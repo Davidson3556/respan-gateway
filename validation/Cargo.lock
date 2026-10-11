@@ -1422,6 +1422,8 @@ dependencies = [
 name = "respan-gateway-realtime-ws"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
+ "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-realtime",

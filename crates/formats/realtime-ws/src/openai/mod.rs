@@ -1,11 +1,20 @@
 //! OpenAI Realtime over WebSocket.
 
+mod input;
+mod output;
+mod session;
+#[cfg(test)]
+mod tests;
+
 use respan_gateway_core::{Connection, Fault, Format};
-use respan_gateway_http::{ClientIo, ProviderIo};
+use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::{ClientIo, ProviderIo, formats};
 use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::WsTransport;
 
-use crate::session::{self, Spec};
+use crate::session::Spec;
+
+const NAME: &str = SPEC.name;
 
 const SPEC: Spec = Spec {
     name: "openai-realtime",
@@ -19,6 +28,14 @@ const SPEC: Spec = Spec {
 /// (`wss://api.openai.com/v1`). It speaks the subprotocol `realtime`, which
 /// its browser clients offer beside their key: a call offers it beside the
 /// client's own offers, and a client that offered it gets it back.
+///
+/// Its GA events are the kind's where the kind has a form for them: a
+/// session's configuration, audio, messages, tools' calls and answers, and
+/// a response's start, content, usage and end. The rest, such as its items
+/// and their content parts, stays native, so a relay to OpenAI keeps every
+/// event. A session's events begin with the session its handshake asked
+/// for, naming the model at `?model=`; OpenAI takes its model at connect,
+/// so a session that says nothing more is no frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OpenAiRealtime;
 
@@ -44,8 +61,15 @@ impl Format<ClientIo, Input, Output> for OpenAiRealtime {
     }
 
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
-        let (read, write) = session::native_client(Self::NAME);
-        Ok(SPEC.client(io, read, write))
+        let query = io.request().uri().query().unwrap_or_default();
+        let model = query.split('&').find_map(|p| p.strip_prefix("model="));
+        let mut client = input::Client::new(model.map(str::to_owned));
+        let read = move |raw: Bytes, out: &mut Vec<Input>| client.read(raw, out);
+        let mut client = output::Client::default();
+        let write = formats::each_message(move |event: &Output, out: &mut Vec<Bytes>| {
+            client.write(event, out)
+        });
+        Ok(SPEC.client(io, Box::new(read), write))
     }
 }
 
@@ -55,7 +79,12 @@ impl Format<ProviderIo, Output, Input> for OpenAiRealtime {
     }
 
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
-        let (write, read) = session::native_provider(Self::NAME);
-        Ok(SPEC.provider(io, write, read))
+        let mut provider = input::Provider::default();
+        let write = formats::each_message(move |event: &Input, out: &mut Vec<Bytes>| {
+            provider.write(event, out)
+        });
+        let mut provider = output::Provider::default();
+        let read = move |raw: Bytes, out: &mut Vec<Output>| provider.read(raw, out);
+        Ok(SPEC.provider(io, write, Box::new(read)))
     }
 }

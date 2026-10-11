@@ -12,6 +12,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
+respan-gateway-conversation.workspace = true
 respan-gateway-core.workspace = true
 respan-gateway-http.workspace = true
 respan-gateway-realtime.workspace = true
@@ -19,6 +21,7 @@ respan-gateway-ws.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-base64.workspace = true
+axum.workspace = true
+respan-gateway-ws = { workspace = true, features = ["axum"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }

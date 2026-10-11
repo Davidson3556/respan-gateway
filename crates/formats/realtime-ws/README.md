@@ -24,14 +24,22 @@ format that speaks a subprotocol offers it to the provider beside the
 client's own offers, and gives it back to a client that offered it. They
 share their session's handshake, and differ in their spec and their codec.
 
-For now each decodes every frame, one JSON event, to the kind's
-`Input::Native` or `Output::Native`, tagged with its name, and writes only
-its own native events: it translates nothing yet. Every event is written
-from its JSON, so a relay to the same format keeps what an event says, not
-its exact bytes. Plugins filter events with `cx.filter(|e: &mut Output| ..)`
-(client edge) or `px.filter(..)` (provider edge), and drop one with a
-`Filter` that does not push it. A handshake one refuses is answered with the
-fault's error code, never its message.
+`OpenAiRealtime` decodes each frame into the kind's events: a session's
+configuration, audio (its bytes, in the session's format), messages, tools'
+calls and answers, a response's start, content, usage and end, errors.
+What the kind has no place for stays OpenAI's: an event's other fields in
+its `native`, as the frame has them, and events of no form in the kind,
+such as its items and content parts, as `Output::Native`. A field is taken
+as the kind's only where it writes back as it came, so a relay to OpenAI
+keeps what every event says, not its exact bytes (audio is base64 anew,
+padded). The other formats decode every frame to the kind's
+`Input::Native` or `Output::Native`, tagged with their name. None writes
+another format's native, or translates to another format yet.
+
+Plugins filter events with `cx.filter(|e: &mut Output| ..)` (client edge)
+or `px.filter(..)` (provider edge), and drop one with a `Filter` that does
+not push it. A handshake one refuses is answered with the fault's error
+code, never its message.
 
 Used by: the [binary](../../../apps/gateway/src/main.rs), and the
 [realtime examples](../../../examples/realtime).

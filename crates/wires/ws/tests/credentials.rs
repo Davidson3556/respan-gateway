@@ -6,7 +6,7 @@
 mod support;
 
 use respan_gateway_core::{
-    ClientContext, Config, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Config, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_http::CallHeaders;
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
@@ -114,17 +114,24 @@ async fn a_transport_with_its_own_key_hides_the_clients() {
 // none of its own: the key is for its own protocol's provider.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_translated_call_carries_none_of_the_clients_keys() {
-    // These test formats share a schema; authorize that translation explicitly.
+    // These test formats share a schema; authorize that translation
+    // explicitly. The session OpenAI's client opens with, from its
+    // handshake, has no frame of its own: it is dropped.
+    struct Retag;
+    impl Filter<Input> for Retag {
+        fn edit(&mut self, event: Input, out: &mut Vec<Input>) -> Result<(), Fault> {
+            if let Input::Native(mut event) = event {
+                event.format = ResponsesWs::NAME.into();
+                out.push(Input::Native(event));
+            }
+            Ok(())
+        }
+    }
     struct Translate;
     #[async_trait]
     impl Plugin for Translate {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|event: &mut Input| {
-                if let Input::Native(event) = event {
-                    event.format = ResponsesWs::NAME.into();
-                }
-                Ok(())
-            })?;
+            cx.filter(Retag)?;
             cx.filter(|event: &mut respan_gateway_realtime::Output| {
                 if let respan_gateway_realtime::Output::Native(event) = event {
                     event.format = OpenAiRealtime::NAME.into();

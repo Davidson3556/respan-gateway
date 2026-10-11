@@ -1125,10 +1125,10 @@ async fn audio_deltas_are_not_counted_as_text() {
     let at = answering(|_| {
         let audio = "A".repeat(60_000);
         vec![
-            json!({ "type": "response.created", "response": { "id": "r" } }),
+            json!({ "type": "response.created", "response": { "id": "r", "status": "in_progress" } }),
             json!({ "type": "response.output_audio.delta", "response_id": "r", "delta": audio }),
             json!({ "type": "response.output_audio_transcript.delta", "delta": "hi" }),
-            json!({ "type": "response.done", "response": { "usage": usage(20, 10) } }),
+            json!({ "type": "response.done", "response": { "status": "completed", "usage": usage(20, 10) } }),
         ]
     })
     .await;
@@ -1385,9 +1385,9 @@ async fn slow_to_tell(late: Duration, read: Arc<AtomicUsize>) -> std::net::Socke
                             read.fetch_add(1, Ordering::SeqCst);
                             tokio::time::sleep(late).await;
                             for reply in [
-                                json!({ "type": "response.created", "response": { "id": "r" } }),
+                                json!({ "type": "response.created", "response": { "id": "r", "status": "in_progress" } }),
                                 json!({ "type": "response.output_text.delta", "delta": "ok" }),
-                                json!({ "type": "response.done", "response": { "usage": usage(40, 9) } }),
+                                json!({ "type": "response.done", "response": { "status": "completed", "usage": usage(40, 9) } }),
                             ] {
                                 let _ = socket.send(Message::Text(reply.to_string().into())).await;
                             }
@@ -1456,9 +1456,9 @@ async fn starts_turns(after: Duration) -> std::net::SocketAddr {
                         while went.recv().await.is_some() {
                             tokio::time::sleep(after).await;
                             for reply in [
-                                json!({ "type": "response.created", "response": { "id": "vad" } }),
+                                json!({ "type": "response.created", "response": { "id": "vad", "status": "in_progress" } }),
                                 json!({ "type": "response.output_text.delta", "delta": "free" }),
-                                json!({ "type": "response.done", "response": { "usage": usage(40, 9) } }),
+                                json!({ "type": "response.done", "response": { "status": "completed", "usage": usage(40, 9) } }),
                             ] {
                                 if tx.send(Message::Text(reply.to_string().into())).await.is_err() {
                                     return;
@@ -1639,9 +1639,9 @@ async fn provider_content_in_a_non_delta_event_is_held() {
         let output = "x".repeat(40_000);
         let item = json!({ "type": "mcp_call", "name": "search", "output": output });
         vec![
-            json!({ "type": "response.created", "response": { "id": "r" } }),
+            json!({ "type": "response.created", "response": { "id": "r", "status": "in_progress" } }),
             json!({ "type": "conversation.item.done", "item": item }),
-            json!({ "type": "response.done", "response": { "usage": usage(20, 10) } }),
+            json!({ "type": "response.done", "response": { "status": "completed", "usage": usage(20, 10) } }),
         ]
     })
     .await;
@@ -1908,7 +1908,7 @@ async fn text_redaction_refuses_audio_before_the_provider_receives_it() {
 async fn audio_usage_is_metered_per_turn_and_charged() {
     let at = answering(|_| {
         vec![
-            json!({"type":"response.created","response":{"id":"audio1"}}),
+            json!({"type":"response.created","response":{"id":"audio1","status":"in_progress"}}),
             json!({"type":"response.output_audio.delta","delta":"AAAA"}),
             json!({"type":"response.done","response":{"id":"audio1","status":"completed","usage":{
             "input_tokens":32,"output_tokens":12,"total_tokens":44,

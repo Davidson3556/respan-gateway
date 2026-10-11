@@ -19,7 +19,7 @@ use respan_gateway_core::{
     async_trait,
 };
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_realtime::{Input, Output};
+use respan_gateway_realtime::{Input, Modality, Output};
 use respan_gateway_realtime_ws::OpenAiRealtime;
 use respan_gateway_ws::{CloseCode, WsTransport};
 use serde_json::{Value, json};
@@ -95,12 +95,8 @@ async fn only_an_edited_event_says_something_else() {
     let tap = Tap::to(ws_base(&openai)).await;
     let hide = OnClient(|cx: &mut ClientContext| {
         cx.filter(|e: &mut Output| {
-            if let Output::Native(e) = e
-                && e.value["type"]
-                    .as_str()
-                    .is_some_and(|t| t.ends_with(".delta"))
-            {
-                Arc::make_mut(&mut e.value)["delta"] = json!("[hidden]");
+            if let Output::Text { text, .. } | Output::Transcript { text, .. } = e {
+                *text = "[hidden]".into();
             }
             Ok(())
         })
@@ -156,9 +152,7 @@ async fn a_filter_can_drop_events_either_way() {
                 .as_str()
                 .is_some_and(|t| t.starts_with("conversation.item.")))
         }))?;
-        cx.filter(Drop(
-            |e: &Input| matches!(e, Input::Native(e) if e.value["type"] == "session.update"),
-        ))
+        cx.filter(Drop(|e: &Input| matches!(e, Input::Session(_))))
     });
     let (gateway, _, _) = gateway_of(&tap.base(), vec![Arc::new(drop_items)]);
     let server = serve(gateway).await;
@@ -174,15 +168,19 @@ async fn a_filter_can_drop_events_either_way() {
     let heard = turn(&mut ws).await;
 
     assert_eq!(tap.sent_by_gateway(), [r#"{"type":"response.create"}"#]);
-    let kept: Vec<String> = tap
+    let kept: Vec<Value> = tap
         .sent_by_provider()
-        .into_iter()
+        .iter()
         .filter(|t| !kind(t).starts_with("conversation.item."))
+        .map(|t| json_of(t))
         .collect();
     let mut all = vec![created];
     all.extend(heard);
-    assert_eq!(all, kept);
-    assert!(kept.iter().any(|t| kind(t) == "response.output_item.added"));
+    assert_eq!(all.iter().map(|t| json_of(t)).collect::<Vec<_>>(), kept);
+    assert!(
+        kept.iter()
+            .any(|t| t["type"] == "response.output_item.added")
+    );
 }
 
 // A client event a filter edits is what the provider reads: the edit is
@@ -192,10 +190,8 @@ async fn a_filter_can_edit_what_the_provider_reads() {
     let openai = FakeOpenAi::start().await;
     let force_text = OnClient(|cx: &mut ClientContext| {
         cx.filter(|e: &mut Input| {
-            if let Input::Native(e) = e
-                && e.value["type"] == "session.update"
-            {
-                Arc::make_mut(&mut e.value)["session"]["output_modalities"] = json!(["text"]);
+            if let Input::Session(session) = e {
+                session.output = Some(Modality::Text);
             }
             Ok(())
         })
@@ -224,7 +220,7 @@ impl Plugin for Turns {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         let seen = self.seen.clone();
         px.filter(move |e: &mut Output| {
-            if matches!(e, Output::Native(e) if e.value["type"] == "response.done") {
+            if matches!(e, Output::ResponseDone { .. }) {
                 seen.fetch_add(1, Ordering::SeqCst);
             }
             Ok(())
@@ -273,14 +269,14 @@ async fn a_provider_edge_plugin_counts_turns() {
 async fn a_failing_filter_closes_the_client_with_its_code_and_no_message() {
     let openai = FakeOpenAi::start().await;
     let policy = OnClient(|cx: &mut ClientContext| {
-        cx.filter(|e: &mut Output| {
-            match matches!(e, Output::Native(e) if e.value["type"] == "response.created") {
+        cx.filter(
+            |e: &mut Output| match matches!(e, Output::ResponseStart { .. }) {
                 true => Err(Fault::new("the word swordfish was said")
                     .with(ErrorCode("policy".into()))
                     .with(CloseCode(1008))),
                 false => Ok(()),
-            }
-        })
+            },
+        )
     });
     let (gateway, ends, calls) = gateway_of(&ws_base(&openai), vec![Arc::new(policy)]);
     let server = serve(gateway).await;

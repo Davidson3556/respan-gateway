@@ -2,10 +2,10 @@
 //! gateway, with plugins over its events.
 //!
 //! - `Pii`: an e-mail address the user says is hidden behind a placeholder
-//!   before the provider reads it (`conversation.item.create`,
-//!   `session.update` and `response.create` text), and restored in every
-//!   text the provider sends back, a placeholder split across deltas
-//!   included (the private text support's `Placeholders`, with its `Rewrite`; its
+//!   before the provider reads it (a message's text, a session's
+//!   instructions and a `response.create`'s), and restored in every text the
+//!   provider sends back, a placeholder split across deltas included (the
+//!   private text support's `Placeholders`, with its `Rewrite`; its
 //!   `Holdback` filters the chat kind, so a session holds its own).
 //! - `MaxLength`: a session is cut at a deadline a plugin chose, with a normal
 //!   close (1000, reason `max_length`); the turns metered before it stay
@@ -14,18 +14,19 @@
 //!   stay, and it composes with every other plugin.
 //! - `Reserve` (use case 9): every turn is bounded, held and settled on the
 //!   client's wallet (private example bookkeeping). The session is capped before the
-//!   client says anything (an input wrap opens it with a `session.update`
-//!   of `max_output_tokens`, and caps the client's own), and a
-//!   `response.create` is rewritten to ask for at most `TURN` output tokens.
+//!   client says anything (an input wrap opens it with a session of
+//!   `max_output_tokens`, and caps the client's own), and a
+//!   response request (`response.create`) is rewritten, in its native
+//!   fields, to ask for at most `TURN` output tokens.
 //!   A turn holds everything the session sends or receives, with validated
 //!   audio bounded by duration and text counted in bytes (a
-//!   token of text is at least a byte) and `IMAGE` tokens per `input_image`
-//!   (an image is billed by pixels, not bytes), plus that cap; it is
-//!   refused, closing the client with 1008, when the
-//!   wallet cannot cover it, and its `response.done` settles what it cost. A
-//!   turn the provider starts on its own (server voice detection) is held
-//!   when its `response.created` passes, and cut with 1008 if the wallet
-//!   cannot cover it. A `response.create` the provider refuses with an
+//!   token of text is at least a byte), a frame's framing, and `IMAGE` tokens
+//!   per `input_image` (an image is billed by pixels, not bytes), plus that
+//!   cap; it is refused, closing the client with 1008, when the
+//!   wallet cannot cover it, and the response's end settles what its usage
+//!   says it cost. A turn the provider starts on its own (server voice
+//!   detection) is held when its response starts, and cut with 1008 if the
+//!   wallet cannot cover it. A request the provider refuses with an
 //!   `error` is released. So parallel sessions cannot overspend one wallet,
 //!   provided the provider honours `max_output_tokens` and the gateway saw
 //!   the context (what the provider adds on its own, such as default
@@ -35,7 +36,7 @@
 //!   the client says before the provider reads it; a refusal closes the
 //!   session with the fault's close code. Both are input wraps: async work
 //!   on each input, which a filter cannot do.
-//! - `Meter`: each turn is metered when its `response.done` passes, not when
+//! - `Meter`: each turn is metered when its response ends, not when
 //!   the session ends, so a session of hours is billed as it goes; a turn cut
 //!   before its `response.done` (or before its first event) is metered from
 //!   an estimate of the session's text, both ways, and never for less than
@@ -43,9 +44,11 @@
 //!   session's end is recorded once.
 //!
 //! The integration (`respan-gateway-ws`) carries the session: `WsTransport` to the
-//! provider, `serve` for the client, `OpenAiRealtime` as the format, one JSON
-//! event per text frame. Everything about Realtime's events is here, none in
-//! the integration.
+//! provider, `serve` for the client, `OpenAiRealtime` as the format, which
+//! reads each JSON frame as the realtime kind's neutral events. Plugins read
+//! those (`Input::Message`, `Output::Text`, `Output::Usage`); what the kind
+//! has no form for, such as a response request's overrides or an item's id,
+//! is in an event's OpenAI `native` fields.
 //!
 //! Covered: text events both ways; a wallet that caps, holds and settles each turn; a classifier per input; a placeholder split across deltas; usage per
 //! turn; the session's end recorded as `ok`, `abandoned` (the client left),
@@ -75,19 +78,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use respan_gateway_conversation::Content;
 use respan_gateway_core::futures::{Stream, StreamExt, TryStreamExt, stream};
 use respan_gateway_core::{
-    ClientContext, EventStream, Fault, Filter, Gateway, Plugin, ProviderContext, Response,
-    async_trait,
+    ClientContext, EventStream, Fault, Filter, Gateway, NativeFields, Plugin, ProviderContext,
+    Response, async_trait,
 };
 use respan_gateway_http::{Credential, Status};
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::{Amount, HoldId, Ledger, MemoryLedger};
-use respan_gateway_realtime::{Input, Output};
+use respan_gateway_realtime::{Input, Output, Session as RtSession, Status as Finish, Usage};
 use respan_gateway_realtime_ws::OpenAiRealtime;
 use respan_gateway_ws::{CloseCode, WsTransport};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use text::{Placeholders, Rewrite};
 
 /// The longest a session may last, unless a plugin says otherwise.
@@ -114,20 +118,56 @@ fn hide_emails(text: &str, vault: &Placeholders) -> String {
         .collect()
 }
 
+/// Every string in `fields` under `keys`, at any depth, edited by `edit`.
+fn edit_fields(fields: &mut Map<String, Value>, keys: &[&str], edit: &mut dyn FnMut(&mut String)) {
+    for (key, value) in fields.iter_mut() {
+        match (value, keys.contains(&key.as_str())) {
+            (Value::String(text), true) => edit(text),
+            (value, _) => edit_texts(value, keys, edit),
+        }
+    }
+}
+
 /// Every string an event says in `keys`, at any depth, edited by `edit`.
 fn edit_texts(event: &mut Value, keys: &[&str], edit: &mut dyn FnMut(&mut String)) {
     match event {
-        Value::Object(fields) => {
-            for (key, value) in fields.iter_mut() {
-                match (value, keys.contains(&key.as_str())) {
-                    (Value::String(text), true) => edit(text),
-                    (value, _) => edit_texts(value, keys, edit),
-                }
-            }
-        }
+        Value::Object(fields) => edit_fields(fields, keys, edit),
         Value::Array(items) => items.iter_mut().for_each(|i| edit_texts(i, keys, edit)),
         _ => {}
     }
+}
+
+/// [`edit_texts`] on the fields a format kept.
+fn edit_native(
+    native: &mut Option<NativeFields>,
+    keys: &[&str],
+    edit: &mut dyn FnMut(&mut String),
+) {
+    if let Some(native) = native {
+        edit_fields(&mut native.fields, keys, edit);
+    }
+}
+
+/// The total length of the strings in `v` under `keys`.
+fn texts_len(v: &Value, keys: &[&str]) -> usize {
+    match v {
+        Value::Object(fields) => fields
+            .iter()
+            .map(|(key, value)| match (value, keys.contains(&key.as_str())) {
+                (Value::String(text), true) => text.len(),
+                (value, _) => texts_len(value, keys),
+            })
+            .sum(),
+        Value::Array(items) => items.iter().map(|i| texts_len(i, keys)).sum(),
+        _ => 0,
+    }
+}
+
+/// The fields a format kept, as JSON.
+fn fields(native: &Option<NativeFields>) -> Value {
+    native
+        .as_ref()
+        .map_or(Value::Null, |n| Value::Object(n.fields.clone()))
 }
 
 /// What the user says: text of items and instructions of sessions and responses.
@@ -135,14 +175,30 @@ const SAID: &[&str] = &["text", "instructions"];
 /// What the provider says whole, and what it says in tool arguments.
 const WRITTEN: &[&str] = &["text", "transcript", "arguments", "instructions"];
 
+/// `v` with its placeholders restored.
+fn restore_json(vault: &mut Placeholders, v: &mut Value) -> Result<(), Fault> {
+    let mut failed = None;
+    edit_texts(v, WRITTEN, &mut |text| match vault.rewrite(text) {
+        Ok(restored) => *text = restored,
+        Err(fault) => failed = Some(fault),
+    });
+    failed.map_or(Ok(()), Err)
+}
+
+/// The item a delta says, if its native names one.
+fn item(native: &Option<NativeFields>) -> Option<String> {
+    let item = native.as_ref()?.fields.get("item_id")?;
+    item.as_str().map(str::to_owned)
+}
+
 /// Restores placeholders in the provider's events. A delta is held back where
 /// a placeholder may begin, per item; a `*.done` event, or the end, releases
 /// what is held first, as deltas of its own.
 struct Restore {
     vault: Placeholders,
-    /// Per item: text held back, and the last delta event of the item, to
-    /// make a delta of it from.
-    held: HashMap<String, (String, Value)>,
+    /// Per item: text held back, and the last delta of the item, to make a
+    /// delta of it from (its native is the item's).
+    held: HashMap<String, (String, Output)>,
 }
 
 impl Restore {
@@ -156,51 +212,76 @@ impl Restore {
     /// The events for what is still held: each item's, restored.
     fn flush(&mut self, out: &mut Vec<Output>) {
         let mut vault = self.vault.clone();
-        for (_, (text, mut template)) in self.held.drain() {
-            if let Ok(text) = vault.rewrite(&text) {
-                template["delta"] = text.into();
-                out.push(Output::native("openai-realtime", template));
+        for (_, (text, mut delta)) in self.held.drain() {
+            if let Ok(restored) = vault.rewrite(&text) {
+                match &mut delta {
+                    Output::Text { text, .. } | Output::Transcript { text, .. } => *text = restored,
+                    _ => continue,
+                }
+                out.push(delta);
             }
         }
+    }
+
+    /// A delta restored, less what may begin a placeholder, which is held.
+    fn delta(&mut self, event: &mut Output) -> Result<(), Fault> {
+        let (Output::Text { text, native } | Output::Transcript { text, native }) = &mut *event
+        else {
+            return Ok(());
+        };
+        let mut vault = self.vault.clone();
+        let Some(item) = item(native) else {
+            *text = vault.rewrite(text)?;
+            return Ok(());
+        };
+        let held = self.held.remove(&item).map(|(text, _)| text);
+        let mut all = held.unwrap_or_default() + text;
+        let mut at = all.len() - vault.pending(&all);
+        while !all.is_char_boundary(at) {
+            at -= 1;
+        }
+        let kept = all.split_off(at);
+        *text = vault.rewrite(&all)?;
+        if !kept.is_empty() {
+            self.held.insert(item, (kept, event.clone()));
+        }
+        Ok(())
     }
 }
 
 impl Filter<Output> for Restore {
     fn edit(&mut self, mut event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
-        let Output::Native(native) = &mut event else {
-            out.push(event);
-            return Ok(());
-        };
-        let json = Arc::make_mut(&mut native.value);
-        let kind = json["type"].as_str().unwrap_or_default().to_owned();
         let mut vault = self.vault.clone();
-        let item = json["item_id"].as_str().map(str::to_owned);
-        if let (true, Some(item), Some(delta)) =
-            (kind.ends_with(".delta"), item, json["delta"].as_str())
-        {
-            let held = self.held.remove(&item).map(|(text, _)| text);
-            let mut text = held.unwrap_or_default() + delta;
-            let mut at = text.len() - vault.pending(&text);
-            while !text.is_char_boundary(at) {
-                at -= 1;
+        match &mut event {
+            Output::Text { .. } | Output::Transcript { .. } => self.delta(&mut event)?,
+            Output::Native(native) => {
+                let json = Arc::make_mut(&mut native.value);
+                if json["type"].as_str().is_some_and(|k| k.ends_with(".done")) {
+                    self.flush(out);
+                }
+                restore_json(&mut vault, json)?;
             }
-            let kept = text.split_off(at);
-            json["delta"] = vault.rewrite(&text)?.into();
-            if !kept.is_empty() {
-                self.held.insert(item, (kept, json.clone()));
-            }
-        } else {
-            if kind.ends_with(".done") {
+            Output::ToolCall { arguments, .. } => {
                 self.flush(out);
+                *arguments = vault.rewrite(arguments)?;
             }
-            let mut failed = None;
-            edit_texts(json, WRITTEN, &mut |text| match vault.rewrite(text) {
-                Ok(restored) => *text = restored,
-                Err(fault) => failed = Some(fault),
-            });
-            if let Some(fault) = failed {
-                return Err(fault);
+            Output::ResponseDone { native, .. } => {
+                self.flush(out);
+                if let Some(native) = native {
+                    let mut json = Value::Object(std::mem::take(&mut native.fields));
+                    let restored = restore_json(&mut vault, &mut json);
+                    if let Value::Object(done) = json {
+                        native.fields = done;
+                    }
+                    restored?;
+                }
             }
+            Output::Opened(session) | Output::Updated(session) => {
+                if let Some(text) = &mut session.instructions {
+                    *text = vault.rewrite(text)?;
+                }
+            }
+            _ => {}
         }
         out.push(event);
         Ok(())
@@ -210,6 +291,13 @@ impl Filter<Output> for Restore {
         self.flush(out);
         Ok(())
     }
+}
+
+/// An audio the text policy cannot inspect.
+fn opaque_audio() -> Fault {
+    Fault::new("text PII policy cannot inspect audio")
+        .with(ErrorCode("audio_requires_redaction".into()))
+        .with(CloseCode(1008))
 }
 
 /// One vault per session: an address said is hidden before the provider
@@ -223,17 +311,37 @@ impl Plugin for Pii {
         let vault = Placeholders::default();
         let hide = vault.clone();
         cx.filter(move |event: &mut Input| {
-            let Input::Native(event) = event else {
-                return Ok(());
-            };
-            if audio::contains_audio(&event.value) {
-                return Err(Fault::new("text PII policy cannot inspect audio")
-                    .with(ErrorCode("audio_requires_redaction".into()))
-                    .with(CloseCode(1008)));
+            let mut hide = |text: &mut String| *text = hide_emails(text, &hide);
+            match event {
+                Input::Audio { .. } => return Err(opaque_audio()),
+                Input::Native(event) => {
+                    if audio::contains_audio(&event.value) {
+                        return Err(opaque_audio());
+                    }
+                    edit_texts(Arc::make_mut(&mut event.value), SAID, &mut hide);
+                }
+                Input::Session(session) => {
+                    session.instructions.iter_mut().for_each(&mut hide);
+                    edit_native(&mut session.native, SAID, &mut hide);
+                }
+                Input::Message { message, native } => {
+                    for part in &mut message.content {
+                        match part {
+                            Content::Text { text, .. } => hide(text),
+                            Content::Native(part) => {
+                                if audio::contains_audio(&part.value) {
+                                    return Err(opaque_audio());
+                                }
+                                edit_texts(Arc::make_mut(&mut part.value), SAID, &mut hide);
+                            }
+                            _ => {}
+                        }
+                    }
+                    edit_native(native, SAID, &mut hide);
+                }
+                Input::Respond { native } => edit_native(native, SAID, &mut hide),
+                _ => {}
             }
-            edit_texts(Arc::make_mut(&mut event.value), SAID, &mut |text| {
-                *text = hide_emails(text, &hide)
-            });
             Ok(())
         })?;
         cx.filter(Restore::new(vault))?;
@@ -294,6 +402,42 @@ struct Said {
     asked: AtomicBool,
 }
 
+/// The bytes of text and the tokens of audio an input says.
+fn said_by(event: &Input) -> Result<(usize, i64), Fault> {
+    let json = |v: &Value| Ok((texts_len(v, SAID), audio_in(v)?));
+    let add = |a: (usize, i64), b: (usize, i64)| (a.0 + b.0, a.1.saturating_add(b.1));
+    let native = |n: &Option<NativeFields>| json(&fields(n));
+    match event {
+        Input::Session(s) => Ok(add(
+            (s.instructions.as_ref().map_or(0, String::len), 0),
+            native(&s.native)?,
+        )),
+        Input::Message { message, native: n } => {
+            let mut total = native(n)?;
+            for part in &message.content {
+                total = add(
+                    total,
+                    match part {
+                        Content::Text { text, .. } => (text.len(), 0),
+                        Content::Native(part) => json(&part.value)?,
+                        _ => (0, 0),
+                    },
+                );
+            }
+            Ok(total)
+        }
+        Input::Audio { audio, native: n } => {
+            Ok(add((0, audio::bound(audio.data.len())), native(n)?))
+        }
+        Input::ToolResult(result) => Ok(add((result.output.len(), 0), native(&result.native)?)),
+        Input::Commit { native: n }
+        | Input::Respond { native: n }
+        | Input::Cancel { native: n } => native(n),
+        Input::Native(event) => json(&event.value),
+        _ => Ok((0, 0)),
+    }
+}
+
 /// Meters one session's turns: each at its `response.done`, and a turn cut
 /// before it (the session ended first) from an estimate, so a cut is never
 /// billed as $0.
@@ -304,24 +448,35 @@ struct TurnMeter {
     said: Arc<Said>,
     /// The output tokens estimated so far in the open turn, if one is open.
     open: Option<u64>,
+    /// What the provider reported for the turn, until its end.
+    usage: Usage,
+}
+
+/// About four bytes a token: an estimate, never zero for a delta.
+fn estimate(text: &str) -> u64 {
+    text.len() as u64 / 4 + 1
+}
+
+/// A response's end as the turns name it.
+fn finish(status: &Finish) -> String {
+    match status {
+        Finish::Completed => "completed".into(),
+        Finish::Cancelled | Finish::Interrupted => "cancelled".into(),
+        Finish::Length | Finish::Filtered => "incomplete".into(),
+        Finish::Native { reason, .. } => reason.clone(),
+        _ => "failed".into(),
+    }
 }
 
 impl TurnMeter {
-    fn record(
-        &self,
-        status: &str,
-        input_tokens: u64,
-        output_tokens: u64,
-        input_audio_tokens: u64,
-        output_audio_tokens: u64,
-    ) {
+    fn record(&self, status: &str, usage: &Usage) {
         lock(&self.turns).push(Turn {
             session: self.session,
             status: status.to_owned(),
-            input_tokens,
-            output_tokens,
-            input_audio_tokens,
-            output_audio_tokens,
+            input_tokens: usage.tokens.input_tokens,
+            output_tokens: usage.tokens.output_tokens,
+            input_audio_tokens: usage.input_audio_tokens,
+            output_audio_tokens: usage.output_audio_tokens,
         });
         self.count.fetch_add(1, Ordering::SeqCst);
     }
@@ -329,42 +484,41 @@ impl TurnMeter {
 
 impl Filter<Output> for TurnMeter {
     fn edit(&mut self, event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
-        let Output::Native(native) = &event else {
-            out.push(event);
-            return Ok(());
-        };
-        let json = &native.value;
-        let kind = json["type"].as_str().unwrap_or_default();
-        if kind == "response.created" {
-            self.open = Some(0);
-        } else if kind.ends_with(".delta")
-            && let Some(estimate) = &mut self.open
-        {
-            // About four bytes a token: an estimate, never zero for a delta.
-            let delta = json["delta"].as_str().unwrap_or_default();
-            *estimate += if kind.ends_with("audio.delta") {
-                audio::tokens(delta)? as u64
-            } else {
-                delta.len() as u64 / 4 + 1
-            };
-        } else if kind == "response.done" {
-            self.open = None;
-            self.said.asked.store(false, Ordering::SeqCst);
-            let response = &json["response"];
-            let used = |name: &str| response["usage"][name].as_u64().unwrap_or_default();
-            let status = response["status"].as_str().unwrap_or_default();
-            let usage = &response["usage"];
-            self.record(
-                status,
-                used("input_tokens"),
-                used("output_tokens"),
-                usage["input_token_details"]["audio_tokens"]
-                    .as_u64()
-                    .unwrap_or_default(),
-                usage["output_token_details"]["audio_tokens"]
-                    .as_u64()
-                    .unwrap_or_default(),
-            );
+        match &event {
+            Output::ResponseStart { .. } => self.open = Some(0),
+            Output::Audio { audio, .. } => {
+                if let Some(open) = &mut self.open {
+                    *open += audio::bound(audio.data.len()) as u64;
+                }
+            }
+            Output::Text { text, .. } | Output::Transcript { text, .. } => {
+                if let Some(open) = &mut self.open {
+                    *open += estimate(text);
+                }
+            }
+            Output::Native(native) => {
+                let json = &native.value;
+                let kind = json["type"].as_str().unwrap_or_default();
+                if let (true, Some(open), Some(delta)) = (
+                    kind.ends_with(".delta"),
+                    &mut self.open,
+                    json["delta"].as_str(),
+                ) {
+                    *open += estimate(delta);
+                }
+            }
+            Output::Usage(usage) => {
+                self.usage.tokens += &usage.tokens;
+                self.usage.input_audio_tokens += usage.input_audio_tokens;
+                self.usage.output_audio_tokens += usage.output_audio_tokens;
+            }
+            Output::ResponseDone { status, .. } => {
+                self.open = None;
+                self.said.asked.store(false, Ordering::SeqCst);
+                let usage = std::mem::take(&mut self.usage);
+                self.record(&finish(status), &usage);
+            }
+            _ => {}
         }
         out.push(event);
         Ok(())
@@ -376,13 +530,11 @@ impl Filter<Output> for TurnMeter {
         if let Some(estimate) = self.open.take().or(asked.then_some(0)) {
             let input = self.said.bytes.load(Ordering::SeqCst) / 4 + 1;
             let audio = self.said.audio.load(Ordering::SeqCst);
-            self.record(
-                "cut",
-                input.saturating_add(audio),
-                estimate.max(HOLD),
-                audio,
-                0,
-            );
+            let mut usage = Usage::default();
+            usage.tokens.input_tokens = input.saturating_add(audio);
+            usage.tokens.output_tokens = estimate.max(HOLD);
+            usage.input_audio_tokens = audio;
+            self.record("cut", &usage);
         }
         Ok(())
     }
@@ -401,18 +553,10 @@ impl Plugin for Meter {
         let said = Arc::new(Said::default());
         let heard = said.clone();
         px.filter(move |event: &mut Input| {
-            let Input::Native(event) = event else {
-                return Ok(());
-            };
-            let mut bytes = 0;
-            edit_texts(Arc::make_mut(&mut event.value), SAID, &mut |text| {
-                bytes += text.len()
-            });
+            let (bytes, audio) = said_by(event)?;
             heard.bytes.fetch_add(bytes as u64, Ordering::SeqCst);
-            heard
-                .audio
-                .fetch_add(audio_in(&event.value)? as u64, Ordering::SeqCst);
-            if event.value["type"] == "response.create" {
+            heard.audio.fetch_add(audio as u64, Ordering::SeqCst);
+            if matches!(event, Input::Respond { .. }) {
                 heard.asked.store(true, Ordering::SeqCst);
             }
             Ok(())
@@ -423,6 +567,7 @@ impl Plugin for Meter {
             turns: self.turns.clone(),
             said,
             open: None,
+            usage: Usage::default(),
         })
     }
 
@@ -505,6 +650,8 @@ struct Turns {
     /// The holds of turns begun (a `response.created`) and not done, in the
     /// order they began: a `response.done` settles the first.
     begun: VecDeque<HoldId>,
+    /// Tokens the provider reported for the turn in progress.
+    used: Option<u64>,
 }
 
 impl<L: Ledger> Wallet<L> {
@@ -532,14 +679,19 @@ impl<L: Ledger> Wallet<L> {
     }
 
     /// What the client says is counted; a `response.create` is
-    /// capped at `TURN` output tokens and holds a turn first; a
-    /// `session.update` is capped the same, for the turns the provider starts.
+    /// capped at `TURN` output tokens and holds a turn first; a session
+    /// configuration is capped the same, for the turns the provider starts.
+    /// The session the handshake opens with names its model and configures
+    /// nothing: it is left as it is, and OpenAI is sent no frame of it.
     async fn before(self: Arc<Self>, mut event: Input) -> Result<Input, Fault> {
-        let Input::Native(native) = &mut event else {
-            return Ok(event);
-        };
-        let json = Arc::make_mut(&mut native.value);
-        let said = context(json)?;
+        if let Input::Session(session) = &event {
+            let mut rest = session.clone();
+            rest.model = None;
+            if rest == RtSession::default() {
+                return Ok(event);
+            }
+        }
+        let said = input_context(&event)?;
         {
             let mut turns = lock(&self.turns);
             turns.bytes = turns.bytes.saturating_add(said);
@@ -549,33 +701,42 @@ impl<L: Ledger> Wallet<L> {
                     .with(CloseCode(1008)));
             }
         }
-        if json["type"] == "response.create" {
-            let response = &mut json["response"];
-            if !response.is_object() {
-                *response = json!({});
+        let ours = || NativeFields::new("openai-realtime", Map::new());
+        let turn = TURN.unsigned_abs();
+        match &mut event {
+            Input::Session(session) => {
+                // The cap of the turns the provider starts on its own.
+                if session
+                    .max_output_tokens
+                    .is_none_or(|n| !(1..=turn).contains(&n))
+                {
+                    session.max_output_tokens = Some(turn);
+                }
             }
-            let cap = &mut response["max_output_tokens"];
-            if cap.as_i64().is_none_or(|n| !(1..=TURN).contains(&n)) {
-                *cap = TURN.into();
+            Input::Respond { native } => {
+                let fields = &mut native.get_or_insert_with(ours).fields;
+                let response = fields.entry("response").or_insert_with(|| json!({}));
+                if !response.is_object() {
+                    *response = json!({});
+                }
+                let cap = &mut response["max_output_tokens"];
+                if cap.as_u64().is_none_or(|n| !(1..=turn).contains(&n)) {
+                    *cap = turn.into();
+                }
+                // The provider's `error` names the event it refuses by this id.
+                let id = match fields.get("event_id").and_then(Value::as_str) {
+                    Some(id) => id.to_owned(),
+                    None => format!("reserve_{}", HoldId::new()),
+                };
+                fields.insert("event_id".into(), id.clone().into());
+                let hold = self.hold(true).await?;
+                // Begun-able only once held: a turn the provider starts itself
+                // meanwhile must not take this entry.
+                let mut turns = lock(&self.turns);
+                turns.unsent.retain(|held| *held != hold);
+                turns.unbegun.push_back((id, hold));
             }
-            // The provider's `error` names the event it refuses by this id.
-            let id = match json["event_id"].as_str() {
-                Some(id) => id.to_owned(),
-                None => format!("reserve_{}", HoldId::new()),
-            };
-            json["event_id"] = id.clone().into();
-            let hold = self.hold(true).await?;
-            // Begun-able only once held: a turn the provider starts itself
-            // meanwhile must not take this entry.
-            let mut turns = lock(&self.turns);
-            turns.unsent.retain(|held| *held != hold);
-            turns.unbegun.push_back((id, hold));
-        } else if json["type"] == "session.update" {
-            // The cap of the turns the provider starts on its own.
-            let cap = &mut json["session"]["max_output_tokens"];
-            if cap.as_i64().is_none_or(|n| !(1..=TURN).contains(&n)) {
-                *cap = TURN.into();
-            }
+            _ => {}
         }
         Ok(event)
     }
@@ -586,50 +747,55 @@ impl<L: Ledger> Wallet<L> {
     /// settles the hold of the oldest begun turn at what it used; the hold leaves the
     /// list only once settled, so a client that leaves meanwhile settles it.
     async fn after(self: Arc<Self>, event: Output) -> Result<Output, Fault> {
-        let Output::Native(native) = &event else {
-            return Ok(event);
-        };
-        let json = &native.value;
-        let kind = json["type"].as_str().unwrap_or_default();
-        if kind == "response.created" {
-            let asked = lock(&self.turns).unbegun.pop_front();
-            let hold = match asked {
-                Some((_, hold)) => hold,
-                None => self.hold(false).await?,
-            };
-            lock(&self.turns).begun.push_back(hold);
-        } else if kind == "error" {
-            // A `response.create` the provider refused never ran: its hold
-            // is released, not charged at the session's end.
-            let id = json["error"]["event_id"].as_str().unwrap_or_default();
-            let refused = lock(&self.turns)
-                .unbegun
-                .iter()
-                .find(|(asked, _)| asked == id)
-                .cloned();
-            if let Some((_, hold)) = refused {
-                // Settled before it leaves the lists: a client that leaves
-                // meanwhile still has it settled by `end`.
-                self.ledger.settle(&hold, 0).await?;
-                let mut turns = lock(&self.turns);
-                turns.unbegun.retain(|(_, held)| *held != hold);
-                turns.holds.retain(|(held, _)| *held != hold);
+        match &event {
+            Output::ResponseStart { .. } => {
+                let asked = lock(&self.turns).unbegun.pop_front();
+                let hold = match asked {
+                    Some((_, hold)) => hold,
+                    None => self.hold(false).await?,
+                };
+                lock(&self.turns).begun.push_back(hold);
             }
-        } else if kind == "response.done" {
-            let done = {
-                let turns = lock(&self.turns);
-                let begun = turns.begun.front().copied();
-                begun.and_then(|b| turns.holds.iter().find(|(h, _)| *h == b).copied())
-            };
-            if let Some((hold, amount)) = done {
-                let used = json["response"]["usage"]["total_tokens"].as_i64();
-                self.ledger.settle(&hold, used.unwrap_or(amount)).await?;
+            Output::Usage(usage) => {
+                let used = usage.tokens.input_tokens + usage.tokens.output_tokens;
                 let mut turns = lock(&self.turns);
-                turns.begun.pop_front();
-                turns.holds.retain(|(h, _)| *h != hold);
+                turns.used = Some(turns.used.unwrap_or_default().saturating_add(used));
+            }
+            Output::ResponseDone { .. } => {
+                let done = {
+                    let turns = lock(&self.turns);
+                    let begun = turns.begun.front().copied();
+                    begun.and_then(|b| turns.holds.iter().find(|(h, _)| *h == b).copied())
+                };
+                let used = lock(&self.turns).used.take();
+                if let Some((hold, amount)) = done {
+                    let used = used.map(|n| Amount::try_from(n).unwrap_or(Amount::MAX));
+                    self.ledger.settle(&hold, used.unwrap_or(amount)).await?;
+                    let mut turns = lock(&self.turns);
+                    turns.begun.pop_front();
+                    turns.holds.retain(|(h, _)| *h != hold);
+                }
+            }
+            event => {
+                // A `response.create` the provider refused never ran: its hold
+                // is released, not charged at the session's end.
+                let id = refused(event).unwrap_or_default();
+                let refused = lock(&self.turns)
+                    .unbegun
+                    .iter()
+                    .find(|(asked, _)| asked == id)
+                    .cloned();
+                if let Some((_, hold)) = refused {
+                    // Settled before it leaves the lists: a client that leaves
+                    // meanwhile still has it settled by `end`.
+                    self.ledger.settle(&hold, 0).await?;
+                    let mut turns = lock(&self.turns);
+                    turns.unbegun.retain(|(_, held)| *held != hold);
+                    turns.holds.retain(|(held, _)| *held != hold);
+                }
             }
         }
-        let seen = context(json)?;
+        let seen = output_context(&event)?;
         let mut turns = lock(&self.turns);
         turns.bytes = turns.bytes.saturating_add(seen);
         Ok(event)
@@ -673,6 +839,9 @@ fn account(credential: &Credential) -> Option<String> {
 /// sets this per model.
 const IMAGE: Amount = 1_445;
 
+/// What a frame costs besides its content: its type, ids and framing.
+const FRAME: Amount = 128;
+
 /// What an event adds to the context, as a bound on its tokens: its bytes
 /// (a token of text is at least a byte), an audio-duration bound, and
 /// `IMAGE` for each image.
@@ -705,6 +874,7 @@ fn audio_in(event: &Value) -> Result<Amount, Fault> {
     }
 }
 
+/// [`context_of`] a JSON event, as the provider writes it.
 fn context(event: &Value) -> Result<Amount, Fault> {
     fn strip(v: &mut Value, images: &mut Amount) {
         match v {
@@ -735,6 +905,102 @@ fn context(event: &Value) -> Result<Amount, Fault> {
         .saturating_add(audio))
 }
 
+/// What the fields a format kept add to the context.
+fn context_of(native: &Option<NativeFields>) -> Result<Amount, Fault> {
+    match native {
+        Some(_) => context(&fields(native)),
+        None => Ok(0),
+    }
+}
+
+fn len(text: &str) -> Amount {
+    Amount::try_from(text.len()).unwrap_or(Amount::MAX)
+}
+
+/// What a session's configuration adds to the context: its instructions and
+/// its tools, which every turn reads.
+fn session_context(session: &RtSession) -> Result<Amount, Fault> {
+    let mut amount = session.instructions.as_deref().map_or(0, len);
+    for tool in session.tools.iter().flatten() {
+        let described = tool.description.as_deref().map_or(0, len);
+        amount = amount
+            .saturating_add(len(&tool.name))
+            .saturating_add(described)
+            .saturating_add(len(&tool.parameters.to_string()))
+            .saturating_add(context_of(&tool.native)?);
+    }
+    Ok(amount.saturating_add(context_of(&session.native)?))
+}
+
+/// What an input adds to the context, as [`context`] bounds a JSON event's.
+fn input_context(event: &Input) -> Result<Amount, Fault> {
+    Ok(input_content(event)?.saturating_add(FRAME))
+}
+
+fn input_content(event: &Input) -> Result<Amount, Fault> {
+    let sum = |a: Amount, b: Result<Amount, Fault>| Ok(a.saturating_add(b?));
+    match event {
+        Input::Session(session) => session_context(session),
+        Input::Message { message, native } => {
+            let mut amount = context_of(native)?;
+            for part in &message.content {
+                let part = match part {
+                    Content::Text { text, .. } => Ok(len(text)),
+                    Content::Native(part) => context(&part.value),
+                    _ => Ok(0),
+                };
+                amount = amount.saturating_add(part?);
+            }
+            sum(amount, context_of(&message.native))
+        }
+        Input::Audio { audio, native } => sum(audio::bound(audio.data.len()), context_of(native)),
+        Input::ToolResult(result) => sum(len(&result.output), context_of(&result.native)),
+        Input::Commit { native } | Input::Respond { native } | Input::Cancel { native } => {
+            context_of(native)
+        }
+        Input::Native(event) => context(&event.value),
+        _ => Ok(0),
+    }
+}
+
+/// What an output adds to the context.
+fn output_context(event: &Output) -> Result<Amount, Fault> {
+    Ok(output_content(event)?.saturating_add(FRAME))
+}
+
+fn output_content(event: &Output) -> Result<Amount, Fault> {
+    let sum = |a: Amount, b: Result<Amount, Fault>| Ok(a.saturating_add(b?));
+    match event {
+        Output::Opened(session) | Output::Updated(session) => session_context(session),
+        Output::InputTranscript { text, native, .. }
+        | Output::Text { text, native }
+        | Output::Transcript { text, native } => sum(len(text), context_of(native)),
+        Output::Audio { audio, native } => sum(audio::bound(audio.data.len()), context_of(native)),
+        Output::ToolCall {
+            arguments, native, ..
+        } => sum(len(arguments), context_of(native)),
+        Output::Error {
+            message, native, ..
+        } => sum(len(message), context_of(native)),
+        Output::SpeechStarted { native, .. }
+        | Output::SpeechStopped { native, .. }
+        | Output::ResponseStart { native, .. }
+        | Output::ResponseDone { native, .. } => context_of(native),
+        Output::Native(event) => context(&event.value),
+        _ => Ok(0),
+    }
+}
+
+/// The id of the client event the provider refuses with an `error`.
+fn refused(event: &Output) -> Option<&str> {
+    let error = match event {
+        Output::Error { native, .. } => native.as_ref()?.fields.get("error")?,
+        Output::Native(native) if native.value["type"] == "error" => native.value.get("error")?,
+        _ => return None,
+    };
+    error["event_id"].as_str()
+}
+
 /// Holds each turn on the client's wallet before the provider sees it. The
 /// hold reads the whole session, so a turn cannot cost more than its hold
 /// as long as the provider keeps to the cap and the gateway saw the context
@@ -761,9 +1027,11 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
         cx.wrap(move |events: EventStream<Input>| {
             // The session is capped before the client says anything, so the
             // turns the provider starts (voice detection) are bounded too.
-            let open = json!({ "type": "session.update", "event_id": capped,
-                "session": { "type": "realtime" } });
-            let open = stream::once(async move { Ok(Input::native("openai-realtime", open)) });
+            let mut open = RtSession::default();
+            open.max_output_tokens = Some(TURN.unsigned_abs());
+            let fields = Map::from_iter([("event_id".to_owned(), capped.into())]);
+            open.native = Some(NativeFields::new("openai-realtime", fields));
+            let open = stream::once(async move { Ok(Input::Session(open)) });
             open.chain(events)
                 .and_then(move |event| asks.clone().before(event))
         })?;
@@ -775,13 +1043,8 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
             // be capped, rather than let it run uncapped.
             let mut ours = true;
             let events = events.try_filter_map(move |event| {
-                let json = match &event {
-                    Output::Native(native) => &*native.value,
-                    _ => &Value::Null,
-                };
-                let kind = json["type"].as_str().unwrap_or_default();
-                let refused = kind == "error" && json["error"]["event_id"] == cap;
-                let mine = ours && kind == "session.updated";
+                let refused = refused(&event) == Some(cap.as_str());
+                let mine = ours && matches!(event, Output::Updated(_));
                 ours &= !mine;
                 std::future::ready(match (refused, mine) {
                     (true, _) => Err(Fault::new("the session cannot be capped")
@@ -808,6 +1071,31 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
 async fn classify(event: &Input) -> Result<(), Fault> {
     tokio::time::sleep(Duration::from_millis(2)).await;
     let said = match event {
+        Input::Session(session) => {
+            let tools = session.tools.iter().flatten();
+            let tools = tools.map(|t| format!("{} {:?}", t.name, t.description));
+            let instructions = session.instructions.clone().unwrap_or_default();
+            [
+                instructions,
+                tools.collect(),
+                fields(&session.native).to_string(),
+            ]
+            .join("\n")
+        }
+        Input::Message { message, native } => {
+            let parts = message.content.iter().map(|part| match part {
+                Content::Text { text, .. } => text.clone(),
+                Content::Native(part) => part.value.to_string(),
+                _ => String::new(),
+            });
+            let mut said: Vec<String> = parts.collect();
+            said.push(fields(native).to_string());
+            said.join("\n")
+        }
+        Input::ToolResult(result) => result.output.clone(),
+        Input::Respond { native } | Input::Commit { native } | Input::Cancel { native } => {
+            fields(native).to_string()
+        }
         Input::Native(native) => native.value.to_string(),
         _ => String::new(),
     };
@@ -1037,7 +1325,7 @@ async fn main() -> Result<(), Fault> {
     let sent: Vec<Value> = openai
         .requests()
         .iter()
-        .filter(|r| r.method == "WS")
+        .filter(|r| r.method == "WS" && r.body["type"] != "session.update")
         .map(|r| r.body.clone())
         .collect();
     println!("provider read: {}", sent[0]["item"]["content"][0]["text"]);
