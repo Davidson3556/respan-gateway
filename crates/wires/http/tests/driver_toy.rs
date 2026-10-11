@@ -489,7 +489,11 @@ async fn a_request_encoders_open_saying_done_is_the_whole_body() {
     let (gw, _, _) = gateway_of(opening("<OPEN>"), seen.transport(true, done));
     let (resp, _) = open(&gw, chunks(vec!["q"]), false).await;
     assert_eq!(read(resp).await, Ok((200, "a;!".into())));
-    assert_eq!(seen.frames().await, frames(&[Ok("<OPEN>")]), "a whole request");
+    assert_eq!(
+        seen.frames().await,
+        frames(&[Ok("<OPEN>")]),
+        "a whole request"
+    );
 }
 
 /// An empty data frame is an input, and its encoding of no bytes is a frame
@@ -504,7 +508,10 @@ async fn an_empty_frame_is_an_input_that_writes_an_empty_frame() {
     drop(tx);
     let (resp, _) = open(&gw, body, true).await;
     let _ = read(resp).await;
-    assert_eq!(seen.frames().await, frames(&[Ok("one"), Ok(""), Ok("<END>")]));
+    assert_eq!(
+        seen.frames().await,
+        frames(&[Ok("one"), Ok(""), Ok("<END>")])
+    );
 }
 
 /// B1: the client's body breaks; the provider's body ends with that `Err`,
@@ -520,7 +527,10 @@ async fn a_broken_upload_ends_the_providers_body_with_the_err() {
     let (resp, _) = open(&gw, body, true).await;
     let _ = read(resp).await;
     gw.idle().await;
-    assert_eq!(seen.frames().await, frames(&[Ok("hello"), Err("bad_request")]));
+    assert_eq!(
+        seen.frames().await,
+        frames(&[Ok("hello"), Err("bad_request")])
+    );
 }
 
 /// A streaming request's inputs follow, even with its body ended, and its
