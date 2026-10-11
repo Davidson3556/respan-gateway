@@ -92,6 +92,24 @@ describe("realtimeReducer", () => {
     expect(state.lines[0]).toMatchObject({ text: "Well, ", done: true, interrupted: true });
   });
 
+  it("marks the reply interrupted when it is truncated or its response is cancelled", () => {
+    const truncated = run(
+      { type: "response.output_audio_transcript.delta", item_id: "a1", delta: "Well, " },
+      { type: "conversation.item.truncated", item_id: "a1" },
+    );
+    expect(truncated.lines[0]).toMatchObject({ done: true, interrupted: true });
+    const cancelled = run(
+      { type: "response.output_audio_transcript.delta", item_id: "a1", delta: "Well, " },
+      { type: "response.done", response: { status: "cancelled" } },
+    );
+    expect(cancelled.lines[0]).toMatchObject({ done: true, interrupted: true });
+    const finished = run(
+      { type: "response.output_audio_transcript.delta", item_id: "a1", delta: "Hi" },
+      { type: "response.done", response: { status: "completed" } },
+    );
+    expect(finished.lines[0]).toMatchObject({ done: true, interrupted: false });
+  });
+
   it("records an error without ending the session", () => {
     const state = run({ type: "open" }, { type: "error", error: { message: "bad event" } });
     expect(state).toMatchObject({ phase: "live", error: "bad event" });

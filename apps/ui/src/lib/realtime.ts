@@ -134,6 +134,10 @@ export function realtimeReducer(state: RealtimeState, action: RealtimeAction): R
   }
 }
 
+function cancelled(event: ServerEvent): boolean {
+  return (event.response as { status?: string } | undefined)?.status === "cancelled";
+}
+
 function onEvent(state: RealtimeState, event: ServerEvent): RealtimeState {
   const itemId = str(event.item_id);
   switch (event.type) {
@@ -152,6 +156,12 @@ function onEvent(state: RealtimeState, event: ServerEvent): RealtimeState {
         lines: state.lines.map((l) =>
           l.role === "assistant" && !l.done ? { ...l, done: true, interrupted: true } : l,
         ),
+      };
+    case "conversation.item.truncated":
+      // The client cut the reply short (Interrupt): what it had said stays.
+      return {
+        ...state,
+        lines: state.lines.map((l) => (l.id === itemId ? { ...l, done: true, interrupted: true } : l)),
       };
     case "input_audio_buffer.speech_stopped":
       return state.speaker === "user" ? { ...state, speaker: null } : state;
@@ -193,7 +203,11 @@ function onEvent(state: RealtimeState, event: ServerEvent): RealtimeState {
         speaker: state.speaker === "assistant" ? null : state.speaker,
         lines:
           event.type === "response.done"
-            ? state.lines.map((l) => (l.role === "assistant" ? { ...l, done: true } : l))
+            ? state.lines.map((l) => {
+                if (l.role !== "assistant") return l;
+                const cut = !l.done && cancelled(event);
+                return { ...l, done: true, interrupted: l.interrupted || cut };
+              })
             : state.lines,
       };
     case "error": {
