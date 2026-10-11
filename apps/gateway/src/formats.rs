@@ -8,12 +8,14 @@ use respan_gateway_conversation as conversation;
 use respan_gateway_core::{Extensions, Fault, Format, Gateway, Upstream};
 use respan_gateway_http::formats::opaque::Passthrough;
 use respan_gateway_http::http::HeaderMap;
-use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo, reqwest};
+use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo, Wire, reqwest};
 use respan_gateway_media::{embedding, image, speech, transcription, video};
 use respan_gateway_plugins::{Kind, Model};
 use respan_gateway_providers::{ALL, Auth, Base, Format as Spoken};
 use respan_gateway_realtime as realtime;
-use respan_gateway_realtime_ws::{GeminiLive, OpenAiRealtime, ResponsesWs};
+use respan_gateway_realtime_ws::{
+    GeminiLive, OpenAiRealtime, ResponsesWs, SessionModel, requested_model,
+};
 use respan_gateway_ws::WsTransport;
 
 use crate::presets::origin;
@@ -29,7 +31,7 @@ pub mod kind {
     };
     pub const REALTIME: Kind = Kind {
         label: "realtime",
-        translates: false,
+        translates: true,
     };
     /// Responses over WebSocket: a session of many requests and replies,
     /// which no other format speaks.
@@ -302,14 +304,16 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
                 OpenAiRealtime::PATH,
                 speaks.base,
                 |f, base| f.transport(base),
-            ),
+            )
+            .model(realtime()),
             Spoken::GeminiLive(f) => session(
                 kind::REALTIME,
                 f,
                 GeminiLive::PATH,
                 speaks.base,
                 |f, base| f.transport(base),
-            ),
+            )
+            .model(realtime()),
             Spoken::ResponsesWs(f) => session(
                 kind::RESPONSES,
                 f,
@@ -330,6 +334,20 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
         .base(Base::Origin),
     );
     known
+}
+
+/// How a realtime session names its model: at `?model=` on its handshake,
+/// as its first input comes only once it is routed (a Gemini Live client
+/// without it goes to the default). The model routing chose is dialed
+/// ([`SessionModel`]) and asked for by the session's opening input.
+fn realtime() -> Model {
+    Model::new(
+        |cx| requested_model(cx.extensions().get::<Wire>()?),
+        |cx, model| {
+            cx.extensions_mut().insert(SessionModel(model.clone()));
+            cx.filter(realtime::set_model(model))
+        },
+    )
 }
 
 /// A session `format` of `kind`, its clients sending to its `path`: after

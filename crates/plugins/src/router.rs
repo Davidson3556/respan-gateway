@@ -192,6 +192,19 @@ impl Model {
         }
     }
 
+    /// The model `read` reads of a request, and `write` asks for, for a
+    /// format whose inputs do not name it at once, such as a session that
+    /// names it in its handshake.
+    pub fn new(
+        read: impl Fn(&ClientContext) -> Option<String> + Send + Sync + 'static,
+        write: impl Fn(&mut ClientContext, String) -> Result<(), Fault> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            read: Arc::new(read),
+            write: Arc::new(write),
+        }
+    }
+
     /// For requests that name no model.
     pub fn none() -> Self {
         Self {
@@ -412,6 +425,41 @@ mod tests {
             ("openai".into(), "openai:openai-realtime".into(), None)
         );
         assert_eq!(routes.route(PASSTHROUGH, "passthrough", None), None);
+    }
+
+    #[test]
+    fn a_session_crosses_formats_only_in_a_kind_that_translates() {
+        const LIVE: Kind = Kind {
+            label: "realtime",
+            translates: true,
+        };
+        const RESPONSES: Kind = Kind {
+            label: "responses",
+            translates: false,
+        };
+        let openai = vec![
+            speaks("openai-realtime", LIVE, "openai:openai-realtime"),
+            speaks("responses-ws", RESPONSES, "openai:responses-ws"),
+        ];
+        let routes = Routes::new()
+            .provider("openai", openai)
+            .provider("gemini", vec![speaks("gemini-live", LIVE, "gemini")])
+            .claim("gpt", "openai")
+            .claim("gemini", "gemini")
+            .target("gemini");
+        let internal = |kind, format, model| routes.route(kind, format, model).map(|r| r.internal);
+        let to_openai = internal(LIVE, "gemini-live", Some("gpt-realtime"));
+        assert_eq!(to_openai.as_deref(), Some("openai:openai-realtime"));
+        let to_gemini = internal(LIVE, "openai-realtime", Some("gemini-live"));
+        assert_eq!(to_gemini.as_deref(), Some("gemini"));
+        assert_eq!(
+            internal(LIVE, "gemini-live", None).as_deref(),
+            Some("gemini")
+        );
+        // Gemini speaks no Responses, so even a model it claims stays with
+        // the provider that does.
+        let responses = internal(RESPONSES, "responses-ws", Some("gemini-live"));
+        assert_eq!(responses.as_deref(), Some("openai:responses-ws"));
     }
 
     #[test]

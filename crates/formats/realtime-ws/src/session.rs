@@ -153,11 +153,6 @@ pub(crate) fn model_at(uri: &Uri) -> Option<String> {
     (!model.is_empty()).then(|| model.to_owned())
 }
 
-/// The model at `?model=` of the handshake of the client a call is for.
-pub(crate) fn clients_model(io: &ProviderIo) -> Option<String> {
-    model_at(io.extensions().get::<h::Wire>()?.get()?.uri())
-}
-
 /// The events of a session's frames, each read by `read`.
 fn frames<T: Send + 'static>(body: h::Body, read: Read<T>) -> EventStream<T> {
     formats::parse(body, read, |read, raw, out| read(raw, out), |_, end, _| end)

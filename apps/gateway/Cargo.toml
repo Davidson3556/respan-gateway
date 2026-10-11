@@ -40,6 +40,7 @@ serde_norway.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 
 [dev-dependencies]
+base64.workspace = true
 futures.workspace = true
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
 reqwest.workspace = true

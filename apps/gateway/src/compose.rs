@@ -235,18 +235,21 @@ fn valid_provider_name(name: &str) -> bool {
 }
 
 /// The formats served when the config names none: OpenAI Chat, Anthropic
-/// Messages, every client format of a media kind some provider speaks, and
-/// every format of a kind that does not translate that some provider
-/// speaks, but passthrough, which takes every request.
+/// Messages, every client format of a media or realtime kind some provider
+/// speaks, and every format of a kind that does not translate that some
+/// provider speaks, but passthrough, which takes every request.
 fn default_serve(upstreams: &[Upstream], formats: &[KnownFormat]) -> Vec<String> {
     let mut serve = vec!["openai-chat".to_owned(), "anthropic-messages".to_owned()];
     let entries = || upstreams.iter().flat_map(|u| &u.entries);
     let spoken = |kind: Kind| entries().any(|e| e.kind == kind);
-    let media = formats
+    let translated = formats
         .iter()
-        .filter(|f| kind::MEDIA.contains(&f.kind) && f.servable() && spoken(f.kind));
+        .filter(|f| kind::MEDIA.contains(&f.kind) || f.kind == kind::REALTIME)
+        .filter(|f| f.servable() && spoken(f.kind));
     let sessions = entries().filter(|e| !e.kind.translates && e.format != PASSTHROUGH);
-    let names = media.map(|f| &f.name).chain(sessions.map(|e| &e.format));
+    let names = translated
+        .map(|f| &f.name)
+        .chain(sessions.map(|e| &e.format));
     for name in names {
         if !serve.contains(name) {
             serve.push(name.clone());

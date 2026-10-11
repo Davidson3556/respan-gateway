@@ -204,7 +204,7 @@ fn message_json(m: &Message, refuse: fn(&str) -> Fault) -> Result<Value, Fault> 
 #[derive(Debug)]
 pub(super) struct Provider {
     /// The model the session was opened with, at its URL.
-    model: Option<String>,
+    model: String,
     /// Whether its first session was written.
     opened: bool,
     /// The format of the audio it takes, as the sessions written say.
@@ -215,7 +215,7 @@ pub(super) struct Provider {
 
 impl Provider {
     /// A writer to a session opened with `model`.
-    pub(super) fn new(model: Option<String>) -> Self {
+    pub(super) fn new(model: String) -> Self {
         Self {
             model,
             opened: false,
@@ -241,7 +241,7 @@ impl Provider {
                 // changes nothing.
                 let opening = !std::mem::replace(&mut self.opened, true);
                 let mut s = s.clone();
-                if opening || s.model == self.model {
+                if opening || s.model.as_ref() == Some(&self.model) {
                     s.model = None;
                 }
                 if s == Session::default() {

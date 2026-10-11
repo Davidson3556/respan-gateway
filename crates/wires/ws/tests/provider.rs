@@ -121,7 +121,7 @@ fn answering(head: String, body: Vec<u8>) -> SocketAddr {
             );
             headers.extend_from_slice(&chunk[..n]);
         }
-        assert!(String::from_utf8_lossy(&headers).contains("GET /realtime HTTP/1.1"));
+        assert!(String::from_utf8_lossy(&headers).contains("GET /realtime?model=m HTTP/1.1"));
         let _ = socket.write_all(head.as_bytes());
         let _ = socket.write_all(&body);
         // Hold the connection open: its end is the test's.
@@ -182,7 +182,7 @@ async fn session_through(
         .expect("gateway");
     let dropped = Arc::new(AtomicBool::new(false));
     let request = http::Request::builder()
-        .uri("/realtime")
+        .uri("/realtime?model=m")
         .header(header::UPGRADE, "websocket")
         .header(header::CONNECTION, "upgrade")
         .body(StreamBody::new(NeverUpload(dropped.clone())))
@@ -261,7 +261,7 @@ async fn an_incomplete_refusal_body_fails_at_the_handshake_deadline() {
     let transport = WsTransport::new(format!("ws://{address}"))
         .expect("transport")
         .with_handshake_timeout(deadline);
-    let request = http::Request::get("/realtime")
+    let request = http::Request::get("/realtime?model=m")
         .body(Body::full(Bytes::new()))
         .expect("request");
     let start = Instant::now();

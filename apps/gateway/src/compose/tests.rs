@@ -277,21 +277,21 @@ fn a_preset_is_every_format_of_its_vendor() {
     assert_eq!(header(1, 1, "x-goog-api-key").as_deref(), Some("AIza"));
     assert_eq!(header(1, 3, "x-goog-api-key").as_deref(), Some("AIza"));
     assert!(plan.upstreams.iter().all(|u| u.own_key));
-    // Served by default: the chat formats, each media kind's client format
-    // and every session's.
+    // Served by default: the chat formats, each media and realtime client
+    // format, and Responses over WebSocket.
     assert_eq!(
         plan.serve,
         [
             "openai-chat",
             "anthropic-messages",
+            "openai-realtime",
             "openai-images",
             "openai-transcriptions",
             "openai-speech",
             "openai-videos",
             "openai-embeddings",
-            "openai-realtime",
-            "responses-ws",
-            "gemini-live"
+            "gemini-live",
+            "responses-ws"
         ]
     );
 }
@@ -384,17 +384,24 @@ fn client_keys_are_literal_or_from_the_environment() {
 }
 
 #[test]
-fn two_providers_of_a_session_format_are_an_error() {
+fn two_providers_of_a_session_format_no_other_translates_are_an_error() {
     let yaml = "providers:
   openai: { vendor: openai, key: k }
-  realtime: { format: openai-realtime, base_url: 'wss://x.test/v1' }
+  responses: { format: responses-ws, base_url: 'wss://x.test/v1' }
 ";
     assert_eq!(
         plan(yaml).err().as_deref(),
         Some(
-            "serve: openai-realtime needs exactly one provider of that format; openai, realtime all speak it"
+            "serve: responses-ws needs exactly one provider of that format; openai, responses all speak it"
         )
     );
+    // A realtime session goes to any provider of the kind.
+    let yaml = "providers:
+  openai: { vendor: openai, key: k }
+  realtime: { format: openai-realtime, base_url: 'wss://x.test/v1' }
+serve: [openai-realtime, gemini-live]
+";
+    assert!(plan(yaml).is_ok());
 }
 
 #[test]
@@ -503,8 +510,10 @@ fn a_session_provider_is_websocket_and_its_clients_go_to_it_alone() {
             "provider 'p': bad base URL: ws or wss with a host, and no query, fragment or credentials (those go in its headers)",
         ),
         (
-            "serve: [openai-realtime]".to_owned(),
-            "serve: openai-realtime needs exactly one provider of that format",
+            "providers: { p: { format: openai-chat, base_url: 'http://x.test' } }
+serve: [responses-ws]"
+                .to_owned(),
+            "serve: responses-ws needs exactly one provider of that format",
         ),
         (
             format!(

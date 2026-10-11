@@ -17,6 +17,9 @@
 
 #![allow(clippy::unwrap_used)]
 
+#[allow(dead_code)]
+#[path = "../../../tests/support/realtime/mod.rs"]
+mod realtime;
 mod support;
 
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi, Mock, Provider, Request};
@@ -1576,7 +1579,9 @@ serve: [openai-realtime, gemini-live]
     assert_eq!(upgrade.path, "/v1/realtime");
     assert_eq!(upgrade.header("authorization"), Some("Bearer sk-gw"));
 
-    let live = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+    // Without its ?model=, a Gemini client would go to the realtime default.
+    let live = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent\
+        ?model=live/gemini-live";
     let (mut live, chosen) = session(&gw, live, "").await;
     assert_eq!(chosen, None);
     let setup = json!({"setup": {"model": "models/gemini-live",
@@ -1614,4 +1619,197 @@ serve: [openai-realtime, gemini-live]
         .unwrap()
         .unwrap();
     assert!(status.success(), "{status}");
+}
+
+/// An event of `kind`'s type.
+fn of_type(kind: &'static str) -> impl Fn(&Value) -> bool {
+    move |event| event["type"] == kind
+}
+
+/// The bytes of standard base64 `v`.
+fn unbase64(v: &Value) -> Vec<u8> {
+    use base64::Engine;
+    let text = v.as_str().unwrap();
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .unwrap()
+}
+
+/// `ms` of 24 kHz PCM, a ramp.
+fn pcm(ms: usize) -> Vec<u8> {
+    (0..ms * 24)
+        .flat_map(|i| (i as i16).to_le_bytes())
+        .collect()
+}
+
+const LIVE: &str = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+
+#[tokio::test]
+async fn realtime_sessions_from_yaml_cross_vendors_by_the_model_they_ask_for() {
+    use realtime::{ToolCall, Turn};
+    let openai = realtime::openai::start().await;
+    let gemini = realtime::gemini::start().await;
+    let http = |ws: String| ws.replace("ws://", "http://");
+    let mut gw = Gateway::start(&format!(
+        "providers:
+  openai: {{ vendor: openai, base_url: '{}', key: sk-gw }}
+  gemini: {{ vendor: gemini, base_url: '{}/v1beta/openai', key: AIza-gw }}
+serve: [openai-realtime, gemini-live]
+",
+        http(openai.base_url()),
+        http(gemini.base_url())
+    ))
+    .await;
+
+    // An OpenAI client asking for a Gemini model is answered by Gemini.
+    let (mut realtime, _) = session(&gw, "/v1/realtime?model=gemini-live", "realtime").await;
+    assert_eq!(
+        hear(&mut realtime).await.unwrap()["type"],
+        "session.created"
+    );
+    let update = json!({"type": "session.update", "session": {"type": "realtime",
+        "instructions": "Be brief.", "audio": {"output": {"voice": "Kore"}},
+        "tools": [{"type": "function", "name": "weather",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}]}});
+    say(&mut realtime, update).await;
+    until(&mut realtime, of_type("session.updated")).await;
+    let setup = &gemini.received(1).await[0]["setup"];
+    assert_eq!(setup["model"], "models/gemini-live");
+    assert_eq!(
+        gemini.handshakes()[0].header("x-goog-api-key"),
+        Some("AIza-gw")
+    );
+    // A voice turn.
+    let append = json!({"type": "input_audio_buffer.append", "audio": base64(&pcm(100))});
+    say(&mut realtime, append).await;
+    gemini.received(2).await;
+    gemini.answer(Turn {
+        audio: Some(pcm(200)),
+        transcript: Some("It is noon.".into()),
+        ..Turn::default()
+    });
+    gemini.user_stops();
+    let turn = until(&mut realtime, of_type("response.done")).await;
+    assert!(turn.contains("response.output_audio.delta"), "{turn}");
+    assert!(turn.contains("It is noon."), "{turn}");
+    assert!(turn.contains("\"status\":\"completed\""), "{turn}");
+    // A barge-in.
+    gemini.answer(Turn {
+        audio: Some(pcm(300)),
+        held: true,
+        ..Turn::default()
+    });
+    gemini.user_stops();
+    until(&mut realtime, of_type("response.output_audio.delta")).await;
+    gemini.user_speaks();
+    let cut = until(&mut realtime, of_type("response.done")).await;
+    assert!(cut.contains("input_audio_buffer.speech_started"), "{cut}");
+    assert!(cut.contains("turn_detected"), "{cut}");
+    // A tool call, and its answer.
+    gemini.answer(Turn {
+        tool_call: Some(ToolCall {
+            name: "weather".into(),
+            arguments: json!({"city": "Paris"}),
+        }),
+        ..Turn::default()
+    });
+    gemini.user_stops();
+    let mut call = Value::Null;
+    while call.is_null() {
+        let event = hear(&mut realtime).await.unwrap();
+        if event["type"] == "response.function_call_arguments.done" {
+            call = event;
+        }
+    }
+    assert_eq!(call["name"], "weather");
+    until(&mut realtime, of_type("response.done")).await;
+    gemini.answer(Turn {
+        audio: Some(pcm(100)),
+        ..Turn::default()
+    });
+    let answer = json!({"type": "conversation.item.create", "item": {"type": "function_call_output",
+        "call_id": call["call_id"], "output": "{\"celsius\":21}"}});
+    say(&mut realtime, answer).await;
+    say(&mut realtime, json!({"type": "response.create"})).await;
+    until(&mut realtime, of_type("response.done")).await;
+    let answered = gemini
+        .received(3)
+        .await
+        .into_iter()
+        .find(|m| m.get("toolResponse").is_some())
+        .unwrap();
+    assert_eq!(
+        answered["toolResponse"]["functionResponses"][0],
+        json!({"id": call["call_id"], "name": "weather", "response": {"celsius": 21}})
+    );
+
+    // A provider's own name for its model is stripped; with none, a Gemini
+    // client goes to the default, OpenAI, which needs one.
+    let (mut named, _) = session(&gw, &format!("{LIVE}?model=openai/gpt-realtime-2.1"), "").await;
+    say(&mut named, json!({"setup": {"model": "models/x"}})).await;
+    hear(&mut named).await.unwrap();
+    assert_eq!(
+        openai.handshakes()[0].uri,
+        "/v1/realtime?model=gpt-realtime-2.1"
+    );
+    // The fake serves one session at a time.
+    drop(named);
+    let url = format!("{}{LIVE}", gw.base.replace("http://", "ws://"));
+    match tokio_tungstenite::connect_async(url).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(answer)) => {
+            assert_eq!(answer.status(), 400)
+        }
+        other => panic!("expected a refusal: {other:?}"),
+    }
+
+    // A Gemini client asking for an OpenAI model is answered by OpenAI.
+    let (mut live, _) = session(&gw, &format!("{LIVE}?model=gpt-realtime"), "").await;
+    let setup = json!({"setup": {"model": "models/gemini-live",
+        "generationConfig": {"responseModalities": ["AUDIO"]}}});
+    say(&mut live, setup).await;
+    assert_eq!(hear(&mut live).await.unwrap(), json!({"setupComplete": {}}));
+    let upgrade = &openai.handshakes()[1];
+    assert_eq!(upgrade.uri, "/v1/realtime?model=gpt-realtime");
+    assert_eq!(upgrade.header("authorization"), Some("Bearer sk-gw"));
+    let chunk = json!({"realtimeInput": {"audio": {"mimeType": "audio/pcm;rate=16000",
+        "data": base64(&pcm(100))}}});
+    say(&mut live, chunk).await;
+    openai.received(2).await;
+    openai.answer(Turn {
+        audio: Some(pcm(200)),
+        ..Turn::default()
+    });
+    openai.user_speaks();
+    openai.user_stops();
+    let mut heard = Vec::new();
+    loop {
+        let message = hear(&mut live).await.unwrap();
+        let parts = &message["serverContent"]["modelTurn"]["parts"];
+        if let Some(data) = parts[0]["inlineData"].get("data") {
+            heard.extend(unbase64(data));
+        }
+        if message["serverContent"]["turnComplete"] == true {
+            break;
+        }
+    }
+    assert_eq!(heard, pcm(200));
+
+    let pid = gw.child.id().unwrap().to_string();
+    let killed = std::process::Command::new("kill")
+        .args(["-TERM", &pid])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    assert_eq!(hear(&mut realtime).await, Err(Some(1001)));
+    assert_eq!(hear(&mut live).await, Err(Some(1001)));
+    let status = tokio::time::timeout(support::BOUND, gw.child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success(), "{status}");
+}
+
+fn base64(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
 }

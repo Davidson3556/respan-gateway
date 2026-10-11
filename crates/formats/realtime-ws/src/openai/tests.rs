@@ -19,7 +19,7 @@ fn inputs(frames: &[Value]) -> Vec<Input> {
 
 /// What `events` are written as, to a provider.
 fn sent(events: &[Input]) -> Result<Vec<Value>, respan_gateway_core::Fault> {
-    let mut provider = input::Provider::new(Some("gpt-realtime".into()));
+    let mut provider = input::Provider::new("gpt-realtime".into());
     let mut frames = Vec::new();
     for event in events {
         provider.write(event, &mut frames)?;

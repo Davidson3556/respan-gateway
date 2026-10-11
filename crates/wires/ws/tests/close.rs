@@ -14,7 +14,7 @@ use respan_gateway_realtime::Input;
 use respan_gateway_ws::{CloseCode, Limits, ProviderClose};
 use support::*;
 
-const PATH: &str = "/v1/realtime";
+const PATH: &str = "/v1/realtime?model=m";
 
 /// A session through a probe provider, sent `via`, with its recorders.
 async fn session(via: Via) -> (Probe, Server, Outcomes, Calls, Ws) {
@@ -410,13 +410,13 @@ async fn a_request_that_is_no_upgrade_is_served_as_http() {
     let probe = Probe::start().await;
     let (gateway, ..) = Via::Typed.gateway(&probe.base());
     let server = serve_typed(gateway).await;
-    let resp = reqwest::get(format!("http://{}{PATH}", server.addr))
+    let resp = reqwest::get(format!("http://{}/v1/realtime", server.addr))
         .await
         .unwrap();
     // `router`'s answer: no format serves a `GET` that is no upgrade.
     assert_eq!(resp.status(), 404);
     let body = resp.text().await.unwrap();
-    assert_eq!(body, format!("no format served accepts GET {PATH}"));
+    assert_eq!(body, "no format served accepts GET /v1/realtime");
     assert_eq!(probe.total.load(Ordering::SeqCst), 0);
 }
 

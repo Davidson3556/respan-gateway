@@ -334,8 +334,9 @@ async fn it_serves_only_its_path() {
     assert_eq!(probe.total.load(Ordering::SeqCst), 0);
 }
 
-// A call the format writes itself is an upgrade request to its path; one
-// that carries no session cannot be written.
+// A call the format writes itself is an upgrade request to its path, of the
+// session's model; one that carries no session, or names no model, cannot
+// be written.
 #[tokio::test]
 async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
     use futures::{SinkExt, StreamExt, TryStreamExt, stream};
@@ -344,7 +345,7 @@ async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
     let factory = respan_gateway_http::connect(
         |call| async move {
             assert_eq!(call.method(), "GET");
-            assert_eq!(call.uri().path(), "/realtime");
+            assert_eq!(call.uri(), "/realtime?model=m");
             assert_eq!(call.headers()["upgrade"], "websocket");
             let frames: Vec<Bytes> = call.into_body().try_collect().await?;
             assert_eq!(frames, [Bytes::from_static(br#"{"type":"x","n":1}"#)]);
@@ -356,18 +357,24 @@ async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
         },
         LIMIT,
     );
-    let (_, mut refusal) = <OpenAiRealtime as Format<ProviderIo, Output, Input>>::bind(
+    let unnamed = <OpenAiRealtime as Format<ProviderIo, Output, Input>>::bind(
         &OpenAiRealtime,
         factory(Extensions::new()),
-    )
-    .unwrap();
+    );
+    assert!(matches!(unnamed, Err(fault) if fault.is::<respan_gateway_core::BadRequest>()));
+    let session = || {
+        let mut extensions = Extensions::new();
+        extensions.insert(respan_gateway_realtime_ws::SessionModel("m".into()));
+        factory(extensions)
+    };
+    let (_, mut refusal) =
+        <OpenAiRealtime as Format<ProviderIo, Output, Input>>::bind(&OpenAiRealtime, session())
+            .unwrap();
     let mut finite = EventStream::single(Input::native("openai-realtime", json!({"type":"x"})));
     assert!(matches!(refusal.prepare(&mut finite), Err(fault) if fault.is::<Config>()));
-    let (opening, mut write) = <OpenAiRealtime as Format<ProviderIo, Output, Input>>::bind(
-        &OpenAiRealtime,
-        factory(Extensions::new()),
-    )
-    .unwrap();
+    let (opening, mut write) =
+        <OpenAiRealtime as Format<ProviderIo, Output, Input>>::bind(&OpenAiRealtime, session())
+            .unwrap();
     let mut input = EventStream::stream(stream::iter([Ok(Input::native(
         "openai-realtime",
         json!({"type":"x", "n":1}),

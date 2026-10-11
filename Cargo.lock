@@ -1414,6 +1414,7 @@ name = "respan-gateway"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "clap",
  "futures",
  "indexmap",

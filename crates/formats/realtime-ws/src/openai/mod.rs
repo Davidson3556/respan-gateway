@@ -6,13 +6,14 @@ mod session;
 #[cfg(test)]
 mod tests;
 
-use respan_gateway_core::{Connection, Fault, Format};
+use respan_gateway_core::{BadRequest, Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::{ClientIo, ProviderIo, formats};
+use respan_gateway_http::{ClientIo, ProviderIo, Wire, formats};
 use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::WsTransport;
 
-use crate::session::{Spec, clients_model, model_at};
+use crate::session::{Spec, model_at};
+use crate::{SessionModel, requested_model};
 
 const NAME: &str = SPEC.name;
 
@@ -36,6 +37,10 @@ const SPEC: Spec = Spec {
 /// event. A session's events begin with the session its handshake asked
 /// for, naming the model at `?model=`; OpenAI takes its model at connect,
 /// so a session that says nothing more is no frame.
+///
+/// A call dials the model routing chose ([`SessionModel`](crate::SessionModel)),
+/// else the one at the client's `?model=`, and its own query alone; with
+/// neither it is refused, `bad_request`.
 ///
 /// A response of another format has none of OpenAI's items: its client is
 /// told of them as OpenAI does, with ids made up for them.
@@ -81,8 +86,15 @@ impl Format<ProviderIo, Output, Input> for OpenAiRealtime {
     }
 
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
-        let model = clients_model(&io);
-        let query = model.as_ref().map(|m| format!("model={m}"));
+        // The model routing chose, else the one the client's handshake asks for.
+        let chosen = io.extensions().get::<SessionModel>().map(|m| m.0.clone());
+        let asked = || requested_model(io.extensions().get::<Wire>()?);
+        let model = chosen.or_else(asked).ok_or_else(|| {
+            BadRequest::fault(
+                "OpenAI Realtime takes its model at connect: name it with ?model= on the session's URL",
+            )
+        })?;
+        let query = Some(format!("model={model}"));
         let mut provider = input::Provider::new(model);
         let write = formats::each_message(move |event: &Input, out: &mut Vec<Bytes>| {
             provider.write(event, out)

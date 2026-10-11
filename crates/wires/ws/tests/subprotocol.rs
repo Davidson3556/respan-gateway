@@ -40,7 +40,7 @@ fn keyed(probe: &Probe) -> Gateway {
 async fn offered_to_provider(offered: &str) -> Option<String> {
     let probe = Probe::start().await;
     let server = serve(keyed(&probe)).await;
-    let path = "/v1/realtime";
+    let path = "/v1/realtime?model=m";
     let _ws = connect(server.addr, path, &[("sec-websocket-protocol", offered)]).await;
     probe.connected(0).await;
     let up = probe.upgrades().remove(0);
@@ -75,7 +75,7 @@ async fn an_empty_entry_leaves_the_provider_a_valid_list() {
 async fn a_key_offered_as_the_only_subprotocol_is_never_echoed() {
     let probe = Probe::start().await;
     let server = serve(keyed(&probe)).await;
-    let mut req = format!("ws://{}/v1/realtime", server.addr)
+    let mut req = format!("ws://{}/v1/realtime?model=m", server.addr)
         .into_client_request()
         .unwrap();
     let offered = HeaderValue::from_static("openai-insecure-api-key.k");
@@ -111,7 +111,7 @@ fn speaking(probe: &Probe) -> Gateway {
 async fn a_formats_subprotocol_is_offered_and_given_back_to_a_client_that_offered_it() {
     let probe = Probe::start().await;
     let server = serve_typed(speaking(&probe)).await;
-    let mut req = format!("ws://{}/v1/realtime", server.addr)
+    let mut req = format!("ws://{}/v1/realtime?model=m", server.addr)
         .into_client_request()
         .unwrap();
     let offered = HeaderValue::from_static("realtime, openai-insecure-api-key.k");
@@ -139,7 +139,7 @@ async fn a_clients_other_subprotocols_are_offered_to_the_provider_beside_the_for
     ] {
         let probe = Probe::start().await;
         let server = serve_typed(speaking(&probe)).await;
-        let mut req = format!("ws://{}/v1/realtime", server.addr)
+        let mut req = format!("ws://{}/v1/realtime?model=m", server.addr)
             .into_client_request()
             .unwrap();
         let offered = HeaderValue::from_static(offered);
@@ -156,7 +156,7 @@ async fn a_clients_other_subprotocols_are_offered_to_the_provider_beside_the_for
 async fn a_client_that_offered_no_subprotocol_gets_none() {
     let probe = Probe::start().await;
     let server = serve_typed(speaking(&probe)).await;
-    let ws = format!("ws://{}/v1/realtime", server.addr);
+    let ws = format!("ws://{}/v1/realtime?model=m", server.addr);
     let (_ws, resp) = tokio_tungstenite::connect_async(ws).await.unwrap();
     assert!(resp.headers().get("sec-websocket-protocol").is_none());
     probe.connected(0).await;
@@ -171,7 +171,7 @@ async fn a_key_the_provider_picks_is_never_echoed() {
     let probe = Probe::start().await;
     let (gateway, ..) = relay(&probe.base());
     let server = serve(gateway).await;
-    let mut req = format!("ws://{}/v1/realtime", server.addr)
+    let mut req = format!("ws://{}/v1/realtime?model=m", server.addr)
         .into_client_request()
         .unwrap();
     let offered = HeaderValue::from_static("openai-insecure-api-key.k");

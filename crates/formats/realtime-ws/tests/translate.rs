@@ -448,7 +448,8 @@ async fn set_up_gemini() -> (Fake, Client, Seen) {
     (fake, client, seen)
 }
 
-// 21: OpenAI takes its model at connect.
+// 21: OpenAI takes its model at connect: a session that names none is
+// refused before it is dialed.
 #[tokio::test]
 async fn gemini_to_openai_dials_the_model_at_its_url() {
     let fake = openai::start().await;
@@ -457,7 +458,8 @@ async fn gemini_to_openai_dials_the_model_at_its_url() {
         OPENAI_KEY,
     );
     let (addr, _) = serve(GeminiLive, OpenAiRealtime, transport).await;
-    assert!(Client::refused(addr, gemini::PATH).await >= 400);
+    assert_eq!(Client::refused(addr, gemini::PATH).await, 400);
+    assert!(fake.handshakes().is_empty());
     let (fake, _client, _) = to_openai().await;
     let handshakes = fake.handshakes();
     assert_eq!(handshakes[0].uri, "/v1/realtime?model=gpt-realtime");

@@ -504,6 +504,78 @@ async fn routing_sends_a_named_provider_its_model_alone() {
     assert_eq!(sent[0].body["model"], "gpt-4o");
 }
 
+// A model a request names outside its input, as a session names it in its
+// handshake: read there, and written as the model the input asks for.
+#[tokio::test]
+async fn routing_reads_and_writes_a_model_named_outside_the_input() {
+    const ASK: &str = r#"{"model":"unread","messages":[{"role":"user","content":"hi"}]}"#;
+    let mock = Fakes::start().await;
+    mock.reply(A, Answer::text("named in the head"));
+    let head = |cx: &ClientContext| {
+        let wire = cx.extensions().get::<respan_gateway_http::Wire>()?;
+        let model = wire.get()?.headers().get("x-model")?.to_str().ok()?;
+        Some(model.to_owned())
+    };
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let seen = written.clone();
+    let model = Model::new(head, move |cx, model| {
+        seen.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(model.clone());
+        cx.filter(move |input: &mut Input| {
+            input.set_model(model.clone());
+            Ok(())
+        })
+    });
+    let routes = Routes::new()
+        .provider(
+            "a",
+            vec![Speaks {
+                format: "openai-chat".into(),
+                kind: CHAT,
+                internal: "a".into(),
+            }],
+        )
+        .provider(
+            "b",
+            vec![Speaks {
+                format: "openai-chat".into(),
+                kind: CHAT,
+                internal: "b".into(),
+            }],
+        );
+    let routing = Routing::new(Arc::new(routes.target("b"))).format("openai-chat", CHAT, model);
+    let gw = Gateway::new()
+        .client::<Input, _, _>(OpenAiChat)
+        .expect("chat client")
+        .provider::<Input, _, _>(
+            "a",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(A), LIMIT),
+        )
+        .expect("a provider")
+        .provider::<Input, _, _>(
+            "b",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(B), LIMIT),
+        )
+        .expect("b provider")
+        .plugin(routing);
+    let mut request = post("/v1/chat/completions", ASK);
+    request
+        .headers_mut()
+        .insert("x-model", HeaderValue::from_static("a/gpt-4o"));
+    let (resp, outcome) = serve(&gw, request).await;
+    let (status, _, _) = read_whole(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ended(outcome.await), Ok(()));
+    assert_eq!(mock.a.requests()[0].body["model"], "gpt-4o");
+    assert_eq!(
+        *written.lock().unwrap_or_else(PoisonError::into_inner),
+        ["gpt-4o"]
+    );
+}
+
 #[tokio::test]
 async fn routing_sends_unmatched_and_missing_models_to_the_target() {
     const UNMATCHED: &str = r#"{"model":"other","messages":[{"role":"user","content":"hi"}]}"#;

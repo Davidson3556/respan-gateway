@@ -732,10 +732,13 @@ async fn the_wallet_is_found_by_any_credential_form() {
     let (_raw, gw, _meter, wallets, addr) = raw_session(7, wallet_of(3)).await;
     let forms = [
         (
-            "/v1/realtime",
+            "/v1/realtime?model=gpt-realtime",
             Some("realtime, openai-insecure-api-key.sk-demo"),
         ),
-        ("/v1/realtime?api_key=sk-demo", Some("realtime")),
+        (
+            "/v1/realtime?model=gpt-realtime&api_key=sk-demo",
+            Some("realtime"),
+        ),
     ];
     for (path, protocol) in forms {
         let mut req = format!("ws://{addr}{path}")
@@ -756,7 +759,7 @@ async fn the_wallet_is_found_by_any_credential_form() {
     gw.idle().await;
     assert_eq!(wallets.spent("sk-demo"), 2 * 7);
 
-    let req = format!("ws://{addr}/v1/realtime")
+    let req = format!("ws://{addr}/v1/realtime?model=gpt-realtime")
         .into_client_request()
         .expect("a request");
     assert!(
