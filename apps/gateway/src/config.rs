@@ -72,6 +72,8 @@ pub struct Config {
     /// Compiled-in plugins, in the order listed.
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
+    /// Run tools of `mcp:` servers inside chat requests; off if unset.
+    pub agent: Option<AgentConfig>,
     /// The provider of each kind it serves for requests nothing else
     /// routes.
     pub default: Option<String>,
@@ -101,6 +103,7 @@ impl Default for Config {
             formats: None,
             mcp: IndexMap::new(),
             plugins: Vec::new(),
+            agent: None,
             default: None,
             source: Source::Inline,
             raw_relay: false,
@@ -145,6 +148,35 @@ pub struct PluginConfig {
     /// Model routes: model prefix to provider, tried in order, for every
     /// kind the provider serves.
     pub models: Vec<ModelRoute>,
+}
+
+/// The agent loop: the gateway offers the tools of `mcp:` servers to the
+/// model and runs the ones it calls, so a client that knows nothing of MCP
+/// gets answers that used them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConfig {
+    /// The `mcp:` servers whose tools the gateway offers and runs, as
+    /// `<server>__<tool>`.
+    pub tools: Vec<String>,
+    /// Model name prefixes the loop applies to, as the provider is sent
+    /// them; every chat model if unset.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// The most calls to the model for one request; 8 if unset.
+    pub max_steps: Option<u32>,
+    /// The wall-clock limit of one request's loop; 5 minutes if unset.
+    #[serde(default, deserialize_with = "agent_timeout")]
+    pub timeout: Option<Duration>,
+    /// The limit of one tool call; 60 s if unset.
+    #[serde(default, deserialize_with = "agent_tool_timeout")]
+    pub tool_timeout: Option<Duration>,
+    /// How long a server's tool list is kept; 5 minutes if unset.
+    #[serde(default, deserialize_with = "agent_cache")]
+    pub cache: Option<Duration>,
+    /// The most bytes of one tool's answer the model sees; 64 KiB if unset.
+    #[serde(default, deserialize_with = "agent_max_result")]
+    pub max_result: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -361,8 +393,9 @@ fn request_log<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Erro
     }
 }
 
-/// A number of seconds, or a duration such as `30s`, `2m`, `1h` or `500ms`.
-fn shutdown_grace<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+/// A number of seconds, or a duration such as `30s`, `2m`, `1h` or `500ms`,
+/// of the config key `key`.
+fn span<'de, D: Deserializer<'de>>(d: D, key: &str) -> Result<Option<Duration>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Span {
@@ -373,10 +406,29 @@ fn shutdown_grace<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D
         None => None,
         Some(Span::Seconds(s)) => Some(Duration::from_secs(s)),
         Some(Span::Text(text)) => Some(
-            parse_duration(&text)
-                .map_err(|e| serde::de::Error::custom(format!("shutdown_grace: {e}")))?,
+            parse_duration(&text).map_err(|e| serde::de::Error::custom(format!("{key}: {e}")))?,
         ),
     })
+}
+
+fn shutdown_grace<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "shutdown_grace")
+}
+
+fn agent_timeout<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "agent: timeout")
+}
+
+fn agent_tool_timeout<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "agent: tool_timeout")
+}
+
+fn agent_cache<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "agent: cache")
+}
+
+fn agent_max_result<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    byte_size(d, "agent: max_result")
 }
 
 /// The time `text` says: a number and a unit (`ms`, `s`, `m`, `h`),

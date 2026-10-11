@@ -90,6 +90,27 @@ export interface Usage {
   seconds?: number;
 }
 
+/** A tool the gateway ran for the model in an agent loop. */
+export interface AgentTool {
+  /** As the model named it, `<server>__<tool>`. */
+  name: string;
+  duration_ms: number;
+  error: boolean;
+  /** The bytes of its answer the model saw. */
+  bytes: number;
+}
+
+/** One call to the model in an agent loop, and the tools it asked for. */
+export interface AgentStep {
+  index: number;
+  duration_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  /** Why the model stopped: `tool_use`, `stop`, … */
+  finish?: string;
+  tools: AgentTool[];
+}
+
 export interface RequestRecord {
   id: string;
   started_at: string;
@@ -105,6 +126,8 @@ export interface RequestRecord {
   ttfb_ms: number | null;
   stream: boolean;
   usage: Usage | null;
+  /** The agent loop's steps, in order; absent without the loop. */
+  steps?: AgentStep[];
   error: string | null;
 }
 

@@ -20,6 +20,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http_body::{self, Frame, SizeHint};
 use respan_gateway_media::{embedding, image, speech, transcription};
+use respan_gateway_plugins::agent::{Sink, StepReport, ToolHop};
 use respan_gateway_plugins::{Kind, Model};
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -52,7 +53,35 @@ pub struct RequestRecord {
     pub ttfb_ms: Option<u64>,
     pub stream: bool,
     pub usage: Option<Usage>,
+    /// The calls to the model the agent loop made for it and the tools it
+    /// ran, in order; none without the loop.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<Step>,
     pub error: Option<String>,
+}
+
+/// One call to the model in an agent loop, and the tools it asked for.
+#[derive(Debug, Clone, Serialize)]
+pub struct Step {
+    pub index: u32,
+    pub duration_ms: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// Why the model stopped, such as `tool_use` or `stop`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish: Option<String>,
+    pub tools: Vec<ToolCall>,
+}
+
+/// A tool the gateway ran for the model.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCall {
+    /// As the model named it, `<server>__<tool>`.
+    pub name: String,
+    pub duration_ms: u64,
+    pub error: bool,
+    /// The bytes of its answer the model saw.
+    pub bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -254,6 +283,7 @@ impl RequestLog {
             ttfb_ms: None,
             stream: false,
             usage: None,
+            steps: Vec::new(),
             error: None,
         };
         let entry = Arc::new(Entry {
@@ -364,6 +394,10 @@ fn line(r: &RequestRecord) -> String {
         if let Some(seconds) = u.seconds {
             details.push(format!("{seconds} s of audio"));
         }
+    }
+    if !r.steps.is_empty() {
+        let tools: usize = r.steps.iter().map(|s| s.tools.len()).sum();
+        details.push(format!("{} steps, {tools} tool calls", r.steps.len()));
     }
     if !details.is_empty() {
         line.push_str(&format!(" ({})", details.join(", ")));
@@ -594,11 +628,53 @@ impl Plugin for Recorder {
     }
 
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        // A tool's server is not the request's provider.
+        if px.extensions().get::<ToolHop>().is_some() {
+            return Ok(());
+        }
         if let Some(Tracked(entry)) = px.extensions().get::<Tracked>() {
             let provider = self.providers.get(px.provider()).cloned();
             entry.record().provider = provider.or_else(|| Some(px.provider().to_owned()));
         }
         Ok(())
+    }
+}
+
+/// Where the agent loop reports a request's steps: into its entry in `log`.
+pub fn steps(log: Arc<RequestLog>) -> impl Fn(&ClientContext) -> Option<Sink> + Send + Sync {
+    move |cx| {
+        let Tracked(entry) = cx.extensions().get::<Tracked>().cloned()?;
+        let log = log.clone();
+        Some(Arc::new(move |report: StepReport| {
+            entry.record().steps.push(step(&report));
+            log.publish(&entry);
+        }))
+    }
+}
+
+fn step(report: &StepReport) -> Step {
+    let millis = |d: std::time::Duration| d.as_millis().try_into().unwrap_or(u64::MAX);
+    let finish = report.finish.as_ref().map(|f| match f {
+        conversation::Finish::Stop => "stop".to_owned(),
+        conversation::Finish::Length => "length".to_owned(),
+        conversation::Finish::ToolUse => "tool_use".to_owned(),
+        conversation::Finish::Filtered => "filtered".to_owned(),
+        _ => "other".to_owned(),
+    });
+    Step {
+        index: report.index,
+        duration_ms: millis(report.took),
+        input_tokens: report.usage.input_tokens,
+        output_tokens: report.usage.output_tokens,
+        finish,
+        tools: (report.tools.iter())
+            .map(|t| ToolCall {
+                name: clip(&t.name),
+                duration_ms: millis(t.took),
+                error: t.is_error,
+                bytes: t.bytes,
+            })
+            .collect(),
     }
 }
 
@@ -710,6 +786,7 @@ mod tests {
                 output_tokens: 40,
                 seconds: None,
             }),
+            steps: Vec::new(),
             error: None,
         };
         assert_eq!(

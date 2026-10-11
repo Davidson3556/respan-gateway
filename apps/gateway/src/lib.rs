@@ -16,6 +16,7 @@
 //! `respan_gateway_core::Gateway` instead.
 
 mod admin;
+mod agent;
 mod app;
 mod auth;
 mod cli;

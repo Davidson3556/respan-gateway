@@ -1403,7 +1403,9 @@ dependencies = [
 name = "respan-gateway-plugins"
 version = "0.1.0"
 dependencies = [
+ "respan-gateway-conversation",
  "respan-gateway-core",
+ "serde_json",
  "tokio",
 ]
 

@@ -1,6 +1,6 @@
 //! A configured gateway and the HTTP application around it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -28,6 +28,7 @@ use tokio::time::Instant;
 use tower::ServiceExt;
 
 use crate::admin::{self, Admin};
+use crate::agent;
 use crate::auth::{self, ClientCredentials, ClientKeys, LocalOnly};
 use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{KnownFormat, formats, kind};
@@ -268,6 +269,10 @@ impl Built {
         }
         let (gateway, mut plan) = compose(&config, &formats)?;
         plan.mcp = mcp;
+        if let Some(agent) = &config.agent {
+            let serving = plan.serves(mcp::FORMAT);
+            agent::check(agent, &plan.mcp, serving)?;
+        }
         let gateway = with_plugins(gateway, &config, &plan, &formats, &process.log);
         let keys = ClientKeys::new(plan.keys.clone());
         let relay = relay(
@@ -648,7 +653,7 @@ fn with_plugins(
         .plugin(VideoJobs::new(&plan.upstreams, formats))
         .plugin(locate);
     // A raw relay sends each client's credentials itself.
-    let gateway = match config.raw_relay {
+    let mut gateway = match config.raw_relay {
         true => gateway.plugin(Relay::RAW),
         false => {
             let keyless = plan.upstreams.iter().filter(|u| !u.own_key);
@@ -659,6 +664,17 @@ fn with_plugins(
             gateway.plugin(ClientCredentials::new(keyless.chain(forwarded).collect()))
         }
     };
+    // The agent answers the request itself, so it comes after every plugin
+    // that routes or edits it.
+    if let Some(config) = &config.agent {
+        let flags: HashSet<String> = (plan.upstreams.iter())
+            .flat_map(|u| &u.entries)
+            .filter(|e| e.format == "anthropic-messages")
+            .map(|e| e.internal.clone())
+            .collect();
+        let agent = agent::plugin(config, move |provider| flags.contains(provider));
+        gateway = gateway.plugin(agent.observe(requests::steps(log.clone())));
+    }
     with_quirks(gateway, &plan.upstreams)
 }
 

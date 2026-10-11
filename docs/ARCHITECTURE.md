@@ -56,7 +56,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
 | `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins (such as Groq's usage, DeepSeek's `reasoning_content`, Gemini's `thought_signature` placeholder) | Core, the conversation, media and realtime formats, and the conversation and realtime kinds (for quirk plugins) |
 | `crates/serve/` | Hosting | One Axum router for a gateway: plain HTTP and WebSocket upgrades, body and session limits, graceful stop | Core, HTTP, WS |
-| `crates/plugins/` | Plugins | The router (`Routes`, `Routing`), attempts, fallback, races and backoff | Core |
+| `crates/plugins/` | Plugins | The router (`Routes`, `Routing`), attempts, fallback, races and backoff, and the agent loop (`agent::Agent`) | Core and the conversation kind |
 | `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | The kinds, wires, formats, providers and plugins above, and MCP (`mcp:` servers at `/mcp/{name}`) |
 | `apps/ui/` | Web UI | React and shadcn/ui admin UI (providers, routes, live requests), built by `pnpm build` to `apps/ui/dist` and embedded in the binary by `apps/gateway/build.rs`; a placeholder page stands in when it is not built | None (talks to the admin API) |
 | `python/` | Python package | PyO3 extension hosting the `apps/gateway` library in-process, plus httpx transports and SDK clients | `apps/gateway` |
@@ -286,8 +286,7 @@ accounts and stores.
 
 There are no admin writes; the config is reloaded from its source (SIGHUP,
 `POST /ui/api/reload`, `--watch`) by building a new gateway and swapping it
-in for new requests, the old one finishing its open ones. The gateway does not
-run MCP tools for chat requests (the agent loop, M9).
+in for new requests, the old one finishing its open ones.
 
 ## MCP in the binary
 
@@ -308,3 +307,32 @@ method (and tool, prompt or resource) where other kinds show a model; the
 server is the provider. Children are the transport's: process groups,
 `stdin` closed then SIGTERM then SIGKILL, and `kill_on_drop` when the runtime
 stops.
+
+## The agent loop
+
+The loop that runs tools inside a chat request is a plugin, not a kernel
+feature: `agent::Agent` in `crates/plugins` depends on the core and the
+conversation kind alone, so it serves every chat format and provider. In
+`on_client`, after routing has chosen the target and the request is in scope,
+it asks a `Tools` runner for the request's `Toolbox` (`list` and `call`),
+adds the listed tools to the conversation and answers the request itself with
+`Response::stream`: each step is a `Call` of the target with its own input
+(`Call::with_input`, so translation, provider-edge filters and the quirks apply
+as for any call), read as `Output` events. A step's events flow to the client
+(blocks renumbered without gaps over the steps), except the runner's tool
+calls, usage and the finish, which are decided when the step ends: calls only to
+the runner's tools are run in parallel and appended to the conversation as
+the assistant's calls and a user message of results; anything else ends the
+loop, with the usage summed. Because the plugin replies, it is registered
+after the plugins that route or edit the request.
+
+The binary supplies the runner and the policy: `apps/gateway/src/agent.rs`
+implements `Tools` with MCP, as the gateway's own client of the `mcp:`
+servers it already composes as providers. A tool call is a `Call` to the
+server's provider with an MCP `Input` (the server's credentials are the
+transport's; the call carries the `Owner` of no client key, and
+`ToolHop` so the request log keeps the server out of the request's provider
+field), through a session the runner keeps per server and restarts when lost,
+and a per-server tool list with a TTL. The config check refuses servers with
+`forward_auth`. The steps and tool calls go to the request log through the
+plugin's observer (`Agent::observe`), which the recorder's entry implements.

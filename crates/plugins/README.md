@@ -64,6 +64,36 @@ HTTP's `watchdog(transport, head, idle)` lives in the HTTP protocol module; it b
 transport's head wait and polled per-frame body gaps. Other transports can
 choose a different classifier without importing HTTP.
 
+## Agent loop
+
+`agent::Agent` runs tools inside chat requests, for every chat format and
+provider, as a plugin over the conversation kind. A `Tools` runner opens a
+`Toolbox` per request (`list` the tools to offer, `call` one by name with
+JSON arguments, answering an `Outcome` whose failure the model reads). The
+agent adds the tools to the request, calls the target, and while the reply
+calls only those tools runs them in parallel and calls again; the client gets
+one reply with the usage summed. It stops at a reply with no such call, at a
+call of a client's own tool (returned to the client; the gateway's calls in it
+are left out), at `max_steps` (the last call forbids tools) and at `timeout`.
+Register it after the plugins that route and edit requests, since it answers
+the request itself:
+
+```rust,ignore
+let agent = Agent::new(MyTools)       // impl Tools
+    .max_steps(8)
+    .tool_timeout(Duration::from_secs(60))
+    .when(|cx, input| input.model().is_some_and(|m| m.starts_with("gpt")))
+    .observe(|cx| Some(sink_for(cx))); // each step and tool call, reported
+let gateway = gateway.plugin(Routing::new(routes)).plugin(agent);
+```
+
+Each model call carries `agent::Step(n)` in its extensions; a runner that
+calls tools through the gateway marks those calls with `agent::ToolHop` so
+other plugins can tell them apart. `Agent::flag_errors_for` says which
+providers can be sent a result flagged as a failure (others get `Error: `
+text). Used by the binary's `agent:` section, with MCP servers as the tools
+([tests](tests/agent.rs)).
+
 Used by: [fallback](../../examples/routing/fallback.rs),
 [attachments](../../examples/integrations/attachments.rs).
 

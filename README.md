@@ -139,8 +139,7 @@ one, the request log carries over, and an invalid config is refused while the
 old one keeps serving. A changed `listen` needs a restart.
 
 Not there yet: no admin writes (the web UI and admin API are read-only apart
-from reload); the gateway does not run MCP tools inside chat requests (the
-agent loop, M9).
+from reload).
 
 ### MCP servers
 
@@ -171,6 +170,54 @@ unauthorized or unreachable; a stdio server is started and stopped for it).
 With `client_keys`, a session belongs to the key that opened it: another key
 naming its `Mcp-Session-Id` gets 404. Name `mcp` in `formats:` if you list
 formats.
+
+### Agent loop
+
+With `agent:` the gateway runs MCP tools for the model, so a client that knows
+nothing of MCP gets answers that used them. It is off unless configured:
+
+```yaml
+agent:
+  tools: [github, files]   # mcp: servers whose tools the gateway offers and runs
+  models: [gpt, claude]    # optional model prefixes; default: every chat model
+  max_steps: 8             # most calls to the model per request
+  # timeout: 5m            # wall clock of one request's loop
+  # tool_timeout: 60s      # one tool call
+  # max_result: 64KiB      # most bytes of one tool answer the model sees
+  # cache: 5m              # how long a server's tool list is kept
+```
+
+On a chat request in scope (any chat format, translated or not) the gateway
+adds the servers' tools to the request, named `<server>__<tool>` (such as
+`github__search_issues`), calls the provider, and while the reply calls only
+those tools it runs them (in parallel), appends the calls and results and
+calls again. The client sees one reply: the final step's, with the usage of
+every step summed. A client can leave the loop out of one request with the
+header `x-respan-agent: off`.
+
+- It stops at a reply that calls no gateway tool; at a reply that calls one of
+  the client's *own* tools (the client runs those; the gateway's calls in that
+  reply are left out of what it sees); at `max_steps`, where the last call
+  forbids tools and a model that still asks for one fails the request (502,
+  `agent_max_steps`); and at `timeout` (502, `agent_timeout`).
+- A tool's failure, a timeout, an unreachable server or malformed arguments
+  is a tool result the model reads (flagged as an error where the provider's
+  format has the flag, else text beginning `Error:`), not a failed request.
+  Answers longer than `max_result` are cut, saying so.
+- Streaming: a step's text and the client's own tool calls stream as they
+  arrive, the gateway's tool calls are held back and run, and the next step's
+  text follows in the same reply. Usage is sent once, before the finish.
+- Tools run with the server's own credentials, never a client's (a server with
+  `forward_auth` cannot be a tool server). The gateway is an MCP client of its
+  own: one session per server, kept across requests and started again when
+  lost, and each tool list kept for `cache`.
+- The request log shows the provider's steps and each tool call (name,
+  duration, bytes, whether it failed) in the request detail drawer; `check`
+  prints the section.
+
+Not covered: a step's extended thinking or Gemini thought signatures are not
+replayed to the provider, so models that insist on them with tool use may
+refuse the second step; native events of steps after the first are dropped.
 
 ## What it speaks
 
@@ -262,7 +309,7 @@ tests, and a 10-minute plugin really takes 10 minutes.
 | M6 Hard cases | Realtime translation, video jobs, PII rewriting, admission | done |
 | M7 0.1 release | Release binaries, Docker image and PyPI wheels are built by tag workflows; first tag pending | open |
 | M8 MCP gateway | `mcp:` servers (streamable HTTP or stdio) served at `/mcp/{name}` with client keys, the request log and the web UI | done |
-| M9 Agent loop | Gateway-run MCP tools inside chat requests | open |
+| M9 Agent loop | `agent:` runs the tools of `mcp:` servers inside chat requests, for every chat format and provider | done |
 
 ## License
 

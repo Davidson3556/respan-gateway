@@ -47,6 +47,16 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
         row(&mut lines, "mcp", servers.flatten().collect());
     }
 
+    if let Some(agent) = &config.agent {
+        let mut about = vec![format!("tools of {}", agent.tools.join(", "))];
+        if !agent.models.is_empty() {
+            about.push(format!("  models  {}", agent.models.join(", ")));
+        }
+        let steps = agent.max_steps.unwrap_or(8);
+        about.push(format!("  limits  {steps} steps per request"));
+        row(&mut lines, "agent", about);
+    }
+
     let mut endpoints: Vec<String> = plan
         .serve
         .iter()

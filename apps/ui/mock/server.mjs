@@ -275,8 +275,9 @@ function begin({ path, format, kind, model, provider, stream, at = new Date() })
   return record;
 }
 
-function finish(record, { status, duration, usage = null, error = null }) {
+function finish(record, { status, duration, usage = null, error = null, steps }) {
   Object.assign(record, {
+    ...(steps ? { steps } : {}),
     status,
     duration_ms: duration,
     ttfb_ms: Math.round(duration * (0.15 + Math.random() * 0.3)),
@@ -327,6 +328,15 @@ function fakeTraffic(at) {
     duration: between(180, chat ? (model.startsWith("llama") ? 900 : 3200) : 4500),
     usage: failed ? null : usage,
   };
+  // Now and then a chat request is an agent loop: the gateway ran tools.
+  if (chat && !failed && Math.random() < 0.2) {
+    const tools = [{ name: "files__read", duration_ms: between(8, 120), error: false, bytes: between(200, 9000) }];
+    if (Math.random() < 0.3) tools.push({ name: "github__search", duration_ms: between(80, 900), error: Math.random() < 0.3, bytes: between(100, 4000) });
+    const step = (index, finish, tools) => ({
+      index, duration_ms: between(300, 1400), input_tokens: between(100, 800), output_tokens: between(10, 200), finish, tools,
+    });
+    outcome.steps = [step(1, "tool_use", tools), step(2, "stop", [])];
+  }
   return { record, outcome };
 }
 

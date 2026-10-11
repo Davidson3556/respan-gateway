@@ -12,6 +12,13 @@ export function formatPercent(ratio: number): string {
   return `${(ratio * 100).toFixed(ratio < 0.1 ? 1 : 0)}%`;
 }
 
+/** 900 → "900 B"; 2048 → "2.0 KB"; 5 MiB → "5.0 MB". */
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** Milliseconds as "840 ms", "2.4 s" or "1m 05s". */
 export function formatMs(ms: number | null | undefined): string {
   if (ms == null) return "—";

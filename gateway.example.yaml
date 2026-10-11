@@ -196,3 +196,22 @@ providers:
 #     env: { LOG_LEVEL: info }
 #     cwd: /data
 # At most 32 MCP sessions per server.
+
+# The agent loop: run the tools of mcp: servers inside chat requests, so a
+# client that knows nothing of MCP gets answers that used them. Off unless
+# set. The gateway adds the servers' tools to a chat request of any chat
+# format (named <server>__<tool>, such as github__search), calls the model,
+# runs the tools it calls with each server's own credentials (never a
+# client's; a `forward_auth` server cannot be listed), and calls again until
+# the model answers or calls a tool of the client's own, which goes back to
+# the client. The client sees one reply, with the usage of every step summed.
+# `mcp` must be served (the default; or listed in `formats`). A request can
+# leave the loop out with the header `x-respan-agent: off`.
+# agent:
+#   tools: [github, files]  # mcp: servers whose tools are offered and run
+#   models: [gpt, claude]   # optional model prefixes; every chat model if unset
+#   max_steps: 8            # most calls to the model per request (1 to 64)
+#   timeout: 5m             # wall clock of one request's loop
+#   tool_timeout: 60s       # one tool call; past it the model gets an error
+#   max_result: 64KiB       # most bytes of one tool answer the model sees
+#   cache: 5m               # how long a server's tool list is kept
