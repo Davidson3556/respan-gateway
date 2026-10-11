@@ -57,6 +57,14 @@ impl OpenAiRealtime {
     pub fn transport(&self, base_url: impl Into<String>) -> Result<WsTransport, Fault> {
         SPEC.transport(base_url)
     }
+
+    /// `input` as its writer takes it: the fields of other formats' natives
+    /// that OpenAI can do without are dropped, and one that could change
+    /// the answer is refused. A plugin that adds OpenAI's own fields to an
+    /// input from another format's client admits it first.
+    pub fn admit(&self, input: &Input) -> Result<Input, Fault> {
+        input::admit(input)
+    }
 }
 
 impl Format<ClientIo, Input, Output> for OpenAiRealtime {

@@ -5,7 +5,7 @@ use respan_gateway_ws::CloseCode;
 use serde_json::{Value, json};
 
 use super::{Answering, Shared, input, lock, output};
-use crate::session;
+use crate::{json, session};
 
 fn inputs(messages: &[Value]) -> Result<Vec<Input>, Fault> {
     let mut client = input::Client::new(Answering::default());
@@ -350,6 +350,17 @@ fn a_refusal_closes_a_live_client() {
         json!({"type": "mcp_list_tools.completed"}),
     );
     assert!(heard(&[mcp]).is_err());
+}
+
+#[test]
+fn a_cancel_that_found_no_response_closes_no_live_client() {
+    let rest = json!({"error": {"code": "response_cancel_not_active"}, "event_id": "e"});
+    let error = Output::Error {
+        code: Some("invalid_request_error".into()),
+        message: "Cancellation failed: no active response found".into(),
+        native: json::native("openai-realtime", rest),
+    };
+    assert_eq!(heard(&[error]).expect("dropped"), Vec::<Value>::new());
 }
 
 #[test]
