@@ -8,7 +8,7 @@ cannot select them.
 | Target | Tests | Requirements |
 | --- | ---: | --- |
 | `live_providers` | 7 | Provider keys and outbound network access |
-| `live_ws` | 2 | OpenAI/Gemini keys, model access and outbound TLS connections |
+| `live_ws` | 4 | OpenAI/Gemini keys, model access and outbound TLS connections |
 | `reference_server` | 2 | Node.js, npx and network access to download the pinned MCP reference server |
 | `pdf` | 1 | Poppler's `pdftotext` on PATH |
 
