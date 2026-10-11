@@ -1627,6 +1627,8 @@ dependencies = [
 name = "respan-gateway-realtime"
 version = "0.0.0"
 dependencies = [
+ "bytes",
+ "respan-gateway-conversation",
  "respan-gateway-core",
  "serde_json",
 ]

@@ -20,8 +20,9 @@ only its endpoint, subprotocol and framing.
   (`with_headers`: OpenAI's `Authorization: Bearer`, Gemini's
   `x-goog-api-key`) or the client's.
 - `JsonEvents::new(name, path)`: client and provider `Format` bindings
-  whose kind is one JSON event per frame, `Input` in and
-  `Output` out (each a format-tagged `NativeValue`, read with `json()`). Every event is written from
+  of one JSON event per frame, each the kind's `Input::Native` in and
+  `Output::Native` out, tagged with the format's name: it translates
+  nothing yet, and writes only its own native events. Every event is written from
   its JSON, so a relay to a format of the same name keeps what an event says,
   not its exact bytes. Plugins filter events with
   `cx.filter(|e: &mut Output| ..)` (client edge) or `px.filter(..)`

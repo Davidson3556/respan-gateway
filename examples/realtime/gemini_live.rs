@@ -48,7 +48,11 @@ impl Plugin for Sessions {
                 let session = incoming.clone();
                 let model = model.clone();
                 async move {
-                    if let Some(setup) = event.json_mut().get_mut("setup") {
+                    let Input::Native(native) = &mut event else {
+                        return Ok(event);
+                    };
+                    let json = Arc::make_mut(&mut native.value);
+                    if let Some(setup) = json.get_mut("setup") {
                         if !setup.is_object() {
                             return Err(BadRequest::fault("setup must be an object"));
                         }
@@ -78,15 +82,15 @@ impl Plugin for Sessions {
                             true.into();
                         setup["proactivity"]["proactiveAudio"] = false.into();
                     }
-                    if event.json()["clientContent"]["turnComplete"] == true
-                        || event.json()["realtimeInput"].get("activityStart").is_some()
+                    if json["clientContent"]["turnComplete"] == true
+                        || json["realtimeInput"].get("activityStart").is_some()
                     {
                         session.begin("turn").await?;
                     }
-                    if event.json().get("toolResponse").is_some() && !session.active("turn") {
+                    if json.get("toolResponse").is_some() && !session.active("turn") {
                         session.begin("turn").await?;
                     }
-                    if event.json().get("realtimeInput").is_some() && !session.active("turn") {
+                    if json.get("realtimeInput").is_some() && !session.active("turn") {
                         return Err(Fault::new("send activityStart before realtime input")
                             .with(ErrorCode("audio_policy".into()))
                             .with(CloseCode(1008)));
@@ -102,13 +106,17 @@ impl Plugin for Sessions {
                 let session = outgoing.clone();
                 let usage = usage.clone();
                 async move {
-                    if let Some(value) = event.json().get("usageMetadata") {
+                    let Output::Native(native) = &event else {
+                        return Ok(event);
+                    };
+                    let json = &native.value;
+                    if let Some(value) = json.get("usageMetadata") {
                         budget::lock(&usage).0 = value.clone();
                     }
-                    if event.json()["serverContent"]["interrupted"] == true {
+                    if json["serverContent"]["interrupted"] == true {
                         budget::lock(&usage).1 = true;
                     }
-                    if event.json()["serverContent"]["turnComplete"] == true {
+                    if json["serverContent"]["turnComplete"] == true {
                         let (used, interrupted) = std::mem::take(&mut *budget::lock(&usage));
                         session
                             .finish(

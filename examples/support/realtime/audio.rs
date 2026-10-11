@@ -35,7 +35,7 @@ impl Plugin for Validate {
         let manual = self.0;
         if manual {
             cx.wrap(|events: EventStream<Input>| {
-                let manual = Input::new(
+                let manual = Input::native(
                     "openai-realtime",
                     json!({
                         "type": "session.update", "session": {"type": "realtime",
@@ -46,10 +46,13 @@ impl Plugin for Validate {
             })?;
         }
         cx.filter(move |event: &mut Input| {
-            if event.json()["type"] != "session.update" {
+            let Input::Native(event) = event else {
+                return Ok(());
+            };
+            if event.value["type"] != "session.update" {
                 return Ok(());
             }
-            let session = &event.json()["session"];
+            let session = &event.value["session"];
             if !session.is_object() {
                 return Err(BadRequest::fault("session must be an object").with(CloseCode(1008)));
             }
@@ -96,9 +99,10 @@ impl Plugin for Validate {
                 }
             }
             if manual {
-                event.json_mut()["session"]["audio"]["input"]["turn_detection"] = Value::Null;
-                if event.json()["session"].get("turn_detection").is_some() {
-                    event.json_mut()["session"]["turn_detection"] = Value::Null;
+                let session = &mut std::sync::Arc::make_mut(&mut event.value)["session"];
+                session["audio"]["input"]["turn_detection"] = Value::Null;
+                if session.get("turn_detection").is_some() {
+                    session["turn_detection"] = Value::Null;
                 }
             }
             Ok(())

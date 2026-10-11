@@ -94,11 +94,12 @@ async fn only_an_edited_event_says_something_else() {
     let tap = Tap::to(ws_base(&openai)).await;
     let hide = OnClient(|cx: &mut ClientContext| {
         cx.filter(|e: &mut Output| {
-            if e.json()["type"]
-                .as_str()
-                .is_some_and(|t| t.ends_with(".delta"))
+            if let Output::Native(e) = e
+                && e.value["type"]
+                    .as_str()
+                    .is_some_and(|t| t.ends_with(".delta"))
             {
-                e.json_mut()["delta"] = json!("[hidden]");
+                Arc::make_mut(&mut e.value)["delta"] = json!("[hidden]");
             }
             Ok(())
         })
@@ -150,11 +151,13 @@ async fn a_filter_can_drop_events_either_way() {
     let tap = Tap::to(ws_base(&openai)).await;
     let drop_items = OnClient(|cx: &mut ClientContext| {
         cx.filter(Drop(|e: &Output| {
-            e.json()["type"]
+            matches!(e, Output::Native(e) if e.value["type"]
                 .as_str()
-                .is_some_and(|t| t.starts_with("conversation.item."))
+                .is_some_and(|t| t.starts_with("conversation.item.")))
         }))?;
-        cx.filter(Drop(|e: &Input| e.json()["type"] == "session.update"))
+        cx.filter(Drop(
+            |e: &Input| matches!(e, Input::Native(e) if e.value["type"] == "session.update"),
+        ))
     });
     let (gateway, _, _) = gateway_of(&tap.base(), vec![Arc::new(drop_items)]);
     let server = serve(gateway).await;
@@ -188,8 +191,10 @@ async fn a_filter_can_edit_what_the_provider_reads() {
     let openai = FakeOpenAi::start().await;
     let force_text = OnClient(|cx: &mut ClientContext| {
         cx.filter(|e: &mut Input| {
-            if e.json()["type"] == "session.update" {
-                e.json_mut()["session"]["output_modalities"] = json!(["text"]);
+            if let Input::Native(e) = e
+                && e.value["type"] == "session.update"
+            {
+                Arc::make_mut(&mut e.value)["session"]["output_modalities"] = json!(["text"]);
             }
             Ok(())
         })
@@ -218,7 +223,7 @@ impl Plugin for Turns {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         let seen = self.seen.clone();
         px.filter(move |e: &mut Output| {
-            if e.json()["type"] == "response.done" {
+            if matches!(e, Output::Native(e) if e.value["type"] == "response.done") {
                 seen.fetch_add(1, Ordering::SeqCst);
             }
             Ok(())
@@ -267,14 +272,14 @@ async fn a_provider_edge_plugin_counts_turns() {
 async fn a_failing_filter_closes_the_client_with_its_code_and_no_message() {
     let openai = FakeOpenAi::start().await;
     let policy = OnClient(|cx: &mut ClientContext| {
-        cx.filter(
-            |e: &mut Output| match e.json()["type"] == "response.created" {
+        cx.filter(|e: &mut Output| {
+            match matches!(e, Output::Native(e) if e.value["type"] == "response.created") {
                 true => Err(Fault::new("the word swordfish was said")
                     .with(ErrorCode("policy".into()))
                     .with(CloseCode(1008))),
                 false => Ok(()),
-            },
-        )
+            }
+        })
     });
     let (gateway, ends, calls) = gateway_of(&ws_base(&openai), vec![Arc::new(policy)]);
     let server = serve(gateway).await;
@@ -360,14 +365,14 @@ async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
         factory(Extensions::new()),
     )
     .unwrap();
-    let mut finite = EventStream::single(Input::new("realtime", json!({"type":"x"})));
+    let mut finite = EventStream::single(Input::native("realtime", json!({"type":"x"})));
     assert!(matches!(refusal.prepare(&mut finite), Err(fault) if fault.is::<Config>()));
     let (opening, mut write) = <JsonEvents as Format<ProviderIo, Output, Input>>::bind(
         &format,
         factory(Extensions::new()),
     )
     .unwrap();
-    let mut input = EventStream::stream(stream::iter([Ok(Input::new(
+    let mut input = EventStream::stream(stream::iter([Ok(Input::native(
         "realtime",
         json!({"type":"x", "n":1}),
     ))]));
@@ -415,12 +420,14 @@ async fn a_plugin_can_refuse_a_session_before_the_upgrade() {
 async fn a_filter_refusing_an_input_closes_the_client_with_its_code() {
     let openai = FakeOpenAi::start().await;
     let policy = OnClient(|cx: &mut ClientContext| {
-        cx.filter(|e: &mut Input| match e.json()["type"] == "forbidden" {
-            true => Err(Fault::new("the input is refused")
-                .with(ErrorCode("policy".into()))
-                .with(CloseCode(1008))),
-            false => Ok(()),
-        })
+        cx.filter(
+            |e: &mut Input| match matches!(e, Input::Native(e) if e.value["type"] == "forbidden") {
+                true => Err(Fault::new("the input is refused")
+                    .with(ErrorCode("policy".into()))
+                    .with(CloseCode(1008))),
+                false => Ok(()),
+            },
+        )
     });
     let (gateway, ends, calls) = gateway_of(&ws_base(&openai), vec![Arc::new(policy)]);
     let server = serve(gateway).await;

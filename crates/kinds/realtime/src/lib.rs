@@ -1,34 +1,456 @@
 #![warn(missing_docs)]
-//! The realtime kind: directional events with explicit wire-format identity.
-//! Input travels client to provider; output travels provider to client.
+//! The realtime kind: a live session with a model, in both directions at once.
+//! Formats translate through these types, and plugins read any session
+//! through them: `cx.filter(|i: &mut Input| ..)` for what the client says,
+//! `cx.filter(|o: &mut Output| ..)` for what the model says, one event each.
 //!
-//! The crate is the kind's types alone, with no I/O; its format, a
-//! WebSocket session of JSON events, is `respan-gateway-realtime-ws`'s.
+//! A session is configured ([`Input::Session`], answered by
+//! [`Output::Updated`]), then fed audio ([`Input::Audio`]) or messages
+//! ([`Input::Message`]). Each answer is a response: [`Output::ResponseStart`],
+//! its [`Output::Audio`], [`Output::Text`], [`Output::Transcript`] and
+//! [`Output::ToolCall`]s, then [`Output::ResponseDone`] with how it ended,
+//! [`Output::Usage`] among them. A user who speaks over the model barges in:
+//! [`Output::SpeechStarted`], and the response ends [`Status::Interrupted`].
+//!
+//! What the kind has no form for stays as its format has it ([`NativeFields`],
+//! [`Input::Native`], [`Output::Native`]). It is sent only in that format.
+//! Crossing to another format, it is refused if it could change the answer,
+//! and dropped if it cannot.
+//!
+//! The crate is the kind's types alone, with no I/O; its formats over
+//! WebSocket are `respan-gateway-realtime-ws`'s.
 
-use respan_gateway_core::{FormatId, NativeValue};
+use std::time::Duration;
+
+use bytes::Bytes;
+use respan_gateway_core::{Fault, FormatId, NativeFields, NativeValue};
 use serde_json::Value;
 
-macro_rules! event {
-    ($(#[$doc:meta])* $name:ident) => {
-        $(#[$doc])*
-        #[derive(Debug, Clone, PartialEq)]
-        pub struct $name {
-            /// Provider-format event, including the identity required to encode it.
-            pub event: NativeValue,
+pub use respan_gateway_conversation::{Message, Tool, ToolChoice};
+
+/// One event the client sends the provider.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Input {
+    /// Configure the session; a field left `None` is left as it is. The
+    /// first event of every session, as its format decodes it (one opening
+    /// with no frame of its own carries what the handshake said, such as
+    /// OpenAI's `?model=`).
+    Session(Session),
+    /// The next chunk of the user's audio, in its own format.
+    Audio {
+        /// The audio.
+        audio: Audio,
+        /// The event's fields the kind has no place for, such as an event id.
+        native: Option<NativeFields>,
+    },
+    /// The user's audio so far is a turn: OpenAI's `input_audio_buffer.commit`,
+    /// Gemini's `activityEnd`. Only with [`Turns::Manual`] in Gemini.
+    Commit {
+        /// The event's fields the kind has no place for.
+        native: Option<NativeFields>,
+    },
+    /// A whole message added to the conversation, such as the user's typed
+    /// text.
+    Message {
+        /// The message: its role and content.
+        message: Message,
+        /// The event's fields the kind has no place for, such as an item id
+        /// or where it goes in the history.
+        native: Option<NativeFields>,
+    },
+    /// What a tool answered the model's call `id`.
+    ToolResult(ToolResult),
+    /// Answer now: OpenAI's `response.create`; implied in Gemini by a
+    /// complete turn, the end of an activity, or a tool's answer.
+    Respond {
+        /// Fields the kind has no place for, such as a response's own
+        /// instructions or an out-of-band response.
+        native: Option<NativeFields>,
+    },
+    /// Stop the response being made.
+    Cancel {
+        /// The event's fields the kind has no place for.
+        native: Option<NativeFields>,
+    },
+    /// An event the kind has no form for, as `format` has it, such as
+    /// OpenAI's `conversation.item.truncate`. Sent only in that format.
+    Native(NativeValue),
+}
+
+impl Input {
+    /// The model a [`Input::Session`] asks for; `None` for any other event.
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            Input::Session(session) => session.model.as_deref(),
+            _ => None,
         }
-        impl $name {
-            /// A JSON event belonging to `format`.
-            pub fn new(format: impl Into<FormatId>, json: Value) -> Self {
-                Self { event: NativeValue::new(format, json) }
-            }
-            /// Inspect the native JSON payload.
-            pub fn json(&self) -> &Value { &self.event.value }
-            /// Edit the native JSON payload, keeping its format identity.
-            pub fn json_mut(&mut self) -> &mut Value { std::sync::Arc::make_mut(&mut self.event.value) }
+    }
+
+    /// Asks for `model` if it is an [`Input::Session`]; other events are
+    /// left as they are.
+    pub fn set_model(&mut self, model: String) {
+        if let Input::Session(session) = self {
+            session.model = Some(model);
         }
+    }
+
+    /// An event of `format` the kind has no form for.
+    pub fn native(format: impl Into<FormatId>, raw: impl Into<Value>) -> Self {
+        Input::Native(NativeValue::new(format, raw))
+    }
+}
+
+/// A filter that asks for `model`, such as `cx.filter(set_model(m))`.
+pub fn set_model(
+    model: impl Into<String>,
+) -> impl FnMut(&mut Input) -> Result<(), Fault> + Clone + Send + 'static {
+    let model = model.into();
+    move |input: &mut Input| {
+        input.set_model(model.clone());
+        Ok(())
+    }
+}
+
+/// A session's configuration. `None` leaves a field as it is (an update), or
+/// as the provider's default (the first).
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct Session {
+    /// The model, as its provider names it, without Gemini's `models/`.
+    pub model: Option<String>,
+    /// Instructions for the model.
+    pub instructions: Option<String>,
+    /// What the model answers in.
+    pub output: Option<Modality>,
+    /// The voice, as the provider names it.
+    pub voice: Option<String>,
+    /// The format of the user's audio, where the spec declares it per
+    /// session (OpenAI); each [`Audio`] says its own.
+    pub input_audio: Option<AudioFormat>,
+    /// The format of the model's audio.
+    pub output_audio: Option<AudioFormat>,
+    /// Who decides when the user's turn ends.
+    pub turns: Option<Turns>,
+    /// Whether the user's audio is transcribed ([`Output::InputTranscript`]).
+    pub input_transcription: Option<bool>,
+    /// Whether the model's audio is transcribed ([`Output::Transcript`]).
+    pub output_transcription: Option<bool>,
+    /// The tools the model may call; `Some(vec![])` takes them all away.
+    pub tools: Option<Vec<Tool>>,
+    /// Whether, or which, tool the model must call.
+    pub tool_choice: Option<ToolChoice>,
+    /// Most tokens in one response.
+    pub max_output_tokens: Option<u64>,
+    /// The fields the kind has no place for, such as OpenAI's noise
+    /// reduction or Gemini's context window compression.
+    pub native: Option<NativeFields>,
+}
+
+/// What the model answers in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Modality {
+    /// Speech, which may also be transcribed.
+    Audio,
+    /// Text alone.
+    Text,
+}
+
+/// Who decides when the user's turn ends.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Turns {
+    /// The provider, by voice activity detection.
+    Server(Vad),
+    /// The client, with [`Input::Commit`].
+    Manual,
+}
+
+/// How the provider detects the user's turns.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct Vad {
+    /// Silence that ends a turn, in milliseconds.
+    pub silence_ms: Option<u32>,
+    /// Audio kept from before speech was detected, in milliseconds.
+    pub prefix_ms: Option<u32>,
+    /// Whether a turn's end makes the model answer.
+    pub respond: Option<bool>,
+    /// Whether the user's speech stops the model's response (barge-in).
+    pub interrupt: Option<bool>,
+    /// Tuning the kind has no place for: OpenAI's threshold, VAD type and
+    /// eagerness, Gemini's sensitivities.
+    pub native: Option<NativeFields>,
+}
+
+/// Audio: bytes in a format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Audio {
+    /// The samples, as `format` encodes them; never base64.
+    pub data: Bytes,
+    /// Their format.
+    pub format: AudioFormat,
+}
+
+impl Audio {
+    /// How long it plays, from its length and format.
+    pub fn duration(&self) -> Duration {
+        let bytes_per_sample = match self.format.encoding {
+            Encoding::Pcm16 => 2,
+            Encoding::Mulaw | Encoding::Alaw => 1,
+        };
+        let samples = (self.data.len() / bytes_per_sample) as u64;
+        match self.format.rate {
+            0 => Duration::ZERO,
+            rate => Duration::from_nanos(samples * 1_000_000_000 / u64::from(rate)),
+        }
+    }
+}
+
+/// How audio is encoded: always mono, as both specs are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AudioFormat {
+    /// The sample encoding.
+    pub encoding: Encoding,
+    /// Samples a second.
+    pub rate: u32,
+}
+
+impl AudioFormat {
+    /// 16-bit little-endian PCM at `rate`.
+    pub const fn pcm16(rate: u32) -> Self {
+        Self {
+            encoding: Encoding::Pcm16,
+            rate,
+        }
+    }
+
+    /// G.711 μ-law, 8 kHz.
+    pub const MULAW: Self = Self {
+        encoding: Encoding::Mulaw,
+        rate: 8000,
+    };
+
+    /// G.711 A-law, 8 kHz.
+    pub const ALAW: Self = Self {
+        encoding: Encoding::Alaw,
+        rate: 8000,
     };
 }
-event!(/// One client event addressed to a provider.
-    Input);
-event!(/// One provider event addressed to a client.
-    Output);
+
+/// A sample encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Encoding {
+    /// 16-bit signed little-endian PCM.
+    Pcm16,
+    /// G.711 μ-law.
+    Mulaw,
+    /// G.711 A-law.
+    Alaw,
+}
+
+/// What a tool answered.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ToolResult {
+    /// The id of the call it answers.
+    pub id: String,
+    /// What the tool said: JSON text, or plain text.
+    pub output: String,
+    /// The fields the kind has no place for, such as Gemini's scheduling.
+    pub native: Option<NativeFields>,
+}
+
+impl ToolResult {
+    /// What a tool answered the call `id`.
+    pub fn new(id: impl Into<String>, output: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            output: output.into(),
+            native: None,
+        }
+    }
+}
+
+/// One event the provider sends the client.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Output {
+    /// The session began, configured so (OpenAI's `session.created`).
+    Opened(Session),
+    /// A configuration took effect (OpenAI's `session.updated`, Gemini's
+    /// `setupComplete`).
+    Updated(Session),
+    /// The user began speaking: a client stops playing the model's audio.
+    SpeechStarted {
+        /// Where in the user's audio, in milliseconds, if the provider says.
+        at_ms: Option<u64>,
+        /// The event's fields the kind has no place for.
+        native: Option<NativeFields>,
+    },
+    /// The user stopped speaking.
+    SpeechStopped {
+        /// Where in the user's audio, in milliseconds, if the provider says.
+        at_ms: Option<u64>,
+        /// The event's fields the kind has no place for.
+        native: Option<NativeFields>,
+    },
+    /// What the user said, as the provider transcribes it.
+    InputTranscript {
+        /// The text: the next part, or with `complete` the whole turn's.
+        text: String,
+        /// Whether `text` is the whole transcript of the user's turn.
+        complete: bool,
+        /// The event's fields the kind has no place for, such as its item.
+        native: Option<NativeFields>,
+    },
+    /// A response begins.
+    ResponseStart {
+        /// Its id, if the provider gives one.
+        id: Option<String>,
+        /// The event's fields the kind has no place for.
+        native: Option<NativeFields>,
+    },
+    /// The next chunk of the model's audio.
+    Audio {
+        /// The audio.
+        audio: Audio,
+        /// The event's fields the kind has no place for, such as its item.
+        native: Option<NativeFields>,
+    },
+    /// The next text of the model's answer, in [`Modality::Text`].
+    Text {
+        /// The text.
+        text: String,
+        /// The event's fields the kind has no place for.
+        native: Option<NativeFields>,
+    },
+    /// The next text of the model's audio, transcribed.
+    Transcript {
+        /// The text.
+        text: String,
+        /// The event's fields the kind has no place for.
+        native: Option<NativeFields>,
+    },
+    /// The model calls tool `name`; its answer is an [`Input::ToolResult`]
+    /// naming `id`.
+    ToolCall {
+        /// The call's id.
+        id: String,
+        /// The tool's name.
+        name: String,
+        /// Its arguments, as JSON text, whole.
+        arguments: String,
+        /// The event's fields the kind has no place for.
+        native: Option<NativeFields>,
+    },
+    /// Usage the provider reports for a response, as an increment.
+    Usage(Usage),
+    /// The response ended.
+    ResponseDone {
+        /// How.
+        status: Status,
+        /// The event's fields the kind has no place for.
+        native: Option<NativeFields>,
+    },
+    /// The provider refused something the client sent; the session goes on
+    /// where the format allows it.
+    Error {
+        /// The provider's code, such as `invalid_request_error`.
+        code: Option<String>,
+        /// What it said.
+        message: String,
+        /// The event's fields the kind has no place for, such as the id of
+        /// the event it refuses.
+        native: Option<NativeFields>,
+    },
+    /// An event the kind has no form for, as `format` has it. Sent only in
+    /// that format.
+    Native(NativeValue),
+}
+
+impl Output {
+    /// An event of `format` the kind has no form for.
+    pub fn native(format: impl Into<FormatId>, raw: impl Into<Value>) -> Self {
+        Output::Native(NativeValue::new(format, raw))
+    }
+}
+
+/// How a response ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Status {
+    /// It was complete, tool calls included.
+    Completed,
+    /// The client cancelled it ([`Input::Cancel`]).
+    Cancelled,
+    /// The user spoke over it.
+    Interrupted,
+    /// The token limit.
+    Length,
+    /// A safety filter.
+    Filtered,
+    /// The provider failed.
+    Failed,
+    /// A reason the kind has no form for, as `format` names it; another
+    /// format writes `fallback`.
+    Native {
+        /// The format that names it.
+        format: FormatId,
+        /// The reason, as that format names it.
+        reason: String,
+        /// What another format writes.
+        fallback: Box<Status>,
+    },
+}
+
+/// Token counts of a response, as an increment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Usage {
+    /// The counts every kind reports: input, output, cached, reasoning.
+    pub tokens: respan_gateway_conversation::Usage,
+    /// Of `tokens.input_tokens`, those of audio.
+    pub input_audio_tokens: u64,
+    /// Of `tokens.output_tokens`, those of audio.
+    pub output_audio_tokens: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_plays_for_its_samples_at_its_rate() {
+        let second = |format: AudioFormat, bytes: usize| Audio {
+            data: Bytes::from(vec![0; bytes]),
+            format,
+        };
+        let one = Duration::from_secs(1);
+        assert_eq!(second(AudioFormat::pcm16(24_000), 48_000).duration(), one);
+        assert_eq!(second(AudioFormat::pcm16(16_000), 32_000).duration(), one);
+        assert_eq!(second(AudioFormat::MULAW, 8_000).duration(), one);
+        assert_eq!(second(AudioFormat::ALAW, 4_000).duration(), one / 2);
+        // An odd byte is no sample.
+        let odd = second(AudioFormat::pcm16(8_000), 3).duration();
+        assert_eq!(odd, Duration::from_micros(125));
+        assert_eq!(second(AudioFormat::pcm16(0), 2).duration(), Duration::ZERO);
+    }
+
+    #[test]
+    fn only_a_session_names_a_model() {
+        let mut session = Input::Session(Session::default());
+        assert_eq!(session.model(), None);
+        set_model("gpt-realtime")(&mut session).expect("set");
+        assert_eq!(session.model(), Some("gpt-realtime"));
+
+        let mut commit = Input::Commit { native: None };
+        commit.set_model("gpt-realtime".into());
+        assert_eq!(commit, Input::Commit { native: None });
+        assert_eq!(commit.model(), None);
+        let native = Input::native("openai-realtime", serde_json::json!({"type": "x"}));
+        assert_eq!(native.model(), None);
+    }
+}

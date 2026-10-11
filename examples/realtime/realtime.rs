@@ -159,7 +159,7 @@ impl Restore {
         for (_, (text, mut template)) in self.held.drain() {
             if let Ok(text) = vault.rewrite(&text) {
                 template["delta"] = text.into();
-                out.push(Output::new("openai-realtime", template));
+                out.push(Output::native("openai-realtime", template));
             }
         }
     }
@@ -167,14 +167,17 @@ impl Restore {
 
 impl Filter<Output> for Restore {
     fn edit(&mut self, mut event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
-        let kind = event.json()["type"].as_str().unwrap_or_default().to_owned();
+        let Output::Native(native) = &mut event else {
+            out.push(event);
+            return Ok(());
+        };
+        let json = Arc::make_mut(&mut native.value);
+        let kind = json["type"].as_str().unwrap_or_default().to_owned();
         let mut vault = self.vault.clone();
-        let item = event.json()["item_id"].as_str().map(str::to_owned);
-        if let (true, Some(item), Some(delta)) = (
-            kind.ends_with(".delta"),
-            item,
-            event.json()["delta"].as_str(),
-        ) {
+        let item = json["item_id"].as_str().map(str::to_owned);
+        if let (true, Some(item), Some(delta)) =
+            (kind.ends_with(".delta"), item, json["delta"].as_str())
+        {
             let held = self.held.remove(&item).map(|(text, _)| text);
             let mut text = held.unwrap_or_default() + delta;
             let mut at = text.len() - vault.pending(&text);
@@ -182,23 +185,19 @@ impl Filter<Output> for Restore {
                 at -= 1;
             }
             let kept = text.split_off(at);
-            event.json_mut()["delta"] = vault.rewrite(&text)?.into();
+            json["delta"] = vault.rewrite(&text)?.into();
             if !kept.is_empty() {
-                self.held.insert(item, (kept, event.json().clone()));
+                self.held.insert(item, (kept, json.clone()));
             }
         } else {
             if kind.ends_with(".done") {
                 self.flush(out);
             }
             let mut failed = None;
-            edit_texts(
-                event.json_mut(),
-                WRITTEN,
-                &mut |text| match vault.rewrite(text) {
-                    Ok(restored) => *text = restored,
-                    Err(fault) => failed = Some(fault),
-                },
-            );
+            edit_texts(json, WRITTEN, &mut |text| match vault.rewrite(text) {
+                Ok(restored) => *text = restored,
+                Err(fault) => failed = Some(fault),
+            });
             if let Some(fault) = failed {
                 return Err(fault);
             }
@@ -224,12 +223,15 @@ impl Plugin for Pii {
         let vault = Placeholders::default();
         let hide = vault.clone();
         cx.filter(move |event: &mut Input| {
-            if audio::contains_audio(event.json()) {
+            let Input::Native(event) = event else {
+                return Ok(());
+            };
+            if audio::contains_audio(&event.value) {
                 return Err(Fault::new("text PII policy cannot inspect audio")
                     .with(ErrorCode("audio_requires_redaction".into()))
                     .with(CloseCode(1008)));
             }
-            edit_texts(event.json_mut(), SAID, &mut |text| {
+            edit_texts(Arc::make_mut(&mut event.value), SAID, &mut |text| {
                 *text = hide_emails(text, &hide)
             });
             Ok(())
@@ -327,14 +329,19 @@ impl TurnMeter {
 
 impl Filter<Output> for TurnMeter {
     fn edit(&mut self, event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
-        let kind = event.json()["type"].as_str().unwrap_or_default();
+        let Output::Native(native) = &event else {
+            out.push(event);
+            return Ok(());
+        };
+        let json = &native.value;
+        let kind = json["type"].as_str().unwrap_or_default();
         if kind == "response.created" {
             self.open = Some(0);
         } else if kind.ends_with(".delta")
             && let Some(estimate) = &mut self.open
         {
             // About four bytes a token: an estimate, never zero for a delta.
-            let delta = event.json()["delta"].as_str().unwrap_or_default();
+            let delta = json["delta"].as_str().unwrap_or_default();
             *estimate += if kind.ends_with("audio.delta") {
                 audio::tokens(delta)? as u64
             } else {
@@ -343,7 +350,7 @@ impl Filter<Output> for TurnMeter {
         } else if kind == "response.done" {
             self.open = None;
             self.said.asked.store(false, Ordering::SeqCst);
-            let response = &event.json()["response"];
+            let response = &json["response"];
             let used = |name: &str| response["usage"][name].as_u64().unwrap_or_default();
             let status = response["status"].as_str().unwrap_or_default();
             let usage = &response["usage"];
@@ -394,13 +401,18 @@ impl Plugin for Meter {
         let said = Arc::new(Said::default());
         let heard = said.clone();
         px.filter(move |event: &mut Input| {
+            let Input::Native(event) = event else {
+                return Ok(());
+            };
             let mut bytes = 0;
-            edit_texts(event.json_mut(), SAID, &mut |text| bytes += text.len());
+            edit_texts(Arc::make_mut(&mut event.value), SAID, &mut |text| {
+                bytes += text.len()
+            });
             heard.bytes.fetch_add(bytes as u64, Ordering::SeqCst);
             heard
                 .audio
-                .fetch_add(audio_in(event.json())? as u64, Ordering::SeqCst);
-            if event.json()["type"] == "response.create" {
+                .fetch_add(audio_in(&event.value)? as u64, Ordering::SeqCst);
+            if event.value["type"] == "response.create" {
                 heard.asked.store(true, Ordering::SeqCst);
             }
             Ok(())
@@ -523,7 +535,11 @@ impl<L: Ledger> Wallet<L> {
     /// capped at `TURN` output tokens and holds a turn first; a
     /// `session.update` is capped the same, for the turns the provider starts.
     async fn before(self: Arc<Self>, mut event: Input) -> Result<Input, Fault> {
-        let said = context(event.json())?;
+        let Input::Native(native) = &mut event else {
+            return Ok(event);
+        };
+        let json = Arc::make_mut(&mut native.value);
+        let said = context(json)?;
         {
             let mut turns = lock(&self.turns);
             turns.bytes = turns.bytes.saturating_add(said);
@@ -533,8 +549,8 @@ impl<L: Ledger> Wallet<L> {
                     .with(CloseCode(1008)));
             }
         }
-        if event.json()["type"] == "response.create" {
-            let response = &mut event.json_mut()["response"];
+        if json["type"] == "response.create" {
+            let response = &mut json["response"];
             if !response.is_object() {
                 *response = json!({});
             }
@@ -543,20 +559,20 @@ impl<L: Ledger> Wallet<L> {
                 *cap = TURN.into();
             }
             // The provider's `error` names the event it refuses by this id.
-            let id = match event.json()["event_id"].as_str() {
+            let id = match json["event_id"].as_str() {
                 Some(id) => id.to_owned(),
                 None => format!("reserve_{}", HoldId::new()),
             };
-            event.json_mut()["event_id"] = id.clone().into();
+            json["event_id"] = id.clone().into();
             let hold = self.hold(true).await?;
             // Begun-able only once held: a turn the provider starts itself
             // meanwhile must not take this entry.
             let mut turns = lock(&self.turns);
             turns.unsent.retain(|held| *held != hold);
             turns.unbegun.push_back((id, hold));
-        } else if event.json()["type"] == "session.update" {
+        } else if json["type"] == "session.update" {
             // The cap of the turns the provider starts on its own.
-            let cap = &mut event.json_mut()["session"]["max_output_tokens"];
+            let cap = &mut json["session"]["max_output_tokens"];
             if cap.as_i64().is_none_or(|n| !(1..=TURN).contains(&n)) {
                 *cap = TURN.into();
             }
@@ -570,7 +586,11 @@ impl<L: Ledger> Wallet<L> {
     /// settles the hold of the oldest begun turn at what it used; the hold leaves the
     /// list only once settled, so a client that leaves meanwhile settles it.
     async fn after(self: Arc<Self>, event: Output) -> Result<Output, Fault> {
-        let kind = event.json()["type"].as_str().unwrap_or_default();
+        let Output::Native(native) = &event else {
+            return Ok(event);
+        };
+        let json = &native.value;
+        let kind = json["type"].as_str().unwrap_or_default();
         if kind == "response.created" {
             let asked = lock(&self.turns).unbegun.pop_front();
             let hold = match asked {
@@ -581,9 +601,7 @@ impl<L: Ledger> Wallet<L> {
         } else if kind == "error" {
             // A `response.create` the provider refused never ran: its hold
             // is released, not charged at the session's end.
-            let id = event.json()["error"]["event_id"]
-                .as_str()
-                .unwrap_or_default();
+            let id = json["error"]["event_id"].as_str().unwrap_or_default();
             let refused = lock(&self.turns)
                 .unbegun
                 .iter()
@@ -604,14 +622,14 @@ impl<L: Ledger> Wallet<L> {
                 begun.and_then(|b| turns.holds.iter().find(|(h, _)| *h == b).copied())
             };
             if let Some((hold, amount)) = done {
-                let used = event.json()["response"]["usage"]["total_tokens"].as_i64();
+                let used = json["response"]["usage"]["total_tokens"].as_i64();
                 self.ledger.settle(&hold, used.unwrap_or(amount)).await?;
                 let mut turns = lock(&self.turns);
                 turns.begun.pop_front();
                 turns.holds.retain(|(h, _)| *h != hold);
             }
         }
-        let seen = context(event.json())?;
+        let seen = context(json)?;
         let mut turns = lock(&self.turns);
         turns.bytes = turns.bytes.saturating_add(seen);
         Ok(event)
@@ -745,7 +763,7 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
             // turns the provider starts (voice detection) are bounded too.
             let open = json!({ "type": "session.update", "event_id": capped,
                 "session": { "type": "realtime" } });
-            let open = stream::once(async move { Ok(Input::new("openai-realtime", open)) });
+            let open = stream::once(async move { Ok(Input::native("openai-realtime", open)) });
             open.chain(events)
                 .and_then(move |event| asks.clone().before(event))
         })?;
@@ -757,8 +775,12 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
             // be capped, rather than let it run uncapped.
             let mut ours = true;
             let events = events.try_filter_map(move |event| {
-                let kind = event.json()["type"].as_str().unwrap_or_default();
-                let refused = kind == "error" && event.json()["error"]["event_id"] == cap;
+                let json = match &event {
+                    Output::Native(native) => &*native.value,
+                    _ => &Value::Null,
+                };
+                let kind = json["type"].as_str().unwrap_or_default();
+                let refused = kind == "error" && json["error"]["event_id"] == cap;
                 let mine = ours && kind == "session.updated";
                 ours &= !mine;
                 std::future::ready(match (refused, mine) {
@@ -785,7 +807,11 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
 /// stands for its network call; a real one is `client.post(..).await`.
 async fn classify(event: &Input) -> Result<(), Fault> {
     tokio::time::sleep(Duration::from_millis(2)).await;
-    match event.json().to_string().contains("evil") {
+    let said = match event {
+        Input::Native(native) => native.value.to_string(),
+        _ => String::new(),
+    };
+    match said.contains("evil") {
         true => Err(Fault::new("the classifier flagged an input")
             .with(ErrorCode("flagged".into()))
             .with(CloseCode(1008))),

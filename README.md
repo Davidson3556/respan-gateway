@@ -233,7 +233,7 @@ the gateway, and the binary chooses what to compose. See the
 | `crates/core/` | The neutral kernel and plugin-author API: typed streams, plugins, lifecycle, fault facts and native values; no HTTP or message kinds. |
 | `crates/kinds/conversation/` | The conversation kind: requests, reply events, typed usage and assembly. |
 | `crates/kinds/media/` | The media kinds, a kind per operation: image generation and edits, transcription, speech, embeddings, video jobs. |
-| `crates/kinds/realtime/` | The realtime kind: a client/provider JSON event pair. |
+| `crates/kinds/realtime/` | The realtime kind: a live session's events, both ways. |
 | `crates/kinds/mcp/` | The MCP kind: typed JSON-RPC messages and their envelopes. |
 | `crates/wires/http/` | The HTTP wire: owned edges, native bodies, stream/sink helpers, credentials, retry classification, the opaque format, and optional Reqwest transport and Axum hosting. |
 | `crates/wires/ws/` | The WebSocket wire: sessions at both edges, close codes and limits, and optional Axum hosting. |

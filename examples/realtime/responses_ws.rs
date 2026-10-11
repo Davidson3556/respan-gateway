@@ -48,9 +48,12 @@ impl Plugin for Sessions {
                 let session = incoming.clone();
                 let model = model.clone();
                 async move {
-                    if event.json()["type"] == "response.create" {
-                        if event
-                            .json()
+                    let Input::Native(native) = &mut event else {
+                        return Ok(event);
+                    };
+                    let json = Arc::make_mut(&mut native.value);
+                    if json["type"] == "response.create" {
+                        if json
                             .get("model")
                             .is_some_and(|v| v.as_str() != Some(&model))
                         {
@@ -58,16 +61,14 @@ impl Plugin for Sessions {
                                 "model is outside the configured budget policy",
                             ));
                         }
-                        event.json_mut()["model"] = model.clone().into();
+                        json["model"] = model.clone().into();
                     }
-                    if event.json()["type"] == "response.create"
-                        && event.json()["generate"] != false
-                    {
-                        let cap = &mut event.json_mut()["max_output_tokens"];
+                    if json["type"] == "response.create" && json["generate"] != false {
+                        let cap = &mut json["max_output_tokens"];
                         if cap.as_i64().is_none_or(|n| !(1..=OUTPUT).contains(&n)) {
                             *cap = OUTPUT.into();
                         }
-                        let lane = event.json()["stream_id"].as_str().unwrap_or("default");
+                        let lane = json["stream_id"].as_str().unwrap_or("default");
                         session.begin(lane).await?;
                     }
                     Ok(event)
@@ -79,13 +80,17 @@ impl Plugin for Sessions {
             events.and_then(move |event| {
                 let session = outgoing.clone();
                 async move {
-                    let kind = event.json()["type"].as_str().unwrap_or_default();
+                    let Output::Native(native) = &event else {
+                        return Ok(event);
+                    };
+                    let json = &native.value;
+                    let kind = json["type"].as_str().unwrap_or_default();
                     if matches!(
                         kind,
                         "response.completed" | "response.failed" | "response.incomplete"
                     ) {
-                        let lane = event.json()["stream_id"].as_str().unwrap_or("default");
-                        let response = &event.json()["response"];
+                        let lane = json["stream_id"].as_str().unwrap_or("default");
+                        let response = &json["response"];
                         let usage = response["usage"]["total_tokens"].as_i64();
                         let record = json!({
                             "lane": lane, "id": response["id"],

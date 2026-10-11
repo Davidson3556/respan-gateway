@@ -8,7 +8,9 @@
 use std::borrow::Cow;
 
 use respan_gateway_core::futures::StreamExt;
-use respan_gateway_core::{BadRequest, Connection, EventStream, Fault, Format, Upstream};
+use respan_gateway_core::{
+    BadRequest, Connection, EventStream, Fault, Format, NativeValue, Upstream,
+};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats;
 use respan_gateway_http::http::header::{CONTENT_TYPE, SEC_WEBSOCKET_PROTOCOL, UPGRADE};
@@ -20,15 +22,15 @@ use respan_gateway_ws::WsTransport;
 
 use respan_gateway_realtime::{Input, Output};
 
-/// An event's `json` as its frame. An event of another format is the
-/// gateway's misconfiguration, a plugin's that moved it untranslated, not
-/// the client's: `config`.
-fn written(format: &str, event: &respan_gateway_core::NativeValue) -> Result<Bytes, Fault> {
-    if event.format.as_ref() != format {
+/// A native event's JSON as its frame. An event of another format, or one
+/// the kind has a form for, which this format does not translate yet, is
+/// the gateway's misconfiguration or a plugin's, not the client's: `config`.
+fn written(format: &str, event: Option<&NativeValue>) -> Result<Bytes, Fault> {
+    let Some(event) = event.filter(|event| event.format.as_ref() == format) else {
         return Err(Fault::config(
             "a realtime event requires explicit translation to another format",
         ));
-    }
+    };
     let json = &*event.value;
     serde_json::to_vec(json)
         .map(Bytes::from)
@@ -43,8 +45,8 @@ fn refusal(fault: &Fault, _request: &Request<Bytes>, head: &mut ResponseHead) ->
     Bytes::from(h::error_code(fault).to_owned())
 }
 
-/// A WebSocket session of JSON text frames, one event per frame, as a
-/// format of a kind of its own. It relays to a format of the same name,
+/// A WebSocket session of JSON text frames, one event per frame, each the
+/// kind's native event of its name. It relays to a format of the same name,
 /// writing each event from its parsed JSON, and reads no event's fields:
 /// what an event means is for the plugins and the tests of the protocol
 /// behind it.
@@ -195,9 +197,9 @@ impl Format<ClientIo, Input, Output> for JsonEvents {
         Ok(io.bind(
             move |request| {
                 h::messages(request, move |_, raw| {
-                    let json = serde_json::from_slice(&raw)
+                    let json: serde_json::Value = serde_json::from_slice(&raw)
                         .map_err(|_| BadRequest::fault("a client's frame is not a JSON event"))?;
-                    Ok(Input::new(input_format.clone(), json))
+                    Ok(Input::native(input_format.clone(), json))
                 })
             },
             move |reply| {
@@ -217,8 +219,13 @@ impl Format<ClientIo, Input, Output> for JsonEvents {
                         head.headers.insert(SEC_WEBSOCKET_PROTOCOL, protocol);
                     }
                 }
-                let write =
-                    formats::each(move |event: &Output| written(&output_format, &event.event));
+                let write = formats::each(move |event: &Output| {
+                    let native = match event {
+                        Output::Native(native) => Some(native),
+                        _ => None,
+                    };
+                    written(&output_format, native)
+                });
                 Ok(reply.open(head, Bytes::new(), write))
             },
             refusal,
@@ -261,7 +268,11 @@ impl Format<ProviderIo, Output, Input> for JsonEvents {
                     )?;
                 }
                 Ok(formats::each(move |event: &Input| {
-                    written(&input_format, &event.event)
+                    let native = match event {
+                        Input::Native(native) => Some(native),
+                        _ => None,
+                    };
+                    written(&input_format, native)
                 }))
             },
             move |answer, _call| response_events(&name, answer),
@@ -295,9 +306,9 @@ fn offer_beside_the_clients(
 fn response_events(name: &str, answer: Response<Body>) -> EventStream<Output> {
     let name = name.to_owned();
     EventStream::stream(answer.into_body().map(move |raw| {
-        let json = serde_json::from_slice(&raw?)
+        let json: serde_json::Value = serde_json::from_slice(&raw?)
             .map_err(|_| Upstream::fault("a provider's frame is not a JSON event"))?;
-        Ok(Output::new(name.clone(), json))
+        Ok(Output::native(name.clone(), json))
     }))
 }
 
@@ -306,20 +317,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_events_require_the_target_format_and_edits_do_not_mutate_clones() {
-        let original = Input::new("one", serde_json::json!({"text":"original"}));
-        let mut edited = original.clone();
-        edited.json_mut()["text"] = "edited".into();
-        assert_eq!(original.json()["text"], "original");
+    fn only_native_events_of_the_format_are_written() {
+        let event = NativeValue::new("one", serde_json::json!({"text":"edited"}));
         assert_eq!(
-            written("one", &edited.event).expect("same format"),
+            written("one", Some(&event)).expect("same format"),
             Bytes::from_static(br#"{"text":"edited"}"#)
         );
-        assert!(
-            written("two", &edited.event)
-                .expect_err("foreign event")
-                .is::<respan_gateway_core::Config>()
-        );
+        for refused in [written("two", Some(&event)), written("one", None)] {
+            let refused = refused.expect_err("foreign event");
+            assert!(refused.is::<respan_gateway_core::Config>());
+        }
     }
 
     #[test]

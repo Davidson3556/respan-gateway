@@ -252,12 +252,14 @@ struct Forbid;
 #[async_trait]
 impl Plugin for Forbid {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(|e: &mut Input| match e.json() == "forbidden" {
-            true => Err(Fault::new("the input is refused")
-                .with(ErrorCode("policy".into()))
-                .with(CloseCode(1008))),
-            false => Ok(()),
-        })?;
+        cx.filter(
+            |e: &mut Input| match matches!(e, Input::Native(e) if *e.value == "forbidden") {
+                true => Err(Fault::new("the input is refused")
+                    .with(ErrorCode("policy".into()))
+                    .with(CloseCode(1008))),
+                false => Ok(()),
+            },
+        )?;
         Ok(None)
     }
 }

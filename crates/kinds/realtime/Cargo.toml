@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-realtime"
-description = "Client and provider event models for realtime sessions."
+description = "The realtime kind: a live session's events, in both directions."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,5 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+bytes.workspace = true
+respan-gateway-conversation.workspace = true
 respan-gateway-core.workspace = true
 serde_json.workspace = true

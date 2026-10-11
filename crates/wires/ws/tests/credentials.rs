@@ -120,11 +120,15 @@ async fn a_translated_call_carries_none_of_the_clients_keys() {
     impl Plugin for Translate {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(|event: &mut Input| {
-                event.event.format = "another-name".into();
+                if let Input::Native(event) = event {
+                    event.format = "another-name".into();
+                }
                 Ok(())
             })?;
             cx.filter(|event: &mut respan_gateway_realtime::Output| {
-                event.event.format = "one-name".into();
+                if let respan_gateway_realtime::Output::Native(event) = event {
+                    event.format = "one-name".into();
+                }
                 Ok(())
             })?;
             Ok(None)
