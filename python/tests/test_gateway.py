@@ -375,12 +375,15 @@ def test_cli_exits_quietly_on_sigint(fake, tmp_path):
 
     cfg = tmp_path / "gateway.yaml"
     cfg.write_text(json.dumps(config_for(fake)))
+    windows = sys.platform == "win32"
     proc = subprocess.Popen(
         [sys.executable, "-m", "respan_gateway", "-c", str(cfg), "--listen", "127.0.0.1:0"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        # Windows signals a console process group: Ctrl-Break is what reaches it.
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if windows else 0,
     )
     time.sleep(1.5)
-    proc.send_signal(signal.SIGINT)
+    proc.send_signal(signal.CTRL_BREAK_EVENT if windows else signal.SIGINT)
     out, err = proc.communicate(timeout=15)
     assert proc.returncode == 0, (out, err)
     assert "Traceback" not in err and "KeyboardInterrupt" not in err

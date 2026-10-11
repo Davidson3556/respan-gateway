@@ -71,11 +71,11 @@ impl Converter {
             self.odd = None;
             bytes = rest;
         }
-        let pairs = bytes.chunks_exact(2);
-        if let [last] = pairs.remainder() {
+        let (pairs, odd) = bytes.as_chunks::<2>();
+        if let [last] = odd {
             self.odd = Some(*last);
         }
-        samples.extend(pairs.map(|pair| i16::from_le_bytes([pair[0], pair[1]])));
+        samples.extend(pairs.iter().map(|pair| i16::from_le_bytes(*pair)));
         samples
     }
 }
@@ -425,7 +425,9 @@ mod tests {
             .flat_map(i16::to_le_bytes)
             .collect();
         let mulaw: Vec<u8> = pcm
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| mulaw_encode(i16::from_le_bytes([p[0], p[1]])))
             .collect();
         for (from, to, audio) in [

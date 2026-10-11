@@ -171,8 +171,15 @@ impl Tally {
     /// counts as reported, even if `amount` is 0.
     pub(crate) fn add(&self, amount: Amount) {
         let spent = &self.0.spent;
-        let add = |now: Amount| Some(now.saturating_add(amount));
-        let _ = spent.fetch_update(Ordering::Relaxed, Ordering::Relaxed, add);
+        let mut now = spent.load(Ordering::Relaxed);
+        while let Err(seen) = spent.compare_exchange_weak(
+            now,
+            now.saturating_add(amount),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            now = seen;
+        }
         self.0.reported.store(true, Ordering::Relaxed);
     }
 

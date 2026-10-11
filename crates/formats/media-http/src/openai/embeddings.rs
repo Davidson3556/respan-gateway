@@ -184,10 +184,8 @@ fn vector_of(v: &Value) -> Result<Vec<f32>, Fault> {
         Value::String(text) => unb64(text)
             .filter(|bytes| bytes.len() % 4 == 0)
             .map(|bytes| {
-                let floats = bytes.chunks_exact(4);
-                floats
-                    .map(|f| f32::from_le_bytes([f[0], f[1], f[2], f[3]]))
-                    .collect()
+                let (floats, _) = bytes.as_chunks::<4>();
+                floats.iter().map(|f| f32::from_le_bytes(*f)).collect()
             })
             .ok_or_else(|| unreadable(NAME, "holds a vector not in base64 of `f32`s")),
         _ => Err(unreadable(NAME, "holds an item with no vector")),

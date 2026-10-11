@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import tempfile
 from typing import Any, Dict, cast
 
 import respan_gateway as rg
@@ -48,9 +50,9 @@ def test_a_full_typed_config_parses() -> None:
                 },
             },
             "local": {
-                "command": ["true"],
+                "command": [sys.executable],
                 "env": {"TOKEN": "literal"},
-                "cwd": "/tmp",
+                "cwd": tempfile.gettempdir(),
             },
         },
         "mcp_aggregate": {"servers": ["remote", "local"], "allow": ["remote__*"], "deny": ["remote__x"]},

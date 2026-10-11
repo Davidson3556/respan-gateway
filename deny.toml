@@ -8,7 +8,11 @@ allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The workspace's own crates depend on each other by path; none is published.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# The provider fakes the tests use.
+allow-git = ["https://github.com/lihe07/mockllm"]

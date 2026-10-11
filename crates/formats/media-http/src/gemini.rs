@@ -205,7 +205,7 @@ fn create_body(create: &Create) -> Result<(Bytes, Value), Fault> {
 fn aspect_of(size: &str) -> Result<(&'static str, &'static str), Fault> {
     let parsed = size.split_once(['x', 'X']).and_then(|(w, h)| {
         let (w, h) = (w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?);
-        Some((w, h)).filter(|_| w > 0 && h > 0)
+        (w > 0 && h > 0).then_some((w, h))
     });
     let refused = || {
         BadRequest::fault(format!(

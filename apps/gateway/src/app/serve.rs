@@ -81,7 +81,17 @@ pub async fn shutdown_signal() {
             Err(_) => std::future::pending().await,
         }
     };
-    #[cfg(not(unix))]
+    // Ctrl-Break, what a process manager sends a console program's group.
+    #[cfg(windows)]
+    let terminate = async {
+        match tokio::signal::windows::ctrl_break() {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(not(any(unix, windows)))]
     let terminate = std::future::pending::<()>();
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}

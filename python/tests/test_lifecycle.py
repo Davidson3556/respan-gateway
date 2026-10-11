@@ -102,7 +102,7 @@ def test_gateway_repr(gw, tmp_path):
     assert repr(gw) == "Gateway(source='dict', providers=[openai, any])"
     path = tmp_path / "g.yaml"
     path.write_text(json.dumps({"providers": {"p": {"vendor": "openai", "key": "k"}}}))
-    assert repr(rg.Gateway.from_file(path)) == f"Gateway(source='{path}', providers=[p])"
+    assert repr(rg.Gateway.from_file(path)) == f"Gateway(source={str(path)!r}, providers=[p])"
 
 
 def test_public_names():

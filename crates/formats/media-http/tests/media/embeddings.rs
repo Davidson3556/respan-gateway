@@ -17,7 +17,9 @@ async fn embed(fake: &Fake, asked: Value) -> (StatusCode, Value) {
 /// The floats a base64 vector holds.
 fn floats(v: &Value) -> Vec<f32> {
     unb64(v)
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|f| f32::from_le_bytes([f[0], f[1], f[2], f[3]]))
         .collect()
 }
