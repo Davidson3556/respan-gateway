@@ -1,7 +1,7 @@
 # Testing
 
 Run these checks from the repository root. They match CI and exercise all
-Rust targets and optional features. The default suite uses local fixtures and
+Rust targets and optional features. The default suite uses fakes written in code and
 requires no provider credentials; fetching build dependencies may need network
 access:
 
@@ -37,38 +37,42 @@ processes or several components.
 Security and resilience are cross-cutting concerns. Credential isolation and
 path bypass tests belong with their owning HTTP, adapter or application suite;
 cancellation, backpressure, resource cleanup and panic tests likewise span
-several layers. Local mock-provider tests establish behavior against fixtures;
+several layers. Local fake-provider tests establish behavior against fakes;
 live tests establish interoperability with the selected remote service.
 
 ### Execution requirements
 
-The main workspace contains **1,624 local test instances** and one opt-in local
-benchmark, excluding doctests. Even `--workspace --all-targets --all-features`
-does not include the separate [`validation/`](../validation/README.md) package.
+The main workspace has one opt-in local benchmark besides its tests, and
+doctests are a separate run. Even `--workspace --all-targets --all-features`
+does not include the separate [`validation/`](../validation/README.md)
+package.
 
-| Run category | Count | Location and requirements |
-| --- | ---: | --- |
-| Default local tests | 1,624 | Main workspace: in-process fixtures, localhost HTTP/WebSocket servers, local child processes and temporary storage; no provider credentials or external services |
-| Timing benchmark | 1 | Main workspace: explicitly run optimized in-process relay benchmark |
-| Live provider tests | 9 | Separate validation package: provider credentials and network access |
-| External-tool tests | 3 | Separate validation package: 2 MCP tests using Node/npx and network access; 1 PDF extraction test using Poppler |
+| Run category | Location and requirements |
+| --- | --- |
+| Default local tests | Main workspace: in-process fakes, localhost HTTP/WebSocket servers, local child processes and temporary storage; no provider credentials or external services |
+| Web UI tests | `apps/ui`, vitest under jsdom: `pnpm test`; needs Node and `pnpm install` |
+| Python tests | `python/tests`, pytest against the built extension: `maturin develop` then `pytest`, from `python/` |
+| Timing benchmark | Main workspace: explicitly run optimized in-process relay benchmark |
+| Live provider tests | Separate validation package: provider credentials and network access |
+| External-tool tests | Separate validation package: MCP tests using Node/npx and network access; a PDF extraction test using Poppler |
+
+CI runs the Rust checks, the UI checks (`pnpm lint`, `typecheck`, `test`,
+`build`), the Python tests, and compiles `validation/` (`cargo check --tests
+--bins`) without running its tests.
 
 The local suite uses `mockllm` for scripted OpenAI, Anthropic, Realtime and
 Gemini Live behavior, and strict in-code fakes of OpenAI Realtime and Gemini
 Live (`tests/support/realtime/`: voice detection, barge-in, G.711,
-transcripts, and what each API rejects) for translated sessions. These mocks
+transcripts, and what each API rejects) for translated sessions. These fakes
 run locally; they do not call real providers.
-Other suites use smaller in-process transports, handcrafted socket fixtures and
+Other suites use smaller in-process transports, handcrafted socket fakes and
 scripted stdio children. Standard local utilities such as `sh`, `sleep` and
 `kill` are needed by process tests. Building from a cold cache may fetch Cargo
-dependencies, including the pinned `mockllm` Git dependency.
+dependencies, including the pinned `mockllm` dependency.
 
-Doctests are a separate local run: 9 runnable doctests and 5 ignored examples.
-By Cargo harness, the workspace contains 241 tests in library or binary source
-targets, 898 integration-target tests, 218 tests in runnable example targets,
-and 1 benchmark-harness test. These are test instances rather than unique source
-declarations: included modules can run in multiple targets. Source-target and
-example-target tests can contain integration scenarios.
+Test counts are not recorded here; they change with every commit. Included
+modules can run in several targets, so a count of test instances is not a
+count of unique tests.
 
 To refresh the inventory without executing test bodies:
 
@@ -82,9 +86,9 @@ cargo test --workspace --all-targets --all-features -- --list
 | --- | --- |
 | `crates/*/src/` | Unit tests for private implementation details |
 | `crates/*/tests/` | Public contracts and protocol integration tests |
-| `crates/formats/conversation-http/tests/{relay,translate}/` | Provider suites grouped by requests, responses, filters, errors and related behavior; shared fixtures remain in each parent test target |
+| `crates/formats/conversation-http/tests/{relay,translate}/` | Provider suites grouped by requests, responses, filters, errors and related behavior; shared fakes remain in each parent test target |
 | `apps/gateway/tests/` | Executable integration tests (`e2e`, `app`), the library in process (`library`), the media kinds in process against a strict fake of OpenAI's media endpoints and Veo (`media`), redirects and bounded error bodies |
-| `apps/gateway/tests/paths/` | Path matching, normalization, allowlists and real client path shapes, using one local wire fixture |
+| `apps/gateway/tests/paths/` | Path matching, normalization, allowlists and real client path shapes, using one local wire fake |
 | `examples/tests/cases/<topic>/` | Test modules included by the corresponding example or private support module |
 | `examples/tests/text_*.rs` | Automatically discovered text and tool-argument integration suites |
 | `tests/support/` | Source-only HTTP and lifecycle helpers shared across packages |
@@ -188,7 +192,7 @@ cargo bench -p respan-gateway-conversation --bench relay -- --ignored --nocaptur
 ## Adding tests
 
 Use behavior names for suites and modules. Keep tests with their owning crate,
-share local fixtures through its support modules, and split large suites into
+share local fakes through its support modules, and split large suites into
 topic modules under one integration target. Only local tests belong in the main
 workspace. Put tests requiring live services or optional system tools in the
 separate validation package, document their requirements, and keep them ignored
