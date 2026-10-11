@@ -111,6 +111,16 @@ impl Input {
             ..Self::default()
         }
     }
+
+    /// The model asked for, if any.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Asks for `model`.
+    pub fn set_model(&mut self, model: String) {
+        self.model = Some(model);
+    }
 }
 
 /// A filter that asks for `model`, such as `cx.filter(set_model(m))`.

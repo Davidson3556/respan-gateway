@@ -17,6 +17,7 @@ use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::relay::Relay;
 use respan_gateway_media::video::LocateContent;
 use respan_gateway_media_http::gemini::GeminiVeo;
+use respan_gateway_plugins::Routing;
 use respan_gateway_ws::Limits;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -25,12 +26,11 @@ use tokio::time::Instant;
 use crate::admin::{self, Admin};
 use crate::auth::{self, ClientCredentials, ClientKeys, LocalOnly};
 use crate::compose::{PASSTHROUGH, Plan, compose};
-use crate::formats::{Kind, KnownFormat, formats};
+use crate::formats::{KnownFormat, formats, kind};
 use crate::jobs::VideoJobs;
 use crate::models::{self, Models};
 use crate::quirks::with_quirks;
 use crate::requests::{self, Recorder, RequestLog};
-use crate::routing::Routing;
 use crate::{Config, Error};
 
 /// Where the gateway listens unless told.
@@ -272,7 +272,7 @@ impl App {
         if !self.plan.serves("openai-chat") {
             return None;
         }
-        let route = self.plan.routes.route(Kind::CHAT, "openai-chat", None)?;
+        let route = self.plan.routes.route(kind::CHAT, "openai-chat", None)?;
         let upstream = self
             .plan
             .upstreams
@@ -288,6 +288,15 @@ impl App {
              -d '{{\"model\":\"{model}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'"
         ))
     }
+}
+
+/// Routing by the plan's routes, of each format.
+fn routing(plan: &Plan, formats: &[KnownFormat]) -> Routing {
+    formats
+        .iter()
+        .fold(Routing::new(plan.routes.clone()), |routing, f| {
+            routing.format(&f.name, f.kind, f.model.clone())
+        })
 }
 
 /// The gateway with the binary's plugins: the request log, routing, video
@@ -314,7 +323,7 @@ fn with_plugins(
     let locate = veo.fold(LocateContent::new(), |l, e| l.provider(&e.internal));
     let gateway = gateway
         .plugin(Recorder::new(log.clone(), formats, names))
-        .plugin(Routing::new(plan.routes.clone(), formats))
+        .plugin(routing(plan, formats))
         .plugin(VideoJobs::new(&plan.upstreams, formats))
         .plugin(locate);
     // A raw relay sends each client's credentials itself.

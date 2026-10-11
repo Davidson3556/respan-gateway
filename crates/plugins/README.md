@@ -1,7 +1,37 @@
 # respan-gateway-plugins
 
-`ModelRouter` selects a provider from an input model. The public `routing` module
-contains transport-neutral attempt orchestration: sequential retry and
+`Routing` targets each request at a provider by `Routes`: providers, each
+one core provider per format it `Speaks`, `models` tables, claimed model
+prefixes and a default target. Of the providers serving the request's
+kind, it picks the one its model names as `provider/model` (sent as
+`model`), else a `models` table's (the last added first), else the longest
+claim's, else the target if it serves the kind, else the first that does;
+then that provider's core provider of the client's format, else, for a
+`Kind` that translates, its first of the kind. Each format is given its
+`Kind` and a `Model`, such as `Model::of(Input::model, Input::set_model)`;
+a request of another format keeps its target.
+
+```rust
+use std::sync::Arc;
+use respan_gateway_conversation::Input;
+use respan_gateway_plugins::{Kind, Model, Routes, Routing, Speaks};
+
+const CHAT: Kind = Kind { label: "chat", translates: true };
+let speaks = |format: &str, internal: &str| Speaks {
+    format: format.into(),
+    kind: CHAT,
+    internal: internal.into(),
+};
+let routes = Routes::new()
+    .provider("openai", vec![speaks("openai-chat", "openai")])
+    .provider("anthropic", vec![speaks("anthropic-messages", "anthropic")])
+    .claim("claude", "anthropic")
+    .target("openai");
+let routing = Routing::new(Arc::new(routes))
+    .format("openai-chat", CHAT, Model::of(Input::model, Input::set_model));
+```
+
+The public `routing` module contains transport-neutral attempt orchestration: sequential retry and
 fallback, a staggered race, and each attempt's role. Each answer is read
 `Until` a stopping point before it is judged: its `Head`, a plugin-chosen
 event (`Until::content(predicate)`), or its `End` (`Response::until_end`,

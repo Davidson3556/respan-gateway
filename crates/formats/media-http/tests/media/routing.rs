@@ -1,17 +1,74 @@
 //! Each kind routed by its model.
 
+use std::sync::Arc;
+
 use respan_gateway_core::Gateway;
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_media::{image, speech, transcription};
 use respan_gateway_media_http::openai::{OpenAiImages, OpenAiSpeech, OpenAiTranscriptions};
-use respan_gateway_plugins::ModelRouter;
+use respan_gateway_plugins::{Kind, Model, Routes, Routing, Speaks};
 use serde_json::json;
 
 use crate::support::{Fake, Form, json_request, send};
 
+/// A kind of `label`, which translates.
+const fn kind(label: &'static str) -> Kind {
+    Kind {
+        label,
+        translates: true,
+    }
+}
+
+const IMAGE: Kind = kind("image");
+const TRANSCRIPTION: Kind = kind("transcription");
+const SPEECH: Kind = kind("speech");
+const VIDEO: Kind = kind("video");
+
+fn speaks(format: &str, kind: Kind, internal: &str) -> Speaks {
+    Speaks {
+        format: format.into(),
+        kind,
+        internal: internal.into(),
+    }
+}
+
 #[tokio::test]
-async fn a_model_router_sends_each_kind_to_its_models_provider() {
+async fn routing_sends_each_kind_to_its_models_provider() {
     let (main, other) = (Fake::openai().await, Fake::openai().await);
+    let provider = |name: &str| {
+        vec![
+            speaks(OpenAiImages::NAME, IMAGE, &format!("{name}-images")),
+            speaks(
+                OpenAiTranscriptions::NAME,
+                TRANSCRIPTION,
+                &format!("{name}-audio"),
+            ),
+            speaks(OpenAiSpeech::NAME, SPEECH, &format!("{name}-speech")),
+        ]
+    };
+    let routes = Routes::new()
+        .provider("main", provider("main"))
+        .provider("other", provider("other"))
+        .claim("dall-e", "other")
+        .claim("whisper", "other")
+        .claim("tts", "other")
+        .target("main");
+    let routing = Routing::new(Arc::new(routes))
+        .format(
+            OpenAiImages::NAME,
+            IMAGE,
+            Model::of(image::Input::model, image::Input::set_model),
+        )
+        .format(
+            OpenAiTranscriptions::NAME,
+            TRANSCRIPTION,
+            Model::of(transcription::Input::model, transcription::Input::set_model),
+        )
+        .format(
+            OpenAiSpeech::NAME,
+            SPEECH,
+            Model::of(speech::Input::model, speech::Input::set_model),
+        );
     let gateway = Gateway::new()
         .provider("main-images", OpenAiImages, main.transport())
         .and_then(|g| g.provider("other-images", OpenAiImages, other.transport()))
@@ -22,21 +79,8 @@ async fn a_model_router_sends_each_kind_to_its_models_provider() {
         .and_then(|g| g.client::<image::Input, _, _>(OpenAiImages))
         .and_then(|g| g.client::<transcription::Input, _, _>(OpenAiTranscriptions))
         .and_then(|g| g.client::<speech::Input, _, _>(OpenAiSpeech))
-        .and_then(|g| g.target("main-images"))
         .expect("a gateway")
-        .plugin(
-            ModelRouter::new(|i: &image::Input| i.model.as_deref()).route("dall-e", "other-images"),
-        )
-        .plugin(
-            ModelRouter::new(|i: &transcription::Input| i.model.as_deref())
-                .route("gpt-4o", "main-audio")
-                .route("whisper", "other-audio"),
-        )
-        .plugin(
-            ModelRouter::new(|i: &speech::Input| i.model.as_deref())
-                .route("tts", "other-speech")
-                .route("gpt", "main-speech"),
-        );
+        .plugin(routing);
 
     let image = |model: Option<&str>| {
         let mut asked = json!({"prompt": "a cat"});
@@ -61,7 +105,7 @@ async fn a_model_router_sends_each_kind_to_its_models_provider() {
         (image(Some("gpt-image-1")), false),
         (image(Some("dall-e-3")), true),
         // Without a model the provider's default, dall-e-2, draws: the
-        // request keeps its target.
+        // request goes to the target.
         (image(None), false),
         (audio("whisper-1"), true),
         (audio("gpt-4o-transcribe"), false),
@@ -98,19 +142,24 @@ async fn a_video_goes_to_its_models_provider_and_a_follow_up_to_its_jobs() {
     use crate::support::videos::Videos;
 
     let (openai, veo) = (Videos::openai().await, Veo::start().await);
+    // A job's id says whose it is: OpenAI's start `video_`, Veo's `veo_`.
+    let routes = Routes::new()
+        .provider("openai", vec![speaks(OpenAiVideos::NAME, VIDEO, "openai")])
+        .provider("veo", vec![speaks(GeminiVeo::NAME, VIDEO, "veo")])
+        .claim("veo", "veo")
+        .claim("sora", "openai")
+        .claim("video_", "openai");
+    let model = Model::of(
+        |i: &video::Input| i.model().or(i.job_id()),
+        video::Input::set_model,
+    );
+    let routing = Routing::new(Arc::new(routes)).format(OpenAiVideos::NAME, VIDEO, model);
     let gateway = Gateway::new()
         .provider("openai", OpenAiVideos, openai.transport())
         .and_then(|g| g.provider("veo", GeminiVeo, veo.transport()))
         .and_then(|g| g.client::<video::Input, _, _>(OpenAiVideos))
-        .and_then(|g| g.target("openai"))
         .expect("a gateway")
-        // A job's id says whose it is: OpenAI's start `video_`, Veo's `veo_`.
-        .plugin(
-            ModelRouter::new(|i: &video::Input| i.model().or(i.job_id()))
-                .route("veo", "veo")
-                .route("sora", "openai")
-                .route("video_", "openai"),
-        )
+        .plugin(routing)
         .plugin(LocateContent::new().provider("veo"));
 
     let mut ids = Vec::new();

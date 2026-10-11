@@ -52,8 +52,8 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/formats/realtime-ws/` | Format | `JsonEvents` and its specs (OpenAI Realtime, Responses over WebSocket, Gemini Live) | Realtime, HTTP, WS |
 | `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
 | `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins | Core, the formats |
-| `crates/plugins/` | Plugins | Model routing, attempts, fallback, races and backoff | Core |
-| `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), its routing step, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | All of the above |
+| `crates/plugins/` | Plugins | The router (`Routes`, `Routing`), attempts, fallback, races and backoff | Core |
+| `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | All of the above |
 | `python/` | Python package | PyO3 extension hosting the `apps/gateway` library in-process, plus httpx transports and SDK clients | `apps/gateway` |
 | `examples/` | Examples | Application policies and runnable integrations of public APIs | Libraries needed by each example |
 
@@ -94,9 +94,7 @@ A configured provider may speak several formats (a vendor preset speaks every
 format of its vendor, as `crates/providers` says); the application registers one core
 provider per format, runs each vendor's plugin on its providers' calls alone,
 registered last so every other plugin sees the kind's events, and routes
-with one plugin of its own: `provider/model`,
-then `models` routes, then preset model prefixes, then the kind's default,
-among the providers serving the request's kind. Each media operation
+with the plugins crate's router (see [Routing](#routing)). Each media operation
 (`image`, `transcription`, `speech`, `embedding`, `video`) is a kind that translates
 within itself. A video job's follow-up names no model, so a second plugin
 sends it to the provider that made the job, by its id's spelling (`video_`,
@@ -106,6 +104,31 @@ way out, `<provider>~<id>`, unwrapped on the way in. The media crate's
 `/healthz`, `/v1/models` and the web UI's admin API before the formats, and
 client keys and the request log around them. Hosts reuse it as the
 `respan_gateway` library: `App::new(config)` gives an `axum::Router`.
+
+## Routing
+
+Core does no routing: it knows provider names, and each request has a
+target slot (`Gateway::target` for the default, `ClientContext::set_target`
+per request). Routing is a plugin, `Routing` in `crates/plugins`, which
+targets a request by `Routes`. Each kind's `Input` owns its model
+(`model()`, `set_model()`); the router is given, per format, its `Kind`
+(a label, and whether its formats translate) and a `Model` built from those
+methods.
+
+A configured provider is one core provider per format it speaks (`openai`,
+`openai:openai-realtime`, ...), each added to `Routes` as what it `Speaks`.
+Of the providers serving the request's kind, the router picks:
+
+1. `provider/model` with `provider` configured, sending `model` alone;
+2. else the `models` tables, the last defined first;
+3. else the longest claimed prefix (the binary claims each vendor's
+   prefixes from `crates/providers`);
+4. else the kind's default: the target if it serves the kind, else the
+   first provider that does.
+
+It then targets that provider's core provider of the client's own format,
+else, for a kind that translates, its first of the kind. A request of a
+format the router was not given keeps its target.
 
 ## Design constraints
 

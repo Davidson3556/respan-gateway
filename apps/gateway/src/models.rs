@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 
 use crate::auth;
 use crate::compose::{Entry, Upstream};
-use crate::formats::{Kind, first_of_each_kind, unreachable};
-use crate::routing::Routes;
+use crate::formats::{first_of_each_kind, kind, unreachable};
+use respan_gateway_plugins::{Kind, Routes};
 use respan_gateway_providers::Provider;
 
 /// How long a provider may take to list its models.
@@ -51,10 +51,10 @@ impl Models {
             .filter_map(|u| {
                 // OpenAI's media formats share its list of models.
                 let openai_media =
-                    |e: &&Entry| Kind::MEDIA.contains(&e.kind) && e.format.starts_with("openai-");
+                    |e: &&Entry| kind::MEDIA.contains(&e.kind) && e.format.starts_with("openai-");
                 let entries = || u.entries.iter();
                 let lister = entries()
-                    .find(|e| e.kind == Kind::CHAT)
+                    .find(|e| e.kind == kind::CHAT)
                     .or_else(|| entries().find(openai_media))?;
                 let base = lister.base_url.trim_end_matches('/');
                 let mut headers = lister.auth.clone();
@@ -172,13 +172,13 @@ fn kind_of(id: &str) -> Option<Kind> {
     let id = id.to_ascii_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| id.contains(w));
     let kind = match () {
-        _ if has(&["embed"]) => Kind::EMBEDDING,
-        _ if has(&["dall-e", "gpt-image", "imagen", "grok-2-image", "flux"]) => Kind::IMAGE,
-        _ if has(&["whisper", "transcribe"]) => Kind::TRANSCRIPTION,
-        _ if has(&["tts"]) => Kind::SPEECH,
-        _ if has(&["sora", "veo"]) => Kind::VIDEO,
-        _ if has(&["realtime"]) => Kind::REALTIME,
-        _ => Kind::CHAT,
+        _ if has(&["embed"]) => kind::EMBEDDING,
+        _ if has(&["dall-e", "gpt-image", "imagen", "grok-2-image", "flux"]) => kind::IMAGE,
+        _ if has(&["whisper", "transcribe"]) => kind::TRANSCRIPTION,
+        _ if has(&["tts"]) => kind::SPEECH,
+        _ if has(&["sora", "veo"]) => kind::VIDEO,
+        _ if has(&["realtime"]) => kind::REALTIME,
+        _ => kind::CHAT,
     };
     Some(kind)
 }

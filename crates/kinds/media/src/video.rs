@@ -78,6 +78,14 @@ impl Input {
         }
     }
 
+    /// Asks for `model`, if a `Create`; no other operation names one, so
+    /// the rest are left as they are.
+    pub fn set_model(&mut self, model: String) {
+        if let Input::Create(create) = self {
+            create.model = Some(model);
+        }
+    }
+
     /// The job an operation is on: `None` for `Create` and `List`.
     pub fn job_id(&self) -> Option<&str> {
         match self {

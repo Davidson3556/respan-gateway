@@ -1570,8 +1570,26 @@ async fn a_router_overrides_the_default_target() {
     let (v1, sent_v1) = local(|_, _| whole(StatusCode::OK, r#"{"output":"hello"}"#));
     let (v2, sent_v2) = local(|_, _| whole(StatusCode::OK, r#"{"text":"hello"}"#));
     let list = [add_provider("v1", V1, v1), add_provider("v2", V2, v2)];
-    let router = respan_gateway_plugins::ModelRouter::new(|j: &Jev| j.model.as_deref());
-    let router = router.route("old", "v1");
+    use respan_gateway_plugins::{Kind, Model, Routes, Routing, Speaks};
+    const JEV: Kind = Kind {
+        label: "jev",
+        translates: true,
+    };
+    let speaks = |format: &str, internal: &str| Speaks {
+        format: format.into(),
+        kind: JEV,
+        internal: internal.into(),
+    };
+    let routes = Routes::new()
+        .provider("v1", vec![speaks("jev-v1", "v1")])
+        .provider("v2", vec![speaks("jev-v2", "v2")])
+        .claim("old", "v1")
+        .target("v2");
+    let model = Model::of(
+        |j: &Jev| j.model.as_deref(),
+        |j, model| j.model = Some(model),
+    );
+    let router = Routing::new(Arc::new(routes)).format("jev-v2", JEV, model);
     let gw = serving(V2, list, vec![Arc::new(router)], Some("v2")).expect("builds");
 
     for model in ["old-1", "new-1"] {

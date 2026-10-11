@@ -13,9 +13,8 @@ formats over HTTP are
 | `embedding` | Embeddings of texts | `items` (`Text` or `Tokens`), `dimensions`, `user` | `Start`, `Embedding` vectors, `Usage` |
 | `video` | Video generation, a job | an operation: `Create` (`model`, `prompt`, `seconds`, `size`, a `reference` image), `Remix`, `Retrieve`, `Content` (a `Variant`), `Delete`, `List` | `Job`, `Jobs`, `Content` chunks, `Deleted` |
 
-Every `Input` has an optional `model`, which a router reads:
-`ModelRouter::new(|i: &image::Input| i.model.as_deref())`; a video's is
-`Input::model()`, as only a `Create` names one. Media are the
+Every `Input` has an optional `model`, read by `model()` and rewritten by
+`set_model()`, as a router does; a video's is a `Create`'s alone. Media are the
 conversation kind's `Media` (a MIME type, bytes or a URL, a name) and token
 usage its `Usage`; a kind has a type of its own only where neither says it:
 a `Transcript` (`text`, `language`, `duration`, `segments`, `words`), and
@@ -41,9 +40,9 @@ the gateway: a client gives it back as a path segment, and a follow-up
 (`Retrieve`, `Content`, `Remix`, `Delete`, read by `Input::job_id()`) must
 reach the provider that made the job. Nothing in the request says which but
 the id's spelling, so a gateway routes follow-ups by it: OpenAI's ids start
-`video_`, Veo's `veo_`, and one router serves both,
-`ModelRouter::new(|i: &video::Input| i.model().or(i.job_id()))` with routes
-for `sora`, `video_` and `veo`. Two deployments of one vendor share a
+`video_`, Veo's `veo_`, and one router serves both, reading
+`i.model().or(i.job_id())` with prefixes claimed for `sora`, `video_` and
+`veo`. Two deployments of one vendor share a
 spelling: a gateway that has them keeps which made each job, or wraps the
 ids in its own, signed, naming the deployment, within the vendor's length
 limits (use case 8), and unwraps them before the call.

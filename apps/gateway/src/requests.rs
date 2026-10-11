@@ -20,10 +20,11 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http_body::{self, Frame, SizeHint};
 use respan_gateway_media::{embedding, image, speech, transcription};
+use respan_gateway_plugins::{Kind, Model};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::formats::{Kind, KnownFormat, ReadModel};
+use crate::formats::KnownFormat;
 
 /// How many finished requests are kept.
 const KEPT: usize = 1000;
@@ -474,7 +475,7 @@ fn escape_controls(line: &str) -> String {
 pub struct Recorder {
     log: Arc<RequestLog>,
     /// Each format's kind, and how its requests name their model.
-    formats: HashMap<String, (Kind, Arc<ReadModel>)>,
+    formats: HashMap<String, (Kind, Model)>,
     /// Each core provider's configured name.
     providers: HashMap<String, String>,
 }
@@ -493,7 +494,7 @@ impl Recorder {
     ) -> Self {
         let formats = formats
             .iter()
-            .map(|f| (f.name.clone(), (f.kind, f.model_reader())))
+            .map(|f| (f.name.clone(), (f.kind, f.model.clone())))
             .collect();
         Self {
             log,
@@ -517,7 +518,7 @@ impl Plugin for Recorder {
             record.format = Some(cx.format().to_owned());
             if let Some((kind, model)) = self.formats.get(cx.format()) {
                 record.kind = Some(kind.label);
-                let model = model(cx).map(|m| clip(&m));
+                let model = model.read(cx).map(|m| clip(&m));
                 record.model = model.or(record.model.take());
             }
         }

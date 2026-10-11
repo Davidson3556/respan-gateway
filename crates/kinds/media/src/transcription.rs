@@ -56,6 +56,16 @@ impl Input {
             native: None,
         }
     }
+
+    /// The model asked for, if any.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Asks for `model`.
+    pub fn set_model(&mut self, model: String) {
+        self.model = Some(model);
+    }
 }
 
 /// The kind's output: one event of a response, streamed or not.

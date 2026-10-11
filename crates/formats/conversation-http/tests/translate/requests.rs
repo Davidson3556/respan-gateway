@@ -51,11 +51,8 @@ async fn only_a_relay_is_marked_and_carries_the_clients_key() {
     ])
     .and_then(|gw| gw.client::<Input, _, _>(OpenAiChat))
     .map(|gw| {
-        let router = ModelRouter::new(|c: &Input| c.model.as_deref());
-        let plugins: Vec<Arc<dyn Plugin>> = vec![
-            Arc::new(Forges),
-            Arc::new(router.route("claude", "anthropic")),
-        ];
+        let plugins: Vec<Arc<dyn Plugin>> =
+            vec![Arc::new(Forges), Arc::new(ByModel("claude", "anthropic"))];
         with_plugins(gw, plugins)
     })
     .unwrap_or_else(|e| panic!("gateway: {e}"));

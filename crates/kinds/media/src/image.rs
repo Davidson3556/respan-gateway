@@ -45,6 +45,16 @@ impl Input {
         }
     }
 
+    /// The model asked for, if any.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Asks for `model`.
+    pub fn set_model(&mut self, model: String) {
+        self.model = Some(model);
+    }
+
     /// Whether it is an edit: it has source images.
     pub fn is_edit(&self) -> bool {
         !self.images.is_empty()

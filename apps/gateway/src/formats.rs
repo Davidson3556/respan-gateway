@@ -4,27 +4,23 @@
 
 use std::sync::Arc;
 
-use respan_gateway_core::{ClientContext, Extensions, Fault, Format, Gateway, Upstream};
-use respan_gateway_http::formats::opaque::{self, Passthrough};
+use respan_gateway_conversation as conversation;
+use respan_gateway_core::{Extensions, Fault, Format, Gateway, Upstream};
+use respan_gateway_http::formats::opaque::Passthrough;
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo, reqwest};
 use respan_gateway_media::{embedding, image, speech, transcription, video};
+use respan_gateway_plugins::{Kind, Model};
 use respan_gateway_providers::{ALL, Auth, Base, Format as Spoken};
 use respan_gateway_realtime_ws::JsonEvents;
 
 use crate::presets::origin;
 
-/// What sort of traffic a format carries, as the admin API and routing
-/// name it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Kind {
-    pub label: &'static str,
-    /// Whether a client of one format of the kind may be answered by a
-    /// provider of another; otherwise only a provider of its own format.
-    pub translates: bool,
-}
+/// The kinds of traffic this binary carries, as the admin API and routing
+/// name them.
+pub mod kind {
+    use respan_gateway_plugins::Kind;
 
-impl Kind {
     pub const CHAT: Kind = Kind {
         label: "chat",
         translates: true,
@@ -59,13 +55,7 @@ impl Kind {
     };
     /// The kinds of the media crate, whose client formats are served by
     /// default once a provider speaks the kind.
-    pub const MEDIA: [Kind; 5] = [
-        Kind::IMAGE,
-        Kind::TRANSCRIPTION,
-        Kind::SPEECH,
-        Kind::VIDEO,
-        Kind::EMBEDDING,
-    ];
+    pub const MEDIA: [Kind; 5] = [IMAGE, TRANSCRIPTION, SPEECH, VIDEO, EMBEDDING];
 }
 
 /// The first of `items` of each kind, in order.
@@ -79,64 +69,8 @@ pub fn first_of_each_kind<T>(items: impl IntoIterator<Item = (Kind, T)>) -> Vec<
     firsts
 }
 
-/// A request's input, as routing reads and rewrites its model.
-pub trait Routed: Clone + Send + Sync + 'static {
-    fn model(&self) -> Option<&str> {
-        None
-    }
-    fn set_model(&mut self, _model: String) {}
-}
-
-impl Routed for respan_gateway_conversation::Input {
-    fn model(&self) -> Option<&str> {
-        self.model.as_deref()
-    }
-    fn set_model(&mut self, model: String) {
-        self.model = Some(model);
-    }
-}
-
-macro_rules! routed_by_model {
-    ($($input:ty),*) => {$(
-        impl Routed for $input {
-            fn model(&self) -> Option<&str> {
-                self.model.as_deref()
-            }
-            fn set_model(&mut self, model: String) {
-                self.model = Some(model);
-            }
-        }
-    )*};
-}
-
-routed_by_model!(
-    image::Input,
-    transcription::Input,
-    speech::Input,
-    embedding::Input
-);
-
-/// Only a `Create` names a model; a follow-up goes by its job's id
-/// ([`crate::jobs`]).
-impl Routed for video::Input {
-    fn model(&self) -> Option<&str> {
-        video::Input::model(self)
-    }
-    fn set_model(&mut self, model: String) {
-        if let video::Input::Create(create) = self {
-            create.model = Some(model);
-        }
-    }
-}
-
-impl Routed for respan_gateway_realtime::Input {}
-
-impl<F: 'static> Routed for opaque::Input<F> {}
-
 type AddProvider = dyn Fn(Gateway, String, &str, HeaderMap) -> Result<Gateway, Fault> + Send + Sync;
 type Serve = dyn Fn(Gateway) -> Result<Gateway, Fault> + Send + Sync;
-pub type ReadModel = dyn Fn(&ClientContext) -> Option<String> + Send + Sync;
-pub type SetModel = dyn Fn(&mut ClientContext, String) -> Result<(), Fault> + Send + Sync;
 
 /// A format compiled into the binary.
 pub struct KnownFormat {
@@ -155,8 +89,8 @@ pub struct KnownFormat {
     provider: Box<AddProvider>,
     /// None for a format only providers speak.
     serve: Option<Box<Serve>>,
-    model: Arc<ReadModel>,
-    set_model: Arc<SetModel>,
+    /// How its requests name their model.
+    pub model: Model,
 }
 
 impl std::fmt::Debug for KnownFormat {
@@ -180,7 +114,7 @@ impl KnownFormat {
     ) -> Self
     where
         F: Clone + Send + Sync + 'static + Format<ClientIo, I, O> + Format<ProviderIo, O, I>,
-        I: Routed,
+        I: Clone + Send + Sync + 'static,
         O: Clone + Send + Sync + 'static,
         T: Fn(Extensions) -> ProviderIo + Send + Sync + 'static,
     {
@@ -201,7 +135,7 @@ impl KnownFormat {
     ) -> Self
     where
         F: Clone + Send + Sync + 'static + Format<ProviderIo, O, I>,
-        I: Routed,
+        I: Clone + Send + Sync + 'static,
         O: Clone + Send + Sync + 'static,
         T: Fn(Extensions) -> ProviderIo + Send + Sync + 'static,
     {
@@ -220,13 +154,7 @@ impl KnownFormat {
                 gateway.provider::<I, O, _>(name, format.clone(), reached)
             }),
             serve: None,
-            model: Arc::new(|cx| cx.input::<I>().ok()?.model().map(str::to_owned)),
-            set_model: Arc::new(|cx, model| {
-                cx.filter(move |input: &mut I| {
-                    input.set_model(model.clone());
-                    Ok(())
-                })
-            }),
+            model: Model::none(),
         }
     }
 
@@ -242,6 +170,11 @@ impl KnownFormat {
 
     fn websocket(mut self) -> Self {
         self.websocket = true;
+        self
+    }
+
+    fn model(mut self, model: Model) -> Self {
+        self.model = model;
         self
     }
 
@@ -274,14 +207,6 @@ impl KnownFormat {
             ))),
         }
     }
-
-    pub fn model_reader(&self) -> Arc<ReadModel> {
-        self.model.clone()
-    }
-
-    pub fn model_writer(&self) -> Arc<SetModel> {
-        self.set_model.clone()
-    }
 }
 
 const CHAT_COMPLETIONS: &[&str] = &["POST /v1/chat/completions"];
@@ -312,42 +237,56 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
             limit,
         ))
     };
+    let chat = || Model::of(conversation::Input::model, conversation::Input::set_model);
+    // Only a `Create` names a model; a follow-up goes by its job's id
+    // ([`crate::jobs`]).
+    let video = || Model::of(video::Input::model, video::Input::set_model);
     let mut known: Vec<KnownFormat> = Vec::new();
     for speaks in ALL.iter().flat_map(|p| p.formats) {
         if known.iter().any(|k| k.name == speaks.format.name()) {
             continue;
         }
         let format = match speaks.format.clone() {
-            Spoken::OpenAiChat(f) => KnownFormat::of(Kind::CHAT, CHAT_COMPLETIONS, f, http),
+            Spoken::OpenAiChat(f) => {
+                KnownFormat::of(kind::CHAT, CHAT_COMPLETIONS, f, http).model(chat())
+            }
             Spoken::AnthropicMessages(f) => {
-                KnownFormat::of(Kind::CHAT, &["POST /v1/messages"], f, http)
+                KnownFormat::of(kind::CHAT, &["POST /v1/messages"], f, http).model(chat())
             }
             Spoken::OpenAiImages(f) => KnownFormat::of(
-                Kind::IMAGE,
+                kind::IMAGE,
                 &["POST /v1/images/generations", "POST /v1/images/edits"],
                 f,
                 http,
-            ),
+            )
+            .model(Model::of(image::Input::model, image::Input::set_model)),
             Spoken::OpenAiTranscriptions(f) => KnownFormat::of(
-                Kind::TRANSCRIPTION,
+                kind::TRANSCRIPTION,
                 &[
                     "POST /v1/audio/transcriptions",
                     "POST /v1/audio/translations",
                 ],
                 f,
                 http,
-            ),
+            )
+            .model(Model::of(
+                transcription::Input::model,
+                transcription::Input::set_model,
+            )),
             Spoken::OpenAiSpeech(f) => {
-                KnownFormat::of(Kind::SPEECH, &["POST /v1/audio/speech"], f, http)
+                KnownFormat::of(kind::SPEECH, &["POST /v1/audio/speech"], f, http)
+                    .model(Model::of(speech::Input::model, speech::Input::set_model))
             }
             Spoken::OpenAiEmbeddings(f) => {
-                KnownFormat::of(Kind::EMBEDDING, &["POST /v1/embeddings"], f, http)
+                KnownFormat::of(kind::EMBEDDING, &["POST /v1/embeddings"], f, http).model(
+                    Model::of(embedding::Input::model, embedding::Input::set_model),
+                )
             }
-            Spoken::OpenAiVideos(f) => {
-                KnownFormat::of(Kind::VIDEO, VIDEOS, f, http).job_ids("video_")
-            }
+            Spoken::OpenAiVideos(f) => KnownFormat::of(kind::VIDEO, VIDEOS, f, http)
+                .job_ids("video_")
+                .model(video()),
             Spoken::GeminiVeo(f) => {
-                KnownFormat::provider_only(Kind::VIDEO, f, google).job_ids("veo_")
+                KnownFormat::provider_only(kind::VIDEO, f, google).job_ids("veo_")
             }
             Spoken::JsonEvents(f) => session(f, speaks.base),
         };
@@ -355,7 +294,7 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
     }
     known.push(
         KnownFormat::of(
-            Kind::PASSTHROUGH,
+            kind::PASSTHROUGH,
             &["ANY /* (every other request)"],
             Passthrough,
             http,
@@ -374,7 +313,7 @@ fn session(format: JsonEvents, base: Base) -> KnownFormat {
         _ => format!("GET /v1{} (WebSocket)", format.path()),
     };
     KnownFormat::of(
-        Kind::REALTIME,
+        kind::REALTIME,
         &[&endpoint],
         format.clone(),
         move |_: &str, base_url: &str, auth| {

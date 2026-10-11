@@ -197,8 +197,7 @@ async fn unary_responses_translate_both_ways() {
 
 #[tokio::test]
 async fn generated_named_model_text_and_usage_relay_in_native_formats() {
-    let router = ModelRouter::new(|c: &Input| c.model.as_deref()).route("gpt", "openai");
-    let h = Harness::with(vec![Arc::new(router)]).await;
+    let h = Harness::with(vec![Arc::new(ByModel("gpt", "openai"))]).await;
     for stream in [false, true] {
         h.openai.answer(Answer::text("Hello from OpenAI"));
         let mut req = json!({ "model": "gpt-4o", "stream": stream,

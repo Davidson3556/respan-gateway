@@ -611,7 +611,7 @@ fn a_vendors_model_name_with_a_slash_goes_to_the_provider_that_serves_it() {
     )
     .unwrap_or_else(|e| panic!("{e}"));
     let to = |model: &str| {
-        let route = plan.routes.route(Kind::CHAT, "openai-chat", Some(model));
+        let route = plan.routes.route(kind::CHAT, "openai-chat", Some(model));
         route.map(|r| (r.provider, r.model))
     };
     let whole = |provider: &str| Some((provider.to_owned(), None));

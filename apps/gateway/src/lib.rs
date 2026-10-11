@@ -28,7 +28,6 @@ mod models;
 mod presets;
 mod quirks;
 mod requests;
-mod routing;
 
 pub use app::{App, DEFAULT_LISTEN, shutdown_signal};
 pub use cli::run;

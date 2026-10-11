@@ -23,7 +23,6 @@ serde_json.workspace = true
 futures.workspace = true
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
-respan-gateway-plugins.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "sync", "test-util"] }
 
 [[bench]]

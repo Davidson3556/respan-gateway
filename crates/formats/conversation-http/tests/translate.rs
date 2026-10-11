@@ -13,7 +13,6 @@ use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::NativeFields;
 use respan_gateway_core::async_trait;
 use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, Response, Upstream};
-use respan_gateway_plugins::ModelRouter;
 #[allow(dead_code)] // Shared hooks also expose a call log not used by this suite.
 #[path = "../../../../tests/support/hooks.rs"]
 mod hooks;
@@ -131,6 +130,21 @@ impl Plugin for Cross {
     }
 }
 
+/// Sends the models starting with its prefix to its provider; the rest
+/// keep their target.
+struct ByModel(&'static str, &'static str);
+
+#[async_trait]
+impl Plugin for ByModel {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let model = cx.input::<Input>().ok().and_then(Input::model);
+        if model.is_some_and(|model| model.starts_with(self.0)) {
+            cx.set_target(self.1);
+        }
+        Ok(None)
+    }
+}
+
 impl Harness {
     /// Plugins, in order: the log, [`Cross`], `native`, and a router sending
     /// Claude models to Anthropic, as gateway.example.yaml does.
@@ -161,9 +175,7 @@ impl Harness {
             .unwrap_or_else(|| provider_http(&anthropic.base_url(), "x-api-key", "sk-ant-test"));
         let mut plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(log.clone())];
         plugins.extend(chain);
-        plugins.push(Arc::new(
-            ModelRouter::new(|c: &Input| c.model.as_deref()).route("claude", "anthropic"),
-        ));
+        plugins.push(Arc::new(ByModel("claude", "anthropic")));
         let usage = Metered::default();
         plugins.push(Arc::new(usage.clone()));
         let gw = providers([

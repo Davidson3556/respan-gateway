@@ -10,9 +10,9 @@ use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
 use crate::config::{Auth, Config, PluginConfig, ProviderConfig};
-use crate::formats::{Kind, KnownFormat};
+use crate::formats::{KnownFormat, kind};
 use crate::presets;
-use crate::routing::Routes;
+use respan_gateway_plugins::{Kind, Routes, Speaks};
 use respan_gateway_providers::{Auth as KeyIn, Base, Provider};
 
 /// The name of the format that relays what no other served format accepts.
@@ -79,7 +79,7 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
             "providers: none configured; add one, such as `openai: { vendor: openai }`",
         ));
     }
-    let routes = Arc::new(Routes::new(&upstreams, tables, config.target.clone()));
+    let routes = Arc::new(routes(&upstreams, tables, config.target.clone()));
     let plan = Plan {
         upstreams,
         serve,
@@ -87,6 +87,34 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
         keys,
     };
     Ok((gateway, plan))
+}
+
+/// The routes to `upstreams`: by `tables`, then their presets' prefixes,
+/// then by default to `target`.
+fn routes(
+    upstreams: &[Upstream],
+    tables: Vec<Vec<(String, String)>>,
+    target: Option<String>,
+) -> Routes {
+    let mut routes = Routes::new();
+    for u in upstreams {
+        let speaks = u.entries.iter().map(|e| Speaks {
+            format: e.format.clone(),
+            kind: e.kind,
+            internal: e.internal.clone(),
+        });
+        routes = routes.provider(&u.name, speaks.collect());
+    }
+    let claims = upstreams.iter().flat_map(|u| {
+        let prefixes = u.preset.map(|p| p.prefixes).unwrap_or_default();
+        prefixes.iter().map(|prefix| (*prefix, &u.name))
+    });
+    routes = claims.fold(routes, |routes, (prefix, name)| routes.claim(prefix, name));
+    routes = tables.into_iter().fold(routes, Routes::models);
+    match target {
+        Some(target) => routes.target(target),
+        None => routes,
+    }
 }
 
 /// The gateway with a core provider for each format of each configured
@@ -161,7 +189,7 @@ fn model_tables(
             let Some(upstream) = upstreams.iter().find(|u| u.name == m.provider) else {
                 return Err(bad(format!("unknown provider '{}'", m.provider)));
             };
-            if !upstream.entries.iter().any(|e| e.kind == Kind::CHAT) {
+            if !upstream.entries.iter().any(|e| e.kind == kind::CHAT) {
                 let formats: Vec<&str> =
                     upstream.entries.iter().map(|e| e.format.as_str()).collect();
                 let formats = match formats.as_slice() {
@@ -216,7 +244,7 @@ fn default_serve(upstreams: &[Upstream], formats: &[KnownFormat]) -> Vec<String>
     let spoken = |kind: Kind| entries().any(|e| e.kind == kind);
     let media = formats
         .iter()
-        .filter(|f| Kind::MEDIA.contains(&f.kind) && f.servable() && spoken(f.kind));
+        .filter(|f| kind::MEDIA.contains(&f.kind) && f.servable() && spoken(f.kind));
     let sessions = entries().filter(|e| !e.kind.translates && e.format != PASSTHROUGH);
     let names = media.map(|f| &f.name).chain(sessions.map(|e| &e.format));
     for name in names {

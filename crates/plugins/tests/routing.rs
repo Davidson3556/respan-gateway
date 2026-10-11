@@ -1,4 +1,4 @@
-//! The routing module's promises, against a mock provider.
+//! The routing module's and the router's promises, against a mock provider.
 
 use respan_gateway_conversation::{Block, Finish, Input, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,8 +21,8 @@ use respan_gateway_http::http::{
     header::{AUTHORIZATION, RETRY_AFTER},
 };
 use respan_gateway_http::{Body, Completion, HttpTransport, error_code, retryable};
-use respan_gateway_plugins::ModelRouter;
 use respan_gateway_plugins::routing::{Attempt, Backoff, Role, Until, first_success, race};
+use respan_gateway_plugins::{Kind, Model, Routes, Routing, Speaks};
 /// An end by its message, for comparing: `Fault` has no equality.
 fn ended(end: Result<(), Fault>) -> Result<(), String> {
     end.map_err(|f| f.message().to_owned())
@@ -422,11 +422,26 @@ fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
 }
 
-fn model(input: &Input) -> Option<&str> {
-    input.model.as_deref()
-}
+const CHAT: Kind = Kind {
+    label: "chat",
+    translates: true,
+};
 
-fn model_gateway(mock: &Fakes, router: ModelRouter<Input>) -> Gateway {
+/// Providers `a` and `b` of OpenAI Chat, `b` the target, and `routes`.
+fn model_gateway(mock: &Fakes, routes: Routes) -> Gateway {
+    let speaks = |internal: &str| {
+        vec![Speaks {
+            format: "openai-chat".into(),
+            kind: CHAT,
+            internal: internal.into(),
+        }]
+    };
+    let routes = routes.provider("a", speaks("a")).provider("b", speaks("b"));
+    let routing = Routing::new(Arc::new(routes.target("b"))).format(
+        "openai-chat",
+        CHAT,
+        Model::of(Input::model, Input::set_model),
+    );
     Gateway::new()
         .client::<Input, _, _>(OpenAiChat)
         .expect("chat client")
@@ -442,9 +457,7 @@ fn model_gateway(mock: &Fakes, router: ModelRouter<Input>) -> Gateway {
             respan_gateway_http::connect(mock.at(B), LIMIT),
         )
         .expect("b provider")
-        .plugin(router)
-        .target("b")
-        .expect("default target")
+        .plugin(routing)
 }
 
 async fn routed_post(gw: &Gateway, body: &'static str) -> (StatusCode, String) {
@@ -456,18 +469,18 @@ async fn routed_post(gw: &Gateway, body: &'static str) -> (StatusCode, String) {
 }
 
 #[tokio::test]
-async fn model_router_uses_first_registered_matching_prefix_not_the_longest() {
+async fn routing_takes_the_longest_claim() {
     const ASK: &str = r#"{"model":"gpt-pro","messages":[{"role":"user","content":"hi"}]}"#;
     for (first, first_target, second, second_target, selected) in [
-        ("gpt", "a", "gpt-pro", "b", A),
-        ("gpt-pro", "b", "gpt", "a", B),
+        ("gpt", "a", "gpt-pro", "b", B),
+        ("gpt-pro", "a", "gpt", "b", A),
     ] {
         let mock = Fakes::start().await;
         mock.reply(selected, Answer::text("chosen provider"));
-        let router = ModelRouter::new(model)
-            .route(first, first_target)
-            .route(second, second_target);
-        let gw = model_gateway(&mock, router);
+        let routes = Routes::new()
+            .claim(first, first_target)
+            .claim(second, second_target);
+        let gw = model_gateway(&mock, routes);
         let (status, answer) = routed_post(&gw, ASK).await;
         assert_eq!(status, StatusCode::OK);
         assert!(answer.contains("chosen provider"), "{answer}");
@@ -479,17 +492,30 @@ async fn model_router_uses_first_registered_matching_prefix_not_the_longest() {
 }
 
 #[tokio::test]
-async fn model_router_keeps_default_for_unmatched_and_missing_models() {
+async fn routing_sends_a_named_provider_its_model_alone() {
+    const ASK: &str = r#"{"model":"a/gpt-4o","messages":[{"role":"user","content":"hi"}]}"#;
+    let mock = Fakes::start().await;
+    mock.reply(A, Answer::text("named provider"));
+    let gw = model_gateway(&mock, Routes::new());
+    let (status, answer) = routed_post(&gw, ASK).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(answer.contains("named provider"), "{answer}");
+    let sent = mock.a.requests();
+    assert_eq!(sent[0].body["model"], "gpt-4o");
+}
+
+#[tokio::test]
+async fn routing_sends_unmatched_and_missing_models_to_the_target() {
     const UNMATCHED: &str = r#"{"model":"other","messages":[{"role":"user","content":"hi"}]}"#;
     const MISSING: &str = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
     let mock = Fakes::start().await;
     mock.reply(B, Answer::text("unmatched default"));
-    let gw = model_gateway(&mock, ModelRouter::new(model).route("gpt", "a"));
+    let gw = model_gateway(&mock, Routes::new().claim("gpt", "a"));
     let (status, answer) = routed_post(&gw, UNMATCHED).await;
     assert_eq!(status, StatusCode::OK);
     assert!(answer.contains("unmatched default"), "{answer}");
-    // The pinned fake rejects the missing model, but only the default target
-    // receives it: the router does not invent a model or choose a route.
+    // The pinned fake rejects the missing model, but only the target
+    // receives it: routing does not invent a model.
     let (resp, outcome) = serve(&gw, post("/v1/chat/completions", MISSING)).await;
     let _ = read_whole(resp).await;
     assert!(outcome.await.is_err());
@@ -497,10 +523,9 @@ async fn model_router_keeps_default_for_unmatched_and_missing_models() {
 }
 
 #[tokio::test]
-async fn model_router_leaves_unreadable_input_on_its_original_target() {
+async fn routing_sends_nothing_of_unreadable_input() {
     let mock = Fakes::start().await;
-    mock.reply(B, Answer::text("original target"));
-    let gw = model_gateway(&mock, ModelRouter::new(model).route("gpt", "a"));
+    let gw = model_gateway(&mock, Routes::new().claim("gpt", "a"));
     let (resp, outcome) = serve(&gw, post("/v1/chat/completions", "not-json")).await;
     let _ = read_whole(resp).await;
     let _ = outcome.await;
@@ -508,7 +533,20 @@ async fn model_router_leaves_unreadable_input_on_its_original_target() {
 }
 
 #[tokio::test]
-async fn model_router_passes_other_kinds_without_changing_their_target() {
+async fn routing_leaves_other_formats_on_their_target() {
+    let routes = Routes::new().provider(
+        "a",
+        vec![Speaks {
+            format: "openai-chat".into(),
+            kind: CHAT,
+            internal: "a".into(),
+        }],
+    );
+    let routing = Routing::new(Arc::new(routes)).format(
+        "openai-chat",
+        CHAT,
+        Model::of(Input::model, Input::set_model),
+    );
     let gw = Gateway::new()
         .client::<Input, _, _>(OpenAiChat)
         .expect("chat client")
@@ -523,7 +561,7 @@ async fn model_router_passes_other_kinds_without_changing_their_target() {
             ),
         )
         .expect("opaque provider")
-        .plugin(ModelRouter::new(model).route("", "a"))
+        .plugin(routing)
         .target("raw")
         .expect("default target");
     let (resp, outcome) = serve(&gw, post("/other", "opaque input")).await;
