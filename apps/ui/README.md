@@ -20,8 +20,8 @@ somewhere else.
 
 The mock (`mock/server.mjs`, no dependencies) serves the admin API with
 generated traffic over the `/ui/api/events` stream, and fake chat (streamed),
-image, transcription and speech endpoints; video answers 404 to show the
-"no provider" state. `MOCK_KEY=secret pnpm mock` requires a key, to exercise
+image, transcription, speech, embeddings and video-job endpoints (a video
+prompt containing "fail" makes its job fail). `MOCK_KEY=secret pnpm mock` requires a key, to exercise
 the key prompt; `PORT=8081` and `MOCK_QUIET=1` (no generated traffic) also
 apply.
 

@@ -3,15 +3,19 @@
 # provider of each vendor whose key is in the environment.
 
 # Without client keys (below), anyone who can reach this address spends
-# your keys. Keep it local: without keys the gateway also refuses browsers'
-# cross-origin requests and, unless it listens on every address, any Host
-# but localhost, 127.0.0.1, [::1], this address or respan-gateway. host:port
-# (a name is resolved), :port or a bare port (on 127.0.0.1).
+# your keys, so the gateway REFUSES TO START on a non-loopback address
+# (0.0.0.0, a LAN IP) without them; set `client_keys` first
+# (`respan-gateway init --client-key` writes one). Without keys it also
+# refuses browsers' cross-origin requests and any Host but localhost,
+# 127.0.0.1, [::1], this address or respan-gateway. host:port (a name is
+# resolved), :port or a bare port (on 127.0.0.1). `--listen`, RESPAN_LISTEN
+# and then the PORT variable (on 0.0.0.0) override this.
 listen: 127.0.0.1:8080
 
 # Client keys, literal or env:NAME. When set, every request needs one, as
 # `Authorization: Bearer <key>`, `x-api-key` or `x-goog-api-key`; the
 # gateway takes it off, and no provider sees it. The web UI asks for one too.
+# RESPAN_CLIENT_KEYS (comma separated) adds more from the environment.
 # client_keys: [env:GATEWAY_KEY]
 
 # How each finished request is printed to stderr, with a timestamp and a
@@ -27,13 +31,16 @@ listen: 127.0.0.1:8080
 # vendors' JSON APIs take.
 # body_limit: 32MiB
 
+# The file is read once at start: change it, restart. (No hot reload.)
+#
 # Providers, by name, in order: the first serving a kind (chat, realtime,
 # image, transcription, speech, embedding, video, ...) is that kind's default. A vendor
 # preset brings the vendor's base URL, its key from env:<VENDOR>_API_KEY,
-# every format of the vendor this binary speaks (OpenAI: chat, realtime,
-# Responses over WebSocket, images, transcriptions, speech, videos and
-# embeddings; Gemini: chat, Live, Imagen as openai-images, Veo as gemini-veo
-# and embeddings; Groq: chat, transcriptions and speech; xAI: chat and
+# every format of the vendor this binary speaks (OpenAI: chat, Responses
+# over HTTP (openai-responses) and WebSocket, realtime, images,
+# transcriptions, speech, videos and embeddings; Gemini: chat through its
+# OpenAI-compatible endpoint, generateContent (gemini-generate), Live,
+# Imagen as openai-images, Veo as gemini-veo and embeddings; Groq: chat, transcriptions and speech; xAI: chat and
 # images; Together: chat, images and embeddings; Mistral, Fireworks and
 # Ollama: chat and embeddings), and
 # its model names: gpt-*, o3-*, dall-e*, whisper-1, tts-*, sora* ... go to
@@ -61,7 +68,7 @@ providers:
 # A provider spelled out: its format (or a list of them), the base URL its
 # own SDK takes (OpenAI's holds the version, Anthropic's does not) and its
 # key, sent as each format expects (Bearer; x-api-key for
-# anthropic-messages; x-goog-api-key for gemini-live and gemini-veo), or any
+# anthropic-messages; x-goog-api-key for gemini-generate, gemini-live and gemini-veo), or any
 # one header with `auth`. A vendor's quirks, such as Groq's usage under
 # `x_groq` or vLLM's `reasoning_content`, come with `vendor:`; a provider of
 # a format alone has none. A provider with no key (no `key`, no `auth`, and
@@ -72,6 +79,14 @@ providers:
 #     formats: openai-chat
 #     base_url: https://llm.example.com/v1
 #     auth: { type: bearer, key: env:COMPATIBLE_KEY }
+#   responses:                   # OpenAI Responses over HTTP: a chat format
+#     formats: openai-responses  # other chat providers are translated to and from
+#     base_url: https://api.openai.com/v1
+#     key: env:OPENAI_API_KEY
+#   google:                      # Gemini's own API (generateContent and
+#     formats: gemini-generate   # streamGenerateContent, the model in the path)
+#     base_url: https://generativelanguage.googleapis.com/v1beta
+#     key: env:GEMINI_API_KEY    # sent as x-goog-api-key
 #   vllm:
 #     vendor: vllm
 #     base_url: http://gpu-box:8000/v1
@@ -130,11 +145,12 @@ providers:
 #
 # The formats clients speak, tried in order; each recognises its own
 # requests: openai-chat a POST to .../chat/completions, anthropic-messages a
-# POST to .../v1/messages, openai-responses a POST to .../responses.
-# Anything else is a 404. Unset: openai-chat, anthropic-messages, the other
-# chat formats, the OpenAI format of each media kind some provider speaks,
+# POST to .../v1/messages, openai-responses a POST to .../responses,
+# gemini-generate a POST to .../models/{model}:generateContent or
+# :streamGenerateContent. Anything else is a 404. Unset: all four chat
+# formats, the OpenAI format of each media kind some provider speaks,
 # and every session format some provider speaks.
-# formats: [openai-chat, anthropic-messages]
+# formats: [openai-chat, anthropic-messages, openai-responses, gemini-generate]
 
 # Compiled-in plugins, run on every request in the order listed; a plugin
 # is the one field that configures it. `models` routes model names to
@@ -148,3 +164,7 @@ providers:
 # The default provider of each kind it serves, for requests nothing else
 # routes; unset, the first provider serving the kind.
 # default: openai
+
+# Not configurable here: the in-memory request log keeps the last 1000
+# requests, shutdown waits up to 30 s for open requests, and a session's
+# WebSocket message may be 16 MiB. The MCP kind is not served by the binary.

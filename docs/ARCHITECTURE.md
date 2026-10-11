@@ -50,11 +50,11 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes | Core |
 | `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the passthrough format; optional Reqwest transport | Core |
 | `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`) | Core, HTTP |
-| `crates/formats/conversation-http/` | Format | The HTTP binding (`Schema`), OpenAI Chat and Anthropic Messages | Conversation, HTTP |
+| `crates/formats/conversation-http/` | Format | The HTTP binding (`Schema`) and four chat formats: OpenAI Chat, Anthropic Messages, Gemini `generateContent` and OpenAI Responses; reasoning controls map between them | Conversation, HTTP |
 | `crates/formats/media-http/` | Format | OpenAI's media endpoints as compatible vendors serve them, and Veo's as a provider | Media, conversation-http, HTTP |
 | `crates/formats/realtime-ws/` | Format | OpenAI Realtime and Gemini Live, translated both ways (audio converted, the other's scaffolding emulated), and Responses over WebSocket, sharing their session's handshake | Realtime, HTTP, WS |
 | `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
-| `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins | Core, the conversation, media and realtime formats, and the conversation and realtime kinds (for quirk plugins) |
+| `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins (such as Groq's usage, DeepSeek's `reasoning_content`, Gemini's `thought_signature` placeholder) | Core, the conversation, media and realtime formats, and the conversation and realtime kinds (for quirk plugins) |
 | `crates/serve/` | Hosting | One Axum router for a gateway: plain HTTP and WebSocket upgrades, body and session limits, graceful stop | Core, HTTP, WS |
 | `crates/plugins/` | Plugins | The router (`Routes`, `Routing`), attempts, fallback, races and backoff | Core |
 | `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | The kinds, wires, formats, providers and plugins above, except MCP |
@@ -89,6 +89,9 @@ flowchart LR
     providers --> gateway
     plugins --> gateway
     serve --> gateway
+    conversation-http --> gateway
+    media-http --> gateway
+    realtime-ws --> gateway
 ```
 
 Core is a dependency of every crate, and `conversation` also of
@@ -116,6 +119,15 @@ way out, `<provider>~<id>`, unwrapped on the way in. The media crate's
 `/healthz`, `/v1/models` and the web UI's admin API before the formats, and
 client keys and the request log around them. Hosts reuse it as the
 `respan_gateway` library: `App::new(config)` gives an `axum::Router`.
+
+## Kinds and routing vocabulary
+
+A **kind** is a pair of event types; the router labels each format with the
+kind it routes within. `chat` is the conversation kind (all four chat
+formats translate within it); `image`, `transcription`, `speech`,
+`embedding` and `video` are the media kinds; `realtime` is the realtime
+kind; `responses` is Responses over WebSocket, a routing kind of its own
+that relays and does not translate.
 
 ## Routing
 
@@ -211,3 +223,59 @@ The independent `validation/` Cargo package is excluded from the workspace. It
 owns live-provider and external-tool checks; all workspace tests run locally.
 
 See [testing](TESTING.md) for commands and external requirements.
+
+## Glossary
+
+A client sends a request, plugins look at it, the gateway sends it on to a
+provider, and the response streams back through the plugins. The kernel
+routes events and never sees a byte, a head or a key: the client edge and
+the provider edge own them (see [One shape at both edges](#one-shape-at-both-edges)).
+
+- **Gateway**: what you build and hand requests to: providers, client
+  formats, plugins and a default target, each registered by value.
+- **Plugin**: four hooks, `on_client` and `on_client_end` once per
+  request, `on_provider` and `on_provider_end` once per call, in
+  registration order. `on_client` passes (`Ok(None)`), replies or refuses.
+- **Filter**: edits a request's inputs or a response's outputs as they
+  stream; its type says which. For work that waits, such as a remote check
+  or a deadline, a plugin wraps the stream in its own (`cx.wrap`).
+- **Format<T, R, W>**: one protocol's binding to owned I/O `T`, receiving
+  `R` and sending `W`. Its `bind(io)` returns a `Connection<R, W>`: an
+  incoming opening future and an outgoing `EventSink<W>`. An optional
+  synchronous preparation step configures the sink from the stream's shape
+  or a finite input before delivery. The kernel pumps events with
+  backpressure, then closes the sink. Formats of one kind translate through
+  typed events; calls always encode typed input unless an application
+  explicitly supplies raw HTTP data. HTTP formats implement the same
+  contract directly, with mirrored `bind`s that each take a decoder, an
+  encoder and an error writer (client) or reader (provider).
+- **Call**: what the gateway sends a provider on a request's behalf
+  (`cx.call`): the request's inputs as filters left them, or one input of
+  its own (`with_input`). HTTP plugins opt into raw requests with
+  `SendRaw(Wire)`, choose heads with `ProviderHead` and `ClientHead`, and
+  opt into raw errors with `RawReply`. Credentials are separate and must be
+  copied explicitly. The binary copies a client's credentials to a keyless
+  provider of the client's own format, and its `proxy` mode relays every
+  request raw with them.
+- **Response**: what a call, or `Response::stream`, gives back: read
+  (`outputs`), held (`buffer_until`, `until_end`) or sent. Buffered events,
+  errors and call ownership remain available for replay even when
+  inspection fails.
+- **Fault**: the one error: a code that says whose fault it is, a message,
+  a retry and typed hints such as HTTP's `Status`.
+
+HTTP formats prepare requests and event sinks synchronously, then let core
+drive delivery; an `Encoder<T>` writes values and terminal framing and does
+not choose heads, open responses or act as a transport. Core exposes
+contracts and shared types, not production `Plugin` implementations, and
+depends on no protocol, provider, plugin or adapter. Billing policies and
+priced tallies live in private
+[example support](../examples/README.md#billing-policies); the conversation
+kind's typed `Usage` is the shared fact, and applications own prices,
+accounts and stores.
+
+## Not in the binary
+
+The config is read once (no hot reload, no admin writes). The `mcp` kind
+and `mcp-http` formats are libraries the binary does not compose yet. The
+request log keeps the last 1000 requests; graceful shutdown waits 30 s.

@@ -46,3 +46,25 @@ vendor, the first in `ALL` that speaks it, does.
 <!-- /table -->
 
 The table is written from `ALL`: `BLESS=1 cargo test -p respan-gateway-providers --test registry`.
+
+## Base URLs
+
+A provider's `base_url` is the one its own SDK takes. OpenAI-compatible ones
+include the version: `https://api.openai.com/v1`,
+`https://api.groq.com/openai/v1`, `https://openrouter.ai/api/v1`, and
+Gemini's OpenAI-compatible endpoint
+`https://generativelanguage.googleapis.com/v1beta/openai` (all
+`openai-chat`). Anthropic's does not: `https://api.anthropic.com`. The media
+formats (`openai-images`, `openai-transcriptions`, `openai-speech`,
+`openai-videos`, `openai-embeddings`) and `openai-responses` take the same
+base URL as `openai-chat`. Gemini's own formats, `gemini-generate`
+(`generateContent` and `streamGenerateContent`, the model in the path) and
+`gemini-veo`, take `https://generativelanguage.googleapis.com/v1beta` with
+the key in `x-goog-api-key`. Session formats take a `wss://` URL as their
+SDK does: `wss://api.openai.com/v1` for `openai-realtime` and
+`responses-ws`, `wss://generativelanguage.googleapis.com` for `gemini-live`.
+
+Without a config file, `RESPAN_<VENDOR>_BASE_URL` moves a vendor's base URL
+(`OLLAMA_HOST` for `ollama`); with one, only the file's `base_url` counts
+(`respan-gateway init` writes the moved URL into it). `azure` and `vllm`
+need a `base_url`.

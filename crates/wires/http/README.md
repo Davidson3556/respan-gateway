@@ -210,3 +210,14 @@ makes of its whole body, read up to the limit, if and only if it is no success; 
 its head, and a fault its body says later fails it. Parsing helpers preserve
 semantic decoder failures separately from broken wire bodies and avoid
 unbounded prefetch across wire frames.
+
+## Passthrough paths
+
+The `passthrough` format, served last, relays every request no format before
+it recognises to a vendor, unread, except a path readers could read two
+ways. It takes a path only if, after one percent-decode, every byte is an
+ASCII letter or digit or one of `/ - _ . ~ : @ + = , !`, and no segment is
+`.`, `..` or ends in `.`; anything else (non-ASCII, space, `?`, `#`, `%`,
+`;`, `\`, control characters) is a 404. It is an allowlist, so a character
+some reader treats specially is refused until someone shows a vendor needs
+it.
