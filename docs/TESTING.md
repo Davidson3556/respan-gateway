@@ -25,7 +25,7 @@ processes or several components.
 | Kernel contracts | Hook ordering, ownership, cancellation, buffering, panic handling and progress | `crates/core/tests/`, core unit tests |
 | Shared data contracts | Input assembly, text access and message representation | Input unit tests |
 | HTTP behavior | Encoding, framing, credentials, headers, retry hints, body handling and stream completion | `crates/wires/http/tests/`, HTTP unit tests |
-| Provider compatibility | Native relay, OpenAI/Anthropic translation, tools, errors and usage | `crates/formats/conversation-http/tests/{relay,translate,round_trips}`, format unit tests; each vendor's quirks in `crates/providers/tests/<vendor>.rs` |
+| Provider compatibility | Native relay, OpenAI/Anthropic translation, tools, errors and usage; realtime relay and OpenAI Realtime/Gemini Live translation | `crates/formats/conversation-http/tests/{relay,translate,round_trips}`, `crates/formats/realtime-ws/tests/{relay,translate,fakes}`, format unit tests; each vendor's quirks in `crates/providers/tests/<vendor>.rs` |
 | Hosting and WebSocket sessions | HTTP ingress, upgrade, subprotocols, session events, backpressure, concurrency and close/recovery behavior | `crates/wires/ws/tests/`, `crates/wires/http/tests/axum.rs`, WS unit tests |
 | MCP behavior | JSON-RPC messages, session state, streamable HTTP, stdio and reference-server interoperability | `crates/formats/mcp-http/tests/`, MCP unit tests |
 | Routing policy | Attempts, retries, fallback, races and explicit retry classification | `crates/plugins/tests/routing.rs`, routing unit tests |
@@ -42,19 +42,22 @@ live tests establish interoperability with the selected remote service.
 
 ### Execution requirements
 
-The main workspace contains **1,357 local test instances** and one opt-in local
+The main workspace contains **1,624 local test instances** and one opt-in local
 benchmark, excluding doctests. Even `--workspace --all-targets --all-features`
 does not include the separate [`validation/`](../validation/README.md) package.
 
 | Run category | Count | Location and requirements |
 | --- | ---: | --- |
-| Default local tests | 1,357 | Main workspace: in-process fixtures, localhost HTTP/WebSocket servers, local child processes and temporary storage; no provider credentials or external services |
+| Default local tests | 1,624 | Main workspace: in-process fixtures, localhost HTTP/WebSocket servers, local child processes and temporary storage; no provider credentials or external services |
 | Timing benchmark | 1 | Main workspace: explicitly run optimized in-process relay benchmark |
 | Live provider tests | 9 | Separate validation package: provider credentials and network access |
 | External-tool tests | 3 | Separate validation package: 2 MCP tests using Node/npx and network access; 1 PDF extraction test using Poppler |
 
 The local suite uses `mockllm` for scripted OpenAI, Anthropic, Realtime and
-Gemini Live behavior. These mocks run locally; they do not call real providers.
+Gemini Live behavior, and strict in-code fakes of OpenAI Realtime and Gemini
+Live (`tests/support/realtime/`: voice detection, barge-in, G.711,
+transcripts, and what each API rejects) for translated sessions. These mocks
+run locally; they do not call real providers.
 Other suites use smaller in-process transports, handcrafted socket fixtures and
 scripted stdio children. Standard local utilities such as `sh`, `sleep` and
 `kill` are needed by process tests. Building from a cold cache may fetch Cargo
@@ -105,8 +108,8 @@ cargo test -p respan-gateway-examples --test text_tool_json
 ## Protocol coverage
 
 The shipped binary is tested against mockllm over real HTTP. WebSocket
-tests also use mockllm's OpenAI Realtime and Gemini Live servers over real
-sockets. MCP uses scripted HTTP responses, real stdio children, and an
+tests also use mockllm's OpenAI Realtime and Gemini Live servers, and the
+strict realtime fakes, over real sockets. MCP uses scripted HTTP responses, real stdio children, and an
 LLM tool cycle through the MCP example.
 
 Coverage includes:

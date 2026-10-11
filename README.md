@@ -6,7 +6,8 @@ everything else built as modules on one public API.
 
 > **Status: pre-alpha.** Relays OpenAI and Anthropic chat traffic and
 > translates text and tools between them; serves images, transcription,
-> speech, embeddings and video jobs through OpenAI's media endpoints, Veo included.
+> speech, embeddings and video jobs through OpenAI's media endpoints, Veo included;
+> translates realtime voice sessions between OpenAI Realtime and Gemini Live.
 > APIs will change. The core is now treated as half-frozen, like a release candidate:
 > its contracts are stable by default while the surrounding APIs continue to evolve.
 
@@ -153,8 +154,12 @@ Realtime), `responses-ws` (OpenAI Responses over WebSocket) or
 `gemini-live` (Gemini Live) has a `wss://` base URL, as its SDK takes it:
 `wss://api.openai.com/v1`, `wss://generativelanguage.googleapis.com` (with
 `auth: { type: header, name: x-goog-api-key, key: ... }`). Serving one makes
-each WebSocket upgrade a session, relayed event by event to the one
-provider of its format ([vendors](crates/providers/README.md)).
+each WebSocket upgrade a session, relayed event by event. A realtime
+session goes to the provider of the model at its URL's `?model=` (a Gemini
+Live client's too, by the gateway's convention), translated if that
+provider speaks the other API
+([realtime formats](crates/formats/realtime-ws/README.md)); a Responses one
+to the one provider of its format.
 
 ## Glossary
 

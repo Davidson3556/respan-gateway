@@ -17,6 +17,7 @@ const TESTS: &[(&str, &str)] = &[
     ("deepseek", include_str!("deepseek.rs")),
     ("gemini", include_str!("gemini.rs")),
     ("groq", include_str!("groq.rs")),
+    ("openai", include_str!("openai.rs")),
     ("openrouter", include_str!("openrouter.rs")),
     ("vllm", include_str!("vllm.rs")),
 ];

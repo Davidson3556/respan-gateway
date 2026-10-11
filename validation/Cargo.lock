@@ -1404,6 +1404,7 @@ dependencies = [
  "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-media-http",
+ "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
  "serde_json",
 ]

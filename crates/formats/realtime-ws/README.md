@@ -90,5 +90,13 @@ A refused input is `bad_request`, closing the client 1008; a refused
 output `upstream`. Another format's events and fields a provider sends are
 dropped at the client.
 
+A session's first input arrives only once it is routed, so routing reads
+its model from the handshake: `requested_model(&Wire)` is `?model=`,
+OpenAI's and, by the gateway's convention, a Gemini client's. The model
+routing chose goes in the call as `SessionModel`, which OpenAI's provider
+dials (else the client's `?model=`; with neither the session is refused),
+and into the opening `Session` by `realtime::set_model`, which Gemini's
+setup names. Each provider writes its own query, never the client's.
+
 Used by: the [binary](../../../apps/gateway/src/main.rs), and the
 [realtime examples](../../../examples/realtime).

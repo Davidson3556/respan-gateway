@@ -45,6 +45,7 @@ and do not need credentials or make paid requests.
 | Realtime | [realtime](realtime/realtime.rs) | Metered Realtime text/audio, cancellation and output caps (7). |
 | | [gemini_live](realtime/gemini_live.rs) | Gemini Live text/audio turns, tools and shutdown (7). **Live credentials to run.** |
 | | [responses_ws](realtime/responses_ws.rs) | Responses WebSocket lanes, continuation and shutdown (7). **Live credentials to run.** |
+| | [tool_guard](realtime/tool_guard.rs) | A tool allow-list for any realtime session, here OpenAI Realtime clients on Gemini Live (1). **Live credentials to run.** |
 
 ## Billing policies
 

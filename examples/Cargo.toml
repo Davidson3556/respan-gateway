@@ -149,6 +149,11 @@ path = "realtime/responses_ws.rs"
 test = true
 
 [[example]]
+name = "tool_guard"
+path = "realtime/tool_guard.rs"
+test = true
+
+[[example]]
 name = "batch_split"
 path = "routing/batch_split.rs"
 test = true

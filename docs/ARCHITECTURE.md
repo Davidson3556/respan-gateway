@@ -49,7 +49,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`); optional Axum hosting | Core, HTTP |
 | `crates/formats/conversation-http/` | Format | The HTTP binding (`Schema`), OpenAI Chat and Anthropic Messages | Conversation, HTTP |
 | `crates/formats/media-http/` | Format | OpenAI's media endpoints as compatible vendors serve them, and Veo's as a provider | Media, conversation-http, HTTP |
-| `crates/formats/realtime-ws/` | Format | OpenAI Realtime, Gemini Live, and Responses over WebSocket, sharing their session's handshake | Realtime, HTTP, WS |
+| `crates/formats/realtime-ws/` | Format | OpenAI Realtime and Gemini Live, translated both ways (audio converted, the other's scaffolding emulated), and Responses over WebSocket, sharing their session's handshake | Realtime, HTTP, WS |
 | `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
 | `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins | Core, the formats |
 | `crates/plugins/` | Plugins | The router (`Routes`, `Routing`), attempts, fallback, races and backoff | Core |
@@ -97,7 +97,8 @@ provider per format, runs each vendor's plugin on its providers' calls alone,
 registered last so every other plugin sees the kind's events, and routes
 with the plugins crate's router (see [Routing](#routing)). Each media operation
 (`image`, `transcription`, `speech`, `embedding`, `video`) is a kind that translates
-within itself. A video job's follow-up names no model, so a second plugin
+within itself, and so is `realtime`; Responses over WebSocket is a routing
+kind of its own, `responses`, which does not. A video job's follow-up names no model, so a second plugin
 sends it to the provider that made the job, by its id's spelling (`video_`,
 `veo_`); providers sharing a spelling get ids wrapped in their name on the
 way out, `<provider>~<id>`, unwrapped on the way in. The media crate's
@@ -114,7 +115,9 @@ per request). Routing is a plugin, `Routing` in `crates/plugins`, which
 targets a request by `Routes`. Each kind's `Input` owns its model
 (`model()`, `set_model()`); the router is given, per format, its `Kind`
 (a label, and whether its formats translate) and a `Model` built from those
-methods.
+methods (`Model::of`), or from any read and write (`Model::new`): a
+realtime session is routed before its first input, so its model is read
+from its handshake's `?model=`.
 
 A configured provider is one core provider per format it speaks (`openai`,
 `openai:openai-realtime`, ...), each added to `Routes` as what it `Speaks`.

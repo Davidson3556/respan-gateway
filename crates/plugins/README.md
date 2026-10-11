@@ -8,8 +8,9 @@ kind, it picks the one its model names as `provider/model` (sent as
 claim's, else the target if it serves the kind, else the first that does;
 then that provider's core provider of the client's format, else, for a
 `Kind` that translates, its first of the kind. Each format is given its
-`Kind` and a `Model`, such as `Model::of(Input::model, Input::set_model)`;
-a request of another format keeps its target.
+`Kind` and a `Model`, such as `Model::of(Input::model, Input::set_model)`,
+or `Model::new(read, write)` for a model named elsewhere, such as a
+session's handshake; a request of another format keeps its target.
 
 ```rust
 use std::sync::Arc;

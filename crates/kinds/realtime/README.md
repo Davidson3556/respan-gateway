@@ -18,7 +18,14 @@ event each. Its formats, over WebSocket, are
 
 What the kind has no form for stays as its format has it: `NativeFields` on
 an event, or a whole `Input::Native` / `Output::Native` event, sent only in
-that format. Messages, tools and token usage are the conversation kind's.
+that format; crossing to another, it is dropped where it cannot change the
+answer and refused where it can. Messages, tools and token usage are the
+conversation kind's.
+
+Formats translate through these events, OpenAI Realtime and Gemini Live
+both ways, so a plugin reads any session the same: it meters `Usage` and
+`Audio::duration()`, vets `Session.tools` and `ToolCall`s, or pins the
+`Session` (`set_model(m)` is the filter routing asks for a model with).
 
 The crate is the kind's types alone, depending on `respan-gateway-core`,
 `respan-gateway-conversation`, `bytes` and `serde_json`.
