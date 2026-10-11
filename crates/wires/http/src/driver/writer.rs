@@ -1,6 +1,7 @@
 //! A bounded encoded-byte handoff. Events never enter this bridge: the HTTP
-//! sinks encode each item themselves, and transports pull the resulting frame.
+//! sinks encode each item themselves, and transports pull the resulting frames.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -14,7 +15,7 @@ use crate::{Completion, Frames};
 
 #[derive(Default)]
 struct State {
-    frame: Option<Bytes>,
+    frames: VecDeque<Bytes>,
     abort: Option<Fault>,
     end: Option<Result<(), Fault>>,
     delivered: Option<Result<(), Fault>>,
@@ -37,7 +38,7 @@ impl State {
     }
 
     fn drained(&mut self) {
-        if self.frame.is_none()
+        if self.frames.is_empty()
             && self.abort.is_none()
             && let Some(end) = self.end.clone()
         {
@@ -46,8 +47,9 @@ impl State {
     }
 }
 
-/// Exactly one outstanding byte frame, plus a terminal body error. The latter
-/// follows any error framing rather than replacing it with clean EOF.
+/// The byte frames of one item, taken only once its reader drained the
+/// last item's, plus a terminal body error. The latter follows any error
+/// framing rather than replacing it with clean EOF.
 pub(crate) struct Writer(Arc<Mutex<State>>);
 
 impl Writer {
@@ -72,7 +74,9 @@ impl Writer {
         if let Some(Err(fault)) = &state.delivered {
             return Poll::Ready(Err(fault.clone()));
         }
-        if state.frame.is_none() && state.abort.is_none() && (!requested || state.reader.is_some())
+        if state.frames.is_empty()
+            && state.abort.is_none()
+            && (!requested || state.reader.is_some())
         {
             Poll::Ready(Ok(()))
         } else {
@@ -83,8 +87,7 @@ impl Writer {
 
     pub(crate) fn send(&self, bytes: Bytes) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        debug_assert!(state.frame.is_none());
-        state.frame = Some(bytes);
+        state.frames.push_back(bytes);
         if let Some(waker) = state.reader.take() {
             waker.wake();
         }
@@ -133,10 +136,12 @@ impl Stream for Pipe {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(bytes) = state.frame.take() {
-            state.drained();
-            if let Some(waker) = state.writer.take() {
-                waker.wake();
+        if let Some(bytes) = state.frames.pop_front() {
+            if state.frames.is_empty() {
+                state.drained();
+                if let Some(waker) = state.writer.take() {
+                    waker.wake();
+                }
             }
             return Poll::Ready(Some(Ok(bytes)));
         }

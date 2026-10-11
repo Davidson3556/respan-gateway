@@ -162,6 +162,32 @@ where
     }
 }
 
+/// Encode each value through an ordinary function as zero or more messages
+/// ([`Encoder::encode_messages`](crate::Encoder::encode_messages)), each a
+/// frame of a live body; a body that is not live has them one after another.
+pub fn each_message<T: 'static, F>(write: F) -> Box<dyn crate::Encoder<T>>
+where
+    F: FnMut(&T, &mut Vec<Bytes>) -> Result<(), Fault> + Send + 'static,
+{
+    Box::new(EachMessage(write))
+}
+struct EachMessage<F>(F);
+impl<T: 'static, F> crate::Encoder<T> for EachMessage<F>
+where
+    F: FnMut(&T, &mut Vec<Bytes>) -> Result<(), Fault> + Send + 'static,
+{
+    fn encode(&mut self, value: &T, out: &mut bytes::BytesMut) -> Result<(), Fault> {
+        let mut messages = Vec::new();
+        (self.0)(value, &mut messages)?;
+        messages.iter().for_each(|m| out.extend_from_slice(m));
+        Ok(())
+    }
+    fn encode_messages(&mut self, value: &T, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+        let written = out.len();
+        (self.0)(value, out).inspect_err(|_| out.truncate(written))
+    }
+}
+
 /// The most frames that decode to nothing one poll of [`parse`] reads before
 /// it yields: what tokio's cooperative budget allows one poll of a task
 /// (128), so a body always ready, of comments alone say, cannot hold its

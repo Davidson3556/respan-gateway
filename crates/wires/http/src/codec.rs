@@ -10,6 +10,15 @@ use respan_gateway_core::{EventStream, Fault};
 pub trait Encoder<T>: Send + 'static {
     /// Encode one value. Partial output is discarded on failure.
     fn encode(&mut self, value: &T, out: &mut BytesMut) -> Result<(), Fault>;
+    /// Encode one value as zero or more messages, each a frame of a live
+    /// body; by default, the one message [`encode`](Self::encode) writes.
+    /// Partial output is discarded on failure.
+    fn encode_messages(&mut self, value: &T, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+        let mut bytes = BytesMut::new();
+        self.encode(value, &mut bytes)?;
+        out.push(bytes.freeze());
+        Ok(())
+    }
     /// Finish success or failure framing. Delivery still reports a source fault
     /// even when this writes its protocol representation successfully.
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {

@@ -502,23 +502,28 @@ impl<T: 'static> Sink<Result<T, Fault>> for Client<T> {
         if self.ended {
             return Ok(());
         }
-        let mut out = BytesMut::new();
+        let mut out = Vec::new();
         let encoded = match item {
             Ok(value) => std::panic::catch_unwind(AssertUnwindSafe(|| {
                 self.encoder
                     .as_mut()
                     .expect("response encoder")
-                    .encode(&value, &mut out)
+                    .encode_messages(&value, &mut out)
             }))
             .unwrap_or_else(|_| Err(Fault::internal(PANICKED))),
             Err(fault) => Err(fault),
         };
         match encoded {
-            Ok(()) if self.reply.live || !out.is_empty() => {
-                self.writer.send(out.freeze());
-                self.open();
+            Ok(()) => {
+                // A live message may be empty; an empty chunk of a body is nothing.
+                let live = self.reply.live;
+                out.retain(|message| live || !message.is_empty());
+                if !out.is_empty() {
+                    out.into_iter()
+                        .for_each(|message| self.writer.send(message));
+                    self.open();
+                }
             }
-            Ok(()) => {}
             Err(fault) => self.finish(Err(fault)),
         }
         Ok(())

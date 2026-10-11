@@ -101,10 +101,12 @@ assert_eq!(bytes, Bytes::from_static(b"hello"));
 ```
 
 For stateful output, implement the small `Encoder<T>` interface: `encode` writes
-one value and `end` writes final success or error framing. It performs no I/O,
-chooses no headers and does not control when a response opens. Simple formats
-can use functions such as `formats::each`; stateful SSE formats keep their own
-encoding state. Response decoders return event streams, with whole-body
+one value and `end` writes final success or error framing. A live body's
+encoder may write zero or more messages of a value, a frame each, with
+`encode_messages` (`formats::each_message`); the next value is taken only once
+they are read. It performs no I/O, chooses no headers and does not control when
+a response opens. Simple formats can use functions such as `formats::each`;
+stateful SSE formats keep their own encoding state. Response decoders return event streams, with whole-body
 (`whole::read`), SSE (`sse::read`) and generic frame (`formats::parse`)
 helpers.
 

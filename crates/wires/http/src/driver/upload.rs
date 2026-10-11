@@ -1,4 +1,5 @@
-//! Per-item request encoding and independent transport completion.
+//! Per-item request encoding, an item's messages a frame each, and
+//! independent transport completion.
 
 use super::PANICKED;
 use super::reader::Failure;
@@ -100,16 +101,18 @@ impl<T: 'static> Sink<Result<T, Fault>> for Encoding<T> {
         if self.ended {
             return Ok(());
         }
-        let mut out = BytesMut::new();
+        let mut out = Vec::new();
         let encoded = match item {
-            Ok(value) => {
-                std::panic::catch_unwind(AssertUnwindSafe(|| self.encoder.encode(&value, &mut out)))
-                    .unwrap_or_else(|_| Err(Fault::internal(PANICKED)))
-            }
+            Ok(value) => std::panic::catch_unwind(AssertUnwindSafe(|| {
+                self.encoder.encode_messages(&value, &mut out)
+            }))
+            .unwrap_or_else(|_| Err(Fault::internal(PANICKED))),
             Err(fault) => Err(fault),
         };
         match encoded {
-            Ok(()) => self.writer.send(out.freeze()),
+            Ok(()) => out
+                .into_iter()
+                .for_each(|message| self.writer.send(message)),
             Err(fault) => self.finish(Err(fault)),
         }
         Ok(())
