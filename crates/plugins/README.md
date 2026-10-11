@@ -91,7 +91,11 @@ Each model call carries `agent::Step(n)` in its extensions; a runner that
 calls tools through the gateway marks those calls with `agent::ToolHop` so
 other plugins can tell them apart. `Agent::flag_errors_for` says which
 providers can be sent a result flagged as a failure (others get `Error: `
-text). Used by the binary's `agent:` section, with MCP servers as the tools
+text). What the model said goes back in the next step as the kind holds it,
+reasoning and native fields included (a signed Anthropic `thinking` block, a
+Gemini `thoughtSignature`); native events of later steps are renumbered with
+their blocks. The timeout fails the request with `agent_timeout`, a 504.
+Used by the binary's `agent:` section, with MCP servers as the tools
 ([tests](tests/agent.rs)).
 
 Used by: [fallback](../../examples/routing/fallback.rs),

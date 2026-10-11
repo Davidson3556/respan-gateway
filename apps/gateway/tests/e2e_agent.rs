@@ -372,6 +372,112 @@ async fn a_stdio_server_serves_the_loop_from_one_child() {
     assert_eq!(pid(1), pid(3), "one child for both requests");
 }
 
+/// Serves `yaml` from a file, so it can be reloaded.
+async fn served_from_file(yaml: &str) -> (Gateway, std::path::PathBuf) {
+    let path = support::write_config(&format!("listen: 127.0.0.1:0\n{yaml}"));
+    (
+        Gateway::run(&["--config", path.to_str().unwrap()]).await,
+        path,
+    )
+}
+
+async fn reload(gw: &Gateway) {
+    let resp = client()
+        .post(gw.url("/ui/api/reload"))
+        .header("authorization", bearer())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+}
+
+/// Whether `up` was sent a `DELETE`.
+fn deleted(up: &FakeMcp) -> bool {
+    up.requests().iter().any(|(m, _, _)| m == "DELETE")
+}
+
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("never happened: {what}");
+}
+
+#[tokio::test]
+async fn a_reload_ends_the_old_sessions_once_requests_on_it_have_ended() {
+    let up = FakeMcp::start().await;
+    let openai = FakeOpenAi::start().await;
+    openai.answer(Answer::tool_call("files__read", json!({"path": "a.txt"})));
+    openai.answer(Answer::text("late").delay_first(700));
+    let yaml = config(&openai, &http_server(&up), "agent:\n  tools: [files]\n");
+    let (gw, _) = served_from_file(&yaml).await;
+
+    // A loop is in flight, its tool run, when the config reloads.
+    let asked = {
+        let (url, auth) = (gw.url("/v1/chat/completions"), bearer());
+        tokio::spawn(async move {
+            let req = client().post(url).header("authorization", auth);
+            let sent = req.header("content-type", "application/json");
+            sent.body(hello().to_string())
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        })
+    };
+    until("the tool ran", || {
+        up.methods().contains(&"tools/call".to_owned())
+    })
+    .await;
+    reload(&gw).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(!deleted(&up), "the loop still uses the session");
+
+    // It ends; so does the session.
+    let reply = json(&asked.await.unwrap());
+    assert_eq!(reply["choices"][0]["message"]["content"], "late", "{reply}");
+    until("the session was deleted", || deleted(&up)).await;
+    let ended = up.requests().into_iter().find(|(m, _, _)| m == "DELETE");
+    let auth = ended.unwrap().1;
+    assert_eq!(auth.as_deref(), Some(&*format!("Bearer {UPSTREAM_KEY}")));
+    assert!(
+        !up.requests()
+            .iter()
+            .any(|(_, a, _)| a.as_deref() == Some(&*bearer()))
+    );
+
+    // The new build starts a session of its own.
+    openai.answer(Answer::tool_call("files__read", json!({"path": "b.txt"})));
+    openai.answer(Answer::text("again"));
+    let (status, reply) = ask(&gw, &[], hello()).await;
+    assert_eq!(status, 200, "{reply}");
+    let methods = up.methods();
+    assert_eq!(methods.iter().filter(|m| *m == "initialize").count(), 2);
+}
+
+#[tokio::test]
+async fn a_reload_stops_the_old_stdio_child() {
+    let openai = FakeOpenAi::start().await;
+    openai.answer(Answer::tool_call("tools__who", json!({})));
+    openai.answer(Answer::text("done"));
+    let script = serde_json::to_string(STDIO_SERVER).unwrap();
+    let mcp = format!("mcp:\n  tools:\n    command: [python3, -c, {script}]\n");
+    let (gw, _) = served_from_file(&config(&openai, &mcp, "agent:\n  tools: [tools]\n")).await;
+    let (status, reply) = ask(&gw, &[], hello()).await;
+    assert_eq!(status, 200, "{reply}");
+    let said = openai.requests()[1].body["messages"][2]["content"].clone();
+    let pid = said.as_str().unwrap().trim_start_matches("pid ").to_owned();
+    let alive = || std::path::Path::new(&format!("/proc/{pid}")).exists();
+    assert!(alive());
+    reload(&gw).await;
+    until("the child stopped", || !alive()).await;
+}
+
 fn check(yaml: &str) -> (bool, String) {
     let path = support::write_config(yaml);
     let said = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))

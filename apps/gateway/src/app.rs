@@ -233,6 +233,16 @@ impl Shared {
             retired.retain(|g| g.idle().now_or_never().is_none());
             retired.push(previous.gateway.clone());
         }
+        // Its agent's sessions end once the requests on it do.
+        if let (Some(closer), Ok(runtime)) =
+            (&previous.closer, tokio::runtime::Handle::try_current())
+        {
+            let (closer, gateway) = (closer.clone(), previous.gateway.clone());
+            runtime.spawn(async move {
+                gateway.idle().await;
+                closer.close(&gateway).await;
+            });
+        }
         *process
             .reloaded_at
             .lock()
@@ -250,6 +260,8 @@ struct Built {
     router: Router,
     /// Without client keys, what keeps it local.
     local: Option<Arc<LocalOnly>>,
+    /// Ends the agent's sessions with its tool servers.
+    closer: Option<agent::Closer>,
 }
 
 impl Built {
@@ -273,7 +285,7 @@ impl Built {
             let serving = plan.serves(mcp::FORMAT);
             agent::check(agent, &plan.mcp, serving)?;
         }
-        let gateway = with_plugins(gateway, &config, &plan, &formats, &process.log);
+        let (gateway, closer) = with_plugins(gateway, &config, &plan, &formats, &process.log);
         let keys = ClientKeys::new(plan.keys.clone());
         let relay = relay(
             &gateway,
@@ -301,6 +313,7 @@ impl Built {
             formats,
             router,
             local,
+            closer,
         })
     }
 
@@ -631,7 +644,7 @@ fn with_plugins(
     plan: &Plan,
     formats: &[KnownFormat],
     log: &Arc<RequestLog>,
-) -> Gateway {
+) -> (Gateway, Option<agent::Closer>) {
     let names: HashMap<String, String> = plan
         .upstreams
         .iter()
@@ -646,6 +659,20 @@ fn with_plugins(
     let veo = plan.upstreams.iter().flat_map(|u| &u.entries);
     let veo = veo.filter(|e| e.format == GeminiVeo::NAME);
     let locate = veo.fold(LocateContent::new(), |l, e| l.provider(&e.internal));
+    // The agent answers the request itself, so it comes after every plugin
+    // that routes or edits it; what ends its sessions comes before them all.
+    let agent = config.agent.as_ref().map(|config| {
+        let flags: HashSet<String> = (plan.upstreams.iter())
+            .flat_map(|u| &u.entries)
+            .filter(|e| e.format == "anthropic-messages")
+            .map(|e| e.internal.clone())
+            .collect();
+        agent::plugin(config, move |provider| flags.contains(provider))
+    });
+    let gateway = match &agent {
+        Some((_, closer)) => gateway.plugin(closer.plugin()),
+        None => gateway,
+    };
     let gateway = gateway
         .plugin(Recorder::new(log.clone(), formats, names))
         .plugin(routing(plan, formats))
@@ -664,18 +691,11 @@ fn with_plugins(
             gateway.plugin(ClientCredentials::new(keyless.chain(forwarded).collect()))
         }
     };
-    // The agent answers the request itself, so it comes after every plugin
-    // that routes or edits it.
-    if let Some(config) = &config.agent {
-        let flags: HashSet<String> = (plan.upstreams.iter())
-            .flat_map(|u| &u.entries)
-            .filter(|e| e.format == "anthropic-messages")
-            .map(|e| e.internal.clone())
-            .collect();
-        let agent = agent::plugin(config, move |provider| flags.contains(provider));
+    let closer = agent.as_ref().map(|(_, closer)| closer.clone());
+    if let Some((agent, _)) = agent {
         gateway = gateway.plugin(agent.observe(requests::steps(log.clone())));
     }
-    with_quirks(gateway, &plan.upstreams)
+    (with_quirks(gateway, &plan.upstreams), closer)
 }
 
 /// The router of the formats served: a WebSocket upgrade is a session if a

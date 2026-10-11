@@ -201,18 +201,27 @@ header `x-respan-agent: off`.
   the client's *own* tools (the client runs those; the gateway's calls in that
   reply are left out of what it sees); at `max_steps`, where the last call
   forbids tools and a model that still asks for one fails the request (502,
-  `agent_max_steps`); and at `timeout` (502, `agent_timeout`).
+  `agent_max_steps`); and at `timeout` (504, `agent_timeout`).
 - A tool's failure, a timeout, an unreachable server or malformed arguments
   is a tool result the model reads (flagged as an error where the provider's
   format has the flag, else text beginning `Error:`), not a failed request.
   Answers longer than `max_result` are cut, saying so.
 - Streaming: a step's text and the client's own tool calls stream as they
   arrive, the gateway's tool calls are held back and run, and the next step's
-  text follows in the same reply. Usage is sent once, before the finish.
+  text follows in the same reply, its blocks and their native events
+  (such as an Anthropic `signature_delta`) renumbered without gaps. Usage is
+  sent once, before the finish. Events about a step as a whole (a ping, a stop
+  sequence) are those of the first step.
+- Reasoning is kept: what the model said in a step goes back as it said it, so
+  Anthropic's signed `thinking` (and `redacted_thinking`) blocks and Gemini's
+  `thoughtSignature` are in the assistant message of the next step, as those
+  providers require. A provider-run tool's blocks are not replayed.
 - Tools run with the server's own credentials, never a client's (a server with
   `forward_auth` cannot be a tool server). The gateway is an MCP client of its
   own: one session per server, kept across requests and started again when
-  lost, and each tool list kept for `cache`.
+  lost, and each tool list kept for `cache`. At a config reload the old
+  build's sessions are ended (an HTTP server's `DELETE`d, a stdio server's
+  child stopped) as soon as its requests are done.
 - The request log shows the provider's steps and each tool call (name,
   duration, bytes, whether it failed) in the request detail drawer; `check`
   prints the section.

@@ -8,6 +8,12 @@
 //! it keeps one session per server across requests, started at the first use
 //! and started again if the server lost it, and keeps each server's tool list
 //! for a while.
+//!
+//! When the config reloads, the old build's sessions are ended once its
+//! requests are done ([`Closer`]), not left to the server's idle timeout:
+//! the app sends the old gateway a request of its own, marked with an
+//! extension no client can send, which `DELETE`s each session (an HTTP
+//! server's, or a stdio server's child) through the same providers.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,8 +22,12 @@ use std::time::{Duration, Instant};
 
 use respan_gateway_conversation::Tool;
 use respan_gateway_core::futures::StreamExt;
-use respan_gateway_core::{Call, ClientContext, Fault};
-use respan_gateway_http::http::Method;
+use respan_gateway_core::futures::stream;
+use respan_gateway_core::{
+    Call, ClientContext, Extensions, Fault, Gateway, Plugin, Response, async_trait,
+};
+use respan_gateway_http::http::{self, Method};
+use respan_gateway_http::{Body, Framing};
 use respan_gateway_mcp::{Input, Message, Outcome as Rpc, Output, RpcError};
 use respan_gateway_mcp_http::Owner;
 use respan_gateway_plugins::agent::{Agent, Outcome, ToolHop, Toolbox, Tools};
@@ -34,6 +44,8 @@ const OWNER: &str = "respan-gateway-agent";
 const PAGES: usize = 8;
 /// The longest a tool's name may be, as every chat API has it.
 const NAME: usize = 64;
+/// The longest the sessions of a retired runner are given to end.
+const CLOSING: Duration = Duration::from_secs(10);
 /// How long a server's tool list is kept unless the config says.
 const DEFAULT_CACHE: Duration = Duration::from_secs(300);
 
@@ -91,8 +103,9 @@ pub fn check(agent: &AgentConfig, servers: &[McpServer], serving_mcp: bool) -> R
 pub fn plugin(
     agent: &AgentConfig,
     anthropic: impl Fn(&str) -> bool + Send + Sync + 'static,
-) -> Agent {
+) -> (Agent, Closer) {
     let tools = McpTools::new(agent.tools.clone(), agent.cache.unwrap_or(DEFAULT_CACHE));
+    let closer = Closer(tools.shared.clone());
     let prefixes = agent.models.clone();
     let mut plugin = Agent::new(tools)
         .flag_errors_for(anthropic)
@@ -114,7 +127,67 @@ pub fn plugin(
     if let Some(bytes) = agent.max_result {
         plugin = plugin.max_result(bytes);
     }
-    plugin
+    (plugin, closer)
+}
+
+/// Marks the request that ends a retired runner's sessions.
+#[derive(Debug, Clone, Copy)]
+struct Close;
+
+/// Ends the sessions the runner kept with its servers.
+#[derive(Clone)]
+pub struct Closer(Arc<Shared>);
+
+impl Closer {
+    /// The plugin that does it for the request [`close`](Self::close) makes.
+    /// Register it first, so nothing else sees that request.
+    pub fn plugin(&self) -> impl Plugin + use<> {
+        Closing(self.0.clone())
+    }
+
+    /// Ends every session, through `gateway`: the one the runner was built
+    /// into, once its requests are done. A session that does not end is the
+    /// server's to time out.
+    pub async fn close(&self, gateway: &Gateway) {
+        let Some(server) = self.0.servers.first() else {
+            return;
+        };
+        let mut request = http::Request::new(Body::full(Vec::<u8>::new()));
+        *request.method_mut() = Method::DELETE;
+        *request.uri_mut() = match format!("/mcp/{}", server.name).parse() {
+            Ok(uri) => uri,
+            Err(_) => return,
+        };
+        // Any session id will do: the plugin answers before it is looked up.
+        request
+            .headers_mut()
+            .insert("mcp-session-id", http::HeaderValue::from_static("closing"));
+        let mut marks = Extensions::new();
+        marks.insert(Close);
+        request.extensions_mut().insert(marks);
+        let sent = respan_gateway_http::handle(gateway, request, Framing::Whole, 1 << 20);
+        let work = async {
+            let (response, done) = sent.await;
+            let body = respan_gateway_http::http_body_util::BodyExt::collect(response.into_body());
+            let _ = tokio::join!(body, done);
+        };
+        let _ = tokio::time::timeout(CLOSING, work).await;
+    }
+}
+
+struct Closing(Arc<Shared>);
+
+#[async_trait]
+impl Plugin for Closing {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        if cx.extensions().get::<Close>().is_none() {
+            return Ok(None);
+        }
+        Servers::new(self.0.clone(), cx).close().await;
+        Ok(Some(Response::stream(stream::empty::<
+            Result<respan_gateway_mcp::Output, Fault>,
+        >())))
+    }
 }
 
 /// The header a client sends to leave the loop out of one request.
@@ -186,17 +259,7 @@ impl McpTools {
 
 impl Tools for McpTools {
     fn open(&self, cx: &mut ClientContext) -> Arc<dyn Toolbox> {
-        let calls = self
-            .shared
-            .servers
-            .iter()
-            .map(|s| (s.name.clone(), cx.call(&s.name)))
-            .collect();
-        Arc::new(Servers {
-            shared: self.shared.clone(),
-            calls,
-            names: Mutex::default(),
-        })
+        Arc::new(Servers::new(self.shared.clone(), cx))
     }
 }
 
@@ -257,6 +320,38 @@ struct Listed {
 }
 
 impl Servers {
+    fn new(shared: Arc<Shared>, cx: &mut ClientContext) -> Self {
+        let calls = shared
+            .servers
+            .iter()
+            .map(|s| (s.name.clone(), cx.call(&s.name)))
+            .collect();
+        Self {
+            shared,
+            calls,
+            names: Mutex::default(),
+        }
+    }
+
+    /// Ends the session with each server, and forgets it.
+    async fn close(&self) {
+        let each = self.shared.servers.iter().map(|server| async move {
+            let session = server.state.lock().await.session.take();
+            let Some(Opened {
+                id: Some(id),
+                protocol,
+            }) = session
+            else {
+                return;
+            };
+            let mut input = Input::new(Method::DELETE, Vec::new());
+            input.session = Some(id);
+            input.protocol_version = Some(protocol);
+            let _ = self.exchange(&server.name, input).await;
+        });
+        respan_gateway_core::futures::future::join_all(each).await;
+    }
+
     fn server(&self, name: &str) -> Result<&Server, Fault> {
         let found = self.shared.servers.iter().find(|s| s.name == name);
         found.ok_or_else(|| Fault::internal(format!("no agent tool server '{name}'")))
@@ -397,15 +492,25 @@ impl Servers {
         session: Option<&Opened>,
         message: Message,
     ) -> Result<(Vec<Message>, Option<String>), Fault> {
-        let call = self
-            .calls
-            .get(server)
-            .ok_or_else(|| Fault::internal(format!("no call to '{server}'")))?;
         let mut input = Input::new(Method::POST, vec![message]);
         if let Some(opened) = session {
             input.session.clone_from(&opened.id);
             input.protocol_version = Some(opened.protocol.clone());
         }
+        self.exchange(server, input).await
+    }
+
+    /// Sends `input` to `server` as the gateway's own client, and reads
+    /// everything it answers: its messages, and the session it names.
+    async fn exchange(
+        &self,
+        server: &str,
+        input: Input,
+    ) -> Result<(Vec<Message>, Option<String>), Fault> {
+        let call = self
+            .calls
+            .get(server)
+            .ok_or_else(|| Fault::internal(format!("no call to '{server}'")))?;
         let call = call.clone().with_input(input).with_extension(ToolHop);
         let call = call.with_extension(Owner(OWNER.to_owned()));
         let mut outputs = call.await?.outputs::<Output>();

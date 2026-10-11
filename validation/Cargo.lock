@@ -1405,6 +1405,7 @@ version = "0.1.0"
 dependencies = [
  "respan-gateway-conversation",
  "respan-gateway-core",
+ "respan-gateway-http",
  "serde_json",
  "tokio",
 ]
