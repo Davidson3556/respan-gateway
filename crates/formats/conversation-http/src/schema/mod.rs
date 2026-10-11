@@ -34,10 +34,11 @@ pub(crate) use exchange::OutputParser;
 pub(crate) use exchange::{Gate, error_event, unreadable_event};
 pub(crate) use respan_gateway_http::framing::fields::{rest_of, unix_now};
 pub(crate) use values::{
-    Keep, Names, NativeFieldsExt, Totals, count, decode_content, decode_message, decode_tools,
-    each_tool, encode_content, encode_message, encode_native, ended, fits, kept_fields,
-    merge_fields, merge_missing, native_fields, only, remainder, set, stop_json, tidy, tool_field,
-    unsupported_fields, untranslatable, unwritable_content, unwritable_usage, usage_extra,
+    INERT, Keep, Names, NativeFieldsExt, Totals, count, decode_content, decode_message,
+    decode_tools, each_tool, encode_content, encode_message, encode_native, ended, fits,
+    kept_fields, merge_fields, merge_missing, native_fields, only, remainder, set, stop_json, tidy,
+    tool_field, unsupported_fields, untranslatable, unwritable_content, unwritable_usage,
+    usage_extra,
 };
 
 use respan_gateway_conversation::{Assembled, Content, Input, Output};

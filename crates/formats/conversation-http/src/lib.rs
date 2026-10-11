@@ -5,6 +5,7 @@
 //!
 //! - [`openai`]: OpenAI Chat Completions.
 //! - [`anthropic`]: Anthropic Messages.
+//! - [`responses`]: OpenAI Responses.
 //!
 //! A format is its spec: what a provider sends beyond it is kept native, at
 //! the place it appeared, for a plugin to read (each module says where).
@@ -16,13 +17,16 @@ pub use schema::{Asked, Decoder, Schema, StreamResponse, merge_details, read_pro
 
 pub mod anthropic;
 pub mod openai;
+pub mod responses;
 
 use anthropic::AnthropicMessages;
 use openai::OpenAiChat;
+use responses::OpenAiResponses;
 
 /// Whether `raw`, an event of `format`, changes no answer, as that format
 /// says ([`Schema::is_inert`]).
 fn is_inert(format: &str, raw: &Value) -> bool {
     (format == OpenAiChat::NAME && OpenAiChat::is_inert(raw))
         || (format == AnthropicMessages::NAME && AnthropicMessages::is_inert(raw))
+        || (format == OpenAiResponses::NAME && OpenAiResponses::is_inert(raw))
 }

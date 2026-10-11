@@ -19,7 +19,7 @@ events.
 - `StreamResponse(bool)`: a call extension choosing whether the provider is
   asked to stream; without it the call follows the client's request.
 
-The helpers both formats share (messages and parts, the `native` fields a
+The helpers the formats share (messages and parts, the `native` fields a
 value keeps for its own format, usage totals and the faults of what cannot be
 written) are private to this crate. Each format names its own inert events
 (`Schema::is_inert`): those another format drops in translation. How a provider's error body reads,
@@ -61,6 +61,37 @@ Thinking is the kind's reasoning; its signature, and what else the kind has
 no form for, stays native to this format. A full context window
 (`model_context_window_exceeded`) is a native finish whose fallback is the
 token limit.
+
+## OpenAI Responses
+
+`responses::OpenAiResponses`, named `openai-responses`: a `POST` to a path
+ending in `/responses`; its provider base URL includes the version, as
+`openai-chat`'s does. It is plain HTTP, a `POST /v1/responses` answered whole
+or, with `stream: true`, as named SSE events; Responses over WebSocket is
+`responses-ws`, a format of its own kind.
+
+`instructions` is a leading system message and `input` the messages after it;
+an assistant's consecutive messages, function calls and reasoning items are one
+assistant message, and consecutive function call outputs are one user message
+of results. A response's output text, function calls and reasoning (its
+summary) are the kind's blocks, and its status and `incomplete_details` the
+finish. A stream is written as the documented sequence (`response.created`,
+`response.in_progress`, each item's `output_item.added`, content part, delta and
+`done` events, then `response.completed` or `response.incomplete` with the
+response whole), one item at a time, with the ids, `output_index`,
+`content_index` and `sequence_number` the kind has no place for made when
+another provider answered.
+
+What the kind has no form for stays native and is refused in translation:
+`previous_response_id` and `conversation` (another provider cannot resolve
+them), `store: false`, `include`, `truncation`, `reasoning` (effort and
+summary), `metadata`, built-in tools (web search, file search, computer use,
+code interpreter, MCP) and the items they make, refusals, and annotations. A
+relay in this format sends them back. The ids and statuses of items, and a
+function tool's default `strict`, are inert: any other format drops them, and
+a tool another format sent is written with `strict: false`, as it is not the
+Responses default. Stop sequences and a failed tool result have no form in a
+request, and log probabilities are not carried. The module docs say it all.
 
 ## Tests
 

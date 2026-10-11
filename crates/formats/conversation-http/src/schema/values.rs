@@ -42,9 +42,15 @@ impl Keep {
     };
 }
 
+/// The native key under which a format keeps what of a value no other format
+/// needs: the id and status of an item a stateful API stored (a `msg_..` or
+/// `fc_..` of Responses), or a default the format left unsaid. Any other
+/// format drops it instead of refusing.
+pub(crate) const INERT: &str = "inert";
+
 /// The fields of `native` to write in `format`: all but the `own` keys if they
-/// are in `format`; if they are another's, none if each is droppable, else
-/// an `Err` naming the first that is not, by `what`.
+/// are in `format`; if they are another's, none if each is droppable (or
+/// [`INERT`]), else an `Err` naming the first that is not, by `what`.
 pub(crate) fn kept_fields(
     format: &str,
     native: &Option<NativeFields>,
@@ -54,7 +60,8 @@ pub(crate) fn kept_fields(
     let own = native.format() == Some(format);
     let mut fields = Map::new();
     for (key, value) in native.fields() {
-        match (own, keep.droppable.contains(&key.as_str())) {
+        let droppable = keep.droppable.contains(&key.as_str()) || key == INERT;
+        match (own, droppable) {
             (true, _) if keep.own.contains(&key.as_str()) => {}
             (true, _) => _ = fields.insert(key.clone(), value.clone()),
             (false, true) => {}
