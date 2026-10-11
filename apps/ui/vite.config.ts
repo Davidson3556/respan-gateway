@@ -12,8 +12,7 @@ export default defineConfig({
   resolve: {
     alias: { "@": path.resolve(import.meta.dirname, "src") },
   },
-  // One app chunk (React, Router, Radix) is ~190 kB gzipped; the playground loads lazily.
-  build: { outDir: "dist", chunkSizeWarningLimit: 700 },
+  build: { outDir: "dist" },
   server: { proxy },
   preview: { proxy },
   test: {
