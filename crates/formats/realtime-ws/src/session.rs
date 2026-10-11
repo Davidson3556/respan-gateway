@@ -1,12 +1,15 @@
 //! What every format's session shares: its handshake at both edges, and its
 //! frames read and written by the format's own codec.
 
-use respan_gateway_core::{BadRequest, Connection, Fault, NativeValue, Upstream};
+use respan_gateway_core::futures::channel::mpsc;
+use respan_gateway_core::futures::stream::{self, PollNext};
+use respan_gateway_core::futures::{StreamExt, future};
+use respan_gateway_core::{BadRequest, Connection, EventStream, Fault, NativeValue, Upstream};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats;
 use respan_gateway_http::http::header::{CONTENT_TYPE, SEC_WEBSOCKET_PROTOCOL, UPGRADE};
 use respan_gateway_http::http::response::Parts as ResponseHead;
-use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
+use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri};
 use respan_gateway_http::{self as h, ClientIo, Encoder, ProviderIo};
 use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::WsTransport;
@@ -14,6 +17,19 @@ use serde_json::Value;
 
 /// Reads one frame as zero or more events.
 pub(crate) type Read<T> = Box<dyn FnMut(Bytes, &mut Vec<T>) -> Result<(), Fault> + Send>;
+
+/// Where a provider's writer says what answers an input rather than a
+/// frame, such as an update it need not send: its events reach the client
+/// before the frames' next, until the frames end.
+pub(crate) type Say = mpsc::UnboundedSender<Output>;
+
+/// What a [`Say`] says, read beside the frames.
+pub(crate) type Said = mpsc::UnboundedReceiver<Output>;
+
+/// A channel for what a provider's writer says itself.
+pub(crate) fn say() -> (Say, Said) {
+    mpsc::unbounded()
+}
 
 /// What a spec says of its session.
 #[derive(Debug)]
@@ -77,14 +93,17 @@ impl Spec {
         )
     }
 
-    /// A session with the provider: an upgrade to the spec's path, offering
-    /// its subprotocol beside the client's own offers; the client's events
-    /// written by `write`, the provider's frames read by `read`.
+    /// A session with the provider: an upgrade to the spec's path and
+    /// `query`, offering its subprotocol beside the client's own offers;
+    /// the client's events written by `write`, the provider's frames read
+    /// by `read`, and what `write` says itself, if anything, among them.
     pub(crate) fn provider(
         &self,
         io: ProviderIo,
+        query: Option<String>,
         write: Box<dyn Encoder<Input>>,
         read: Read<Output>,
+        said: Option<Said>,
     ) -> Connection<Output, Input> {
         let (name, path) = (self.name, self.path);
         let protocol = self.protocol;
@@ -100,7 +119,13 @@ impl Spec {
                     ));
                 }
                 head.method = Method::GET;
-                formats::set_path(head, path)?;
+                let at = match &query {
+                    Some(query) => format!("{path}?{query}"),
+                    None => path.to_owned(),
+                };
+                head.uri = at.parse().map_err(|e| {
+                    Fault::internal("a session's URL could not be written").with_source(e)
+                })?;
                 head.headers
                     .insert(UPGRADE, HeaderValue::from_static("websocket"));
                 if let Some(protocol) = protocol {
@@ -109,15 +134,45 @@ impl Spec {
                 }
                 Ok(write)
             },
-            move |answer, _call| frames(answer.into_body(), read),
+            move |answer, _call| {
+                let frames = frames(answer.into_body(), read);
+                match said {
+                    Some(said) => among(said, frames),
+                    None => frames,
+                }
+            },
             move |answer| h::provider_fault(name, answer),
         )
     }
 }
 
+/// The model at `?model=` of a client's handshake, if it names one.
+pub(crate) fn model_at(uri: &Uri) -> Option<String> {
+    let query = uri.query()?;
+    let model = query.split('&').find_map(|p| p.strip_prefix("model="))?;
+    (!model.is_empty()).then(|| model.to_owned())
+}
+
+/// The model at `?model=` of the handshake of the client a call is for.
+pub(crate) fn clients_model(io: &ProviderIo) -> Option<String> {
+    model_at(io.extensions().get::<h::Wire>()?.get()?.uri())
+}
+
 /// The events of a session's frames, each read by `read`.
-fn frames<T: Send + 'static>(body: h::Body, read: Read<T>) -> respan_gateway_core::EventStream<T> {
+fn frames<T: Send + 'static>(body: h::Body, read: Read<T>) -> EventStream<T> {
     formats::parse(body, read, |read, raw, out| read(raw, out), |_, end, _| end)
+}
+
+/// The events of `frames`, with what was `said` first whenever there is
+/// some, until the frames end.
+fn among(said: Said, frames: EventStream<Output>) -> EventStream<Output> {
+    let said = said.map(|event| Some(Ok(event)));
+    let frames = frames.map(Some).chain(stream::once(future::ready(None)));
+    let first = |_: &mut ()| PollNext::Left;
+    let events = stream::select_with_strategy(said, frames, first)
+        .take_while(|event| future::ready(event.is_some()))
+        .filter_map(future::ready);
+    EventStream::stream(events)
 }
 
 /// A refused handshake's answer: text/plain, with the fault's error code
@@ -183,7 +238,7 @@ pub(crate) fn native_provider(name: &'static str) -> (Box<dyn Encoder<Input>>, R
 }
 
 /// A native event's JSON as its frame. An event of another format, or one
-/// the kind has a form for, which this format does not translate yet, is
+/// the kind has a form for, which this format does not translate, is
 /// the gateway's misconfiguration or a plugin's, not the client's: `config`.
 fn written(format: &str, event: Option<&NativeValue>) -> Result<Bytes, Fault> {
     let Some(event) = event.filter(|event| event.format.as_ref() == format) else {

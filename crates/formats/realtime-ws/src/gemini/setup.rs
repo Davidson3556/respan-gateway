@@ -1,7 +1,7 @@
 //! A Live API `setup` as the kind's [`Session`], both ways.
 
 use respan_gateway_core::Fault;
-use respan_gateway_realtime::{AudioFormat, Modality, Session, Tool, Turns, Vad};
+use respan_gateway_realtime::{AudioFormat, Modality, Session, Tool, ToolChoice, Turns, Vad};
 use serde_json::{Map, Value, json};
 
 use super::NAME;
@@ -51,10 +51,13 @@ pub(super) fn decode(mut v: Value) -> Session {
 }
 
 /// The `setup` message of `s`, refused by `refuse` where it says what the
-/// Live API cannot.
+/// Live API cannot. Its audio formats are each chunk's own.
 pub(super) fn encode(s: &Session, refuse: fn(&str) -> Fault) -> Result<Value, Fault> {
-    if s.tool_choice.is_some() {
-        return Err(refuse("a tool choice"));
+    if s.tool_choice
+        .as_ref()
+        .is_some_and(|c| *c != ToolChoice::Auto)
+    {
+        return Err(refuse("a tool choice but `auto`"));
     }
     let mut v = json!({});
     let mut put = |path: &[&str], value: Option<Value>| {

@@ -116,16 +116,16 @@ pub(crate) fn own<'a>(
     }
 }
 
-/// An input `format` cannot write: another format's, or one whose
-/// translation is not built yet.
+/// An input `format` cannot write, which could change the answer: the
+/// client's fault, closing its session 1008.
 pub(crate) fn untranslatable_input(format: &str, what: &str) -> Fault {
-    let message = format!("{what} cannot be translated to {format} yet");
+    let message = format!("{what} cannot be translated to {format}");
     BadRequest::fault(message).with(CloseCode(1008))
 }
 
 /// An output `format` cannot write, which fails the session.
 pub(crate) fn untranslatable_output(format: &str, what: &str) -> Fault {
-    let message = format!("{what} cannot be translated to {format} yet");
+    let message = format!("{what} cannot be translated to {format}");
     Upstream::fault(message).with(ErrorCode("untranslatable".into()))
 }
 

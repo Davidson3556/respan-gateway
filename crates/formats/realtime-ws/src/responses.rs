@@ -59,6 +59,6 @@ impl Format<ProviderIo, Output, Input> for ResponsesWs {
 
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
         let (write, read) = session::native_provider(Self::NAME);
-        Ok(SPEC.provider(io, write, read))
+        Ok(SPEC.provider(io, None, write, read, None))
     }
 }

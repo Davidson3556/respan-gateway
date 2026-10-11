@@ -1,28 +1,67 @@
 //! What the client says: the Live API's client messages as the kind's
 //! [`Input`], read at the client's edge and written at the provider's.
 
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use respan_gateway_conversation::{Content, Message, Role};
 use respan_gateway_core::{BadRequest, Fault, NativeFields, NativeValue};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_realtime::{Audio, AudioFormat, Encoding, Input, ToolResult};
+use respan_gateway_realtime::{
+    Audio, AudioFormat, Encoding, Input, Output, Session, Status, ToolChoice, ToolResult, Turns,
+};
 use respan_gateway_ws::CloseCode;
 use serde_json::{Map, Value, json};
 
-use super::{Applied, NAME, setup};
+use super::{Answering, NAME, Shared, lock, setup};
+use crate::audio::Convert;
+use crate::foreign::Drops;
 use crate::json::{self, merge, own, untranslatable_input};
+use crate::session::{self, Say};
+
+/// What of another format's natives the Live API drops: OpenAI's event and
+/// item ids, its session's type, noise reduction, speed, transcription
+/// settings, tracing, includes, context truncation and output cap, and its
+/// voice detection's tuning. Each manages its context, and detects voices,
+/// itself.
+const DROPS: Drops = Drops {
+    format: NAME,
+    session: &[
+        "event_id",
+        "session.type",
+        "session.audio.input.noise_reduction",
+        "session.audio.input.transcription",
+        "session.audio.output.speed",
+        "session.include",
+        "session.tracing",
+        "session.truncation",
+        "session.max_output_tokens",
+    ],
+    vad: &["type", "threshold", "eagerness"],
+    message: &["id"],
+    event: &["event_id", "item.id", "response_id"],
+};
 
 /// A client's messages as events: its `setup` first and once, and each
 /// message one of `setup`, `clientContent`, `realtimeInput` and
 /// `toolResponse`, as the Live API takes them; any other is the client's
 /// fault, closed 1007.
-#[derive(Debug, Default)]
+///
+/// Its `activityStart` is the user's turn beginning: a [`Input::Cancel`]
+/// while it is answered, as the Live API stops what it says, else native.
+#[derive(Debug)]
 pub(super) struct Client {
     setup: bool,
+    answering: Answering,
 }
 
 impl Client {
+    pub(super) fn new(answering: Answering) -> Self {
+        Self {
+            setup: false,
+            answering,
+        }
+    }
+
     pub(super) fn read(&mut self, raw: Bytes, out: &mut Vec<Input>) -> Result<(), Fault> {
         let v: Value =
             serde_json::from_slice(&raw).map_err(|_| invalid("a client's message is not JSON"))?;
@@ -40,7 +79,10 @@ impl Client {
             }
             ("setup", true) => return Err(invalid("setup is sent once")),
             (_, false) => return Err(invalid("a session's first message is its setup")),
-            _ => out.extend(decode(&v).unwrap_or_else(|| vec![Input::native(NAME, v)])),
+            _ => {
+                let answering = self.answering.load(Ordering::Relaxed);
+                out.extend(decode(&v, answering).unwrap_or_else(|| vec![Input::native(NAME, v)]));
+            }
         }
         Ok(())
     }
@@ -51,9 +93,10 @@ fn invalid(message: &str) -> Fault {
     BadRequest::fault(message).with(CloseCode(1007))
 }
 
-/// The events of a message after the setup; `None` for one the kind has no
-/// form for, or one its events would not write back as it came.
-fn decode(v: &Value) -> Option<Vec<Input>> {
+/// The events of a message after the setup, its client `answering` or not;
+/// `None` for one the kind has no form for, or one its events would not
+/// write back as it came.
+fn decode(v: &Value, answering: bool) -> Option<Vec<Input>> {
     let events = match v.as_object()?.iter().next()? {
         (name, body) if name == "realtimeInput" => {
             let (field, value) = single(body)?;
@@ -64,6 +107,9 @@ fn decode(v: &Value) -> Option<Vec<Input>> {
                     Input::Commit { native: None },
                     Input::Respond { native: None },
                 ],
+                "activityStart" if answering && *value == json!({}) => vec![Input::Cancel {
+                    native: json::native(NAME, v.clone()),
+                }],
                 _ => return None,
             }
         }
@@ -96,7 +142,7 @@ fn decode(v: &Value) -> Option<Vec<Input>> {
         }
         _ => return None,
     };
-    let mut provider = Provider::opened();
+    let mut provider = Provider::past_setup();
     let mut written = Vec::new();
     for event in &events {
         provider.encode(event, &mut written).ok()?;
@@ -198,13 +244,21 @@ fn answer(v: &Value) -> Option<Input> {
 }
 
 /// A tool's answer as a function response: its output as the response if
-/// it is a JSON object, else the object `{"output": ..}`.
-fn answer_json(result: &ToolResult, refuse: fn(&str) -> Fault) -> Result<Value, Fault> {
+/// it is a JSON object, else the object `{"output": ..}`, and the `name` of
+/// the tool it answers if it does not say it.
+fn answer_json(
+    result: &ToolResult,
+    name: Option<&String>,
+    refuse: fn(&str) -> Fault,
+) -> Result<Value, Fault> {
     let response = match serde_json::from_str::<Value>(&result.output) {
         Ok(object @ Value::Object(_)) => object,
         _ => json!({"output": result.output}),
     };
     let mut v = json!({"id": result.id, "response": response});
+    if let (None, Some(name)) = (&result.native, name) {
+        v["name"] = name.as_str().into();
+    }
     merge(
         &mut v,
         own(NAME, &result.native, || refuse("another format's answer"))?,
@@ -224,37 +278,60 @@ enum Held {
 /// The client's events written to the provider: its setup first, then
 /// messages and tools' answers held until what answers them, so that a
 /// message writes them together.
+///
+/// What only another format says is emulated: with manual turns, the
+/// user's activity begins at its first audio; a cancel ends the response
+/// at once, and the rest of its turn is dropped; an update that changes
+/// nothing is acknowledged. A message is written only as the user's text,
+/// answered at once, and a tool's answer to a call the provider cancelled
+/// not at all.
 #[derive(Debug)]
 pub(super) struct Provider {
-    /// The setup written, which the provider's events say took effect.
-    applied: Applied,
+    shared: Shared,
+    say: Say,
     /// Whether the setup was written.
     opened: bool,
     held: Option<Held>,
     /// Whether the last message already makes the model answer.
     answered: bool,
+    /// Whether the user's activity is open, with manual turns.
+    activity: bool,
+    /// Whether audio came since the user's last turn ended.
+    heard: bool,
+    /// Its audio in PCM.
+    convert: Convert,
 }
 
 impl Provider {
-    pub(super) fn new(applied: Applied) -> Self {
+    pub(super) fn new(shared: Shared, say: Say) -> Self {
         Self {
-            applied,
+            shared,
+            say,
             opened: false,
             held: None,
             answered: false,
+            activity: false,
+            heard: false,
+            convert: Convert::default(),
         }
     }
 
-    /// A writer past its setup, which writes a message as a session would.
-    fn opened() -> Self {
-        let mut provider = Self::new(Arc::default());
-        provider.opened = true;
+    /// A writer past a setup of turns the client ends, the user's activity
+    /// open: it writes each message of the client's as it came.
+    fn past_setup() -> Self {
+        let mut session = Session::default();
+        session.turns = Some(Turns::Manual);
+        let shared = Shared::default();
+        lock(&shared).applied = Some(session);
+        let mut provider = Self::new(shared, session::say().0);
+        (provider.opened, provider.activity) = (true, true);
         provider
     }
 
     pub(super) fn write(&mut self, event: &Input, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+        let event = DROPS.admit(event)?;
         let mut messages = Vec::new();
-        self.encode(event, &mut messages)?;
+        self.encode(&event, &mut messages)?;
         for message in &messages {
             out.push(json::frame(message)?);
         }
@@ -267,14 +344,11 @@ impl Provider {
         let (mut v, native) = match event {
             Input::Session(s) if !self.opened => {
                 self.opened = true;
-                *super::lock(&self.applied) = Some(s.clone());
                 out.push(setup::encode(s, refuse)?);
+                lock(&self.shared).applied = Some(s.clone());
                 return Ok(());
             }
-            Input::Session(_) => {
-                let fixed = "Gemini Live fixes a session's configuration at its setup";
-                return Err(BadRequest::fault(fixed).with(CloseCode(1008)));
-            }
+            Input::Session(s) => return self.update(s),
             _ if !self.opened => {
                 return Err(Fault::internal(
                     "a Gemini Live session begins with its setup",
@@ -288,9 +362,17 @@ impl Provider {
                         self.held = Some(Held::Messages(vec![event.clone()]));
                     }
                 }
-                if shaped(native) {
-                    self.flush(out)?;
+                if shaped(native)
+                    && let Some(Held::Messages(messages)) = self.held.take()
+                {
+                    out.push(messages_json(&messages, refuse)?);
                 }
+                return Ok(());
+            }
+            Input::ToolResult(result) if lock(&self.shared).withdrawn.contains(&result.id) => {
+                // The provider takes no answer to a call it cancelled, nor
+                // asks for one.
+                self.answered = true;
                 return Ok(());
             }
             Input::ToolResult(result) => {
@@ -310,24 +392,43 @@ impl Provider {
             Input::Respond { native } => (self.respond(native)?, native),
             _ => {
                 self.flush(out)?;
+                let manual = self.manual();
                 match event {
                     Input::Audio { audio, native } => {
-                        if audio.format.encoding != Encoding::Pcm16 {
-                            return Err(refuse("audio other than PCM"));
+                        let pcm = AudioFormat::pcm16(audio.format.rate);
+                        let data = match audio.format.encoding {
+                            Encoding::Pcm16 => Some(audio.data.clone()),
+                            _ => self.convert.to(audio, pcm),
+                        };
+                        let data = data.ok_or_else(|| refuse("audio of this format"))?;
+                        if manual && !std::mem::replace(&mut self.activity, true) {
+                            out.push(json!({"realtimeInput": {"activityStart": {}}}));
                         }
-                        let mime = format!("audio/pcm;rate={}", audio.format.rate);
-                        let blob = json!({"mimeType": mime, "data": json::base64(&audio.data)});
+                        self.heard = true;
+                        let mime = format!("audio/pcm;rate={}", pcm.rate);
+                        let blob = json!({"mimeType": mime, "data": json::base64(&data)});
                         (json!({"realtimeInput": {"audio": blob}}), native)
                     }
+                    Input::Commit { .. } if !manual => {
+                        return Err(refuse("a commit under the provider's voice detection"));
+                    }
                     Input::Commit { native } => {
-                        self.answered = true;
+                        (self.activity, self.heard, self.answered) = (false, false, true);
                         (json!({"realtimeInput": {"activityEnd": {}}}), native)
                     }
+                    Input::Cancel { native } if native.is_some() => {
+                        self.activity = true;
+                        (json!({}), native)
+                    }
+                    Input::Cancel { .. } => return self.cancel(manual, out),
                     Input::Native(NativeValue { format, value }) if **format == *NAME => {
+                        if at_start(value) {
+                            self.activity = true;
+                        }
                         out.push(Value::clone(value));
                         return Ok(());
                     }
-                    Input::Cancel { .. } => return Err(refuse("a cancel")),
+                    Input::Native(NativeValue { value, .. }) => return self.dropped(value),
                     _ => return Err(refuse("another format's event")),
                 }
             }
@@ -340,54 +441,169 @@ impl Provider {
         Ok(())
     }
 
-    /// The message that asks for an answer to what is held: the user's
-    /// text alone, unless `native` says it came as `clientContent`;
-    /// messages; tools' answers; or a complete turn of nothing more.
+    /// Whether the client ends the user's turns, as the setup says.
+    fn manual(&self) -> bool {
+        let state = lock(&self.shared);
+        let turns = state.applied.as_ref().and_then(|s| s.turns.as_ref());
+        matches!(turns, Some(Turns::Manual))
+    }
+
+    /// A later session, which the Live API cannot take: one that changes
+    /// nothing is acknowledged, and one that changes anything refused.
+    fn update(&mut self, s: &Session) -> Result<(), Fault> {
+        let mut state = lock(&self.shared);
+        let applied = state.applied.get_or_insert_default();
+        if let Some(field) = changes(applied, s) {
+            let fixed = format!(
+                "Gemini Live fixes a session's configuration at its setup: this update changes `{field}`"
+            );
+            return Err(BadRequest::fault(fixed).with(CloseCode(1008)));
+        }
+        // Audio formats are each chunk's own.
+        applied.input_audio = s.input_audio.or(applied.input_audio);
+        applied.output_audio = s.output_audio.or(applied.output_audio);
+        let _ = self.say.unbounded_send(Output::Updated(applied.clone()));
+        Ok(())
+    }
+
+    /// A cancel, which the Live API has none of: the response being made
+    /// ends cancelled, and the rest of its turn is dropped. With manual
+    /// turns the user's activity begins, which stops it.
+    fn cancel(&mut self, manual: bool, out: &mut Vec<Value>) -> Result<(), Fault> {
+        let mut state = lock(&self.shared);
+        if std::mem::take(&mut state.open) {
+            state.cancelled = true;
+            let done = Output::ResponseDone {
+                status: Status::Cancelled,
+                native: None,
+            };
+            let _ = self.say.unbounded_send(done);
+        }
+        if manual && !std::mem::replace(&mut self.activity, true) {
+            out.push(json!({"realtimeInput": {"activityStart": {}}}));
+        }
+        Ok(())
+    }
+
+    /// Another format's event, which the Live API has none of: OpenAI's
+    /// truncation of what was heard and clearing of what is played are
+    /// dropped, as the Live API keeps only what it sent, and its clearing
+    /// of the user's audio if there is none since the last turn; any other
+    /// is refused.
+    fn dropped(&self, event: &Value) -> Result<(), Fault> {
+        let kind = event["type"].as_str().unwrap_or_default();
+        match kind {
+            "conversation.item.truncate" | "output_audio_buffer.clear" => Ok(()),
+            "input_audio_buffer.clear" if !self.heard => Ok(()),
+            _ => Err(untranslatable_input(NAME, &format!("`{kind}`"))),
+        }
+    }
+
+    /// The message that asks for an answer to what is held: messages as
+    /// `clientContent` if `native` says they came so, else the user's text
+    /// alone; tools' answers; or a complete turn of nothing more, as it
+    /// came.
     fn respond(&mut self, native: &Option<NativeFields>) -> Result<Value, Fault> {
         let refuse = |what: &str| untranslatable_input(NAME, what);
         let content = shaped(native);
         match self.held.take() {
-            None => Ok(json!({"clientContent": {"turnComplete": true}})),
+            None if content => Ok(json!({"clientContent": {"turnComplete": true}})),
+            None => Err(refuse("a response to nothing the client said")),
             Some(Held::Results(results)) => self.results(&results),
+            Some(Held::Messages(messages)) if content => {
+                let mut v = messages_json(&messages, refuse)?;
+                v["clientContent"]["turnComplete"] = true.into();
+                Ok(v)
+            }
             Some(Held::Messages(messages)) => match messages.as_slice() {
-                [Input::Message { message, native }]
-                    if !content
-                        && native.is_none()
-                        && message.native.is_none()
-                        && message.role == Role::User
-                        && message
-                            .content
-                            .iter()
-                            .all(|c| matches!(c, Content::Text { native: None, .. })) =>
-                {
+                [Input::Message { message, native }] if native.is_none() && said(message) => {
                     Ok(json!({"realtimeInput": {"text": message.text()}}))
                 }
-                _ => {
-                    let mut v = messages_json(&messages, refuse)?;
-                    v["clientContent"]["turnComplete"] = true.into();
-                    Ok(v)
-                }
+                _ => Err(refuse(UNANSWERED)),
             },
         }
     }
 
     fn results(&self, results: &[ToolResult]) -> Result<Value, Fault> {
         let refuse = |what: &str| untranslatable_input(NAME, what);
-        let answers = results.iter().map(|r| answer_json(r, refuse));
+        let calls = &lock(&self.shared).calls;
+        let answers = results
+            .iter()
+            .map(|r| answer_json(r, calls.get(&r.id), refuse));
         let answers = answers.collect::<Result<Vec<_>, _>>()?;
         Ok(json!({"toolResponse": {"functionResponses": answers}}))
     }
 
-    /// Write what is held, which nothing answers.
+    /// Write what is held, which nothing answers: tools' answers; messages
+    /// the Live API would not answer at once are refused.
     fn flush(&mut self, out: &mut Vec<Value>) -> Result<(), Fault> {
-        let refuse = |what: &str| untranslatable_input(NAME, what);
         match self.held.take() {
             None => {}
-            Some(Held::Messages(messages)) => out.push(messages_json(&messages, refuse)?),
+            Some(Held::Messages(_)) => return Err(untranslatable_input(NAME, UNANSWERED)),
             Some(Held::Results(results)) => out.push(self.results(&results)?),
         }
         Ok(())
     }
+}
+
+/// The messages the Live API takes only as they came, in `clientContent`:
+/// it answers any other message at once, as the user's text.
+const UNANSWERED: &str = "a message but the user's text, answered at once,";
+
+/// Whether `message` is the user's text alone.
+fn said(message: &Message) -> bool {
+    message.native.is_none()
+        && message.role == Role::User
+        && message
+            .content
+            .iter()
+            .all(|c| matches!(c, Content::Text { native: None, .. }))
+}
+
+/// Whether `event` begins the user's activity.
+fn at_start(event: &Value) -> bool {
+    json::at(event, &["realtimeInput", "activityStart"]).is_some()
+}
+
+/// The first field `s` sets to other than `applied` has.
+fn changes(applied: &Session, s: &Session) -> Option<&'static str> {
+    fn differs<T: PartialEq>(new: &Option<T>, old: &Option<T>) -> bool {
+        new.is_some() && new != old
+    }
+    let auto = |c: &Option<ToolChoice>| match c {
+        Some(ToolChoice::Auto) | None => None,
+        Some(c) => Some(c.clone()),
+    };
+    [
+        ("model", differs(&s.model, &applied.model)),
+        (
+            "instructions",
+            differs(&s.instructions, &applied.instructions),
+        ),
+        ("output_modalities", differs(&s.output, &applied.output)),
+        ("voice", differs(&s.voice, &applied.voice)),
+        ("turn_detection", differs(&s.turns, &applied.turns)),
+        (
+            "transcription",
+            differs(&s.input_transcription, &applied.input_transcription),
+        ),
+        (
+            "output_transcription",
+            differs(&s.output_transcription, &applied.output_transcription),
+        ),
+        ("tools", differs(&s.tools, &applied.tools)),
+        (
+            "tool_choice",
+            differs(&auto(&s.tool_choice), &auto(&applied.tool_choice)),
+        ),
+        (
+            "max_output_tokens",
+            differs(&s.max_output_tokens, &applied.max_output_tokens),
+        ),
+        ("native", differs(&s.native, &applied.native)),
+    ]
+    .into_iter()
+    .find_map(|(field, changed)| changed.then_some(field))
 }
 
 /// Whether an event's `native` says it came as `clientContent`.

@@ -10,17 +10,19 @@
 //!
 //! [`OpenAiRealtime`] and [`GeminiLive`] decode each frame into the kind's
 //! events, keeping what the kind has no place for as their own (an event's
-//! `native`, or a native event), and write them back; [`ResponsesWs`]
-//! decodes every frame to the kind's native event of its name. Each writes
-//! no other format's native, and translates to no other format yet: a relay
-//! to the same format keeps what each event says, not its exact bytes. A
-//! frame that is not JSON fails: the client's, `bad_request`; the
-//! provider's, `upstream`. A handshake one refuses is answered text/plain
-//! with the fault's error code, never its message.
+//! `native`, or a native event), and write them back: a relay to the same
+//! format keeps what each event says, not its exact bytes. Each writes the
+//! other's events too. Audio is converted where a spec cannot carry it, and
+//! what one spec has and the other has not is emulated, dropped where it
+//! cannot change the answer, or refused: an input `bad_request`, closing
+//! the client 1008; an output `upstream`. [`ResponsesWs`] decodes every
+//! frame to the kind's native event of its name, and writes no other
+//! format's. A frame that is not JSON fails: the client's, `bad_request`;
+//! the provider's, `upstream`. A handshake one refuses is answered
+//! text/plain with the fault's error code, never its message.
 
-// The codecs convert audio where a spec cannot carry the source's format.
-#[allow(dead_code)]
 mod audio;
+mod foreign;
 mod gemini;
 mod json;
 mod openai;

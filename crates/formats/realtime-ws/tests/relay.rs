@@ -5,179 +5,29 @@
 #![allow(clippy::unwrap_used)]
 
 #[allow(dead_code)]
+mod common;
+#[allow(dead_code)]
 #[path = "../../../../tests/support/realtime/mod.rs"]
 mod realtime;
 
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use common::{
+    Client, GOOGLE_KEY, OPENAI_KEY, Seen, base64, has, keyed, of_type, pcm, pcm_at, serve,
+};
 use realtime::{Fake, ToolCall, Turn, Usage, gemini, openai};
-use respan_gateway_core::futures::{SinkExt, StreamExt};
-use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
-use respan_gateway_http::relay::Relay;
 use respan_gateway_realtime::{AudioFormat, Input, Modality, Output, Status, Turns};
 use respan_gateway_realtime_ws::{GeminiLive, OpenAiRealtime};
-use respan_gateway_ws::{Limits, WsTransport};
 use serde_json::{Value, json};
-use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderName;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-
-/// The events plugins saw at the client's edge.
-#[derive(Clone, Default)]
-struct Seen {
-    inputs: Arc<Mutex<Vec<Input>>>,
-    outputs: Arc<Mutex<Vec<Output>>>,
-}
-
-impl Seen {
-    fn inputs(&self) -> Vec<Input> {
-        self.inputs.lock().unwrap().clone()
-    }
-
-    fn outputs(&self) -> Vec<Output> {
-        self.outputs.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl Plugin for Seen {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let inputs = self.inputs.clone();
-        cx.filter(move |e: &mut Input| {
-            inputs.lock().unwrap().push(e.clone());
-            Ok(())
-        })?;
-        let outputs = self.outputs.clone();
-        cx.filter(move |e: &mut Output| {
-            outputs.lock().unwrap().push(e.clone());
-            Ok(())
-        })?;
-        Ok(None)
-    }
-}
-
-/// A gateway serving `format` at both edges, its provider at `transport`.
-/// The call keeps the client's head, its key and query among it
-/// ([`Relay::RAW`]); its frames are the format's, written anew.
-async fn serve<F>(format: F, transport: WsTransport) -> (SocketAddr, Seen)
-where
-    F: respan_gateway_core::Format<respan_gateway_http::ClientIo, Input, Output>
-        + respan_gateway_core::Format<respan_gateway_http::ProviderIo, Output, Input>
-        + Clone,
-{
-    let seen = Seen::default();
-    let gateway = Gateway::new()
-        .client::<Input, _, _>(format.clone())
-        .unwrap()
-        .provider::<Input, _, _>("p", format, transport.connect())
-        .unwrap()
-        .plugin(seen.clone())
-        .target("p")
-        .unwrap()
-        .plugin(Relay::RAW);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let app = respan_gateway_ws::axum::router(
-        gateway,
-        |_| 32 << 20,
-        Limits::default(),
-        std::future::pending(),
-    );
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (addr, seen)
-}
-
-/// A client of the gateway, which keeps what it said and heard.
-struct Client {
-    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    said: Vec<Value>,
-    heard: Vec<Value>,
-}
-
-impl Client {
-    async fn connect(addr: SocketAddr, path: &str, key: (&str, &str)) -> Self {
-        let mut request = format!("ws://{addr}{path}").into_client_request().unwrap();
-        let (name, value) = key;
-        let name: HeaderName = name.parse().unwrap();
-        request.headers_mut().insert(name, value.parse().unwrap());
-        let (ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-        Self {
-            ws,
-            said: Vec::new(),
-            heard: Vec::new(),
-        }
-    }
-
-    async fn say(&mut self, event: Value) {
-        let text = event.to_string().into();
-        self.ws.send(Message::Text(text)).await.unwrap();
-        self.said.push(event);
-    }
-
-    async fn hear(&mut self) -> Value {
-        loop {
-            let next = tokio::time::timeout(Duration::from_secs(5), self.ws.next());
-            let event: Value = match next.await.expect("an event in time") {
-                Some(Ok(Message::Text(text))) => serde_json::from_str(&text).unwrap(),
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
-                other => panic!("expected an event, heard {other:?}"),
-            };
-            self.heard.push(event.clone());
-            return event;
-        }
-    }
-
-    /// What it hears up to and including the first event `last` says ends.
-    async fn until(&mut self, last: impl Fn(&Value) -> bool) -> Vec<Value> {
-        let mut events = Vec::new();
-        loop {
-            let event = self.hear().await;
-            let done = last(&event);
-            events.push(event);
-            if done {
-                return events;
-            }
-        }
-    }
-
-    /// The fake read what the client said, and the client heard what the
-    /// fake sent, event for event.
-    async fn relayed(&self, fake: &Fake) {
-        assert_eq!(fake.received(self.said.len()).await, self.said);
-        assert_eq!(self.heard, fake.sent());
-    }
-}
-
-fn of_type(kind: &'static str) -> impl Fn(&Value) -> bool {
-    move |event| event["type"] == kind
-}
-
-fn pcm(ms: usize) -> Vec<u8> {
-    (0..ms * 24)
-        .flat_map(|i| (i as i16).to_le_bytes())
-        .collect()
-}
-
-fn base64(data: &[u8]) -> String {
-    STANDARD.encode(data)
-}
 
 /// An OpenAI Realtime client through a gateway to the strict fake, past
 /// its `session.created`.
 async fn openai() -> (Fake, Client, Seen) {
     let fake = openai::start().await;
-    // The client's path is kept: the provider is at the vendor's origin.
-    let origin = fake.base_url().replace("/v1", "");
-    let transport = OpenAiRealtime.transport(origin).unwrap();
-    let (addr, seen) = serve(OpenAiRealtime, transport).await;
-    let key = ("authorization", "Bearer sk-test");
-    let mut client = Client::connect(addr, "/v1/realtime?model=gpt-realtime", key).await;
+    let transport = keyed(
+        OpenAiRealtime.transport(fake.base_url()).unwrap(),
+        OPENAI_KEY,
+    );
+    let (addr, seen) = serve(OpenAiRealtime, OpenAiRealtime, transport).await;
+    let mut client = Client::connect(addr, "/v1/realtime?model=gpt-realtime").await;
     assert_eq!(client.hear().await["type"], "session.created");
     (fake, client, seen)
 }
@@ -219,11 +69,12 @@ async fn openai_relays_a_voice_turn_with_its_transcripts() {
     client.until(of_type("rate_limits.updated")).await;
     client.relayed(&fake).await;
 
+    // The first update is the session the handshake opens, of its model.
     let inputs = seen.inputs();
-    assert!(matches!(&inputs[0], Input::Session(s) if s.model.as_deref() == Some("gpt-realtime")));
-    let Input::Session(update) = &inputs[1] else {
+    let Input::Session(update) = &inputs[0] else {
         panic!("{inputs:?}")
     };
+    assert_eq!(update.model.as_deref(), Some("gpt-realtime"));
     assert_eq!(update.instructions.as_deref(), Some("Be brief."));
     assert_eq!(update.input_transcription, Some(true));
     let audio = |e: &Input| {
@@ -420,7 +271,7 @@ async fn openai_relays_a_tool_call_round_trip() {
     client.relayed(&fake).await;
 
     let inputs = seen.inputs();
-    let Input::Session(session) = &inputs[1] else {
+    let Input::Session(session) = &inputs[0] else {
         panic!("{inputs:?}")
     };
     let tools = session.tools.as_ref().unwrap();
@@ -526,7 +377,7 @@ async fn openai_relays_a_g711_session_unchanged() {
     client.relayed(&fake).await;
 
     let inputs = seen.inputs();
-    let Input::Session(session) = &inputs[1] else {
+    let Input::Session(session) = &inputs[0] else {
         panic!("{inputs:?}")
     };
     assert_eq!(session.input_audio, Some(AudioFormat::MULAW));
@@ -553,21 +404,10 @@ async fn openai_relays_a_g711_session_unchanged() {
 /// binary frames.
 async fn gemini() -> (Fake, Client, Seen) {
     let fake = gemini::start().await;
-    let transport = GeminiLive.transport(fake.base_url()).unwrap();
-    let (addr, seen) = serve(GeminiLive, transport).await;
-    let key = ("x-goog-api-key", "AIza-test");
-    let client = Client::connect(addr, gemini::PATH, key).await;
+    let transport = keyed(GeminiLive.transport(fake.base_url()).unwrap(), GOOGLE_KEY);
+    let (addr, seen) = serve(GeminiLive, GeminiLive, transport).await;
+    let client = Client::connect(addr, gemini::PATH).await;
     (fake, client, seen)
-}
-
-fn has(field: &'static str) -> impl Fn(&Value) -> bool {
-    move |message| message.get(field).is_some()
-}
-
-fn pcm16k(ms: usize) -> Vec<u8> {
-    (0..ms * 16)
-        .flat_map(|i| (i as i16).to_le_bytes())
-        .collect()
 }
 
 // 9: a setup, a voice turn with transcripts, an interruption, a tool call
@@ -587,7 +427,7 @@ async fn gemini_relays_a_session() {
     assert!(client.hear().await.get("setupComplete").is_some());
 
     let chunk = json!({"realtimeInput": {"audio": {"mimeType": "audio/pcm;rate=16000",
-        "data": base64(&pcm16k(100))}}});
+        "data": base64(&pcm_at(16_000, 100))}}});
     client.say(chunk.clone()).await;
     client.say(chunk).await;
     fake.received(3).await;
@@ -654,7 +494,7 @@ async fn gemini_relays_a_session() {
     );
     let audio = |e: &Input| {
         matches!(e, Input::Audio { audio, .. }
-        if audio.format == AudioFormat::pcm16(16_000) && audio.data == pcm16k(100))
+        if audio.format == AudioFormat::pcm16(16_000) && audio.data == pcm_at(16_000, 100))
     };
     assert_eq!(inputs.iter().filter(|e| audio(e)).count(), 2);
     assert!(inputs.iter().any(|e| matches!(e, Input::ToolResult(result)

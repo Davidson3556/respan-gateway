@@ -1,15 +1,14 @@
-use std::sync::Arc;
-
 use respan_gateway_core::{BadRequest, Fault};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_realtime::{AudioFormat, Input, Modality, Output, Status, Turns};
+use respan_gateway_realtime::{AudioFormat, Input, Modality, Output, Session, Status, Turns};
 use respan_gateway_ws::CloseCode;
 use serde_json::{Value, json};
 
-use super::{Applied, input, lock, output};
+use super::{Answering, Shared, input, lock, output};
+use crate::session;
 
 fn inputs(messages: &[Value]) -> Result<Vec<Input>, Fault> {
-    let mut client = input::Client::default();
+    let mut client = input::Client::new(Answering::default());
     let mut events = Vec::new();
     for message in messages {
         client.read(Bytes::from(message.to_string()), &mut events)?;
@@ -17,8 +16,8 @@ fn inputs(messages: &[Value]) -> Result<Vec<Input>, Fault> {
     Ok(events)
 }
 
-fn sent(applied: &Applied, events: &[Input]) -> Result<Vec<Value>, Fault> {
-    let mut provider = input::Provider::new(applied.clone());
+fn sent(shared: &Shared, events: &[Input]) -> Result<Vec<Value>, Fault> {
+    let mut provider = input::Provider::new(shared.clone(), session::say().0);
     let mut messages = Vec::new();
     for event in events {
         provider.write(event, &mut messages)?;
@@ -29,8 +28,8 @@ fn sent(applied: &Applied, events: &[Input]) -> Result<Vec<Value>, Fault> {
         .collect())
 }
 
-fn outputs(applied: &Applied, messages: &[Value]) -> Vec<Output> {
-    let mut provider = output::Provider::new(applied.clone());
+fn outputs(shared: &Shared, messages: &[Value]) -> Vec<Output> {
+    let mut provider = output::Provider::new(shared.clone());
     let mut events = Vec::new();
     for message in messages {
         provider
@@ -41,7 +40,7 @@ fn outputs(applied: &Applied, messages: &[Value]) -> Vec<Output> {
 }
 
 fn heard(events: &[Output]) -> Result<Vec<Value>, Fault> {
-    let mut client = output::Client::default();
+    let mut client = output::Client::new(Answering::default());
     let mut messages = Vec::new();
     for event in events {
         client.write(event, &mut messages)?;
@@ -78,8 +77,6 @@ fn every_client_message_is_written_back_as_it_came() {
         json!({"clientContent": {"turns": [{"role": "user", "parts": [{"text": "one"}]}],
             "turnComplete": true}}),
         json!({"clientContent": {"turnComplete": true}}),
-        json!({"realtimeInput": {"activityStart": {}}}),
-        json!({"realtimeInput": {"activityEnd": {}}}),
         json!({"toolResponse": {"functionResponses": [
             {"id": "c1", "name": "weather", "response": {"celsius": 21}},
             {"id": "c2", "response": {"ok": true}, "scheduling": "SILENT"}]}}),
@@ -103,9 +100,6 @@ fn every_client_message_is_written_back_as_it_came() {
             "message",
             "respond",
             "respond",
-            "native",
-            "commit",
-            "respond",
             "tool_result",
             "tool_result",
             "respond",
@@ -114,9 +108,9 @@ fn every_client_message_is_written_back_as_it_came() {
             "native"
         ]
     );
-    let applied = Applied::default();
+    let applied = Shared::default();
     assert_eq!(sent(&applied, &events).expect("written"), messages);
-    let Some(session) = lock(&applied).clone() else {
+    let Some(session) = lock(&applied).applied.clone() else {
         panic!("no setup")
     };
     assert_eq!(session.model.as_deref(), Some("gemini-live"));
@@ -179,19 +173,58 @@ fn a_client_must_set_up_first_and_once_one_thing_a_message() {
 }
 
 #[test]
-fn a_session_is_set_up_once_and_first() {
-    let applied = Applied::default();
+fn a_client_ends_its_turns_with_manual_detection() {
+    let messages = [
+        json!({"setup": {"model": "models/m",
+            "realtimeInputConfig": {"automaticActivityDetection": {"disabled": true}}}}),
+        json!({"realtimeInput": {"activityStart": {}}}),
+        json!({"realtimeInput": {"audio": {"mimeType": "audio/pcm;rate=16000", "data": "AAEC"}}}),
+        json!({"realtimeInput": {"activityEnd": {}}}),
+    ];
+    let events = inputs(&messages).expect("read");
+    let kinds: Vec<&str> = events.iter().map(kind).collect();
+    assert_eq!(kinds, ["session", "native", "audio", "commit", "respond"]);
+    assert_eq!(
+        sent(&Shared::default(), &events).expect("written"),
+        messages
+    );
+}
+
+#[test]
+fn a_session_is_set_up_first_and_then_only_acknowledged() {
+    let shared = Shared::default();
     let respond = Input::Respond { native: None };
-    assert!(sent(&applied, &[respond]).is_err());
+    assert!(sent(&shared, &[respond]).is_err());
     let events = inputs(&[json!({"setup": {"model": "models/m"}})]).expect("written");
-    let twice = [events[0].clone(), events[0].clone()];
-    let fault = sent(&applied, &twice).expect_err("refused");
+    let (say, mut said) = session::say();
+    let mut provider = input::Provider::new(shared, say);
+    let mut frames = Vec::new();
+    for event in [&events[0], &events[0]] {
+        provider.write(event, &mut frames).expect("written");
+    }
+    assert_eq!(
+        frames.len(),
+        1,
+        "the update that changes nothing is no frame"
+    );
+    let acknowledged = said.try_recv().expect("said");
+    assert!(matches!(acknowledged, Output::Updated(s) if s.model.as_deref() == Some("m")));
+    let mut changed = Session::default();
+    changed.instructions = Some("Be brief.".into());
+    let fault = provider
+        .write(&Input::Session(changed), &mut frames)
+        .expect_err("refused");
     assert_eq!(fault.get::<CloseCode>(), Some(&CloseCode(1008)));
+    assert!(
+        fault
+            .message()
+            .ends_with("this update changes `instructions`")
+    );
 }
 
 #[test]
 fn every_server_message_is_written_back_as_it_came() {
-    let applied: Applied = Arc::default();
+    let applied = Shared::default();
     let usage = json!({"promptTokenCount": 40, "responseTokenCount": 12,
         "cachedContentTokenCount": 0, "totalTokenCount": 52,
         "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 10},
@@ -273,7 +306,7 @@ fn every_server_message_is_written_back_as_it_came() {
 
 #[test]
 fn the_setup_written_is_the_session_its_completion_says() {
-    let applied = Applied::default();
+    let applied = Shared::default();
     let events = inputs(&[json!({"setup": {"model": "models/m"}})]).expect("written");
     sent(&applied, &events).expect("written");
     let events = outputs(&applied, &[json!({"setupComplete": {}})]);
@@ -292,6 +325,62 @@ fn a_refusal_closes_a_live_client() {
     };
     let fault = heard(&[error]).expect_err("refused");
     assert_eq!(fault.get::<CloseCode>(), Some(&CloseCode(1007)));
-    let foreign = Output::native("openai-realtime", json!({"type": "x"}));
-    assert!(heard(&[foreign]).is_err());
+    let foreign = Output::native("openai-realtime", json!({"type": "rate_limits.updated"}));
+    assert_eq!(heard(&[foreign]).expect("dropped"), Vec::<Value>::new());
+    let mcp = Output::native(
+        "openai-realtime",
+        json!({"type": "mcp_list_tools.completed"}),
+    );
+    assert!(heard(&[mcp]).is_err());
+}
+
+#[test]
+fn a_cancelled_turn_says_nothing_more_and_a_withdrawn_call_takes_no_answer() {
+    let shared = Shared::default();
+    let (say, mut said) = session::say();
+    let mut provider = input::Provider::new(shared.clone(), say);
+    let mut frames = Vec::new();
+    let setup = inputs(&[json!({"setup": {"model": "models/m"}})]).expect("read");
+    provider.write(&setup[0], &mut frames).expect("written");
+    let part = json!({"serverContent": {"modelTurn": {"parts": [{"text": "Once"}]}}});
+    let started = outputs(&shared, std::slice::from_ref(&part));
+    assert!(
+        matches!(started[0], Output::ResponseStart { .. }),
+        "{started:?}"
+    );
+    provider
+        .write(&Input::Cancel { native: None }, &mut frames)
+        .expect("written");
+    assert_eq!(frames.len(), 1, "the Live API has no cancel");
+    let done = said.try_recv().expect("said");
+    assert!(matches!(
+        done,
+        Output::ResponseDone {
+            status: Status::Cancelled,
+            ..
+        }
+    ));
+    let end = json!({"serverContent": {"turnComplete": true},
+        "usageMetadata": {"promptTokenCount": 3}});
+    let rest = outputs(&shared, &[part.clone(), end]);
+    assert!(
+        matches!(rest[0], Output::Usage(_)),
+        "metered still: {rest:?}"
+    );
+    let said = |e: &Output| matches!(e, Output::Text { .. } | Output::ResponseDone { .. });
+    assert!(!rest.iter().any(said), "{rest:?}");
+    let next = outputs(&shared, &[part]);
+    assert!(matches!(next[0], Output::ResponseStart { .. }), "{next:?}");
+
+    outputs(&shared, &[json!({"toolCallCancellation": {"ids": ["c1"]}})]);
+    let answer = Input::ToolResult(respan_gateway_realtime::ToolResult::new("c1", "{}"));
+    provider.write(&answer, &mut frames).expect("dropped");
+    provider
+        .write(&Input::Respond { native: None }, &mut frames)
+        .expect("dropped");
+    assert_eq!(
+        frames.len(),
+        1,
+        "no answer to a withdrawn call, nor a response"
+    );
 }

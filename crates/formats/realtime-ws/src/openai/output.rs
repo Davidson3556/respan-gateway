@@ -9,6 +9,8 @@ use respan_gateway_realtime::{Audio, AudioFormat, Output, Status, Usage};
 use serde_json::{Value, json};
 
 use super::{NAME, session};
+use crate::audio::Convert;
+use crate::foreign;
 use crate::json::{
     self, at, count, merge, number, own, set, string, take, text, untranslatable_output,
 };
@@ -226,33 +228,60 @@ fn spelled(status: &Status) -> Option<(&str, Option<&str>)> {
     })
 }
 
-/// The events written to the client.
+/// The events written to the client. A response that began in another
+/// format has none of OpenAI's items, so they are made up for it, with
+/// ids of their own, and told of as OpenAI does: the response, its message
+/// and content part, their deltas and ends, an item per call, and the
+/// response's end with its usage and items.
 #[derive(Debug)]
 pub(super) struct Client {
     /// The format of the audio it takes, as its session says.
     output: AudioFormat,
+    /// The model's audio in that format.
+    convert: Convert,
     /// Usage of the response being made, written in its `response.done`.
     usage: Option<Usage>,
+    ids: Ids,
+    /// The response being made, if it began in another format.
+    response: Option<Response>,
+    /// The item of the user's turn another format's events speak of.
+    user: Option<String>,
+    /// What was heard of it, until its whole transcript is written.
+    heard: Option<String>,
 }
 
 impl Default for Client {
     fn default() -> Self {
         Self {
             output: AudioFormat::pcm16(24_000),
+            convert: Convert::default(),
             usage: None,
+            ids: Ids::default(),
+            response: None,
+            user: None,
+            heard: None,
         }
     }
 }
 
 impl Client {
     pub(super) fn write(&mut self, event: &Output, out: &mut Vec<Bytes>) -> Result<(), Fault> {
-        if let Some(v) = self.encode(event)? {
+        let Some(event) = foreign::strip(NAME, event) else {
+            return Ok(());
+        };
+        let mut events = Vec::new();
+        self.encode(&event, &mut events)?;
+        let made_up = !owned(&event);
+        for mut v in events {
+            if made_up && v.get("event_id").is_none() {
+                v["event_id"] = self.ids.next("event").into();
+            }
             out.push(json::frame(&v)?);
         }
         Ok(())
     }
 
-    fn encode(&mut self, event: &Output) -> Result<Option<Value>, Fault> {
+    fn encode(&mut self, event: &Output, out: &mut Vec<Value>) -> Result<(), Fault> {
         let refuse = |what: &str| untranslatable_output(NAME, what);
         let (mut v, native) = match event {
             Output::Opened(s) | Output::Updated(s) => {
@@ -261,7 +290,10 @@ impl Client {
                     Output::Opened(_) => "session.created",
                     _ => "session.updated",
                 };
-                let session = session::encode(s, refuse)?;
+                let mut session = session::encode(s, refuse)?;
+                if s.native.is_none() {
+                    session["type"] = "realtime".into();
+                }
                 (json!({"type": kind, "session": session}), &s.native)
             }
             Output::SpeechStarted { at_ms, native } => {
@@ -269,12 +301,20 @@ impl Client {
                 if let Some(ms) = at_ms {
                     v["audio_start_ms"] = (*ms).into();
                 }
+                if native.is_none() {
+                    let item = self.ids.next("item");
+                    v["item_id"] = item.as_str().into();
+                    self.user = Some(item);
+                }
                 (v, native)
             }
             Output::SpeechStopped { at_ms, native } => {
                 let mut v = json!({"type": "input_audio_buffer.speech_stopped"});
                 if let Some(ms) = at_ms {
                     v["audio_end_ms"] = (*ms).into();
+                }
+                if native.is_none() {
+                    v["item_id"] = self.user().into();
                 }
                 (v, native)
             }
@@ -284,18 +324,42 @@ impl Client {
                 native,
             } => {
                 let kind = "conversation.item.input_audio_transcription";
-                let v = match complete {
+                let mut v = match complete {
                     false => json!({"type": format!("{kind}.delta"), "delta": text}),
                     true => json!({"type": format!("{kind}.completed"), "transcript": text}),
                 };
+                if native.is_none() {
+                    v["item_id"] = self.user().into();
+                    v["content_index"] = 0.into();
+                    match complete {
+                        false => self.heard.get_or_insert_default().push_str(text),
+                        true => self.heard = None,
+                    }
+                }
                 (v, native)
             }
-            Output::ResponseStart { id, native } => {
-                // A response that began in another format has none of the
-                // items OpenAI's scaffolding names.
-                if !matches!(native, Some(n) if *n.format == *NAME) {
-                    return Err(refuse("a response outside OpenAI's items"));
+            Output::ResponseStart { id, native } if native.is_none() => {
+                // What was heard of the turn it answers is all there is.
+                if let Some(heard) = self.heard.take() {
+                    out.push(
+                        json!({"type": "conversation.item.input_audio_transcription.completed",
+                        "item_id": self.user(), "content_index": 0, "transcript": heard}),
+                    );
                 }
+                self.user = None;
+                let id = id.clone().unwrap_or_else(|| self.ids.next("resp"));
+                out.push(json!({"type": "response.created", "response": {
+                    "object": "realtime.response", "id": id, "status": "in_progress",
+                    "status_details": null, "output": [], "usage": null}}));
+                self.response = Some(Response {
+                    id,
+                    said: None,
+                    output: Vec::new(),
+                });
+                return Ok(());
+            }
+            Output::ResponseStart { id, native } => {
+                self.response = None;
                 let mut v = json!({"type": "response.created", "response": {}});
                 if let Some(id) = id {
                     v["response"]["id"] = id.as_str().into();
@@ -303,20 +367,34 @@ impl Client {
                 (v, native)
             }
             Output::Audio { audio, native } => {
-                if audio.format != self.output {
-                    return Err(refuse("audio in another format than the session's"));
+                let data = self.convert.to(audio, self.output);
+                let data = data.ok_or_else(|| refuse("audio of this format"))?;
+                let delta = json::base64(&data);
+                if let Some(response) = &mut self.response {
+                    response.delta(&mut self.ids, Part::Audio, delta, out);
+                    return Ok(());
                 }
-                let delta = json::base64(&audio.data);
                 (
                     json!({"type": "response.output_audio.delta", "delta": delta}),
                     native,
                 )
             }
-            Output::Text { text, native } => (
-                json!({"type": "response.output_text.delta", "delta": text}),
-                native,
-            ),
+            Output::Text { text, native } => {
+                if let Some(response) = &mut self.response {
+                    response.delta(&mut self.ids, Part::Text, text.as_str().into(), out);
+                    return Ok(());
+                }
+                (
+                    json!({"type": "response.output_text.delta", "delta": text}),
+                    native,
+                )
+            }
             Output::Transcript { text, native } => {
+                if let Some(response) = &mut self.response {
+                    let delta = text.as_str().into();
+                    response.delta(&mut self.ids, Part::Transcript, delta, out);
+                    return Ok(());
+                }
                 let v = json!({"type": "response.output_audio_transcript.delta", "delta": text});
                 (v, native)
             }
@@ -326,6 +404,10 @@ impl Client {
                 arguments,
                 native,
             } => {
+                if let Some(response) = &mut self.response {
+                    response.call(&mut self.ids, id, name, arguments, out);
+                    return Ok(());
+                }
                 let v = json!({"type": "response.function_call_arguments.done", "call_id": id,
                     "name": name, "arguments": arguments});
                 (v, native)
@@ -335,13 +417,19 @@ impl Client {
                 held.tokens += &usage.tokens;
                 held.input_audio_tokens += usage.input_audio_tokens;
                 held.output_audio_tokens += usage.output_audio_tokens;
-                return Ok(None);
+                return Ok(());
             }
             Output::ResponseDone { status, native } => {
                 let (said, reason) = spelled(status).ok_or_else(|| refuse("this status"))?;
                 let mut v = json!({"type": "response.done", "response": {"status": said}});
                 if let Some(reason) = reason {
                     v["response"]["status_details"] = json!({"type": said, "reason": reason});
+                }
+                if let Some(mut response) = self.response.take() {
+                    response.close(said == "completed", out);
+                    let made_up = json!({"object": "realtime.response", "id": response.id,
+                        "status_details": null, "output": response.output});
+                    merge(&mut v["response"], made_up.as_object());
                 }
                 merge(
                     &mut v,
@@ -355,7 +443,8 @@ impl Client {
                     }
                 }
                 self.usage = None;
-                return Ok(Some(v));
+                out.push(v);
+                return Ok(());
             }
             Output::Error {
                 code,
@@ -369,7 +458,8 @@ impl Client {
                 (v, native)
             }
             Output::Native(NativeValue { format, value }) if **format == *NAME => {
-                return Ok(Some(Value::clone(value)));
+                out.push(Value::clone(value));
+                return Ok(());
             }
             _ => return Err(refuse("another format's event")),
         };
@@ -377,6 +467,211 @@ impl Client {
             &mut v,
             own(NAME, native, || refuse("another format's event"))?,
         );
-        Ok(Some(v))
+        out.push(v);
+        Ok(())
+    }
+
+    /// The item of the user's turn, made up if no event named it yet.
+    fn user(&mut self) -> String {
+        let ids = &mut self.ids;
+        self.user.get_or_insert_with(|| ids.next("item")).clone()
+    }
+}
+
+/// Whether `event` is OpenAI's, saying as it came what it says beyond the
+/// kind's fields.
+fn owned(event: &Output) -> bool {
+    let native = match event {
+        Output::Opened(s) | Output::Updated(s) => &s.native,
+        Output::SpeechStarted { native, .. }
+        | Output::SpeechStopped { native, .. }
+        | Output::InputTranscript { native, .. }
+        | Output::ResponseStart { native, .. }
+        | Output::Audio { native, .. }
+        | Output::Text { native, .. }
+        | Output::Transcript { native, .. }
+        | Output::ToolCall { native, .. }
+        | Output::ResponseDone { native, .. }
+        | Output::Error { native, .. } => native,
+        _ => return true,
+    };
+    native.is_some()
+}
+
+/// The ids a client's writer makes up: a prefix and a number, unique in
+/// its session.
+#[derive(Debug, Default)]
+struct Ids(u64);
+
+impl Ids {
+    fn next(&mut self, prefix: &str) -> String {
+        self.0 += 1;
+        format!("{prefix}_gw{}", self.0)
+    }
+}
+
+/// A response that began in another format.
+#[derive(Debug)]
+struct Response {
+    id: String,
+    /// Its message, while it is being said.
+    said: Option<Said>,
+    /// Its items said, as its `response.done` lists them.
+    output: Vec<Value>,
+}
+
+/// The message a response is saying.
+#[derive(Debug)]
+struct Said {
+    id: String,
+    /// Whether it is spoken, rather than written.
+    audio: bool,
+    /// Its transcript, or its text, so far.
+    text: String,
+}
+
+/// What a delta of a response's message is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Audio,
+    Transcript,
+    Text,
+}
+
+impl Response {
+    /// Where an event of its message is: the response, the item, their
+    /// indexes.
+    fn at(&self, said: &Said) -> Value {
+        json!({"response_id": self.id, "item_id": said.id,
+            "output_index": self.output.len(), "content_index": 0})
+    }
+
+    /// The next `delta` of its message, which begins with its first.
+    fn delta(&mut self, ids: &mut Ids, part: Part, delta: Value, out: &mut Vec<Value>) {
+        let mut said = match self.said.take() {
+            Some(said) => said,
+            None => self.open(ids, part != Part::Text, out),
+        };
+        let kind = match part {
+            Part::Audio => "response.output_audio.delta",
+            Part::Transcript => "response.output_audio_transcript.delta",
+            Part::Text => "response.output_text.delta",
+        };
+        if let (Part::Transcript | Part::Text, Some(text)) = (part, delta.as_str()) {
+            said.text.push_str(text);
+        }
+        let mut v = self.at(&said);
+        v["type"] = kind.into();
+        v["delta"] = delta;
+        out.push(v);
+        self.said = Some(said);
+    }
+
+    /// Its message's item and content part, added.
+    fn open(&mut self, ids: &mut Ids, audio: bool, out: &mut Vec<Value>) -> Said {
+        let said = Said {
+            id: ids.next("item"),
+            audio,
+            text: String::new(),
+        };
+        let item = json!({"id": said.id, "object": "realtime.item", "type": "message",
+            "status": "in_progress", "role": "assistant", "content": []});
+        out.push(
+            json!({"type": "response.output_item.added", "response_id": self.id,
+            "output_index": self.output.len(), "item": item}),
+        );
+        out.push(json!({"type": "conversation.item.added", "item": item}));
+        let mut v = self.at(&said);
+        v["type"] = "response.content_part.added".into();
+        v["part"] = match audio {
+            true => json!({"type": "audio", "transcript": ""}),
+            false => json!({"type": "text", "text": ""}),
+        };
+        out.push(v);
+        said
+    }
+
+    /// Its message's end, if it is saying one: `completed` or not.
+    fn close(&mut self, completed: bool, out: &mut Vec<Value>) {
+        let Some(said) = self.said.take() else {
+            return;
+        };
+        let event = |kind: &str, fields: Value| {
+            let mut v = self.at(&said);
+            v["type"] = kind.into();
+            merge(&mut v, fields.as_object());
+            v
+        };
+        let text = said.text.as_str();
+        let (part, content) = match said.audio {
+            true => {
+                out.push(event("response.output_audio.done", json!({})));
+                out.push(event(
+                    "response.output_audio_transcript.done",
+                    json!({"transcript": text}),
+                ));
+                (
+                    json!({"type": "audio", "transcript": text}),
+                    json!({"type": "output_audio", "transcript": text}),
+                )
+            }
+            false => {
+                out.push(event("response.output_text.done", json!({"text": text})));
+                (
+                    json!({"type": "text", "text": text}),
+                    json!({"type": "output_text", "text": text}),
+                )
+            }
+        };
+        out.push(event("response.content_part.done", json!({"part": part})));
+        let status = if completed { "completed" } else { "incomplete" };
+        let item = json!({"id": said.id, "object": "realtime.item", "type": "message",
+            "status": status, "role": "assistant", "content": [content]});
+        self.done(item, out);
+    }
+
+    /// A call of tool `name`: its item, its arguments whole, its end.
+    fn call(&mut self, ids: &mut Ids, id: &str, name: &str, arguments: &str, out: &mut Vec<Value>) {
+        self.close(true, out);
+        let item_id = ids.next("item");
+        let item = |status: &str, arguments: &str| {
+            json!({"id": item_id, "object": "realtime.item", "type": "function_call",
+                "status": status, "name": name, "call_id": id, "arguments": arguments})
+        };
+        let index = self.output.len();
+        let added = item("in_progress", "");
+        out.push(
+            json!({"type": "response.output_item.added", "response_id": self.id,
+            "output_index": index, "item": added}),
+        );
+        out.push(json!({"type": "conversation.item.added", "item": added}));
+        let at = json!({"response_id": self.id, "item_id": item_id, "output_index": index,
+            "call_id": id});
+        for (kind, fields) in [
+            (
+                "response.function_call_arguments.delta",
+                json!({"delta": arguments}),
+            ),
+            (
+                "response.function_call_arguments.done",
+                json!({"name": name, "arguments": arguments}),
+            ),
+        ] {
+            let mut v = at.clone();
+            v["type"] = kind.into();
+            merge(&mut v, fields.as_object());
+            out.push(v);
+        }
+        self.done(item("completed", arguments), out);
+    }
+
+    /// `item` done: told of, and listed among its items.
+    fn done(&mut self, item: Value, out: &mut Vec<Value>) {
+        out.push(
+            json!({"type": "response.output_item.done", "response_id": self.id,
+            "output_index": self.output.len(), "item": item}),
+        );
+        out.push(json!({"type": "conversation.item.done", "item": item}));
+        self.output.push(item);
     }
 }

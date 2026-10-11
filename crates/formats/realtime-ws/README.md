@@ -48,14 +48,47 @@ them, so `clientContent` and `toolResponse` are written whole.
 `activityStart`, `audioStreamEnd`, `goAway`, `toolCallCancellation` and
 `sessionResumptionUpdate` stay native.
 
-`ResponsesWs` decodes every frame to the kind's `Input::Native` or
-`Output::Native`, tagged with its name. None writes another format's
-native, or translates to another format yet.
+`OpenAiRealtime` and `GeminiLive` write each other's events too: see
+[Translation](#translation). `ResponsesWs` decodes every frame to the
+kind's `Input::Native` or `Output::Native`, tagged with its name, and
+writes no other format's.
 
 Plugins filter events with `cx.filter(|e: &mut Output| ..)` (client edge)
 or `px.filter(..)` (provider edge), and drop one with a `Filter` that does
 not push it. A handshake one refuses is answered with the fault's error
 code, never its message.
+
+## Translation
+
+The target format's writer converts audio its spec cannot carry: G.711 is
+decoded for Gemini, which takes PCM at any rate it is told; Gemini's
+clients' audio is resampled to OpenAI's 24 kHz; Gemini's 24 kHz audio is
+encoded as the G.711 an OpenAI client asked for. A response from Gemini
+reaches an OpenAI client with the items, content parts and ids OpenAI
+would send, its usage in `response.done`.
+
+What one spec has and the other has not is emulated, dropped or refused:
+
+- To Gemini: the session is created before its setup; an update that
+  changes nothing is acknowledged, one that changes anything closes the
+  session 1008 (Gemini fixes its setup); `response.cancel` ends the
+  response at once and drops the rest of its turn; with manual turns the
+  user's audio opens an activity and its commit ends it.
+  `conversation.item.truncate` is dropped, as Gemini keeps only what it
+  sent; so are ids, tracing, noise reduction, transcription settings and
+  VAD tuning. A message is taken only as the user's text answered at once;
+  history, item edits, response overrides, a commit under server VAD, a
+  tool choice other than `auto` and `create_response: false` are refused.
+- To OpenAI: Gemini's client routes by `?model=` on its URL (OpenAI takes
+  its model at connect), and its `activityStart` while the model speaks is
+  `response.cancel`; context compression, VAD sensitivities and
+  `audioStreamEnd` are dropped; sampling, resumption, proactivity, Google
+  Search, non-blocking functions and video are refused. An OpenAI `error`
+  closes a Gemini client, which knows a refusal only as a close.
+
+A refused input is `bad_request`, closing the client 1008; a refused
+output `upstream`. Another format's events and fields a provider sends are
+dropped at the client.
 
 Used by: the [binary](../../../apps/gateway/src/main.rs), and the
 [realtime examples](../../../examples/realtime).

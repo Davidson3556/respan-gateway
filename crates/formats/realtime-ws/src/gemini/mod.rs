@@ -6,25 +6,43 @@ mod setup;
 #[cfg(test)]
 mod tests;
 
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::{ClientIo, ProviderIo, formats};
-use respan_gateway_realtime::{Input, Output, Session};
+use respan_gateway_realtime::{AudioFormat, Input, Modality, Output, Session};
 use respan_gateway_ws::WsTransport;
 
-use crate::session::Spec;
+use crate::session::{self, Spec};
 
 const NAME: &str = SPEC.name;
 
-/// The setup a session's provider took, which its encoder wrote and its
-/// decoder says took effect.
-type Applied = Arc<Mutex<Option<Session>>>;
-
-fn lock(applied: &Applied) -> MutexGuard<'_, Option<Session>> {
-    applied.lock().unwrap_or_else(PoisonError::into_inner)
+/// What a session's writer to its provider and reader of it share.
+#[derive(Debug, Default)]
+struct State {
+    /// The setup written, which the provider's events say took effect.
+    applied: Option<Session>,
+    /// Whether a response is being made.
+    open: bool,
+    /// Whether the client cancelled it: the rest of its turn is dropped.
+    cancelled: bool,
+    /// The tools' names by the id of their calls.
+    calls: HashMap<String, String>,
+    /// The calls the provider cancelled, whose answers it takes none of.
+    withdrawn: HashSet<String>,
 }
+
+type Shared = Arc<Mutex<State>>;
+
+fn lock(shared: &Shared) -> MutexGuard<'_, State> {
+    shared.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether a client is being answered: its writer says, its reader reads.
+type Answering = Arc<AtomicBool>;
 
 const SPEC: Spec = Spec {
     name: "gemini-live",
@@ -46,6 +64,10 @@ const SPEC: Spec = Spec {
 /// as the Live API takes them; else the session closes 1007. What the kind
 /// has no form for, such as a session's resumption or a warning that it
 /// ends, stays native, so a relay to Gemini keeps what every message says.
+///
+/// To a client of another format it says what the Live API cannot: a
+/// session opened before its setup, an update that changes nothing, and
+/// the end of a response the client cancelled, whose rest it drops.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GeminiLive;
 
@@ -72,9 +94,10 @@ impl Format<ClientIo, Input, Output> for GeminiLive {
     }
 
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
-        let mut client = input::Client::default();
+        let answering = Answering::default();
+        let mut client = input::Client::new(answering.clone());
         let read = move |raw: Bytes, out: &mut Vec<Input>| client.read(raw, out);
-        let mut client = output::Client::default();
+        let mut client = output::Client::new(answering);
         let write = formats::each_message(move |event: &Output, out: &mut Vec<Bytes>| {
             client.write(event, out)
         });
@@ -88,13 +111,20 @@ impl Format<ProviderIo, Output, Input> for GeminiLive {
     }
 
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
-        let applied = Applied::default();
-        let mut provider = input::Provider::new(applied.clone());
+        let shared = Shared::default();
+        let (say, said) = session::say();
+        // The session is open before its setup, as a client of OpenAI
+        // waits to hear.
+        let mut opened = Session::default();
+        opened.output = Some(Modality::Audio);
+        opened.output_audio = Some(AudioFormat::pcm16(24_000));
+        let _ = say.unbounded_send(Output::Opened(opened));
+        let mut provider = input::Provider::new(shared.clone(), say);
         let write = formats::each_message(move |event: &Input, out: &mut Vec<Bytes>| {
             provider.write(event, out)
         });
-        let mut provider = output::Provider::new(applied);
+        let mut provider = output::Provider::new(shared);
         let read = move |raw: Bytes, out: &mut Vec<Output>| provider.read(raw, out);
-        Ok(SPEC.provider(io, write, Box::new(read)))
+        Ok(SPEC.provider(io, None, write, Box::new(read), Some(said)))
     }
 }

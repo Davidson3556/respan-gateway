@@ -1,4 +1,4 @@
-use respan_gateway_core::{BadRequest, NativeFields, Upstream};
+use respan_gateway_core::{BadRequest, NativeFields};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_realtime::{AudioFormat, Input, Output, Session, Status, ToolResult};
 use serde_json::{Value, json};
@@ -19,7 +19,7 @@ fn inputs(frames: &[Value]) -> Vec<Input> {
 
 /// What `events` are written as, to a provider.
 fn sent(events: &[Input]) -> Result<Vec<Value>, respan_gateway_core::Fault> {
-    let mut provider = input::Provider::default();
+    let mut provider = input::Provider::new(Some("gpt-realtime".into()));
     let mut frames = Vec::new();
     for event in events {
         provider.write(event, &mut frames)?;
@@ -91,7 +91,6 @@ fn every_client_event_is_written_back_as_it_came() {
         kinds,
         [
             "session",
-            "session",
             "audio",
             "commit",
             "message",
@@ -129,15 +128,13 @@ fn a_client_event_is_read_as_the_kinds() {
         json!({"type": "input_audio_buffer.append", "audio": "AAE"}),
     ];
     let events = inputs(&frames);
-    let Input::Session(opening) = &events[0] else {
+    // The first update is the session the handshake opens.
+    let Input::Session(session) = &events[0] else {
         panic!("{events:?}")
     };
-    assert_eq!(opening.model.as_deref(), Some("gpt-realtime"));
-    let Input::Session(session) = &events[1] else {
-        panic!("{events:?}")
-    };
+    assert_eq!(session.model.as_deref(), Some("gpt-realtime"));
     assert_eq!(session.input_audio, Some(AudioFormat::ALAW));
-    let Input::Audio { audio, native } = &events[2] else {
+    let Input::Audio { audio, native } = &events[1] else {
         panic!("{events:?}")
     };
     assert_eq!(
@@ -147,6 +144,10 @@ fn a_client_event_is_read_as_the_kinds() {
     assert_eq!(*native, None);
     // Written padded: the same audio.
     assert_eq!(sent(&events).expect("written")[1]["audio"], "AAE=");
+    // A first frame of another event follows a session of the model alone.
+    let events = inputs(&frames[1..]);
+    assert!(matches!(&events[0], Input::Session(s) if s.model.as_deref() == Some("gpt-realtime")));
+    assert!(matches!(events[1], Input::Audio { .. }));
 }
 
 #[test]
@@ -176,27 +177,64 @@ fn a_session_of_nothing_but_its_model_is_no_frame() {
 }
 
 #[test]
-fn another_formats_input_is_refused() {
-    let foreign = || Some(NativeFields::new("gemini-live", Default::default()));
-    for event in [
-        Input::Respond { native: foreign() },
-        Input::native("gemini-live", json!({"clientContent": {}})),
+fn another_formats_input_is_dropped_where_it_cannot_change_the_answer() {
+    let gemini = |v: Value| {
+        Some(NativeFields::new(
+            "gemini-live",
+            v.as_object().cloned().expect("object"),
+        ))
+    };
+    let shaped = Input::Respond {
+        native: gemini(json!({"clientContent": {}})),
+    };
+    assert_eq!(
+        sent(&[shaped]).expect("written"),
+        [json!({"type": "response.create"})]
+    );
+    let start = Input::native(
+        "gemini-live",
+        json!({"realtimeInput": {"activityStart": {}}}),
+    );
+    assert_eq!(sent(&[start]).expect("written"), Vec::<Value>::new());
+    let mut sampled = Session::default();
+    sampled.native = gemini(json!({"setup": {"generationConfig": {"temperature": 0.2}}}));
+    for (event, field) in [
+        (
+            Input::Session(sampled),
+            "`setup.generationConfig.temperature`",
+        ),
+        (
+            Input::native("gemini-live", json!({"realtimeInput": {"video": {}}})),
+            "`realtimeInput.video`",
+        ),
     ] {
         let refused = sent(&[event]).expect_err("refused");
         assert!(refused.is::<BadRequest>(), "{refused}");
-        assert!(refused.message().contains("cannot be translated"));
+        assert_eq!(
+            refused.message(),
+            format!("{field} cannot be translated to openai-realtime")
+        );
     }
-    let mut session = Session::default();
-    session.instructions = Some("x".into());
-    let audio = respan_gateway_realtime::Audio {
-        data: Bytes::from_static(&[0; 4]),
-        format: AudioFormat::pcm16(16_000),
-    };
-    let audio = Input::Audio {
-        audio,
+}
+
+#[test]
+fn audio_in_another_format_is_converted_to_the_sessions() {
+    let audio = |format, data: Vec<u8>| Input::Audio {
+        audio: respan_gateway_realtime::Audio {
+            data: Bytes::from(data),
+            format,
+        },
         native: None,
     };
-    assert!(sent(&[Input::Session(session), audio]).is_err());
+    let second: Vec<u8> = (0..16_000i16)
+        .flat_map(|i| (i % 100).to_le_bytes())
+        .collect();
+    let written = sent(&[audio(AudioFormat::pcm16(16_000), second)]).expect("written");
+    let data = crate::json::unbase64(&written[0]["audio"]).expect("base64");
+    // A second at 24 kHz, but what the resampler still holds.
+    assert!((47_000..=48_000).contains(&data.len()), "{}", data.len());
+    let refused = sent(&[audio(AudioFormat::pcm16(500), vec![0; 4])]).expect_err("refused");
+    assert!(refused.is::<BadRequest>(), "{refused}");
 }
 
 #[test]
@@ -235,7 +273,7 @@ fn every_server_event_is_written_back_as_it_came() {
             "item_id": "i3", "name": "f", "arguments": "{}"}),
         json!({"type": "response.done", "response": {"id": "r1", "status": "completed",
             "status_details": null, "usage": usage}}),
-        json!({"type": "response.done", "response": {"status": "cancelled",
+        json!({"type": "response.done", "event_id": "s4", "response": {"status": "cancelled",
             "status_details": {"type": "cancelled", "reason": "turn_detected"}}}),
         json!({"type": "response.done", "response": {"status": "failed",
             "status_details": {"type": "failed", "error": {"code": "x"}}}}),
@@ -301,20 +339,82 @@ fn usage_a_filter_edits_is_written_in_the_response_done() {
 }
 
 #[test]
-fn a_response_outside_openais_items_is_refused_to_its_client() {
-    let foreign = Output::ResponseStart {
-        id: None,
-        native: None,
-    };
-    let refused = heard(&[foreign]).expect_err("refused");
-    assert!(refused.is::<Upstream>(), "{refused}");
+fn a_response_of_another_format_is_told_of_as_openai_does() {
+    let response = [
+        Output::ResponseStart {
+            id: None,
+            native: None,
+        },
+        Output::Audio {
+            audio: respan_gateway_realtime::Audio {
+                data: Bytes::from_static(&[0; 4]),
+                format: AudioFormat::pcm16(24_000),
+            },
+            native: None,
+        },
+        Output::Transcript {
+            text: "Hi.".into(),
+            native: None,
+        },
+        Output::ToolCall {
+            id: "c1".into(),
+            name: "f".into(),
+            arguments: "{}".into(),
+            native: None,
+        },
+        Output::Usage(Default::default()),
+        Output::ResponseDone {
+            status: Status::Completed,
+            native: Some(NativeFields::new("gemini-live", Default::default())),
+        },
+    ];
+    let written = heard(&response).expect("written");
+    let kinds: Vec<&str> = written
+        .iter()
+        .map(|v| v["type"].as_str().expect("typed"))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "response.created",
+            "response.output_item.added",
+            "conversation.item.added",
+            "response.content_part.added",
+            "response.output_audio.delta",
+            "response.output_audio_transcript.delta",
+            "response.output_audio.done",
+            "response.output_audio_transcript.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "conversation.item.done",
+            "response.output_item.added",
+            "conversation.item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+            "conversation.item.done",
+            "response.done",
+        ]
+    );
+    let done = &written[17]["response"];
+    assert_eq!(done["id"], written[0]["response"]["id"]);
+    assert_eq!(done["output"][0]["content"][0]["transcript"], "Hi.");
+    assert_eq!(done["output"][1]["call_id"], "c1");
+    assert!(written.iter().all(|v| v["event_id"].is_string()));
+    let ids: std::collections::HashSet<&Value> = written.iter().map(|v| &v["event_id"]).collect();
+    assert_eq!(ids.len(), written.len());
+}
+
+#[test]
+fn an_error_is_written_as_openais() {
     let error = Output::Error {
         code: Some("invalid_request_error".into()),
         message: "no".into(),
         native: None,
     };
+    let written = heard(&[error]).expect("written");
     assert_eq!(
-        heard(&[error]).expect("written"),
-        [json!({"type": "error", "error": {"type": "invalid_request_error", "message": "no"}})]
+        written[0]["error"],
+        json!({"type": "invalid_request_error", "message": "no"})
     );
 }

@@ -7,22 +7,34 @@
 //! would be written as several, such as a turn of two parts, reaches its
 //! client as several, each saying its part.
 
+use std::sync::atomic::Ordering;
+
 use respan_gateway_core::{BadRequest, Fault, NativeFields, NativeValue, Upstream};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_realtime::{Audio, AudioFormat, Encoding, Output, Status, Usage};
+use respan_gateway_realtime::{Audio, AudioFormat, Output, Status, Usage};
 use respan_gateway_ws::CloseCode;
 use serde_json::{Map, Value, json};
 
-use super::{Applied, NAME, lock};
+use super::{Answering, NAME, Shared, State, lock};
+use crate::audio::Convert;
+use crate::foreign;
 use crate::json::{self, at, count, merge, own, set, string, take, text, untranslatable_output};
+
+/// What a turn the client cancelled says that is dropped: its content, and
+/// its end, as its response already ended.
+const CANCELLED: &[&[&str]] = &[
+    &["serverContent", "modelTurn"],
+    &["serverContent", "outputTranscription"],
+    &["serverContent", "turnComplete"],
+    &["serverContent", "turnCompleteReason"],
+    &["toolCall"],
+];
 
 /// A provider's messages as events.
 #[derive(Debug)]
 pub(super) struct Provider {
-    /// The setup the client's events wrote.
-    applied: Applied,
-    /// Whether a response is being made.
-    open: bool,
+    /// What it shares with the writer of the client's events.
+    shared: Shared,
     /// Whether the turn's response ended, by its calls or an interruption,
     /// before the turn did.
     ended: bool,
@@ -32,10 +44,9 @@ pub(super) struct Provider {
 }
 
 impl Provider {
-    pub(super) fn new(applied: Applied) -> Self {
+    pub(super) fn new(shared: Shared) -> Self {
         Self {
-            applied,
-            open: false,
+            shared,
             ended: false,
             spoke: false,
         }
@@ -50,7 +61,8 @@ impl Provider {
         }
         let used = usage(&mut v);
         let mut events = Vec::new();
-        if self.decode(&mut v, &mut events) {
+        let shared = self.shared.clone();
+        if self.decode(&mut lock(&shared), &mut v, &mut events) {
             out.push(Output::ResponseStart {
                 id: None,
                 native: None,
@@ -71,15 +83,26 @@ impl Provider {
 
     /// The events of what `v` says, taken from it; whether a response
     /// begins before them.
-    fn decode(&mut self, v: &mut Value, events: &mut Vec<Output>) -> bool {
+    fn decode(&mut self, state: &mut State, v: &mut Value, events: &mut Vec<Output>) -> bool {
         let mut starts = false;
         let mut start = |open: &mut bool, ended: &mut bool| {
             starts |= !*open;
             (*open, *ended) = (true, false);
         };
+        if state.cancelled {
+            let content = &v["serverContent"];
+            state.cancelled = content["turnComplete"] != true && content["interrupted"] != true;
+            for path in CANCELLED {
+                json::remove(v, path);
+            }
+        }
+        if let Some(ids) = at(v, &["toolCallCancellation", "ids"]).and_then(Value::as_array) {
+            let ids = ids.iter().filter_map(Value::as_str).map(str::to_owned);
+            state.withdrawn.extend(ids);
+        }
         if let Some(Value::Object(complete)) = v.get("setupComplete").cloned() {
             json::remove(v, &["setupComplete"]);
-            let mut session = lock(&self.applied).clone().unwrap_or_default();
+            let mut session = state.applied.clone().unwrap_or_default();
             session.native = match complete.is_empty() {
                 true => None,
                 false => json::native(NAME, json!({"setupComplete": complete})),
@@ -109,19 +132,19 @@ impl Provider {
             _ => {}
         }
         if at(v, &["serverContent", "interrupted"]) == Some(&Value::Bool(true)) {
-            let said = !self.spoke || self.open;
+            let said = !self.spoke || state.open;
             if !self.spoke {
                 events.push(Output::SpeechStarted {
                     at_ms: None,
                     native: None,
                 });
             }
-            if self.open {
+            if state.open {
                 events.push(Output::ResponseDone {
                     status: Status::Interrupted,
                     native: None,
                 });
-                (self.open, self.ended) = (false, true);
+                (state.open, self.ended) = (false, true);
             }
             self.spoke = false;
             if said {
@@ -139,13 +162,13 @@ impl Provider {
         let path = ["serverContent", "modelTurn", "parts"];
         let parts = at(v, &path).and_then(Value::as_array);
         if let Some(parts) = parts.and_then(|p| p.iter().map(part).collect::<Option<Vec<_>>>()) {
-            start(&mut self.open, &mut self.ended);
+            start(&mut state.open, &mut self.ended);
             events.extend(parts);
             json::remove(v, &path);
         }
         let path = ["serverContent", "outputTranscription", "text"];
         if let Some(said) = take(v, &path, string, text) {
-            start(&mut self.open, &mut self.ended);
+            start(&mut state.open, &mut self.ended);
             events.push(Output::Transcript {
                 text: said,
                 native: None,
@@ -154,26 +177,31 @@ impl Provider {
         let path = ["toolCall", "functionCalls"];
         let calls = at(v, &path).and_then(Value::as_array);
         if let Some(calls) = calls.and_then(|c| c.iter().map(call).collect::<Option<Vec<_>>>()) {
-            start(&mut self.open, &mut self.ended);
+            start(&mut state.open, &mut self.ended);
+            for call in &calls {
+                if let Output::ToolCall { id, name, .. } = call {
+                    state.calls.insert(id.clone(), name.clone());
+                }
+            }
             events.extend(calls);
             events.push(Output::ResponseDone {
                 status: Status::Completed,
                 native: None,
             });
             json::remove(v, &path);
-            (self.open, self.ended) = (false, true);
+            (state.open, self.ended) = (false, true);
         }
         // A turn whose response already ended says nothing more: its end
         // stays the Live API's.
         if at(v, &["serverContent", "turnComplete"]) == Some(&Value::Bool(true)) && !self.ended {
-            start(&mut self.open, &mut self.ended);
+            start(&mut state.open, &mut self.ended);
             json::remove(v, &["serverContent", "turnComplete"]);
             let reason = take(v, &["serverContent", "turnCompleteReason"], string, text);
             events.push(Output::ResponseDone {
                 status: reason.map_or(Status::Completed, status),
                 native: None,
             });
-            self.open = false;
+            state.open = false;
         } else if at(v, &["serverContent", "turnComplete"]).is_some() {
             self.ended = false;
         }
@@ -361,8 +389,11 @@ fn put_usage(v: &mut Value, used: &Usage) {
     }
 }
 
-/// The events written to the client.
-#[derive(Debug, Default)]
+/// The events written to the client. Another format's natives are
+/// dropped, but its MCP events, which only a session of MCP tools has,
+/// refused; a whole transcript of the user's turn is written only if no
+/// part of it was.
+#[derive(Debug)]
 pub(super) struct Client {
     /// Whether its setup's completion was written.
     setup: bool,
@@ -372,11 +403,43 @@ pub(super) struct Client {
     calls: Vec<Value>,
     /// Whether the response's interruption was written.
     interrupted: bool,
+    /// Whether part of the user's turn's transcript was written.
+    heard: bool,
+    /// Whether a response is being written, which its reader reads.
+    answering: Answering,
+    /// The model's audio as 24 kHz PCM.
+    convert: Convert,
 }
 
 impl Client {
+    pub(super) fn new(answering: Answering) -> Self {
+        Self {
+            setup: false,
+            usage: None,
+            calls: Vec::new(),
+            interrupted: false,
+            heard: false,
+            answering,
+            convert: Convert::default(),
+        }
+    }
+
     pub(super) fn write(&mut self, event: &Output, out: &mut Vec<Bytes>) -> Result<(), Fault> {
-        if let Some(v) = self.encode(event)? {
+        if let Output::Native(NativeValue { format, value }) = event
+            && **format != *NAME
+            && value["type"].as_str().is_some_and(|t| t.contains("mcp"))
+        {
+            return Err(untranslatable_output(NAME, "an MCP event"));
+        }
+        let Some(event) = foreign::strip(NAME, event) else {
+            return Ok(());
+        };
+        match &event {
+            Output::ResponseStart { .. } => self.answering.store(true, Ordering::Relaxed),
+            Output::ResponseDone { .. } => self.answering.store(false, Ordering::Relaxed),
+            _ => {}
+        }
+        if let Some(v) = self.encode(&event)? {
             out.push(json::frame(&v)?);
         }
         Ok(())
@@ -406,7 +469,15 @@ impl Client {
                 json!({"voiceActivity": {"voiceActivityType": "ACTIVITY_END"}}),
                 native,
             ),
-            Output::InputTranscript { text, native, .. } => {
+            Output::InputTranscript { complete: true, .. } if std::mem::take(&mut self.heard) => {
+                return Ok(None);
+            }
+            Output::InputTranscript {
+                text,
+                complete,
+                native,
+            } => {
+                self.heard = !complete;
                 (content("inputTranscription", json!({"text": text})), native)
             }
             Output::ResponseStart { native, .. } => {
@@ -415,11 +486,12 @@ impl Client {
                 return Ok(None);
             }
             Output::Audio { audio, native } => {
-                if audio.format.encoding != Encoding::Pcm16 {
-                    return Err(refuse("audio other than PCM"));
-                }
-                let mime = format!("audio/pcm;rate={}", audio.format.rate);
-                let data = json!({"mimeType": mime, "data": json::base64(&audio.data)});
+                // The Live API's audio is always 24 kHz PCM.
+                let pcm = AudioFormat::pcm16(24_000);
+                let converted = self.convert.to(audio, pcm);
+                let converted = converted.ok_or_else(|| refuse("audio of this format"))?;
+                let mime = format!("audio/pcm;rate={}", pcm.rate);
+                let data = json!({"mimeType": mime, "data": json::base64(&converted)});
                 (
                     content("modelTurn", json!({"parts": [{"inlineData": data}]})),
                     native,

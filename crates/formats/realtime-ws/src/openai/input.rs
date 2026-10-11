@@ -8,11 +8,33 @@ use respan_gateway_realtime::{Audio, AudioFormat, Input, Session, ToolResult};
 use serde_json::{Value, json};
 
 use super::{NAME, session};
+use crate::audio::Convert;
+use crate::foreign::Drops;
 use crate::json::{self, merge, own, string, take, text, untranslatable_input};
 
-/// A client's frames as events. Its first is preceded by the session the
-/// handshake asked for, its model the one at `?model=`, so a session's
-/// events always begin with an [`Input::Session`].
+/// What of another format's natives OpenAI Realtime drops: Gemini Live's
+/// transcription settings, context compression and voice detection's
+/// sensitivities, and the shape of the message a client's event came in.
+const DROPS: Drops = Drops {
+    format: NAME,
+    session: &[
+        "setup.contextWindowCompression",
+        "setup.inputAudioTranscription",
+        "setup.outputAudioTranscription",
+    ],
+    vad: &[
+        "startOfSpeechSensitivity",
+        "endOfSpeechSensitivity",
+        "disabled",
+    ],
+    message: &[],
+    event: &["clientContent", "realtimeInput.activityStart", "name"],
+};
+
+/// A client's frames as events, beginning with the session the handshake
+/// asked for, its model the one at `?model=`: the client's first
+/// `session.update`, or, if its first frame is another event, a session
+/// of that model alone before it.
 #[derive(Debug)]
 pub(super) struct Client {
     /// The model the handshake asked for, until the first frame.
@@ -32,12 +54,18 @@ impl Client {
     pub(super) fn read(&mut self, raw: Bytes, out: &mut Vec<Input>) -> Result<(), Fault> {
         let v: Value = serde_json::from_slice(&raw)
             .map_err(|_| BadRequest::fault("a client's frame is not a JSON event"))?;
+        let mut event = decode(v, self.input);
         if let Some(model) = self.opening.take() {
-            let mut opening = Session::default();
-            opening.model = model;
-            out.push(Input::Session(opening));
+            match &mut event {
+                Input::Session(s) if s.model.is_none() => s.model = model,
+                Input::Session(_) => {}
+                _ => {
+                    let mut opening = Session::default();
+                    opening.model = model;
+                    out.push(Input::Session(opening));
+                }
+            }
         }
-        let event = decode(v, self.input);
         if let Input::Session(Session {
             input_audio: Some(format),
             ..
@@ -175,21 +203,30 @@ fn message_json(m: &Message, refuse: fn(&str) -> Fault) -> Result<Value, Fault> 
 /// The client's events written to the provider.
 #[derive(Debug)]
 pub(super) struct Provider {
+    /// The model the session was opened with, at its URL.
+    model: Option<String>,
+    /// Whether its first session was written.
+    opened: bool,
     /// The format of the audio it takes, as the sessions written say.
     input: AudioFormat,
-}
-
-impl Default for Provider {
-    fn default() -> Self {
-        Self {
-            input: AudioFormat::pcm16(24_000),
-        }
-    }
+    /// The client's audio in that format.
+    convert: Convert,
 }
 
 impl Provider {
+    /// A writer to a session opened with `model`.
+    pub(super) fn new(model: Option<String>) -> Self {
+        Self {
+            model,
+            opened: false,
+            input: AudioFormat::pcm16(24_000),
+            convert: Convert::default(),
+        }
+    }
+
     pub(super) fn write(&mut self, event: &Input, out: &mut Vec<Bytes>) -> Result<(), Fault> {
-        if let Some(v) = self.encode(event)? {
+        let event = DROPS.admit(event)?;
+        if let Some(v) = self.encode(&event)? {
             out.push(json::frame(&v)?);
         }
         Ok(())
@@ -199,17 +236,21 @@ impl Provider {
         let refuse = |what: &str| untranslatable_input(NAME, what);
         let (mut v, native) = match event {
             Input::Session(s) => {
-                // OpenAI takes its model at connect: a session that says
-                // nothing more changes nothing.
-                let mut rest = s.clone();
-                rest.model = None;
-                if rest == Session::default() {
+                // OpenAI takes its model at connect: the first session's is
+                // the one at its URL, and a later one that names it again
+                // changes nothing.
+                let opening = !std::mem::replace(&mut self.opened, true);
+                let mut s = s.clone();
+                if opening || s.model == self.model {
+                    s.model = None;
+                }
+                if s == Session::default() {
                     return Ok(None);
                 }
                 if let Some(format) = s.input_audio {
                     self.input = format;
                 }
-                let session = session::encode(s, refuse)?;
+                let session = session::encode(&s, refuse)?;
                 let mut v = json!({"type": "session.update", "session": session});
                 merge(
                     &mut v,
@@ -221,10 +262,9 @@ impl Provider {
                 return Ok(Some(v));
             }
             Input::Audio { audio, native } => {
-                if audio.format != self.input {
-                    return Err(refuse("audio in another format than the session's"));
-                }
-                let v = json!({"type": "input_audio_buffer.append", "audio": json::base64(&audio.data)});
+                let data = self.convert.to(audio, self.input);
+                let data = data.ok_or_else(|| refuse("audio of this format"))?;
+                let v = json!({"type": "input_audio_buffer.append", "audio": json::base64(&data)});
                 (v, native)
             }
             Input::Commit { native } => (json!({"type": "input_audio_buffer.commit"}), native),
@@ -246,6 +286,7 @@ impl Provider {
             Input::Native(NativeValue { format, value }) if **format == *NAME => {
                 return Ok(Some(Value::clone(value)));
             }
+            Input::Native(NativeValue { value, .. }) => return dropped(value).map(|()| None),
             _ => return Err(refuse("another format's event")),
         };
         merge(
@@ -253,5 +294,25 @@ impl Provider {
             own(NAME, native, || refuse("another format's event"))?,
         );
         Ok(Some(v))
+    }
+}
+
+/// Whether another format's event, which OpenAI has none of, is dropped:
+/// Gemini Live's start of the user's activity, which OpenAI's voice
+/// detection or the next commit implies, and the end of its audio stream;
+/// any other is refused, by its field.
+fn dropped(event: &Value) -> Result<(), Fault> {
+    let input = event.get("realtimeInput").and_then(Value::as_object);
+    let field = |fields: &serde_json::Map<String, Value>| fields.keys().next().cloned();
+    match input.and_then(field).as_deref() {
+        Some("activityStart" | "audioStreamEnd") => Ok(()),
+        Some(field) => Err(untranslatable_input(
+            NAME,
+            &format!("`realtimeInput.{field}`"),
+        )),
+        None => {
+            let field = event.as_object().and_then(field).unwrap_or_default();
+            Err(untranslatable_input(NAME, &format!("`{field}`")))
+        }
     }
 }

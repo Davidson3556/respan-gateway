@@ -22,7 +22,8 @@ const TOOL_CHOICE: &[&str] = &["session", "tool_choice"];
 const MAX_OUTPUT_TOKENS: &[&str] = &["session", "max_output_tokens"];
 
 /// What `v`, an event less its type, says of its `session`; what is left of
-/// `v` is the session's native.
+/// `v` is the session's native. OpenAI always transcribes the model's
+/// audio.
 pub(super) fn decode(mut v: Value) -> Session {
     let v = &mut v;
     let mut s = Session::default();
@@ -41,6 +42,7 @@ pub(super) fn decode(mut v: Value) -> Session {
         |_| Some(Value::Null),
     )
     .or_else(|| at(v, TRANSCRIPTION)?.is_object().then_some(true));
+    s.output_transcription = Some(true);
     s.tools = take(v, TOOLS, tools, |t| tools_json(t, refuse).ok());
     s.tool_choice = take(v, TOOL_CHOICE, tool_choice, tool_choice_json);
     s.max_output_tokens = take(v, MAX_OUTPUT_TOKENS, Value::as_u64, number);

@@ -4,7 +4,8 @@
 
 use std::f64::consts::PI;
 
-use respan_gateway_realtime::{AudioFormat, Encoding};
+use respan_gateway_http::bytes::Bytes;
+use respan_gateway_realtime::{Audio, AudioFormat, Encoding};
 
 /// The rates a [`Converter`] takes, in samples a second.
 pub(crate) const RATES: std::ops::RangeInclusive<u32> = 1_000..=192_000;
@@ -76,6 +77,27 @@ impl Converter {
         }
         samples.extend(pairs.map(|pair| i16::from_le_bytes([pair[0], pair[1]])));
         samples
+    }
+}
+
+/// A session's audio in the format its writer takes: each chunk as it
+/// came if it is in that format, else converted by a [`Converter`] kept
+/// while the chunks' format stays the same.
+#[derive(Debug, Default)]
+pub(crate) struct Convert(Option<(AudioFormat, AudioFormat, Converter)>);
+
+impl Convert {
+    /// `audio` in `to`; `None` if it cannot be converted.
+    pub(crate) fn to(&mut self, audio: &Audio, to: AudioFormat) -> Option<Bytes> {
+        if audio.format == to {
+            return Some(audio.data.clone());
+        }
+        let kept = matches!(&self.0, Some((from, into, _)) if *from == audio.format && *into == to);
+        if !kept {
+            self.0 = Some((audio.format, to, Converter::new(audio.format, to)?));
+        }
+        let (_, _, converter) = self.0.as_mut()?;
+        Some(Bytes::from(converter.convert(&audio.data)))
     }
 }
 
