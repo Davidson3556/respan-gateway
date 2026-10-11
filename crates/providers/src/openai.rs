@@ -72,21 +72,20 @@ impl Plugin for OpenAiQuirks {
 }
 
 /// A session that turns input transcription on, asking for no model, asks
-/// for [`TRANSCRIPTION_MODEL`]. One that keeps another format's native
-/// fields is left as it is.
+/// for [`TRANSCRIPTION_MODEL`]. Another format's native fields, which OpenAI
+/// drops, go first (and one it refuses is refused here), as they are where
+/// the model is asked for.
 fn transcription_model(input: &mut Input) -> Result<()> {
+    if !matches!(input, Input::Session(s) if s.input_transcription == Some(true)) {
+        return Ok(());
+    }
+    *input = OpenAiRealtime.admit(input)?;
     let Input::Session(session) = input else {
         return Ok(());
     };
-    if session.input_transcription != Some(true) {
-        return Ok(());
-    }
     let native = session
         .native
         .get_or_insert_with(|| NativeFields::new(OpenAiRealtime::NAME, Default::default()));
-    if *native.format != *OpenAiRealtime::NAME {
-        return Ok(());
-    }
     let mut fields = Value::Object(std::mem::take(&mut native.fields));
     let transcription = &mut fields["session"]["audio"]["input"]["transcription"];
     if transcription.get("model").is_none() {

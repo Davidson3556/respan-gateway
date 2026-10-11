@@ -200,6 +200,12 @@ fn message_json(m: &Message, refuse: fn(&str) -> Fault) -> Result<Value, Fault> 
     Ok(v)
 }
 
+/// `event` with the fields of other formats' natives that OpenAI drops
+/// dropped, as its writer does; refused if one could change the answer.
+pub(super) fn admit(event: &Input) -> Result<Input, Fault> {
+    DROPS.admit(event)
+}
+
 /// The client's events written to the provider.
 #[derive(Debug)]
 pub(super) struct Provider {

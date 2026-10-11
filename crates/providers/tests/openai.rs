@@ -76,3 +76,15 @@ async fn openai_transcription_model_is_asked_for_when_a_session_names_none() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn openai_transcription_model_is_asked_for_beside_gemini_only_fields() {
+    let setup = json!({"setup": {"model": "models/m", "inputAudioTranscription": {},
+        "contextWindowCompression": {"slidingWindow": {}}}});
+    let update = sent_of(setup).await;
+    assert_eq!(
+        update["session"]["audio"]["input"]["transcription"],
+        json!({"model": "gpt-4o-mini-transcribe"})
+    );
+    assert!(update["setup"].is_null(), "{update}");
+}
