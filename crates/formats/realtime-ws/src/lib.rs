@@ -14,6 +14,9 @@
 //! `bad_request`; the provider's, `upstream`. A handshake one refuses is
 //! answered text/plain with the fault's error code, never its message.
 
+// The codecs convert audio where a spec cannot carry the source's format.
+#[allow(dead_code)]
+mod audio;
 mod gemini;
 mod openai;
 mod responses;
