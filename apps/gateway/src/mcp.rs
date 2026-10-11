@@ -95,6 +95,8 @@ pub enum Transport {
     },
     Stdio {
         command: Vec<String>,
+        /// The program as found: on Windows `npx` is `npx.cmd`.
+        program: PathBuf,
         env: Vec<(String, String)>,
         cwd: Option<PathBuf>,
     },
@@ -109,12 +111,19 @@ impl McpServer {
         }
     }
 
-    /// What it runs or reaches, for a person to read: the URL, or the
-    /// command line.
+    /// What it runs or reaches, for a person to read and for the admin API:
+    /// an HTTP server's origin (`scheme://host[:port]`) and a stdio
+    /// server's program name. Never the path or the arguments, which hold
+    /// tokens (`/mcp/<token>`, `--token X`), nor the environment.
     pub fn target(&self) -> String {
         match &self.transport {
-            Transport::Http { url, .. } => url.clone(),
-            Transport::Stdio { command, .. } => command.join(" "),
+            Transport::Http { origin, .. } => origin.clone(),
+            Transport::Stdio { command, .. } => {
+                let program = command.first().map_or("", String::as_str);
+                let name = Path::new(program).file_name();
+                name.map_or(program, |n| n.to_str().unwrap_or(program))
+                    .to_owned()
+            }
         }
     }
 
@@ -194,8 +203,17 @@ fn server(name: &str, c: &McpConfig) -> Result<McpServer, Fault> {
             let Some(program) = command.first().filter(|p| !p.is_empty()) else {
                 return Err(bad("`command` is empty"));
             };
-            if !on_path(program) {
+            let Some(found) = find_program(program) else {
                 return Err(bad(&format!("command '{program}' was not found on PATH")));
+            };
+            if let Some(dir) = &c.cwd
+                && !dir.is_dir()
+            {
+                let why = match dir.exists() {
+                    true => "is not a directory",
+                    false => "does not exist",
+                };
+                return Err(bad(&format!("cwd '{}' {why}", dir.display())));
             }
             let env = c
                 .env
@@ -204,6 +222,7 @@ fn server(name: &str, c: &McpConfig) -> Result<McpServer, Fault> {
                 .collect::<Result<_, Fault>>()?;
             let t = Transport::Stdio {
                 command: command.clone(),
+                program: found,
                 env,
                 cwd: c.cwd.clone(),
             };
@@ -227,14 +246,47 @@ fn key_source(value: &str) -> String {
     }
 }
 
-/// Whether `program` is a file, or is on the gateway's `PATH`, which a
-/// child is given.
-fn on_path(program: &str) -> bool {
-    if program.contains('/') {
-        return Path::new(program).is_file();
-    }
+/// The file `program` names, or finds on the gateway's `PATH`, which a
+/// child is given. On Windows a program is also found with an extension of
+/// `PATHEXT` (`npx` is `npx.cmd`).
+fn find_program(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path).any(|dir| dir.join(program).is_file())
+    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let pathext = match cfg!(windows) {
+        true => std::env::var("PATHEXT").ok(),
+        false => None,
+    };
+    let exts = pathext_list(pathext.as_deref());
+    resolve(program, &dirs, &exts)
+}
+
+/// The extensions `PATHEXT` lists, or the usual ones if it is unset; none
+/// where it is not used (`None` is an unset one only on Windows).
+fn pathext_list(pathext: Option<&str>) -> Vec<String> {
+    if !cfg!(windows) && pathext.is_none() {
+        return Vec::new();
+    }
+    let list = pathext.unwrap_or(".COM;.EXE;.BAT;.CMD");
+    let exts = list.split(';').map(str::trim).filter(|e| !e.is_empty());
+    exts.map(str::to_owned).collect()
+}
+
+/// `program` as a file in one of `dirs` (itself, if it has a directory), as
+/// it is or with one of `exts` added, in that order.
+fn resolve(program: &str, dirs: &[PathBuf], exts: &[String]) -> Option<PathBuf> {
+    let candidates = |base: PathBuf| -> Option<PathBuf> {
+        let name = base.as_os_str().to_owned();
+        let with = exts.iter().map(|ext| {
+            let mut name = name.clone();
+            name.push(ext);
+            PathBuf::from(name)
+        });
+        std::iter::once(base).chain(with).find(|p| p.is_file())
+    };
+    if program.contains(std::path::is_separator) {
+        return candidates(PathBuf::from(program));
+    }
+    dirs.iter().find_map(|dir| candidates(dir.join(program)))
 }
 
 /// How long a server has to answer a probe's `initialize`.
@@ -274,7 +326,12 @@ pub async fn probe(servers: &[McpServer]) -> Vec<Probe> {
 async fn probe_one(server: &McpServer) -> Reach {
     match &server.transport {
         Transport::Http { url, auth, .. } => probe_http(url, auth).await,
-        Transport::Stdio { command, env, cwd } => probe_stdio(command, env, cwd.as_deref()).await,
+        Transport::Stdio {
+            command,
+            program,
+            env,
+            cwd,
+        } => probe_stdio(command, program, env, cwd.as_deref()).await,
     }
 }
 
@@ -318,10 +375,13 @@ async fn probe_http(url: &str, auth: &HeaderMap) -> Reach {
     Reach::Reachable
 }
 
-async fn probe_stdio(command: &[String], env: &[(String, String)], cwd: Option<&Path>) -> Reach {
-    let Some((program, args)) = command.split_first() else {
-        return Reach::Unreachable("`command` is empty".to_owned());
-    };
+async fn probe_stdio(
+    command: &[String],
+    program: &Path,
+    env: &[(String, String)],
+    cwd: Option<&Path>,
+) -> Reach {
+    let args = command.get(1..).unwrap_or_default();
     let mut child = tokio::process::Command::new(program);
     child
         .args(args)
@@ -333,6 +393,17 @@ async fn probe_stdio(command: &[String], env: &[(String, String)], cwd: Option<&
         .kill_on_drop(true);
     if let Some(path) = std::env::var_os("PATH") {
         child.env("PATH", path);
+    }
+    #[cfg(windows)]
+    {
+        // As a session starts it: its own process group, and what a
+        // program cannot start without.
+        child.creation_flags(0x0000_0200);
+        for name in ["SystemRoot", "ComSpec", "PATHEXT", "TEMP", "TMP"] {
+            if let Some(value) = std::env::var_os(name) {
+                child.env(name, value);
+            }
+        }
     }
     if let Some(dir) = cwd {
         child.current_dir(dir);
@@ -356,6 +427,16 @@ async fn probe_stdio(command: &[String], env: &[(String, String)], cwd: Option<&
     };
     // Stopped as a session's end stops it: stdin closed, then killed.
     drop(stdin);
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        // The program and what it started, as a session's end stops them.
+        let _ = tokio::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
     let _ = child.kill().await;
     let answered = serde_json::from_str::<serde_json::Value>(&answer)
         .ok()
@@ -409,10 +490,13 @@ fn register(
                 let io = explained(transport, &s.name, origin, limit, Some(owners.clone()));
                 gateway.provider::<Input, Output, _>(name, StreamableHttp::new(path), io)?
             }
-            Transport::Stdio { command, env, cwd } => {
-                let (program, args) = command
-                    .split_first()
-                    .ok_or_else(|| Fault::config("empty"))?;
+            Transport::Stdio {
+                command,
+                program,
+                env,
+                cwd,
+            } => {
+                let args = command.get(1..).unwrap_or_default();
                 let mut child = StdioTransport::new(program, args)
                     .max_sessions(SESSIONS)
                     .max_total(SESSIONS);
@@ -595,6 +679,48 @@ mod tests {
         assert!(
             said("a: { url: 'http://h.test', key: 'env:NO_SUCH_VAR_X' }").contains("NO_SUCH_VAR_X")
         );
+    }
+
+    #[test]
+    fn a_program_is_found_with_an_extension_of_pathext() {
+        let dir = std::env::temp_dir().join(format!("respan-pathext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(dir.join("npx.cmd"), "").unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(dir.join("plain"), "").unwrap_or_else(|e| panic!("{e}"));
+        let dirs = [dir.clone()];
+        let exts = pathext_list(Some(".com;.exe;.cmd"));
+        assert_eq!(exts, [".com", ".exe", ".cmd"]);
+        assert_eq!(resolve("npx", &dirs, &exts), Some(dir.join("npx.cmd")));
+        assert_eq!(resolve("npx", &dirs, &[]), None);
+        assert_eq!(resolve("plain", &dirs, &exts), Some(dir.join("plain")));
+        assert_eq!(resolve("absent", &dirs, &exts), None);
+        let whole = dir.join("npx").to_string_lossy().into_owned();
+        assert_eq!(resolve(&whole, &[], &exts), Some(dir.join("npx.cmd")));
+        assert_eq!(pathext_list(Some(" ;")), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cwd_must_be_a_directory() {
+        let said = |cwd: &str| parse(&format!("a: {{ command: [sh], cwd: '{cwd}' }}")).err();
+        assert!(said("/definitely/not/here").is_some_and(|e| e.contains("does not exist")));
+        assert!(said("/bin/sh").is_some_and(|e| e.contains("not a directory")));
+        assert!(said("/").is_none());
+    }
+
+    #[test]
+    fn a_target_shows_no_path_argument_or_environment() {
+        let http = parse("a: { url: 'https://h.test:8443/mcp/tok3n/', key: sk-1 }")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(http[0].target(), "https://h.test:8443");
+        let plain =
+            parse("a: { url: 'http://h.test/secret/path' }").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(plain[0].target(), "http://h.test");
+        let stdio = parse("a: { command: [sh, '--token', tok3n], env: { K: sk-2 } }");
+        let stdio = stdio.unwrap_or_else(|e| panic!("{e}"));
+        let target = stdio[0].target();
+        assert_eq!(target, "sh");
     }
 
     #[test]

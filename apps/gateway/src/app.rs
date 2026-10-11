@@ -29,7 +29,7 @@ use tower::ServiceExt;
 
 use crate::admin::{self, Admin};
 use crate::agent;
-use crate::auth::{self, ClientCredentials, ClientKeys, LocalOnly};
+use crate::auth::{self, ClientCredentials, ClientKeys, Cors, LocalOnly};
 use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{KnownFormat, formats, kind};
 use crate::jobs::VideoJobs;
@@ -220,9 +220,10 @@ impl Shared {
                 built.listen()
             ));
         }
-        process
-            .log
-            .configure(built.config.request_log.unwrap_or(KEPT), built.config.log);
+        process.log.configure(
+            built.config.request_history.unwrap_or(KEPT),
+            built.config.log,
+        );
         let built = Arc::new(built);
         let previous = {
             let mut current = self.current.write().unwrap_or_else(|e| e.into_inner());
@@ -303,9 +304,13 @@ impl Built {
             &plan,
             &formats,
         ));
-        let local =
-            (!keys.required()).then(|| LocalOnly::new(config.listen.unwrap_or(DEFAULT_LISTEN)));
-        let router = routes(&config, &plan, relay, admin, keys, local.clone());
+        let cors = match &config.cors {
+            Some(c) => Some(Cors::new(&c.origins, keys.required()).map_err(Error::new)?),
+            None => None,
+        };
+        let local = (!keys.required())
+            .then(|| LocalOnly::new(config.listen.unwrap_or(DEFAULT_LISTEN), cors.clone()));
+        let router = routes(&config, &plan, relay, admin, keys, local.clone(), cors);
         Ok(Built {
             config: Arc::new(config),
             gateway,
@@ -441,7 +446,7 @@ impl App {
     /// given a source ([`reload_from`](Self::reload_from)).
     pub fn new(config: Config) -> Result<App, Error> {
         let process = Arc::new(Process {
-            log: RequestLog::new(config.request_log.unwrap_or(KEPT), config.log),
+            log: RequestLog::new(config.request_history.unwrap_or(KEPT), config.log),
             stopping: Arc::new(watch::channel(false).0),
             listen: OnceLock::new(),
             started_at: SystemTime::now(),
@@ -609,7 +614,17 @@ impl App {
         let models = Models::new(&built.plan.upstreams, built.plan.routes.clone());
         let (providers, servers) = tokio::join!(models.probe(), mcp::probe(&built.plan.mcp));
         let probes: Vec<Probe> = providers.into_iter().chain(servers).collect();
-        (report::online(&probes), report::all_reachable(&probes))
+        // Listing contacts the servers, so only here, never in `report`.
+        let tools = match &built.closer {
+            Some(closer) => {
+                let tools = closer.offered(&built.gateway).await;
+                closer.close(&built.gateway).await;
+                Some(tools)
+            }
+            None => None,
+        };
+        let report = report::online(&probes, tools.as_deref());
+        (report, report::all_reachable(&probes))
     }
 }
 
@@ -737,6 +752,7 @@ fn routes(
     admin: Arc<Admin>,
     keys: Arc<ClientKeys>,
     local: Option<Arc<LocalOnly>>,
+    cors: Option<Arc<Cors>>,
 ) -> Router {
     let mut router = Router::new().route("/healthz", get(|| async { "ok" }));
     // A raw relay lets its vendor answer, with the client's credentials.
@@ -759,8 +775,13 @@ fn routes(
         router = router.merge(admin::router(admin, keys.clone()));
     }
     let router = router.fallback_service(relay);
-    match local {
+    let router = match local {
         Some(local) => router.layer(from_fn_with_state(local, auth::local_only)),
+        None => router,
+    };
+    // Outermost: a preflight carries no key, and no host check applies.
+    match cors {
+        Some(cors) => router.layer(from_fn_with_state(cors, auth::cors)),
         None => router,
     }
 }

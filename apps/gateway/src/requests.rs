@@ -29,7 +29,7 @@ use tokio::sync::broadcast;
 use crate::formats::KnownFormat;
 use crate::logging::{Level, LogFormat};
 
-/// How many finished requests are kept unless the config's `request_log`
+/// How many finished requests are kept unless the config's `request_history`
 /// says.
 pub const KEPT: usize = 1000;
 /// How much of an error body is read for its message.

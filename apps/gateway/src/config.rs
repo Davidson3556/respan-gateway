@@ -32,10 +32,10 @@ pub struct Config {
     /// bytes or a size such as `16MiB`; 16 MiB if unset.
     #[serde(default, deserialize_with = "ws_message_limit")]
     pub ws_message_limit: Option<usize>,
-    /// How many finished requests the in-memory request log (the web UI's)
-    /// keeps; 1000 if unset.
-    #[serde(default, deserialize_with = "request_log")]
-    pub request_log: Option<usize>,
+    /// How many finished requests the in-memory request history (the web
+    /// UI's) keeps; 1000 if unset.
+    #[serde(default, deserialize_with = "request_history")]
+    pub request_history: Option<usize>,
     /// How long open responses and end hooks get, together, after a stop
     /// signal, before they are cut: seconds, or a duration such as `30s`,
     /// `2m` or `500ms`; 30 s if unset.
@@ -69,6 +69,8 @@ pub struct Config {
     /// if that lists formats.
     #[serde(default)]
     pub mcp: IndexMap<String, McpConfig>,
+    /// Which web pages may call the gateway from a browser; none if unset.
+    pub cors: Option<CorsConfig>,
     /// Compiled-in plugins, in the order listed.
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
@@ -94,7 +96,7 @@ impl Default for Config {
             listen: None,
             body_limit: None,
             ws_message_limit: None,
-            request_log: None,
+            request_history: None,
             shutdown_grace: None,
             client_keys: Vec::new(),
             log: LogFormat::Text,
@@ -103,6 +105,7 @@ impl Default for Config {
             formats: None,
             mcp: IndexMap::new(),
             plugins: Vec::new(),
+            cors: None,
             agent: None,
             default: None,
             source: Source::Inline,
@@ -150,6 +153,17 @@ pub struct PluginConfig {
     pub models: Vec<ModelRoute>,
 }
 
+/// Browser access: the origins whose pages may call the gateway.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorsConfig {
+    /// Origins such as `https://app.example.com` (scheme, host and port
+    /// alone), or `*` for any, which needs `client_keys`. Their preflight
+    /// requests are answered without a key; their other requests need the
+    /// gateway's usual one.
+    pub origins: Vec<String>,
+}
+
 /// The agent loop: the gateway offers the tools of `mcp:` servers to the
 /// model and runs the ones it calls, so a client that knows nothing of MCP
 /// gets answers that used them.
@@ -158,7 +172,15 @@ pub struct PluginConfig {
 pub struct AgentConfig {
     /// The `mcp:` servers whose tools the gateway offers and runs, as
     /// `<server>__<tool>`.
-    pub tools: Vec<String>,
+    pub servers: Vec<String>,
+    /// Which of their tools are offered, as the model names them
+    /// (`<server>__<tool>`), `*` standing for any characters, such as
+    /// `github__search_*`; all of them if unset or empty.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Tools never offered, named as `allow` does; it wins over `allow`.
+    #[serde(default)]
+    pub deny: Vec<String>,
     /// Model name prefixes the loop applies to, as the provider is sent
     /// them; every chat model if unset.
     #[serde(default)]
@@ -172,11 +194,18 @@ pub struct AgentConfig {
     #[serde(default, deserialize_with = "agent_tool_timeout")]
     pub tool_timeout: Option<Duration>,
     /// How long a server's tool list is kept; 5 minutes if unset.
-    #[serde(default, deserialize_with = "agent_cache")]
-    pub cache: Option<Duration>,
+    #[serde(default, deserialize_with = "agent_tool_list_ttl")]
+    pub tool_list_ttl: Option<Duration>,
+    /// The most tool calls of one step that run at once; 4 if unset.
+    pub parallel: Option<usize>,
     /// The most bytes of one tool's answer the model sees; 64 KiB if unset.
+    /// A tool's output is untrusted input to the model.
     #[serde(default, deserialize_with = "agent_max_result")]
     pub max_result: Option<usize>,
+    /// The most bytes of tool answers the model sees in one request, over
+    /// all its steps; 256 KiB if unset.
+    #[serde(default, deserialize_with = "agent_max_results")]
+    pub max_results: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -220,7 +249,7 @@ pub const DEFAULT_FILE: &str = "gateway.yaml";
 impl Config {
     /// A configuration from YAML text.
     pub fn parse(yaml: &str) -> Result<Config, Error> {
-        serde_norway::from_str(yaml).map_err(|e| Error::new(e.to_string()))
+        serde_norway::from_str(yaml).map_err(|e| Error::new(explain(&e.to_string())))
     }
 
     /// The configuration in the file at `path`.
@@ -307,6 +336,49 @@ impl Config {
     }
 }
 
+/// Keys that were renamed, with their new names; `agent.` ones are named
+/// under their section.
+const RENAMED: [(&str, &str); 3] = [
+    ("request_log", "request_history"),
+    ("tools", "agent.servers"),
+    ("cache", "agent.tool_list_ttl"),
+];
+
+/// A serde error for a person: no value of the config in it, which may be a
+/// secret (`invalid type: string "sk-..."`), and a hint where a key was
+/// renamed.
+fn explain(message: &str) -> String {
+    let mut said = redacted(message);
+    for (old, new) in RENAMED {
+        if said.contains(&format!("unknown field `{old}`")) {
+            said.push_str(&format!("\n(`{old}` is now `{new}`)"));
+        }
+    }
+    said
+}
+
+/// `message` with the values serde echoes in it left out: a string
+/// (`invalid type: string "..."`), and a variant name (`unknown variant
+/// `...``), which a misplaced secret would be.
+fn redacted(message: &str) -> String {
+    let mut out = message.to_owned();
+    for (start, end) in [
+        ("string \"", "\", expected"),
+        ("unknown variant `", "`, expected"),
+    ] {
+        let mut from = 0;
+        while let Some(at) = out[from..].find(start) {
+            let value = from + at + start.len();
+            let Some(len) = out[value..].rfind(end) else {
+                break;
+            };
+            out.replace_range(value..value + len, "...");
+            from = value + 3;
+        }
+    }
+    out
+}
+
 /// What to do when there is no config file and no key in the environment.
 pub fn no_keys_message() -> String {
     let names: Vec<&str> = respan_gateway_providers::ALL
@@ -386,9 +458,9 @@ fn ws_message_limit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D:
     byte_size(d, "ws_message_limit")
 }
 
-fn request_log<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+fn request_history<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
     match Option::<usize>::deserialize(d)? {
-        Some(0) => Err(serde::de::Error::custom("request_log: must be above 0")),
+        Some(0) => Err(serde::de::Error::custom("request_history: must be above 0")),
         kept => Ok(kept),
     }
 }
@@ -423,12 +495,16 @@ fn agent_tool_timeout<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration
     span(d, "agent: tool_timeout")
 }
 
-fn agent_cache<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "agent: cache")
+fn agent_tool_list_ttl<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "agent: tool_list_ttl")
 }
 
 fn agent_max_result<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
     byte_size(d, "agent: max_result")
+}
+
+fn agent_max_results<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    byte_size(d, "agent: max_results")
 }
 
 /// The time `text` says: a number and a unit (`ms`, `s`, `m`, `h`),
@@ -573,10 +649,11 @@ providers:
 
     #[test]
     fn limits_are_sizes_counts_and_durations() {
-        let config = Config::parse("ws_message_limit: 1MiB\nrequest_log: 50\nshutdown_grace: 2m")
-            .unwrap_or_else(|e| panic!("{e}"));
+        let config =
+            Config::parse("ws_message_limit: 1MiB\nrequest_history: 50\nshutdown_grace: 2m")
+                .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(config.ws_message_limit, Some(1 << 20));
-        assert_eq!(config.request_log, Some(50));
+        assert_eq!(config.request_history, Some(50));
         assert_eq!(config.shutdown_grace, Some(Duration::from_secs(120)));
         let grace = |text: &str| Config::parse(text).map(|c| c.shutdown_grace);
         assert_eq!(
@@ -592,12 +669,12 @@ providers:
             Ok(Some(Duration::from_millis(500)))
         );
         let defaults = Config::parse("{}").unwrap_or_else(|e| panic!("{e}"));
-        assert!(defaults.request_log.is_none() && defaults.shutdown_grace.is_none());
+        assert!(defaults.request_history.is_none() && defaults.shutdown_grace.is_none());
         for (text, key) in [
             ("shutdown_grace: soon", "shutdown_grace"),
             ("shutdown_grace: 5 days", "shutdown_grace"),
-            ("request_log: 0", "request_log"),
-            ("request_log: many", "request_log"),
+            ("request_history: 0", "request_history"),
+            ("request_history: many", "request_history"),
             ("ws_message_limit: 0", "ws_message_limit"),
             ("ws_message_limit: big", "ws_message_limit"),
             ("body_limit: 0", "body_limit"),
@@ -625,6 +702,63 @@ providers:
         let config = Config::parse("{}").unwrap_or_else(|e| panic!("{e}"));
         assert!(config.log == LogFormat::Text && config.ui && config.client_keys.is_empty());
         assert_eq!(config.source(), &Source::Inline);
+    }
+
+    #[test]
+    fn an_error_does_not_echo_a_value_that_may_be_a_secret() {
+        for text in [
+            "client_keys: sk-secret-1",
+            "providers: { p: { vendor: openai, key: [sk-secret-1] } }",
+            "providers: { p: { vendor: openai, auth: sk-secret-1 } }",
+            "mcp: { m: { command: [x], env: sk-secret-1 } }",
+            "mcp: { m: { url: 'http://h.test', key: { a: 1 }, forward_auth: sk-secret-1 } }",
+            "log: sk-secret-1",
+            "providers: { p: { vendor: openai, auth: { type: sk-secret-1, key: k } } }",
+        ] {
+            let said = Config::parse(text)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(!said.is_empty(), "{text}");
+            assert!(!said.contains("sk-secret-1"), "{text}: {said}");
+        }
+        let said = Config::parse("client_keys: sk-secret-1")
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(said.contains("string \"...\""), "{said}");
+    }
+
+    #[test]
+    fn renamed_keys_are_refused_with_their_new_names() {
+        let said = |text: &str| Config::parse(text).err().map(|e| e.to_string());
+        assert!(said("request_log: 5").is_some_and(|e| e.contains("`request_history`")));
+        let agent = "agent: { servers: [a], tools: [a] }";
+        assert!(said(agent).is_some_and(|e| e.contains("agent.servers")));
+        let cache = "agent: { servers: [a], cache: 5 }";
+        assert!(said(cache).is_some_and(|e| e.contains("agent.tool_list_ttl")));
+    }
+
+    #[test]
+    fn agent_and_cors_keys_parse() {
+        let yaml = "agent:
+  servers: [github]
+  allow: ['github__*']
+  deny: ['github__delete_*']
+  tool_list_ttl: 1m
+  parallel: 2
+  max_result: 8KiB
+  max_results: 64KiB
+cors: { origins: ['https://app.example.com'] }";
+        let config = Config::parse(yaml).unwrap_or_else(|e| panic!("{e}"));
+        let agent = config.agent.unwrap_or_else(|| panic!("agent"));
+        assert_eq!(agent.servers, ["github"]);
+        assert_eq!(agent.allow, ["github__*"]);
+        assert_eq!(agent.deny, ["github__delete_*"]);
+        assert_eq!(agent.tool_list_ttl, Some(Duration::from_secs(60)));
+        assert_eq!(agent.parallel, Some(2));
+        assert_eq!(agent.max_results, Some(64 << 10));
+        assert!(config.cors.is_some_and(|c| c.origins.len() == 1));
     }
 
     #[test]

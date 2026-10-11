@@ -200,7 +200,7 @@ async fn the_gateway_runs_a_tool_and_the_client_sees_only_the_answer() {
     let gw = Gateway::start(&config(
         &openai,
         &http_server(&up),
-        "agent:\n  tools: [files]\n",
+        "agent:\n  servers: [files]\n",
     ))
     .await;
 
@@ -272,7 +272,7 @@ async fn the_gateway_runs_a_tool_and_the_client_sees_only_the_answer() {
 async fn a_request_can_leave_the_loop_and_a_models_list_scopes_it() {
     let up = FakeMcp::start().await;
     let openai = FakeOpenAi::start().await;
-    let agent = "agent:\n  tools: [files]\n  models: [gpt-4o]\n";
+    let agent = "agent:\n  servers: [files]\n  models: [gpt-4o]\n";
     let gw = Gateway::start(&config(&openai, &http_server(&up), agent)).await;
 
     let (status, _) = ask(&gw, &[("x-respan-agent", "off")], hello()).await;
@@ -296,7 +296,7 @@ async fn a_streaming_client_gets_the_final_step_streamed() {
     let gw = Gateway::start(&config(
         &openai,
         &http_server(&up),
-        "agent:\n  tools: [files]\n",
+        "agent:\n  servers: [files]\n",
     ))
     .await;
     let mut body = hello();
@@ -356,7 +356,7 @@ async fn a_stdio_server_serves_the_loop_from_one_child() {
     }
     let script = serde_json::to_string(STDIO_SERVER).unwrap();
     let mcp = format!("mcp:\n  tools:\n    command: [python3, -c, {script}]\n");
-    let gw = Gateway::start(&config(&openai, &mcp, "agent:\n  tools: [tools]\n")).await;
+    let gw = Gateway::start(&config(&openai, &mcp, "agent:\n  servers: [tools]\n")).await;
     for _ in 0..2 {
         let (status, reply) = ask(&gw, &[], hello()).await;
         assert_eq!(status, 200, "{reply}");
@@ -412,7 +412,7 @@ async fn a_reload_ends_the_old_sessions_once_requests_on_it_have_ended() {
     let openai = FakeOpenAi::start().await;
     openai.answer(Answer::tool_call("files__read", json!({"path": "a.txt"})));
     openai.answer(Answer::text("late").delay_first(700));
-    let yaml = config(&openai, &http_server(&up), "agent:\n  tools: [files]\n");
+    let yaml = config(&openai, &http_server(&up), "agent:\n  servers: [files]\n");
     let (gw, _) = served_from_file(&yaml).await;
 
     // A loop is in flight, its tool run, when the config reloads.
@@ -467,7 +467,7 @@ async fn a_reload_stops_the_old_stdio_child() {
     openai.answer(Answer::text("done"));
     let script = serde_json::to_string(STDIO_SERVER).unwrap();
     let mcp = format!("mcp:\n  tools:\n    command: [python3, -c, {script}]\n");
-    let (gw, _) = served_from_file(&config(&openai, &mcp, "agent:\n  tools: [tools]\n")).await;
+    let (gw, _) = served_from_file(&config(&openai, &mcp, "agent:\n  servers: [tools]\n")).await;
     let (status, reply) = ask(&gw, &[], hello()).await;
     assert_eq!(status, 200, "{reply}");
     let said = openai.requests()[1].body["messages"][2]["content"].clone();
@@ -497,7 +497,7 @@ fn the_agent_section_is_checked_against_the_mcp_servers() {
     let base = "providers:\n  p: { formats: openai-chat, base_url: 'http://x.test/v1', key: k }\n";
     let server = "mcp:\n  files: { url: 'http://m.test/mcp', key: k }\n  open: { url: 'http://m.test/mcp', forward_auth: true }\n";
     let (ok, text) = check(&format!(
-        "{base}{server}agent:\n  tools: [files]\n  max_steps: 4\n  timeout: 2m\n"
+        "{base}{server}agent:\n  servers: [files]\n  max_steps: 4\n  timeout: 2m\n"
     ));
     assert!(ok, "{text}");
     let said = |agent: &str| {
@@ -505,13 +505,187 @@ fn the_agent_section_is_checked_against_the_mcp_servers() {
         assert!(!ok, "{text}");
         text
     };
-    assert!(said("agent:\n  tools: [nope]\n").contains("unknown mcp server 'nope'"));
-    assert!(said("agent:\n  tools: [open]\n").contains("forward_auth"));
-    assert!(said("agent:\n  tools: []\n").contains("names no mcp server"));
-    assert!(said("agent:\n  tools: [files, files]\n").contains("listed twice"));
-    assert!(said("agent:\n  tools: [files]\n  max_steps: 0\n").contains("max_steps"));
-    assert!(said("agent:\n  tools: [files]\n  tool_timeout: 0\n").contains("tool_timeout"));
-    assert!(said("agent:\n  tools: [files]\n  bogus: 1\n").contains("bogus"));
-    let formats = "formats: [openai-chat]\nagent:\n  tools: [files]\n";
+    assert!(said("agent:\n  servers: [nope]\n").contains("unknown mcp server 'nope'"));
+    assert!(said("agent:\n  servers: [open]\n").contains("forward_auth"));
+    assert!(said("agent:\n  servers: []\n").contains("names no mcp server"));
+    assert!(said("agent:\n  servers: [files, files]\n").contains("listed twice"));
+    assert!(said("agent:\n  servers: [files]\n  max_steps: 0\n").contains("max_steps"));
+    assert!(said("agent:\n  servers: [files]\n  tool_timeout: 0\n").contains("tool_timeout"));
+    assert!(said("agent:\n  servers: [files]\n  bogus: 1\n").contains("bogus"));
+    let formats = "formats: [openai-chat]\nagent:\n  servers: [files]\n";
     assert!(said(formats).contains("add it to `formats`"));
+}
+
+fn check_args(yaml: &str, args: &[&str]) -> (bool, String) {
+    let path = support::write_config(yaml);
+    let said = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
+        .arg("check")
+        .args(args)
+        .args(["--config", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&said.stdout),
+        String::from_utf8_lossy(&said.stderr)
+    );
+    (said.status.success(), text)
+}
+
+#[tokio::test]
+async fn allow_and_deny_pick_the_tools_the_model_is_offered_and_can_call() {
+    let up = FakeMcp::start().await;
+    let openai = FakeOpenAi::start().await;
+    // The denied tool is not offered, so a call of it is not the gateway's:
+    // it goes back to the client, and no server is asked.
+    openai.answer(Answer::tool_call("files__boom", json!({})));
+    let agent = "agent:\n  servers: [files]\n  allow: ['files__*']\n  deny: ['files__bo*']\n";
+    let gw = Gateway::start(&config(&openai, &http_server(&up), agent)).await;
+    let (status, reply) = ask(&gw, &[], hello()).await;
+    assert_eq!(status, 200, "{reply}");
+    let sent = openai.requests();
+    let names: Vec<&str> = (sent[0].body["tools"].as_array().unwrap().iter())
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["files__read"]);
+    assert_eq!(sent.len(), 1);
+    let calls = &reply["choices"][0]["message"]["tool_calls"];
+    assert_eq!(calls[0]["function"]["name"], "files__boom", "{reply}");
+    assert!(!up.methods().contains(&"tools/call".to_owned()));
+
+    // An allow list alone: only what it names.
+    let openai = FakeOpenAi::start().await;
+    openai.answer(Answer::text("ok"));
+    let agent = "agent:\n  servers: [files]\n  allow: ['files__boom']\n";
+    let gw = Gateway::start(&config(&openai, &http_server(&up), agent)).await;
+    let _ = ask(&gw, &[], hello()).await;
+    let tools = openai.requests()[0].body["tools"].clone();
+    assert_eq!(tools.as_array().unwrap().len(), 1, "{tools}");
+}
+
+#[tokio::test]
+async fn check_lists_the_offered_tools_only_online() {
+    let up = FakeMcp::start().await;
+    let yaml = format!(
+        "providers:\n  p: {{ formats: openai-chat, base_url: 'http://127.0.0.1:9/v1', key: k }}\n{}agent:\n  servers: [files]\n  deny: ['files__boom']\n",
+        http_server(&up)
+    );
+    let (ok, text) = check_args(&yaml, &[]);
+    assert!(ok, "{text}");
+    assert!(!text.contains("agent tools"), "{text}");
+    assert!(text.contains("deny"), "{text}");
+    assert!(up.requests().is_empty(), "plain check is offline");
+
+    let path = support::write_config(&yaml);
+    let said = tokio::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
+        .args(["check", "--online", "--config", path.to_str().unwrap()])
+        .output()
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&said.stdout).into_owned();
+    let tools = text.split("agent tools").nth(1).unwrap_or_default();
+    assert!(tools.contains("files__read"), "{text}");
+    assert!(!tools.contains("files__boom"), "{text}");
+    assert!(!text.contains(UPSTREAM_KEY));
+}
+
+#[test]
+fn the_agent_keys_are_validated_and_the_old_names_say_what_replaced_them() {
+    let base = "providers:\n  p: { formats: openai-chat, base_url: 'http://x.test/v1', key: k }\n";
+    let server = "mcp:\n  files: { url: 'http://m.test/mcp', key: k }\n";
+    let said = |agent: &str| {
+        let (ok, text) = check_args(&format!("{base}{server}{agent}"), &[]);
+        assert!(!ok, "{text}");
+        text
+    };
+    assert!(
+        said("agent:\n  servers: [files]\n  allow: ['git.hub']\n").contains("allow: 'git.hub'")
+    );
+    assert!(said("agent:\n  servers: [files]\n  deny: ['']\n").contains("deny"));
+    assert!(said("agent:\n  servers: [files]\n  parallel: 0\n").contains("parallel"));
+    assert!(said("agent:\n  servers: [files]\n  max_results: 0\n").contains("max_results"));
+    assert!(said("agent:\n  tools: [files]\n").contains("agent.servers"));
+    assert!(said("agent:\n  servers: [files]\n  cache: 5m\n").contains("agent.tool_list_ttl"));
+    assert!(said("request_log: 5\n").contains("request_history"));
+    let ok = "agent:\n  servers: [files]\n  allow: ['files__*']\n  parallel: 2\n  max_results: 1MiB\n  tool_list_ttl: 1m\n";
+    assert!(check_args(&format!("{base}{server}{ok}"), &[]).0);
+}
+
+#[tokio::test]
+async fn an_mcp_server_shows_as_its_origin_or_program_name_alone() {
+    let up = FakeMcp::start().await;
+    let script = serde_json::to_string(STDIO_SERVER).unwrap();
+    let mcp = format!(
+        "mcp:\n  files: {{ url: '{}/mcp/path-token-9', key: {UPSTREAM_KEY} }}\n  local:\n    command: [python3, -c, {script}]\n    env: {{ API_TOKEN: env-secret-7 }}\n",
+        up.base
+    );
+    let yaml = format!(
+        "providers:\n  p: {{ formats: openai-chat, base_url: 'http://127.0.0.1:9/v1', key: k }}\n{mcp}"
+    );
+    let (ok, text) = check_args(&yaml, &[]);
+    assert!(ok, "{text}");
+    assert!(text.contains(&format!("target  {}\n", up.base)), "{text}");
+    assert!(text.contains("target  python3\n"), "{text}");
+    for secret in ["path-token-9", "env-secret-7", "import"] {
+        assert!(!text.contains(secret), "{secret}: {text}");
+    }
+
+    let gw = Gateway::start(&format!("client_keys: [{KEY}]\n{mcp}providers:\n  p: {{ formats: openai-chat, base_url: 'http://127.0.0.1:9/v1', key: k }}\n")).await;
+    let resp = client()
+        .get(gw.url("/ui/api/mcp"))
+        .header("authorization", bearer())
+        .send()
+        .await
+        .unwrap();
+    let body = resp.text().await.unwrap();
+    let servers = json(&body);
+    let target = |name: &str| {
+        let all = servers["servers"].as_array().unwrap();
+        let found = all.iter().find(|s| s["name"] == name).unwrap();
+        found["target"].as_str().unwrap().to_owned()
+    };
+    assert_eq!(target("files"), up.base);
+    assert_eq!(target("local"), "python3");
+    for secret in ["path-token-9", "env-secret-7", UPSTREAM_KEY] {
+        assert!(!body.contains(secret), "{secret}: {body}");
+    }
+}
+
+#[test]
+fn a_stdio_servers_cwd_must_be_a_directory_at_start() {
+    let base = "providers:\n  p: { formats: openai-chat, base_url: 'http://x.test/v1', key: k }\n";
+    let tmp = env!("CARGO_TARGET_TMPDIR");
+    let yaml =
+        |cwd: &str| format!("{base}mcp:\n  s: {{ command: [python3, -c, pass], cwd: '{cwd}' }}\n");
+    let (ok, text) = check_args(&yaml(&format!("{tmp}/no-such-dir")), &[]);
+    assert!(!ok && text.contains("does not exist"), "{text}");
+    let file = support::write_config("x");
+    let (ok, text) = check_args(&yaml(file.to_str().unwrap()), &[]);
+    assert!(!ok && text.contains("not a directory"), "{text}");
+    let (ok, text) = check_args(&yaml(tmp), &[]);
+    assert!(ok, "{text}");
+}
+
+#[test]
+fn a_config_error_never_prints_a_secret() {
+    for (yaml, secret) in [
+        ("client_keys: sk-secret-77\n", "sk-secret-77"),
+        (
+            "providers:\n  p: { vendor: openai, key: [sk-secret-77] }\n",
+            "sk-secret-77",
+        ),
+        (
+            "providers:\n  p: { vendor: openai, auth: sk-secret-77 }\n",
+            "sk-secret-77",
+        ),
+        (
+            "mcp:\n  m: { command: [python3], env: sk-secret-77 }\n",
+            "sk-secret-77",
+        ),
+    ] {
+        let (ok, text) = check_args(yaml, &[]);
+        assert!(!ok, "{yaml}");
+        assert!(text.contains("invalid type"), "{text}");
+        assert!(!text.contains(secret), "{yaml}: {text}");
+    }
 }

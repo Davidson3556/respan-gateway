@@ -106,6 +106,18 @@ async fn the_admin_api_reloads_the_file_and_keeps_the_old_config_when_the_new_is
     assert_eq!(names(&gw).await, ["alpha", "beta"]);
     assert_eq!(chat(&gw, "alpha/m").await.status(), 200);
 
+    // A value of the bad file is not echoed: it may be a secret.
+    std::fs::write(&path, "client_keys: sk-secret-77\n").unwrap();
+    let resp = client()
+        .post(gw.url("/ui/api/reload"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("invalid type"), "{body}");
+    assert!(!body.contains("sk-secret-77"), "{body}");
+
     // A moved listen address is said to need a restart.
     let moved = config("127.0.0.1:1", &[("alpha", &a.base_url())], "");
     std::fs::write(&path, moved).unwrap();
@@ -195,7 +207,7 @@ async fn the_request_log_keeps_the_configured_number_of_requests_across_reloads(
     let path = write_config(&config(
         "127.0.0.1:0",
         &[("alpha", &a.base_url())],
-        "request_log: 3",
+        "request_history: 3",
     ));
     let gw = serve(&path, &[]).await;
     for _ in 0..5 {
@@ -205,7 +217,11 @@ async fn the_request_log_keeps_the_configured_number_of_requests_across_reloads(
     assert_eq!(kept["requests"].as_array().unwrap().len(), 3);
     std::fs::write(
         &path,
-        config("127.0.0.1:0", &[("alpha", &a.base_url())], "request_log: 2"),
+        config(
+            "127.0.0.1:0",
+            &[("alpha", &a.base_url())],
+            "request_history: 2",
+        ),
     )
     .unwrap();
     let resp = client()

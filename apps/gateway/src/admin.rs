@@ -244,7 +244,7 @@ async fn providers(State(admin): State<Arc<Admin>>) -> Json<Value> {
 }
 
 /// `GET /ui/api/mcp`: each MCP server (`name`, `transport` (`http` or
-/// `stdio`), `target` (its URL or command), `endpoint` (where clients reach
+/// `stdio`), `target` (an HTTP server's origin or a stdio server's program name, no path, arguments or environment), `endpoint` (where clients reach
 /// it), `credentials` (`gateway`, `client` or `none`)), its `requests`,
 /// `errors`, `avg_latency_ms`, and `status`: `idle` before a request,
 /// `failing` if every request failed, else `ok`.

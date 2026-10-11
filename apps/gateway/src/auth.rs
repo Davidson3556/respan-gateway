@@ -19,7 +19,7 @@ use respan_gateway_core::{Extensions, Fault, Plugin, ProviderContext, async_trai
 use respan_gateway_http::http::header::{
     AUTHORIZATION, HOST, HeaderName, ORIGIN, SEC_WEBSOCKET_PROTOCOL, UPGRADE,
 };
-use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode};
+use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential};
 use respan_gateway_mcp_http::Owner;
 
@@ -216,6 +216,100 @@ pub async fn require(State(keys): State<Arc<ClientKeys>>, req: Request, next: Ne
     }
 }
 
+/// Browser access: which origins' pages may call the gateway.
+///
+/// A preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`)
+/// from an allowed origin is answered here, without a key, since a browser
+/// sends none with it. Other requests carry the gateway's usual key, and an
+/// allowed origin's get the `Access-Control-*` headers a page needs to read
+/// the answer, including the MCP session header. Origins that are not
+/// allowed get nothing, so the browser refuses them.
+#[derive(Debug)]
+pub struct Cors {
+    origins: Vec<String>,
+    any: bool,
+}
+
+/// The headers a browser client may send: the keys, the SDKs' own, and
+/// MCP's.
+const ALLOWED_HEADERS: &str = "Authorization, x-api-key, x-goog-api-key, anthropic-version, \
+    anthropic-beta, openai-beta, content-type, mcp-session-id, mcp-protocol-version, \
+    last-event-id, x-respan-agent";
+/// The headers a page may read.
+const EXPOSED_HEADERS: &str = "mcp-session-id, mcp-protocol-version, retry-after";
+const ALLOWED_METHODS: &str = "GET, POST, PUT, DELETE, OPTIONS";
+
+impl Cors {
+    /// The allowed `origins`: `scheme://host[:port]` each, or `*`, which
+    /// needs `keys`, since without them any page could spend the gateway's
+    /// provider keys.
+    pub fn new(origins: &[String], keys: bool) -> Result<Arc<Self>, String> {
+        if origins.is_empty() {
+            return Err("cors: `origins` names no origin".to_owned());
+        }
+        let any = origins.iter().any(|o| o == "*");
+        if any && !keys {
+            return Err(
+                "cors: origin '*' needs `client_keys:`; without keys any web page \
+                        could spend the gateway's provider keys"
+                    .to_owned(),
+            );
+        }
+        for origin in origins.iter().filter(|o| *o != "*") {
+            let (scheme, host) = origin.split_once("://").unwrap_or(("", origin));
+            let plain = !host.is_empty() && !host.contains(['/', '?', '#', '@', ' ']);
+            if !matches!(scheme, "http" | "https") || !plain {
+                return Err(format!(
+                    "cors: origin '{origin}' is not `scheme://host[:port]` (http or https, \
+                     no path, no trailing slash), or `*`"
+                ));
+            }
+        }
+        let origins = origins.iter().map(|o| o.to_ascii_lowercase()).collect();
+        Ok(Arc::new(Self { origins, any }))
+    }
+
+    fn allows(&self, origin: &str) -> bool {
+        self.any || self.origins.iter().any(|o| o.eq_ignore_ascii_case(origin))
+    }
+}
+
+/// Answers an allowed origin's preflight, and marks its other answers.
+pub async fn cors(State(cors): State<Arc<Cors>>, req: Request, next: Next) -> Response {
+    let origin = req.headers().get(ORIGIN).cloned();
+    let Some(origin) = origin.filter(|o| o.to_str().is_ok_and(|o| cors.allows(o))) else {
+        return next.run(req).await;
+    };
+    let preflight = req.method() == Method::OPTIONS
+        && req.headers().contains_key("access-control-request-method");
+    let mut resp = match preflight {
+        true => {
+            let mut resp = Response::new(axum::body::Body::empty());
+            *resp.status_mut() = StatusCode::NO_CONTENT;
+            let headers = resp.headers_mut();
+            headers.insert(
+                "access-control-allow-methods",
+                HeaderValue::from_static(ALLOWED_METHODS),
+            );
+            headers.insert(
+                "access-control-allow-headers",
+                HeaderValue::from_static(ALLOWED_HEADERS),
+            );
+            headers.insert("access-control-max-age", HeaderValue::from_static("86400"));
+            resp
+        }
+        false => next.run(req).await,
+    };
+    let headers = resp.headers_mut();
+    headers.insert("access-control-allow-origin", origin);
+    headers.insert(
+        "access-control-expose-headers",
+        HeaderValue::from_static(EXPOSED_HEADERS),
+    );
+    headers.append("vary", HeaderValue::from_static("Origin"));
+    resp
+}
+
 /// Without client keys, whoever reaches the gateway spends its provider
 /// keys. On loopback that is meant to be local programs alone, but a web
 /// page the user opens reaches it too: by a cross-site request, which a
@@ -229,12 +323,19 @@ pub struct LocalOnly {
     configured: SocketAddr,
     /// Where it was bound, once served.
     bound: OnceLock<SocketAddr>,
+    /// Origins the config lets call it (`cors:`), which are not cross-site
+    /// here.
+    allowed: Option<Arc<Cors>>,
 }
 
 impl LocalOnly {
-    pub fn new(configured: SocketAddr) -> Arc<Self> {
+    pub fn new(configured: SocketAddr, allowed: Option<Arc<Cors>>) -> Arc<Self> {
         let bound = OnceLock::new();
-        Arc::new(Self { configured, bound })
+        Arc::new(Self {
+            configured,
+            bound,
+            allowed,
+        })
     }
 
     pub fn serving_on(&self, addr: SocketAddr) {
@@ -270,6 +371,11 @@ impl LocalOnly {
                      only to localhost; set `client_keys:` to reach it by another name"
                 ));
             }
+        }
+        if let (Some(cors), Some(origin)) = (&self.allowed, value(ORIGIN))
+            && cors.allows(origin)
+        {
+            return None;
         }
         let cross_site = value(SEC_FETCH_SITE) == Some("cross-site");
         let origin = value(ORIGIN).map(|origin| origin.split_once("://").map(|(_, at)| at));
@@ -396,7 +502,10 @@ mod tests {
 
     #[test]
     fn without_keys_a_cross_origin_browser_request_is_refused() {
-        let local = LocalOnly::new("127.0.0.1:8080".parse().unwrap_or_else(|e| panic!("{e}")));
+        let local = LocalOnly::new(
+            "127.0.0.1:8080".parse().unwrap_or_else(|e| panic!("{e}")),
+            None,
+        );
         let host = ("host", "127.0.0.1:8080");
         assert!(!refused(&local, &[host]), "curl");
         assert!(
@@ -414,7 +523,10 @@ mod tests {
 
     #[test]
     fn without_keys_only_the_gateways_own_host_names_are_answered() {
-        let local = LocalOnly::new("127.0.0.1:8080".parse().unwrap_or_else(|e| panic!("{e}")));
+        let local = LocalOnly::new(
+            "127.0.0.1:8080".parse().unwrap_or_else(|e| panic!("{e}")),
+            None,
+        );
         for host in [
             "localhost:8080",
             "127.0.0.1",
@@ -427,9 +539,15 @@ mod tests {
         assert!(!refused(&local, &[]), "no Host");
         assert!(refused(&local, &[("host", "evil.example:8080")]));
         assert!(refused(&local, &[("host", "localhost.evil.example")]));
-        let everywhere = LocalOnly::new("0.0.0.0:8080".parse().unwrap_or_else(|e| panic!("{e}")));
+        let everywhere = LocalOnly::new(
+            "0.0.0.0:8080".parse().unwrap_or_else(|e| panic!("{e}")),
+            None,
+        );
         assert!(!refused(&everywhere, &[("host", "gateway.lan:8080")]));
-        let own = LocalOnly::new("10.0.0.2:8080".parse().unwrap_or_else(|e| panic!("{e}")));
+        let own = LocalOnly::new(
+            "10.0.0.2:8080".parse().unwrap_or_else(|e| panic!("{e}")),
+            None,
+        );
         assert!(!refused(&own, &[("host", "10.0.0.2:8080")]));
         // Served elsewhere than configured, as a host may.
         local.serving_on("0.0.0.0:9".parse().unwrap_or_else(|e| panic!("{e}")));

@@ -43,13 +43,23 @@ class McpConfig(TypedDict, total=False):
 class AgentConfig(TypedDict, total=False):
     """The agent loop: the gateway runs the tools of `mcp` servers inside chat requests."""
 
-    tools: List[str]  # the `mcp` servers whose tools are offered
+    servers: List[str]  # the `mcp` servers whose tools are offered
+    allow: List[str]  # tool names as the model has them, "github__*"; all if unset
+    deny: List[str]  # never offered; wins over `allow`
     models: List[str]  # model prefixes the loop applies to; every chat model if unset
     max_steps: int
     timeout: Union[int, float, str]  # seconds, or "5m"
     tool_timeout: Union[int, float, str]
-    cache: Union[int, float, str]  # how long a server's tool list is kept
+    tool_list_ttl: Union[int, float, str]  # how long a server's tool list is kept
+    parallel: int  # tool calls of one step that run at once
     max_result: Union[int, str]  # bytes, or a size such as "64KiB"
+    max_results: Union[int, str]  # bytes of tool answers in one request
+
+
+class CorsConfig(TypedDict):
+    """Browser access: pages on these origins may call the gateway."""
+
+    origins: List[str]  # "https://app.example.com"; "*" needs client_keys
 
 
 class PluginConfig(TypedDict, total=False):
@@ -68,8 +78,9 @@ class GatewayConfig(TypedDict, total=False):
     body_limit: Union[int, str]  # bytes, or a size such as "32MiB"
     log: str  # "text", "json" or "off"
     ws_message_limit: Union[int, str]  # bytes, or a size such as "16MiB"
-    request_log: int  # finished requests the web UI keeps
+    request_history: int  # finished requests the web UI keeps
     shutdown_grace: Union[int, float, str]  # seconds, or "30s", "2m", "500ms"
     mcp: Dict[str, McpConfig]
     agent: AgentConfig
+    cors: CorsConfig
     ui: bool  # False also turns off the admin API behind models()/requests()/providers()

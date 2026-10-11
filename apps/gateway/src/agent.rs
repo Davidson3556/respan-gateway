@@ -44,7 +44,7 @@ const OWNER: &str = "respan-gateway-agent";
 const PAGES: usize = 8;
 /// The longest a tool's name may be, as every chat API has it.
 const NAME: usize = 64;
-/// The longest the sessions of a retired runner are given to end.
+/// The longest the sessions of a retired runner, or a listing, are given.
 const CLOSING: Duration = Duration::from_secs(10);
 /// How long a server's tool list is kept unless the config says.
 const DEFAULT_CACHE: Duration = Duration::from_secs(300);
@@ -53,42 +53,57 @@ const DEFAULT_CACHE: Duration = Duration::from_secs(300);
 /// `mcp:` server that is served, and takes no client's credentials.
 pub fn check(agent: &AgentConfig, servers: &[McpServer], serving_mcp: bool) -> Result<(), Fault> {
     let bad = |e: String| Fault::config(format!("agent: {e}"));
-    if agent.tools.is_empty() {
-        return Err(bad("`tools` names no mcp server".into()));
+    if agent.servers.is_empty() {
+        return Err(bad("`servers` names no mcp server".into()));
     }
     let known = || {
         let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
         names.join(", ")
     };
-    for (i, name) in agent.tools.iter().enumerate() {
-        if agent.tools[..i].contains(name) {
-            return Err(bad(format!("tools: '{name}' is listed twice")));
+    for (i, name) in agent.servers.iter().enumerate() {
+        if agent.servers[..i].contains(name) {
+            return Err(bad(format!("servers: '{name}' is listed twice")));
         }
         let Some(server) = servers.iter().find(|s| s.name == *name) else {
             return Err(bad(format!(
-                "tools: unknown mcp server '{name}'; mcp servers: [{}]",
+                "servers: unknown mcp server '{name}'; mcp servers: [{}]",
                 known()
             )));
         };
         if server.forward_auth {
             return Err(bad(format!(
-                "tools: mcp server '{name}' passes on a client's credentials \
+                "servers: mcp server '{name}' passes on a client's credentials \
                  (`forward_auth`); the gateway runs tools with the server's own"
             )));
         }
     }
     if !serving_mcp {
         return Err(bad(
-            "tools: the mcp servers are served by the `mcp` format; add it to `formats`".into(),
+            "servers: the mcp servers are served by the `mcp` format; add it to `formats`".into(),
         ));
     }
     if agent.max_steps == Some(0) || agent.max_steps.is_some_and(|n| n > 64) {
         return Err(bad("max_steps: must be from 1 to 64".into()));
     }
+    if agent.parallel == Some(0) || agent.parallel.is_some_and(|n| n > 64) {
+        return Err(bad("parallel: must be from 1 to 64".into()));
+    }
+    for (key, patterns) in [("allow", &agent.allow), ("deny", &agent.deny)] {
+        for pattern in patterns {
+            let fit = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '*');
+            if pattern.is_empty() || !pattern.chars().all(fit) {
+                return Err(bad(format!(
+                    "{key}: '{pattern}' is not a tool name as the model has it \
+                     (`<server>__<tool>`, letters, digits, '_' and '-', with '*' for any \
+                     characters; any other character of a tool's name is '_')"
+                )));
+            }
+        }
+    }
     for (key, value) in [
         ("timeout", agent.timeout),
         ("tool_timeout", agent.tool_timeout),
-        ("cache", agent.cache),
+        ("tool_list_ttl", agent.tool_list_ttl),
     ] {
         if value == Some(Duration::ZERO) {
             return Err(bad(format!("{key}: must be above 0")));
@@ -104,7 +119,12 @@ pub fn plugin(
     agent: &AgentConfig,
     anthropic: impl Fn(&str) -> bool + Send + Sync + 'static,
 ) -> (Agent, Closer) {
-    let tools = McpTools::new(agent.tools.clone(), agent.cache.unwrap_or(DEFAULT_CACHE));
+    let filter = Filter {
+        allow: agent.allow.clone(),
+        deny: agent.deny.clone(),
+    };
+    let ttl = agent.tool_list_ttl.unwrap_or(DEFAULT_CACHE);
+    let tools = McpTools::new(agent.servers.clone(), ttl, filter);
     let closer = Closer(tools.shared.clone());
     let prefixes = agent.models.clone();
     let mut plugin = Agent::new(tools)
@@ -127,12 +147,56 @@ pub fn plugin(
     if let Some(bytes) = agent.max_result {
         plugin = plugin.max_result(bytes);
     }
+    if let Some(calls) = agent.parallel {
+        plugin = plugin.parallel(calls);
+    }
+    if let Some(bytes) = agent.max_results {
+        plugin = plugin.max_results(bytes);
+    }
     (plugin, closer)
+}
+
+/// Which tools are offered: those `allow` names (all, if it names none) but
+/// not those `deny` names, by the name the model has.
+#[derive(Debug, Clone, Default)]
+struct Filter {
+    allow: Vec<String>,
+    deny: Vec<String>,
+}
+
+impl Filter {
+    fn offers(&self, name: &str) -> bool {
+        let named = |patterns: &[String]| patterns.iter().any(|p| glob(p, name));
+        (self.allow.is_empty() || named(&self.allow)) && !named(&self.deny)
+    }
+}
+
+/// Whether `text` matches `pattern`, in which `*` stands for any characters.
+fn glob(pattern: &str, text: &str) -> bool {
+    let Some((first, rest)) = pattern.split_once('*') else {
+        return pattern == text;
+    };
+    let Some(mut left) = text.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('*').collect();
+    let (last, middle) = parts.split_last().unwrap_or((&"", &[]));
+    for part in middle {
+        match left.find(part) {
+            Some(at) => left = &left[at + part.len()..],
+            None => return false,
+        }
+    }
+    left.ends_with(last)
 }
 
 /// Marks the request that ends a retired runner's sessions.
 #[derive(Debug, Clone, Copy)]
 struct Close;
+
+/// Marks the request that lists the tools the agent offers, into its slot.
+#[derive(Debug, Clone, Default)]
+struct List(Arc<Mutex<Vec<String>>>);
 
 /// Ends the sessions the runner kept with its servers.
 #[derive(Clone)]
@@ -149,6 +213,21 @@ impl Closer {
     /// into, once its requests are done. A session that does not end is the
     /// server's to time out.
     pub async fn close(&self, gateway: &Gateway) {
+        self.send(gateway, Close).await;
+    }
+
+    /// The tools the agent offers (`<server>__<tool>`), listed now through
+    /// `gateway`; a server that cannot be listed offers none.
+    pub async fn offered(&self, gateway: &Gateway) -> Vec<String> {
+        let list = List::default();
+        self.send(gateway, list.clone()).await;
+        let names = list.0.lock().unwrap_or_else(PoisonError::into_inner);
+        names.clone()
+    }
+
+    /// A request of the gateway's own, marked with `mark`, which the plugin
+    /// answers.
+    async fn send<M: Clone + Send + Sync + 'static>(&self, gateway: &Gateway, mark: M) {
         let Some(server) = self.0.servers.first() else {
             return;
         };
@@ -163,7 +242,7 @@ impl Closer {
             .headers_mut()
             .insert("mcp-session-id", http::HeaderValue::from_static("closing"));
         let mut marks = Extensions::new();
-        marks.insert(Close);
+        marks.insert(mark);
         request.extensions_mut().insert(marks);
         let sent = respan_gateway_http::handle(gateway, request, Framing::Whole, 1 << 20);
         let work = async {
@@ -180,10 +259,16 @@ struct Closing(Arc<Shared>);
 #[async_trait]
 impl Plugin for Closing {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if cx.extensions().get::<Close>().is_none() {
+        let list = cx.extensions().get::<List>().cloned();
+        if let Some(List(slot)) = list {
+            let servers = Servers::new(self.0.clone(), cx);
+            let names = servers.list().await.into_iter().map(|t| t.name);
+            *slot.lock().unwrap_or_else(PoisonError::into_inner) = names.collect();
+        } else if cx.extensions().get::<Close>().is_some() {
+            Servers::new(self.0.clone(), cx).close().await;
+        } else {
             return Ok(None);
         }
-        Servers::new(self.0.clone(), cx).close().await;
         Ok(Some(Response::stream(stream::empty::<
             Result<respan_gateway_mcp::Output, Fault>,
         >())))
@@ -215,6 +300,7 @@ struct Shared {
     /// The servers, in the order the config names them.
     servers: Vec<Server>,
     ttl: Duration,
+    filter: Filter,
     /// The next JSON-RPC id, unique across every session.
     next_id: AtomicU64,
 }
@@ -239,7 +325,7 @@ struct Opened {
 }
 
 impl McpTools {
-    fn new(servers: Vec<String>, ttl: Duration) -> Self {
+    fn new(servers: Vec<String>, ttl: Duration, filter: Filter) -> Self {
         let servers = servers
             .into_iter()
             .map(|name| Server {
@@ -251,6 +337,7 @@ impl McpTools {
             shared: Arc::new(Shared {
                 servers,
                 ttl,
+                filter,
                 next_id: AtomicU64::new(1),
             }),
         }
@@ -392,6 +479,9 @@ impl Servers {
                 let Some(name) = tool["name"].as_str() else {
                     continue;
                 };
+                if !self.shared.filter.offers(&model_name(server, name)) {
+                    continue;
+                }
                 let mut offered = Tool::new(
                     model_name(server, name),
                     match tool["inputSchema"].is_object() {
@@ -592,6 +682,33 @@ fn render(result: &Value) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pattern_matches_with_stars() {
+        assert!(glob("github__*", "github__search"));
+        assert!(glob("*__delete_*", "gh__delete_repo"));
+        assert!(glob("a*b*c", "aXbYc") && glob("a*b*c", "abc"));
+        assert!(glob("*", "") && glob("exact", "exact"));
+        assert!(!glob("github__*", "gitlab__search"));
+        assert!(!glob("a*b", "ab_"));
+        assert!(!glob("a*b*c", "acb"));
+        assert!(!glob("exact", "exacts"));
+    }
+
+    #[test]
+    fn deny_wins_over_allow_and_allow_defaults_to_all() {
+        let filter = |allow: &[&str], deny: &[&str]| Filter {
+            allow: allow.iter().map(|s| (*s).to_owned()).collect(),
+            deny: deny.iter().map(|s| (*s).to_owned()).collect(),
+        };
+        let all = filter(&[], &[]);
+        assert!(all.offers("gh__search"));
+        let some = filter(&["gh__*"], &["gh__delete_*"]);
+        assert!(some.offers("gh__search") && !some.offers("gh__delete_repo"));
+        assert!(!some.offers("fs__read"));
+        let denied = filter(&[], &["fs__write"]);
+        assert!(denied.offers("fs__read") && !denied.offers("fs__write"));
+    }
 
     #[test]
     fn a_tool_is_named_for_the_model_after_its_server() {

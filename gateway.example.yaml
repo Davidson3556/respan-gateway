@@ -165,12 +165,12 @@ providers:
 # routes; unset, the first provider serving the kind.
 # default: openai
 
-# Limits. request_log is how many finished requests the in-memory request
-# log (the web UI's) keeps; shutdown_grace is how long open responses and end
+# Limits. request_history is how many finished requests the in-memory request
+# history (the web UI's) keeps; shutdown_grace is how long open responses and end
 # hooks get, together, after a stop signal before they are cut (seconds, or
 # 30s, 2m, 500ms); ws_message_limit is the largest WebSocket message of a
 # session, from either side, as a size like body_limit.
-# request_log: 1000
+# request_history: 1000
 # shutdown_grace: 30s
 # ws_message_limit: 16MiB
 
@@ -194,8 +194,16 @@ providers:
 #   files:
 #     command: [npx, -y, "@modelcontextprotocol/server-filesystem", /data]
 #     env: { LOG_LEVEL: info }
-#     cwd: /data
-# At most 32 MCP sessions per server.
+#     cwd: /data            # must exist; the child runs there
+# At most 32 MCP sessions per server. On Windows `npx` is found as `npx.cmd`.
+
+# Browser apps on other origins (MCP Inspector, a chat front end) are refused
+# unless listed here: their preflight is answered without a key, and their
+# requests may read the answers (the mcp-session-id header too). Their requests
+# still need a client key, if keys are set. "*" allows any page and needs
+# client_keys. Origins are scheme://host[:port], no path.
+# cors:
+#   origins: ["https://app.example.com"]
 
 # The agent loop: run the tools of mcp: servers inside chat requests, so a
 # client that knows nothing of MCP gets answers that used them. Off unless
@@ -208,10 +216,20 @@ providers:
 # `mcp` must be served (the default; or listed in `formats`). A request can
 # leave the loop out with the header `x-respan-agent: off`.
 # agent:
-#   tools: [github, files]  # mcp: servers whose tools are offered and run
+#   servers: [github, files]  # mcp: servers whose tools are offered and run
+#   # Which of their tools: names as the model has them (<server>__<tool>, any
+#   # other character of a tool's name is _), * for any characters. All of the
+#   # servers' tools if allow is unset; deny wins. Any client can make the
+#   # model call any tool offered, with the servers' own credentials.
+#   allow: ["github__search_*", "files__read_file"]
+#   deny: ["files__write_*"]
 #   models: [gpt, claude]   # optional model prefixes; every chat model if unset
 #   max_steps: 8            # most calls to the model per request (1 to 64)
 #   timeout: 5m             # wall clock of one request's loop
 #   tool_timeout: 60s       # one tool call; past it the model gets an error
 #   max_result: 64KiB       # most bytes of one tool answer the model sees
-#   cache: 5m               # how long a server's tool list is kept
+#   tool_list_ttl: 5m       # how long a server's tool list is kept
+#   parallel: 4             # most tool calls of one step that run at once
+#   max_results: 256KiB     # most bytes of tool answers in one request
+# Tool descriptions and answers are untrusted input to the model.
+# `check --online` lists the tools that would be offered.

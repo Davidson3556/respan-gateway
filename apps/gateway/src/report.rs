@@ -48,12 +48,20 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
     }
 
     if let Some(agent) = &config.agent {
-        let mut about = vec![format!("tools of {}", agent.tools.join(", "))];
+        let mut about = vec![format!("tools of {}", agent.servers.join(", "))];
+        for (label, patterns) in [("allow", &agent.allow), ("deny", &agent.deny)] {
+            if !patterns.is_empty() {
+                about.push(format!("  {label:<7} {}", patterns.join(", ")));
+            }
+        }
         if !agent.models.is_empty() {
             about.push(format!("  models  {}", agent.models.join(", ")));
         }
         let steps = agent.max_steps.unwrap_or(8);
-        about.push(format!("  limits  {steps} steps per request"));
+        let parallel = agent.parallel.unwrap_or(4);
+        about.push(format!(
+            "  limits  {steps} steps per request, {parallel} tool calls at once"
+        ));
         row(&mut lines, "agent", about);
     }
 
@@ -120,8 +128,9 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
 }
 
 /// What `check --online` prints: how each provider answered a call made
-/// with its key. No key, and no URL, is named.
-pub fn online(probes: &[Probe]) -> String {
+/// with its key, and the tools the agent would offer, if it has any. No
+/// key, and no URL, is named.
+pub fn online(probes: &[Probe], tools: Option<&[String]>) -> String {
     let width = probes.iter().map(|p| p.provider.len()).max().unwrap_or(0);
     let mut lines =
         vec!["online (one call to each provider and MCP server, with its key)".to_owned()];
@@ -140,6 +149,16 @@ pub fn online(probes: &[Probe]) -> String {
     }
     if probes.is_empty() {
         lines.push("  no provider lists its models, and no MCP server is set".to_owned());
+    }
+    if let Some(tools) = tools {
+        lines.push(String::new());
+        lines.push("agent tools (as the model is offered them)".to_owned());
+        if tools.is_empty() {
+            lines.push(
+                "  none: no server listed a tool, or `allow` and `deny` leave none".to_owned(),
+            );
+        }
+        lines.extend(tools.iter().map(|t| format!("  {t}")));
     }
     lines.join("\n")
 }

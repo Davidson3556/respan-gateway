@@ -123,11 +123,18 @@ A provider with its own key always uses it; one with none receives the
 client's own credential headers, only when the client speaks the provider's
 format, never across a translation.
 
+**Browser apps.** A web page on another origin (MCP Inspector, a chat front
+end) is refused unless `cors` lists it: `cors: { origins: ["https://app.example.com"] }`
+answers that origin's preflight (`OPTIONS`, which carries no key) and lets its
+requests read the answers, including the `mcp-session-id` header. Its requests
+still need a client key if keys are set. `origins: ["*"]` allows any page and
+needs `client_keys`. Without `cors`, nothing changes.
+
 **Configuration** is one YAML file, every setting shown in
 [`gateway.example.yaml`](gateway.example.yaml): providers (vendor presets or
 spelled out), `formats` served, `client_keys`, `default`, `plugins` (model
-prefixes), `mcp` servers, `log`, `ui`, `body_limit`, `ws_message_limit`,
-`request_log`, `shutdown_grace`. Routing order: `name/model` goes to
+prefixes), `mcp` servers, `agent`, `cors`, `log`, `ui`, `body_limit`,
+`ws_message_limit`, `request_history`, `shutdown_grace`. Routing order: `name/model` goes to
 provider `name`; else the `models` plugin's prefixes; else the vendors'
 prefixes (longest wins); else the kind's default
 ([routing](docs/ARCHITECTURE.md#routing)).
@@ -160,8 +167,10 @@ gateway key; the upstream key (`key`, or `auth` for another header) stays on
 the gateway, and a client's own credentials are not sent on unless the server
 says `forward_auth: true`. A stdio server runs as a child process, one per
 client session, started when the session initializes (the `command` must be
-on `PATH` at startup), given only `PATH` and its `env` (values literal or
-`env:NAME`), and stopped when the session ends: the client's `DELETE`, ten idle
+on `PATH` at startup; on Windows `npx` finds `npx.cmd` through `PATHEXT`, and
+the child and what it started are all ended with the session), given only `PATH` and its `env` (values literal or
+`env:NAME`; `cwd` must be an existing directory), and stopped when the session
+ends: the client's `DELETE`, ten idle
 minutes, a crash (that session's calls fail and the client starts a new
 session, so a fresh child), or the gateway stopping. Each MCP request is in
 the request log as kind `mcp`, with its method and tool (`tools/call echo`)
@@ -180,14 +189,26 @@ nothing of MCP gets answers that used them. It is off unless configured:
 
 ```yaml
 agent:
-  tools: [github, files]   # mcp: servers whose tools the gateway offers and runs
-  models: [gpt, claude]    # optional model prefixes; default: every chat model
-  max_steps: 8             # most calls to the model per request
-  # timeout: 5m            # wall clock of one request's loop
-  # tool_timeout: 60s      # one tool call
-  # max_result: 64KiB      # most bytes of one tool answer the model sees
-  # cache: 5m              # how long a server's tool list is kept
+  servers: [github, files]  # mcp: servers whose tools the gateway offers and runs
+  # allow: ["github__search_*", "files__read_file"]  # only these tools (default: all)
+  # deny: ["files__write_*"]   # never these; wins over allow
+  models: [gpt, claude]     # optional model prefixes; default: every chat model
+  max_steps: 8              # most calls to the model per request
+  # timeout: 5m             # wall clock of one request's loop
+  # tool_timeout: 60s       # one tool call
+  # tool_list_ttl: 5m       # how long a server's tool list is kept
+  # parallel: 4             # most tool calls of one step that run at once
+  # max_result: 64KiB       # most bytes of one tool answer the model sees
+  # max_results: 256KiB     # most bytes of tool answers in one request
 ```
+
+`allow` and `deny` name tools as the model has them, `<server>__<tool>` with
+any character other than letters, digits and `-` written `_`, and `*` for any
+characters. Every client key can make the model call any tool offered, with
+the servers' own credentials, so offer no more than you would let a client
+do: list the tools you want in `allow`, or the dangerous ones in `deny`.
+`check --online` lists the tools that would be offered (it contacts the
+servers; plain `check` does not).
 
 On a chat request in scope (any chat format, translated or not) the gateway
 adds the servers' tools to the request, named `<server>__<tool>` (such as
@@ -205,7 +226,11 @@ header `x-respan-agent: off`.
 - A tool's failure, a timeout, an unreachable server or malformed arguments
   is a tool result the model reads (flagged as an error where the provider's
   format has the flag, else text beginning `Error:`), not a failed request.
-  Answers longer than `max_result` are cut, saying so.
+  Answers longer than `max_result` are cut, saying so, and once a request's
+  answers add up to `max_results` the rest are left out.
+- A tool's description and answer is untrusted input to the model: a server
+  (or a page or file it reads) can try to instruct it. Offer tools whose
+  servers you trust, and keep destructive ones out with `deny`.
 - Streaming: a step's text and the client's own tool calls stream as they
   arrive, the gateway's tool calls are held back and run, and the next step's
   text follows in the same reply, its blocks and their native events
@@ -219,7 +244,7 @@ header `x-respan-agent: off`.
 - Tools run with the server's own credentials, never a client's (a server with
   `forward_auth` cannot be a tool server). The gateway is an MCP client of its
   own: one session per server, kept across requests and started again when
-  lost, and each tool list kept for `cache`. At a config reload the old
+  lost, and each tool list kept for `tool_list_ttl`. At a config reload the old
   build's sessions are ended (an HTTP server's `DELETE`d, a stdio server's
   child stopped) as soon as its requests are done.
 - The request log shows the provider's steps and each tool call (name,
