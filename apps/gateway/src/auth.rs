@@ -23,6 +23,8 @@ use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential};
 use respan_gateway_mcp_http::Owner;
 
+use crate::agent::ToolScope;
+
 const X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
 const X_GOOG_API_KEY: HeaderName = HeaderName::from_static("x-goog-api-key");
 const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
@@ -63,10 +65,23 @@ impl Plugin for ClientCredentials {
 }
 
 /// A client key, read, and the name its requests are logged under.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Client {
     pub name: String,
     pub key: String,
+    /// Whether it reaches the admin API.
+    pub admin: bool,
+    /// The tools its requests may use, if it is limited.
+    pub tools: Option<Vec<String>>,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("name", &self.name)
+            .field("admin", &self.admin)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -139,8 +154,8 @@ impl ClientKeys {
         }
     }
 
-    /// The client whose key `headers` present, if any, and its id.
-    fn identify(&self, headers: &HeaderMap) -> Option<(Owner, &str)> {
+    /// The client whose key `headers` present, if any.
+    fn identify(&self, headers: &HeaderMap) -> Option<&Client> {
         let bearer = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
         let bearer = bearer
             .and_then(|v| v.split_once(' '))
@@ -149,13 +164,34 @@ impl ClientKeys {
             .into_iter()
             .filter_map(|name| headers.get(name)?.to_str().ok());
         let mut presented = bearer.into_iter().chain(others);
-        let client = presented.find_map(|key| self.client(key))?;
-        Some((client_id(&client.key), &client.name))
+        presented.find_map(|key| self.client(key))
+    }
+
+    /// Whether the request may use the admin API: any request when there
+    /// are no client keys, else one with an admin client's key.
+    pub fn admin_allows(&self, headers: &HeaderMap) -> bool {
+        !self.required() || self.identify(headers).is_some_and(|c| c.admin)
     }
 
     pub fn allows(&self, headers: &HeaderMap) -> bool {
         self.presented(headers) != Presented::Refused
     }
+}
+
+/// Puts what the gateway knows of `client` on a request's extensions: its
+/// name in the request record, its [`Owner`] id, and the tools it is limited
+/// to, if it is.
+fn attribute(req: &mut Request, client: &Client) {
+    // The gateway's own extensions ride in the request's.
+    let mut calls = req.extensions_mut().remove::<Extensions>();
+    let calls = calls.get_or_insert_with(Extensions::new);
+    crate::requests::attribute(calls, &client.name);
+    calls.insert(client_id(&client.key));
+    if let Some(tools) = &client.tools {
+        calls.insert(ToolScope::new(tools.clone()));
+    }
+    let calls = std::mem::take(calls);
+    req.extensions_mut().insert(calls);
 }
 
 /// Whether `a` and `b` are equal, in time that depends on their lengths alone.
@@ -190,14 +226,8 @@ pub async fn consume(
         Presented::Refused => unauthorized(),
         Presented::Open => next.run(req).await,
         Presented::Valid(holders) => {
-            if let Some((owner, name)) = keys.identify(req.headers()) {
-                // The gateway's own extensions ride in the request's.
-                let mut calls = req.extensions_mut().remove::<Extensions>();
-                let calls = calls.get_or_insert_with(Extensions::new);
-                crate::requests::attribute(calls, name);
-                calls.insert(owner);
-                let calls = std::mem::take(calls);
-                req.extensions_mut().insert(calls);
+            if let Some(client) = keys.identify(req.headers()) {
+                attribute(&mut req, client);
             }
             for name in holders {
                 req.headers_mut().remove(name);
@@ -220,9 +250,20 @@ impl ClientKeys {
     fn browser(&self, req: Request) -> Option<Request> {
         let (mut head, body) = req.into_parts();
         let mut credential = Credential::lift(&mut head)?;
-        let found = credential.take_keys(|key| self.is_key(key));
+        let client = std::cell::Cell::new(None);
+        let found = credential.take_keys(|key| {
+            let found = self.client(key);
+            if client.get().is_none() {
+                client.set(found);
+            }
+            found.is_some()
+        });
         credential.restore(&mut head);
-        found.then(|| Request::from_parts(head, body))
+        let mut req = Request::from_parts(head, body);
+        if let Some(client) = client.get() {
+            attribute(&mut req, client);
+        }
+        found.then_some(req)
     }
 }
 
@@ -235,12 +276,14 @@ impl ClientKeys {
 #[derive(Debug, Clone, Copy)]
 pub struct Trusted;
 
-/// Whether `req` is a trusted read: of the admin API, or of a model list.
+/// Whether `req` is a trusted read: a `GET` of the admin API or of a model
+/// list.
 fn is_trusted(req: &Request) -> bool {
     let path = req.uri().path();
-    let read = path.starts_with("/ui/api/")
-        || req.method() == Method::GET
-            && (path == "/v1/models" || path.starts_with("/v1beta/models"));
+    let read = req.method() == Method::GET
+        && (path.starts_with("/ui/api/")
+            || path == "/v1/models"
+            || path.starts_with("/v1beta/models"));
     read && req.extensions().get::<Trusted>().is_some()
 }
 
@@ -250,6 +293,27 @@ pub async fn require(State(keys): State<Arc<ClientKeys>>, req: Request, next: Ne
     match is_trusted(&req) || keys.allows(req.headers()) {
         true => next.run(req).await,
         false => unauthorized(),
+    }
+}
+
+/// Like [`require`], and the key must be an admin client's (see
+/// `client_keys`): another valid key is refused with `403`.
+pub async fn require_admin(
+    State(keys): State<Arc<ClientKeys>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if is_trusted(&req) || !keys.required() {
+        return next.run(req).await;
+    }
+    match (keys.allows(req.headers()), keys.admin_allows(req.headers())) {
+        (_, true) => next.run(req).await,
+        (true, false) => error(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            "this client key is not an admin key (`admin: true` in `client_keys`)",
+        ),
+        (false, _) => unauthorized(),
     }
 }
 
@@ -267,8 +331,8 @@ pub struct Cors {
     any: bool,
 }
 
-/// The headers a browser client may send: the keys, the SDKs' own, and
-/// MCP's.
+/// The headers a preflight that asks for none may be answered with: the
+/// keys, the SDKs' own, and MCP's.
 const ALLOWED_HEADERS: &str = "Authorization, x-api-key, x-goog-api-key, anthropic-version, \
     anthropic-beta, openai-beta, content-type, mcp-session-id, mcp-protocol-version, \
     last-event-id, x-respan-agent";
@@ -311,6 +375,34 @@ impl Cors {
     }
 }
 
+/// The headers a preflight asks to send (`Access-Control-Request-Headers`),
+/// as the page's origin is already allowed: browser SDKs send ones of their
+/// own (`x-stainless-*`, `anthropic-dangerous-direct-browser-access`). Only
+/// header-name characters are echoed. A preflight that asks for none gets
+/// the usual list.
+fn allowed_headers(req: &Request) -> HeaderValue {
+    let asked = req
+        .headers()
+        .get("access-control-request-headers")
+        .and_then(|v| v.to_str().ok());
+    let token = |name: &&str| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+    };
+    let names: Vec<&str> = asked
+        .into_iter()
+        .flat_map(|v| v.split(',').map(str::trim))
+        .filter(token)
+        .collect();
+    match names.is_empty() {
+        true => HeaderValue::from_static(ALLOWED_HEADERS),
+        false => HeaderValue::from_str(&names.join(", "))
+            .unwrap_or_else(|_| HeaderValue::from_static(ALLOWED_HEADERS)),
+    }
+}
+
 /// Answers an allowed origin's preflight, and marks its other answers.
 pub async fn cors(State(cors): State<Arc<Cors>>, req: Request, next: Next) -> Response {
     let origin = req.headers().get(ORIGIN).cloned();
@@ -328,10 +420,7 @@ pub async fn cors(State(cors): State<Arc<Cors>>, req: Request, next: Next) -> Re
                 "access-control-allow-methods",
                 HeaderValue::from_static(ALLOWED_METHODS),
             );
-            headers.insert(
-                "access-control-allow-headers",
-                HeaderValue::from_static(ALLOWED_HEADERS),
-            );
+            headers.insert("access-control-allow-headers", allowed_headers(&req));
             headers.insert("access-control-max-age", HeaderValue::from_static("86400"));
             resp
         }
@@ -462,6 +551,8 @@ mod tests {
         Client {
             name: name.to_owned(),
             key: key.to_owned(),
+            admin: true,
+            tools: None,
         }
     }
 
@@ -493,7 +584,10 @@ mod tests {
     #[test]
     fn a_client_key_has_an_id_that_is_not_the_key() {
         let keys = ClientKeys(vec![client("a", "k1"), client("b", "k2")]);
-        let id = |pairs: &[(&'static str, &str)]| keys.identify(&headers(pairs));
+        let id = |pairs: &[(&'static str, &str)]| {
+            let found = keys.identify(&headers(pairs));
+            found.map(|c| (client_id(&c.key), c.name.clone()))
+        };
         let one = id(&[("authorization", "Bearer k1")]);
         assert_eq!(one, id(&[("x-api-key", "k1")]));
         assert_ne!(one, id(&[("x-api-key", "k2")]));
@@ -504,13 +598,45 @@ mod tests {
         assert_eq!(id(&both), id(&[("x-api-key", "k2")]));
         let name = |pairs: &[(&'static str, &str)]| {
             let found = keys.identify(&headers(pairs));
-            found.map(|(_, name)| name.to_owned())
+            found.map(|c| c.name.clone())
         };
         assert_eq!(name(&[("x-api-key", "k2")]).as_deref(), Some("b"));
         assert_eq!(
             name(&[("authorization", "Bearer k1")]).as_deref(),
             Some("a")
         );
+    }
+
+    #[test]
+    fn only_admin_clients_reach_the_admin_api() {
+        let mut ops = client("ops", "k2");
+        let mut app = client("app", "k1");
+        app.admin = false;
+        ops.admin = true;
+        let keys = ClientKeys(vec![app, ops]);
+        let admin = |pairs: &[(&'static str, &str)]| keys.admin_allows(&headers(pairs));
+        assert!(admin(&[("x-api-key", "k2")]));
+        assert!(!admin(&[("x-api-key", "k1")]));
+        assert!(!admin(&[]));
+        assert!(ClientKeys(Vec::new()).admin_allows(&headers(&[])));
+    }
+
+    #[test]
+    fn a_preflight_is_answered_with_the_headers_it_asks_for() {
+        let ask = |value: &str| {
+            let req = Request::builder()
+                .header("access-control-request-headers", value)
+                .body(axum::body::Body::empty())
+                .expect("request");
+            allowed_headers(&req).to_str().expect("text").to_owned()
+        };
+        assert_eq!(
+            ask("x-stainless-os, Anthropic-Dangerous-Direct-Browser-Access,content-type"),
+            "x-stainless-os, Anthropic-Dangerous-Direct-Browser-Access, content-type"
+        );
+        // Anything that is not a header name is dropped.
+        assert_eq!(ask("x-a, bad name, x-b\"c"), "x-a");
+        assert_eq!(ask("   "), ALLOWED_HEADERS);
     }
 
     #[test]

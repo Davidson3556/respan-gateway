@@ -33,6 +33,7 @@ mod mcp_oauth;
 mod models;
 mod presets;
 mod quirks;
+mod redact;
 mod report;
 mod requests;
 

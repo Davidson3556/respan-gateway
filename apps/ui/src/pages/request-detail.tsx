@@ -188,6 +188,7 @@ function Detail({ record }: { record: RequestRecord }) {
             {record.model}
           </Field>
           <Field label="Provider">{record.provider}</Field>
+          {record.client && <Field label="Client">{record.client}</Field>}
           <Field label="Streaming">{record.stream ? "Yes" : "No"}</Field>
         </dl>
       </Section>

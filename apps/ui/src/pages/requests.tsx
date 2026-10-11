@@ -27,6 +27,7 @@ export function RequestsPage() {
     kind: params.get("kind") ?? ANY,
     provider: params.get("provider") ?? ANY,
     model: params.get("model") ?? ANY,
+    client: params.get("client") ?? ANY,
     q: params.get("q") ?? "",
   };
 
@@ -48,6 +49,7 @@ export function RequestsPage() {
       kinds: distinct(all.map((r) => r.kind)),
       providers: distinct(all.map((r) => r.provider)),
       models: distinct(all.map((r) => r.model)),
+      clients: distinct(all.map((r) => r.client ?? null)),
     }),
     [all],
   );

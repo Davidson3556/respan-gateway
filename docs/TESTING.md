@@ -87,7 +87,13 @@ cargo test --workspace --all-targets --all-features -- --list
 | `crates/*/src/` | Unit tests for private implementation details |
 | `crates/*/tests/` | Public contracts and protocol integration tests |
 | `crates/formats/conversation-http/tests/{relay,translate}/` | Provider suites grouped by requests, responses, filters, errors and related behavior; shared fakes remain in each parent test target |
-| `apps/gateway/tests/` | The built executable against mockllm (`e2e`; `e2e_native` for Gemini `generateContent` and Responses; `e2e_media` for the media kinds; `e2e_mcp` for MCP servers; `e2e_agent` for the agent loop; `reload` for config reload), the command line (`cli`: init, check, models, proxy, `PORT`, the non-loopback guard), browser WebSocket keys (`ws_auth`), browser access (`cors`), the app and library in process (`app`, `library`), the media kinds against a strict fake of OpenAI's media endpoints and Veo (`media`), vendor quirks (`quirks`), redirects and bounded error bodies |
+| `apps/gateway/tests/` | The built executable against mockllm: `e2e` (chat), `e2e_native` (Gemini `generateContent` and Responses), `e2e_media` (media kinds), `e2e_mcp` (MCP servers), `e2e_mcp_aggregate` (the aggregate MCP endpoint), `e2e_agent` (the agent loop), `reload` (config reload); the command line (`cli`: init, check, models, proxy, `PORT`, the non-loopback guard); the admin API's config view and edits (`admin_config`), the request history file (`history`); browser WebSocket keys (`ws_auth`) and browser access (`cors`); the app and library in process (`app`, `library`); the media kinds against a strict fake of OpenAI's media endpoints and Veo (`media`); vendor quirks (`quirks`); `redirects`; bounded error bodies (`error_bodies`) |
+| `crates/core/tests/` | The kernel: `buffering`, `cancellation`, `contract`, `edge` and `edge_runtime`, `faults`, `lifecycle`, `output_wrap` and `wrap`, `ownership`, `panic_matrix`, `progress`, `stress`, `symmetric`, `transports`, `until`, `upload` |
+| `crates/plugins/tests/` | `agent` (the tool loop) and `routing` (attempts, retries, fallback, races) |
+| `crates/providers/tests/` | `registry`, and one file per vendor's quirks: `azure`, `deepseek`, `gemini`, `groq`, `openai`, `openrouter`, `vllm` |
+| `crates/serve/tests/` | `http`: HTTP ingress |
+| `python/tests/` | `test_gateway`, `test_kinds`, `test_lifecycle`, `test_config_types`, `test_examples` (pytest against the built extension) |
+| `apps/ui/src/**/*.test.ts(x)` | The web UI: components, hooks, pages and `lib/` (API client, export, filters, chat and realtime helpers), vitest under jsdom |
 | `apps/gateway/tests/paths/` | Path matching, normalization, allowlists and real client path shapes, using one local wire fake |
 | `examples/tests/cases/<topic>/` | Test modules included by the corresponding example or private support module |
 | `examples/tests/text_*.rs` | Automatically discovered text and tool-argument integration suites |

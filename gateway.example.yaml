@@ -19,7 +19,19 @@ listen: 127.0.0.1:8080
 # A key may carry a name, which each request in the log and the export shows
 # as its `client` (filter by it: /ui/api/requests?client=app); a key without
 # one is key-1, key-2... by its place in the list, never the key itself.
-# client_keys: [env:GATEWAY_KEY, { name: ci, key: env:CI_KEY }]
+#
+# A named key may also say what it may do:
+#   admin: true   reaches the admin API (/ui/api/*: requests of every client,
+#                 reload, the config). Unless some key sets `admin: true`,
+#                 every key does; once one does, only those keys do and the
+#                 others get 403 there. `admin: false` always excludes.
+#   tools: [..]   the agent tools (`server__tool`, `*` globs, as `agent.allow`)
+#                 this key's requests may be offered, within the global
+#                 `allow`/`deny`; all if unset.
+# client_keys:
+#   - { name: ops, key: env:OPS_KEY, admin: true }
+#   - { name: ci, key: env:CI_KEY, tools: ['files__read*'] }
+#   - env:GATEWAY_KEY
 
 # How each finished request is printed to stderr, with a timestamp and a
 # level: text (the default), json (a line each) or off. `--log` and
@@ -29,7 +41,11 @@ listen: 127.0.0.1:8080
 # ui: true
 # `admin_writes: true` lets the admin API and the UI's Config page rewrite
 # this file (`PUT /ui/api/config`: validated, written atomically, the old
-# file kept as `<file>.bak`, then reloaded). Needs `client_keys`.
+# file kept as `<file>.bak`, then reloaded). Needs a `client_keys` entry with
+# `admin: true`: the config can start programs (`mcp: command`) and read
+# environment variables, so it is never open to every key. The file is
+# replaced through a temporary file, or written in place where it is a bind
+# mount; a symlink is written through.
 # admin_writes: false
 
 # The most bytes of a client's request, and of a provider's answer held at

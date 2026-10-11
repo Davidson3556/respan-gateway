@@ -13,8 +13,8 @@ export function createQueryClient(): QueryClient {
   return new QueryClient({
     queryCache: new QueryCache({
       onError: (error, query) => {
-        // 401s open the key dialog instead; 404s are handled by the page.
-        if (error instanceof ApiError && (error.status === 401 || error.status === 404)) return;
+        // 401s and 403s open the key dialog instead; 404s are handled by the page.
+        if (error instanceof ApiError && (error.status === 401 || error.status === 403 || error.status === 404)) return;
         // One toast per distinct failure, so background polling doesn't stack them.
         const message = describeError(error);
         toast.error(message, { id: message, description: `While loading ${query.queryKey[0]}` });

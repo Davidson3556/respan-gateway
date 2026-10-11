@@ -23,7 +23,7 @@ const rows: RequestRecord[] = [
   { ...base, id: "r_2", model: "claude-sonnet-4-5", provider: "anthropic", status: 429 },
   { ...base, id: "r_3", kind: "image", path: "/v1/images/generations", status: null },
 ];
-const none = { status: ANY, kind: ANY, provider: ANY, model: ANY, q: "" };
+const none = { status: ANY, kind: ANY, provider: ANY, model: ANY, client: ANY, q: "" };
 const ids = (f: Partial<typeof none>) => filterRequests(rows, { ...none, ...f }).map((r) => r.id);
 
 describe("filterRequests", () => {
@@ -38,6 +38,11 @@ describe("filterRequests", () => {
   it("combines kind, provider and model", () => {
     expect(ids({ kind: "chat", provider: "anthropic" })).toEqual(["r_2"]);
     expect(ids({ model: "gpt-4o-mini" })).toEqual(["r_1", "r_3"]);
+  });
+
+  it("filters by client", () => {
+    const named = [{ ...base, id: "a", client: "ci" }, { ...base, id: "b", client: "web" }, base];
+    expect(filterRequests(named, { ...none, client: "web" }).map((r) => r.id)).toEqual(["b"]);
   });
 
   it("searches model and path, ignoring case and padding", () => {

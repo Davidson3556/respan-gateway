@@ -69,7 +69,7 @@ export interface Provider {
 export interface McpServer {
   name: string;
   transport: "http" | "stdio";
-  /** The server's URL, or the command a stdio server runs. */
+  /** Only the origin of an HTTP server's URL, or the program a stdio server runs (never its path, query or arguments). */
   target: string;
   /** Where clients reach it, such as `/mcp/github`. */
   endpoint: string;
@@ -133,6 +133,8 @@ export interface RequestRecord {
   kind: Kind | null;
   model: string | null;
   provider: string | null;
+  /** The name of the client key the request came with; absent without named client keys. */
+  client?: string;
   /** null while the request is in flight */
   status: number | null;
   duration_ms: number | null;
@@ -207,6 +209,7 @@ export class ApiError extends Error {
 type Listener = () => void;
 const keyListeners = new Set<Listener>();
 const unauthorizedListeners = new Set<Listener>();
+const forbiddenListeners = new Set<Listener>();
 
 export function getGatewayKey(): string | null {
   try {
@@ -235,6 +238,12 @@ export function subscribeGatewayKey(listener: Listener): () => void {
 export function onUnauthorized(listener: Listener): () => void {
   unauthorizedListeners.add(listener);
   return () => unauthorizedListeners.delete(listener);
+}
+
+/** Called whenever any request comes back 403: the key is valid but may not use the admin API. */
+export function onForbidden(listener: Listener): () => void {
+  forbiddenListeners.add(listener);
+  return () => forbiddenListeners.delete(listener);
 }
 
 // --- requests -------------------------------------------------------------
@@ -276,6 +285,7 @@ export async function gatewayFetch(path: string, init: RequestInit = {}): Promis
   const res = await fetch(path, { ...init, headers: authHeaders(init.headers) });
   if (res.ok) return res;
   if (res.status === 401) unauthorizedListeners.forEach((l) => l());
+  if (res.status === 403) forbiddenListeners.forEach((l) => l());
   throw await errorFrom(res);
 }
 

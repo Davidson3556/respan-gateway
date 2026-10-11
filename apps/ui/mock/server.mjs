@@ -147,7 +147,7 @@ const mcpServers = [
   {
     name: "github",
     transport: "http",
-    target: "https://api.githubcopilot.com/mcp/",
+    target: "https://api.githubcopilot.com",
     endpoint: "/mcp/github",
     credentials: "gateway",
     labels: ["initialize", "tools/list", "tools/call search_repositories", "tools/call get_issue"],
@@ -155,7 +155,7 @@ const mcpServers = [
   {
     name: "files",
     transport: "stdio",
-    target: "npx -y @modelcontextprotocol/server-filesystem /data",
+    target: "npx",
     endpoint: "/mcp/files",
     credentials: "none",
     labels: ["initialize", "tools/list", "tools/call read_file", "tools/call list_directory"],
@@ -266,6 +266,7 @@ function begin({ path, format, kind, model, provider, stream, at = new Date() })
     format,
     kind,
     model,
+    ...(KEY ? { client: pick(["ci", "web", "ops"]) } : {}),
     provider: provider ?? (model ? providerFor(model) : null),
     status: null,
     duration_ms: null,
@@ -1098,13 +1099,14 @@ const routesTable = {
         (r) =>
           (!q.get("kind") || r.kind === q.get("kind")) &&
           (!q.get("status") || outcome(r) === q.get("status")) &&
+          (!q.get("client") || r.client === q.get("client")) &&
           (!q.get("provider") || r.provider === q.get("provider")) &&
           (!q.get("model") || (r.model ?? "").toLowerCase().includes(q.get("model").toLowerCase())) &&
           (!q.get("since") || r.started_at >= new Date(q.get("since")).toISOString()),
       )
       .reverse();
     if (q.get("format") === "csv") {
-      const cols = ["id", "started_at", "method", "path", "format", "kind", "model", "provider", "status", "duration_ms", "input_tokens", "output_tokens", "cost_usd", "error"];
+      const cols = ["id", "started_at", "method", "path", "format", "kind", "model", "provider", "client", "status", "duration_ms", "input_tokens", "output_tokens", "cost_usd", "error"];
       const cell = (v) => (/[",\n]/.test(String(v ?? "")) ? `"${String(v).replace(/"/g, '""')}"` : (v ?? ""));
       const line = (r) => cols.map((c) => cell(c.endsWith("_tokens") ? r.usage?.[c] : r[c])).join(",");
       res.writeHead(200, { "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="requests.csv"' });

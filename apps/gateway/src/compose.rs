@@ -33,7 +33,6 @@ pub struct Upstream {
 }
 
 /// One format of a provider: the core provider registered for it.
-#[derive(Debug)]
 pub struct Entry {
     pub format: String,
     pub kind: Kind,
@@ -42,6 +41,16 @@ pub struct Entry {
     pub internal: String,
     pub base_url: String,
     pub auth: HeaderMap,
+}
+
+impl std::fmt::Debug for Entry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Entry")
+            .field("format", &self.format)
+            .field("internal", &self.internal)
+            .field("base_url", &crate::redact::url(&self.base_url))
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -76,7 +85,7 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
             names(&upstreams)
         )));
     }
-    let keys = clients(&config.client_keys)?;
+    let keys = clients(&config.client_keys, config.admin_writes)?;
     if upstreams.is_empty() && config.mcp.is_empty() {
         return Err(Fault::config(
             "providers: none configured; add one, such as `openai: { vendor: openai }`",
@@ -392,8 +401,21 @@ pub fn secret(owner: &str, value: &str) -> Result<String, Fault> {
 }
 
 /// The client keys, read, each with the name its requests are logged
-/// under: its own, else `key-<n>` by its place in the list.
-fn clients(entries: &[ClientKey]) -> Result<Vec<Client>, Fault> {
+/// under (its own, else `key-<n>` by its place in the list), whether it
+/// reaches the admin API, and the tools it is limited to.
+///
+/// A key's `admin` is what its entry says. An entry that does not say is an
+/// admin key unless some entry sets `admin: true`, when only those are.
+/// `admin_writes` needs an entry that sets `admin: true`.
+fn clients(entries: &[ClientKey], admin_writes: bool) -> Result<Vec<Client>, Fault> {
+    let named_admins = entries.iter().any(|e| e.admin() == Some(true));
+    if admin_writes && !named_admins {
+        return Err(Fault::config(
+            "admin_writes: needs a client key with `admin: true` \
+             (`client_keys: [{ name: ops, key: ..., admin: true }]`), so that not \
+             every key can rewrite the config",
+        ));
+    }
     let mut clients: Vec<Client> = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
         let key = secret("client_keys", entry.key())?;
@@ -407,7 +429,14 @@ fn clients(entries: &[ClientKey]) -> Result<Vec<Client>, Fault> {
                 "client_keys: the name '{name}' is used twice"
             )));
         }
-        clients.push(Client { name, key });
+        let admin = entry.admin().unwrap_or(!named_admins);
+        let tools = entry.tools().map(<[String]>::to_vec);
+        clients.push(Client {
+            name,
+            key,
+            admin,
+            tools,
+        });
     }
     Ok(clients)
 }

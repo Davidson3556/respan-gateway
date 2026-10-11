@@ -25,6 +25,7 @@ export interface RequestFilter {
   kind: string;
   provider: string;
   model: string;
+  client: string;
   /** Free text, matched against the model and the path. */
   q: string;
 }
@@ -37,6 +38,7 @@ export function filterRequests(rows: RequestRecord[], f: RequestFilter): Request
       (f.kind === ANY || r.kind === f.kind) &&
       (f.provider === ANY || r.provider === f.provider) &&
       (f.model === ANY || r.model === f.model) &&
+      (f.client === ANY || r.client === f.client) &&
       (!needle ||
         (r.model ?? "").toLowerCase().includes(needle) ||
         r.path.toLowerCase().includes(needle)),

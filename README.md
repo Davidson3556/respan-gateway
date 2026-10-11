@@ -126,15 +126,18 @@ format, never across a translation.
 **Browser apps.** A web page on another origin (MCP Inspector, a chat front
 end) is refused unless `cors` lists it: `cors: { origins: ["https://app.example.com"] }`
 answers that origin's preflight (`OPTIONS`, which carries no key) and lets its
-requests read the answers, including the `mcp-session-id` header. Its requests
+requests read the answers, including the `mcp-session-id` header; the preflight is answered with the headers it asks for (a browser SDK's `x-stainless-*`, say). Its requests
 still need a client key if keys are set. `origins: ["*"]` allows any page and
 needs `client_keys`. Without `cors`, nothing changes.
 
 **Configuration** is one YAML file, every setting shown in
 [`gateway.example.yaml`](gateway.example.yaml): providers (vendor presets or
 spelled out), `formats` served, `client_keys`, `default`, `plugins` (model
-prefixes), `mcp` servers, `agent`, `cors`, `log`, `ui`, `body_limit`,
-`ws_message_limit`, `request_history` (`request_history_file` keeps it across restarts, `/ui/api/requests/export` downloads it, `prices` adds a cost to each request), `shutdown_grace`. Routing order: `name/model` goes to
+prefixes), `mcp` servers, `mcp_aggregate`, `agent`, `cors`, `listen`, `log`,
+`ui`, `admin_writes`, `body_limit`, `ws_message_limit`, `request_history`
+(`request_history_file` keeps it across restarts, rotated at
+`request_history_file_max`; `/ui/api/requests/export` downloads it; `prices`
+adds a cost to each request), `shutdown_grace`. Routing order: `name/model` goes to
 provider `name`; else the `models` plugin's prefixes; else the vendors'
 prefixes (longest wins); else the kind's default
 ([routing](docs/ARCHITECTURE.md#routing)).
@@ -147,18 +150,35 @@ old one keeps serving. A changed `listen` needs a restart. `SIGHUP` is unix-only
 `POST /ui/api/reload` or `--watch`. In Docker, a `listen:` in a mounted config
 beats `PORT`, so `listen: 127.0.0.1:8080` there is unreachable from outside.
 
-**Admin config** (behind the client keys, like the rest of `/ui/api/`):
+**Client keys and admin.** A `client_keys` entry is a key, or `{ name, key,
+admin?, tools? }`. The admin API (`/ui/api/*`: every client's request records,
+reload, the config) is for admin keys: while no entry sets `admin: true`,
+every key is one (single-user setups just work); once any entry does, only
+those keys reach it and the others get `403` there (`admin: false` always
+excludes a key). `tools` limits the agent tools (`server__tool` globs, as
+`agent.allow`) a key's requests are offered, within the global `allow` and
+`deny`; the `/mcp` aggregate endpoint is not yet limited by it.
+
+**Admin config** (needs an admin key, like the rest of `/ui/api/`):
 `GET /ui/api/config` shows the config file as on disk with every secret
 (`client_keys`, provider and MCP `key`/`auth.key`, MCP `env` values and
 program arguments, and MCP URLs that carry credentials) as `"…"`, while an
 `env:NAME` reference stays as written; `POST /ui/api/config/validate` (YAML
 body) parses and composes it as a reload would, touching nothing, and answers
 `{ok}` or `{ok: false, error, line, column}`. With `admin_writes: true`, a
-config file and `client_keys`, `PUT /ui/api/config` validates the body, writes
-it atomically (temp file, rename, the old file kept as `<file>.bak`) and
-reloads; otherwise it is `403`. A secret left as `"…"` in the body keeps the
-file's value at that place, so the redacted view can be edited and sent back
-(YAML comments are not kept when it does). The web UI's Config page does all of
+config file, `PUT /ui/api/config` validates the body, writes it atomically
+(temp file, rename, the old file kept as `<file>.bak`; written in place where
+the file is a bind mount, through a symlink) and reloads; otherwise it is
+`403`. `admin_writes` needs a client key with `admin: true` (the config can
+start programs and read environment variables, so not every key may write it);
+the gateway refuses to start without one. A secret left as `"…"` in the body
+keeps the file's value at that place, so the redacted view can be edited and
+sent back (YAML comments are not kept when it does). A client key is shown as
+`{ name, key: "…" }` (a bare one as `key-<n>`, the name it is logged under) and
+kept by its name, so keys may be deleted, reordered or added; other lists
+(an MCP command's arguments) are kept by position, and a list that changed
+length next to a `"…"` is refused: give the values. A provider `base_url` with
+credentials (userinfo, query) is redacted likewise. The web UI's Config page does all of
 this.
 
 ### MCP servers
@@ -373,8 +393,8 @@ provider with a `base_url` and a format.
 ## Web UI
 
 `/ui/` shows providers, routes, each request live (and a playground for
-chat, images, transcription, speech and video) through a read-only admin
-API under `/ui/api`. `ui: false` turns both off. See
+chat, images, transcription, speech and video) through the admin API under
+`/ui/api` (reads, reload, and the config editor behind `admin_writes`). `ui: false` turns both off. See
 [`apps/ui`](apps/ui/README.md).
 
 ## Python

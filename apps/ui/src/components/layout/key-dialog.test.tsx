@@ -86,4 +86,18 @@ describe("KeyDialog", () => {
     expect(screen.queryByText("This gateway needs a key")).not.toBeInTheDocument();
     expect(getGatewayKey()).toBeNull();
   });
+
+  it("says a valid key is not an admin key on a 403, rather than asking as if none was given", async () => {
+    setGatewayKey("sk-client");
+    serve({
+      "GET /ui/api/overview": () => json({ error: { message: "not an admin key" } }, 403),
+    });
+    renderGuarded();
+
+    expect(await screen.findByText("This key can't open the admin UI")).toBeInTheDocument();
+    expect(screen.queryByText("This gateway needs a key")).not.toBeInTheDocument();
+    expect(screen.queryByText("That key was refused")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Not now" }));
+    expect(getGatewayKey()).toBe("sk-client");
+  });
 });

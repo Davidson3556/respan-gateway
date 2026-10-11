@@ -12,13 +12,14 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { getGatewayKey, onUnauthorized, setGatewayKey, subscribeGatewayKey } from "@/lib/api";
+import { getGatewayKey, onForbidden, onUnauthorized, setGatewayKey, subscribeGatewayKey } from "@/lib/api";
 
-/** Opens whenever a call is refused with 401, and asks for the gateway key. */
+/** Opens when a call is refused with 401 (asks for a key) or 403 (the key may not open the admin UI). */
 export function KeyDialog() {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [rejected, setRejected] = useState(false);
+  const [forbidden, setForbidden] = useState(false);
   const [value, setValue] = useState("");
   // Once dismissed, background polling must not keep reopening the dialog;
   // it asks again only after the key changes (for instance in Settings).
@@ -29,11 +30,18 @@ export function KeyDialog() {
     const offUnauthorized = onUnauthorized(() => {
       if (dismissed.current) return;
       setRejected(getGatewayKey() !== null);
+      setForbidden(false);
+      setOpen(true);
+    });
+    const offForbidden = onForbidden(() => {
+      if (dismissed.current) return;
+      setForbidden(true);
       setOpen(true);
     });
     return () => {
       offKey();
       offUnauthorized();
+      offForbidden();
     };
   }, []);
 
@@ -59,10 +67,16 @@ export function KeyDialog() {
             <div className="mb-2 flex size-10 items-center justify-center rounded-full bg-brand-soft text-brand">
               <KeyRound className="size-5" />
             </div>
-            <DialogTitle>{rejected ? "That key was refused" : "This gateway needs a key"}</DialogTitle>
+            <DialogTitle>{forbidden
+                ? "This key can't open the admin UI"
+                : rejected
+                  ? "That key was refused"
+                  : "This gateway needs a key"}
+            </DialogTitle>
             <DialogDescription>
-              The gateway is configured with client keys. Enter one to use the dashboard and the
-              playground; it's kept in this browser only.
+              {forbidden
+                ? "The key is valid, but it isn't an admin key. Enter an admin key to use the dashboard."
+                : "The gateway is configured with client keys. Enter one to use the dashboard and the playground; it's kept in this browser only."}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
@@ -75,7 +89,7 @@ export function KeyDialog() {
               placeholder="sk-gw-…"
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              aria-invalid={rejected || undefined}
+              aria-invalid={rejected || forbidden || undefined}
             />
           </div>
           <DialogFooter>

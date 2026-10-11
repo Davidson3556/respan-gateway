@@ -57,7 +57,8 @@ async fn preflight(gw: &Gateway, path: &str, origin: &str) -> reqwest::Response 
         .header("access-control-request-method", "POST")
         .header(
             "access-control-request-headers",
-            "authorization, content-type",
+            "authorization, x-api-key, x-goog-api-key, anthropic-version, content-type, \
+             mcp-session-id, mcp-protocol-version",
         )
         .send()
         .await
@@ -100,6 +101,31 @@ async fn an_allowed_origins_preflight_is_answered_without_a_key() {
             "{methods}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_preflight_gets_the_headers_it_asks_for_that_are_header_names() {
+    let gw = gateway(&format!(
+        "client_keys: [{KEY}]\ncors: {{ origins: ['{APP}'] }}\n"
+    ))
+    .await;
+    let asked = "authorization, x-stainless-os, x-stainless-lang, \
+        anthropic-dangerous-direct-browser-access, openai-organization, bad header, x\"y";
+    let resp = client()
+        .request(Method::OPTIONS, gw.url("/v1/messages"))
+        .header("origin", APP)
+        .header("access-control-request-method", "POST")
+        .header("access-control-request-headers", asked)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let allowed = header(&resp, "access-control-allow-headers").unwrap();
+    assert_eq!(
+        allowed,
+        "authorization, x-stainless-os, x-stainless-lang, \
+         anthropic-dangerous-direct-browser-access, openai-organization"
+    );
 }
 
 #[tokio::test]

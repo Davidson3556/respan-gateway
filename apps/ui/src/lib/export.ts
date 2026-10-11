@@ -6,7 +6,7 @@ export type ExportFormat = "jsonl" | "csv";
 /** The export URL for the filters in force; unset filters and the free-text search are left out. */
 export function exportPath(format: ExportFormat, filter: Partial<RequestFilter>, since?: string): string {
   const query = new URLSearchParams({ format });
-  for (const name of ["kind", "status", "provider", "model"] as const) {
+  for (const name of ["kind", "status", "provider", "model", "client"] as const) {
     const value = filter[name];
     if (value && value !== ANY) query.set(name, value);
   }

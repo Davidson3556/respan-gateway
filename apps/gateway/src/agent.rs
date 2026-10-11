@@ -175,6 +175,23 @@ impl Filter {
     }
 }
 
+/// The tools a client key limits its requests to (`tools:` of a
+/// `client_keys` entry), put on its requests' extensions. A tool is offered
+/// to such a request only if it is within this and the global filter.
+#[derive(Debug, Clone)]
+pub(crate) struct ToolScope(Filter);
+
+impl ToolScope {
+    pub(crate) fn new(tools: Vec<String>) -> Self {
+        Self(Filter::new(tools, Vec::new()))
+    }
+
+    /// Whether the tool `name` (`<server>__<tool>`) is within the scope.
+    pub(crate) fn offers(&self, name: &str) -> bool {
+        self.0.offers(name)
+    }
+}
+
 /// Whether `text` matches `pattern`, in which `*` stands for any characters.
 fn glob(pattern: &str, text: &str) -> bool {
     let Some((first, rest)) = pattern.split_once('*') else {
@@ -361,6 +378,8 @@ struct Servers {
     calls: HashMap<String, Call>,
     /// The tools offered, by the name the model has: server and tool.
     names: Mutex<HashMap<String, (String, String)>>,
+    /// What the request's client key limits it to, if it does.
+    scope: Option<ToolScope>,
 }
 
 #[respan_gateway_core::async_trait]
@@ -371,6 +390,13 @@ impl Toolbox for Servers {
         let mut names = self.names.lock().unwrap_or_else(PoisonError::into_inner);
         let mut offered = Vec::new();
         for listed in all.into_iter().flatten() {
+            if !self
+                .scope
+                .as_ref()
+                .is_none_or(|s| s.offers(&listed.offered.name))
+            {
+                continue;
+            }
             if !names.contains_key(&listed.offered.name) {
                 let (server, tool) = (listed.server, listed.tool);
                 names.insert(listed.offered.name.clone(), (server, tool));
@@ -417,10 +443,12 @@ impl Servers {
             .iter()
             .map(|s| (s.name.clone(), cx.call(&s.name)))
             .collect();
+        let scope = cx.extensions().get::<ToolScope>().cloned();
         Self {
             shared,
             calls,
             names: Mutex::default(),
+            scope,
         }
     }
 

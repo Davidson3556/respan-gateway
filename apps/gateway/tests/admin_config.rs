@@ -11,7 +11,7 @@ use support::{Gateway, client, json, write_config};
 const KEY: &str = "gw-key-1";
 
 const BODY: &str = "
-client_keys: [gw-key-1, env:SOME_OTHER_KEY_VAR]
+client_keys: [{ name: ops, key: gw-key-1, admin: true }, env:SOME_OTHER_KEY_VAR]
 providers:
   alpha: { formats: openai-chat, base_url: 'http://127.0.0.1:9', key: sk-prov-secret-1 }
   beta:
@@ -108,7 +108,8 @@ async fn the_view_redacts_every_secret_and_says_whether_writes_are_on() {
     assert!(yaml.contains("env:GAMMA_KEY_REF"), "{yaml}");
     assert!(yaml.contains("https://example.invalid/mcp/"), "{yaml}");
     assert_eq!(said["config"]["providers"]["alpha"]["key"], "…");
-    assert_eq!(said["config"]["client_keys"][0], "…");
+    assert_eq!(said["config"]["client_keys"][0]["key"], "…");
+    assert_eq!(said["config"]["client_keys"][0]["admin"], true);
     assert_eq!(said["source"], "file");
     assert!(said["path"].as_str().unwrap().ends_with(".yaml"));
     assert_eq!(said["writes_enabled"], true);
@@ -171,7 +172,7 @@ async fn validation_composes_like_a_reload_and_says_where_and_what_without_secre
 }
 
 #[tokio::test]
-async fn writes_are_refused_unless_enabled_with_a_file_and_client_keys() {
+async fn writes_are_refused_unless_enabled() {
     let gw = start(BODY).await;
     let path = call(&gw, "GET", "/ui/api/config", None).await.1["path"]
         .as_str()
@@ -182,23 +183,103 @@ async fn writes_are_refused_unless_enabled_with_a_file_and_client_keys() {
     assert_eq!(status, 403, "{said}");
     assert_eq!(said["error"]["type"], "admin_writes_disabled");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+}
 
-    // admin_writes without client keys is refused too (a local page could
-    // otherwise rewrite the file).
-    let open = start("admin_writes: true\nproviders: { a: { formats: openai-chat, base_url: 'http://x.test', key: k } }").await;
+#[tokio::test]
+async fn admin_writes_needs_a_key_marked_admin() {
+    let provider = "providers: { a: { formats: openai-chat, base_url: 'http://x.test', key: k } }";
+    for keys in [
+        "",
+        "client_keys: [k1]\n",
+        "client_keys: [{ name: a, key: k1, admin: false }]\n",
+    ] {
+        let path = write_config(&format!(
+            "listen: 127.0.0.1:0\nadmin_writes: true\n{keys}{provider}"
+        ));
+        let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
+            .args(["check", "--config", path.to_str().unwrap()])
+            .output()
+            .await
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success(), "{keys}: {said}");
+        assert!(said.contains("admin: true"), "{keys}: {said}");
+    }
+}
+
+#[tokio::test]
+async fn only_admin_keys_reach_the_admin_api_once_one_is_marked() {
+    let gw = start(&with_writes(BODY)).await;
+    // `env:SOME_OTHER_KEY_VAR` (gw-key-2) is a valid key but not an admin's.
+    for (method, path) in [
+        ("GET", "/ui/api/overview"),
+        ("GET", "/ui/api/requests"),
+        ("GET", "/ui/api/config"),
+        ("POST", "/ui/api/reload"),
+        ("PUT", "/ui/api/config"),
+    ] {
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+        let resp = client()
+            .request(method, gw.url(path))
+            .bearer_auth("gw-key-2")
+            .body("providers: {}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403, "{path}");
+    }
+    // It still uses the gateway, and the admin key still reaches the API.
     let resp = client()
-        .put(open.url("/ui/api/config"))
-        .body("providers: {}")
+        .get(gw.url("/v1/models"))
+        .bearer_auth("gw-key-2")
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
-    let said = json(&resp.text().await.unwrap());
+    assert!(![401, 403].contains(&resp.status().as_u16()));
+    assert_eq!(call(&gw, "GET", "/ui/api/overview", None).await.0, 200);
+
+    // Without a marked key, every key is an admin key.
+    let open = start(
+        "client_keys: [gw-key-1, env:SOME_OTHER_KEY_VAR]\nproviders: { a: { formats: openai-chat, base_url: 'http://x.test', key: k } }",
+    )
+    .await;
+    for key in ["gw-key-1", "gw-key-2"] {
+        let resp = client()
+            .get(open.url("/ui/api/overview"))
+            .bearer_auth(key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{key}");
+    }
+}
+
+#[tokio::test]
+async fn deleting_or_reordering_client_keys_in_the_editor_keeps_each_keys_own_secret() {
+    let gw = start(&with_writes(BODY)).await;
+    let (_, view) = call(&gw, "GET", "/ui/api/config", None).await;
+    let path = view["path"].as_str().unwrap().to_owned();
+    // Put a bare literal key first and the admin second, then delete it: the
+    // admin key keeps its own secret.
+    let mut config = view["config"].clone();
+    let keys = config["client_keys"].as_array_mut().unwrap();
+    keys.insert(
+        0,
+        serde_json::json!({ "name": "old", "key": "sk-old-secret" }),
+    );
+    let body = serde_json::to_string(&config).unwrap();
+    let (status, said) = call(&gw, "PUT", "/ui/api/config", Some(&body)).await;
+    assert_eq!(status, 200, "{said}");
+    let (_, view) = call(&gw, "GET", "/ui/api/config", None).await;
+    let mut config = view["config"].clone();
+    config["client_keys"].as_array_mut().unwrap().remove(0);
+    let body = serde_json::to_string(&config).unwrap();
+    let (status, said) = call(&gw, "PUT", "/ui/api/config", Some(&body)).await;
+    assert_eq!(status, 200, "{said}");
+    let after = std::fs::read_to_string(&path).unwrap();
     assert!(
-        said["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("client_keys")
+        after.contains("gw-key-1") && !after.contains("sk-old-secret"),
+        "{after}"
     );
 }
 
@@ -280,7 +361,7 @@ async fn an_invalid_save_changes_nothing_and_a_placeholder_with_nothing_to_keep_
     assert_eq!(said["error"]["type"], "invalid_config");
     assert!(said["error"]["line"].as_u64().is_some(), "{said}");
 
-    let fresh = "admin_writes: true\nclient_keys: ['…']\nproviders: { n: { formats: openai-chat, base_url: 'http://x.test', key: '…' } }";
+    let fresh = "admin_writes: true\nclient_keys: [{ name: ops, key: gw-key-1, admin: true }]\nproviders: { n: { formats: openai-chat, base_url: 'http://x.test', key: '…' } }";
     let (status, said) = call(&gw, "PUT", "/ui/api/config", Some(fresh)).await;
     assert_eq!(status, 422, "{said}");
     assert!(

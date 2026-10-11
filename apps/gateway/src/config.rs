@@ -16,19 +16,62 @@ use crate::mcp_aggregate::AggregateConfig;
 use crate::presets;
 
 /// A client key in the config: the key alone, or with the name its requests
-/// are logged under.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(untagged)]
+/// are logged under and what it may do.
+#[derive(Clone, PartialEq, Eq)]
 pub enum ClientKey {
     Key(String),
     Named(NamedKey),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NamedKey {
     pub name: String,
     pub key: String,
+    /// Whether the key reaches the admin API. When no key sets it, every
+    /// key does; once one sets `true`, only those do.
+    #[serde(default)]
+    pub admin: Option<bool>,
+    /// The agent and aggregate tools (`server__tool` globs) the key's
+    /// requests may use, within the global `allow` and `deny`; all if unset.
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+}
+
+// A key is a secret: a debug print shows its name alone.
+impl std::fmt::Debug for ClientKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key(_) => f.write_str("ClientKey(..)"),
+            Self::Named(named) => write!(f, "ClientKey({})", named.name),
+        }
+    }
+}
+
+impl std::fmt::Debug for NamedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NamedKey")
+            .field("name", &self.name)
+            .field("admin", &self.admin)
+            .field("tools", &self.tools)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'de> Deserialize<'de> for ClientKey {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = serde_norway::Value::deserialize(de)?;
+        match value {
+            serde_norway::Value::String(key) => Ok(Self::Key(key)),
+            serde_norway::Value::Mapping(_) => serde_norway::from_value(value)
+                .map(Self::Named)
+                .map_err(|e| D::Error::custom(format!("a client key entry: {e}"))),
+            _ => Err(D::Error::custom(
+                "a client key is a string, or `{ name, key, admin?, tools? }`",
+            )),
+        }
+    }
 }
 
 impl ClientKey {
@@ -45,11 +88,49 @@ impl ClientKey {
             Self::Named(named) => Some(&named.name),
         }
     }
+
+    /// What the entry says of admin access, if it does.
+    pub fn admin(&self) -> Option<bool> {
+        match self {
+            Self::Key(_) => None,
+            Self::Named(named) => named.admin,
+        }
+    }
+
+    pub fn tools(&self) -> Option<&[String]> {
+        match self {
+            Self::Key(_) => None,
+            Self::Named(named) => named.tools.as_deref(),
+        }
+    }
 }
 
 impl From<&str> for ClientKey {
     fn from(key: &str) -> Self {
         Self::Key(key.to_owned())
+    }
+}
+
+// Secrets stay out of a debug print: a key, `env:NAME` or not, is not shown.
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("vendor", &self.vendor)
+            .field("formats", &self.formats)
+            .field(
+                "base_url",
+                &self.base_url.as_deref().map(crate::redact::url),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bearer { .. } => f.write_str("Auth::Bearer(..)"),
+            Self::Header { name, .. } => write!(f, "Auth::Header({name}: ..)"),
+        }
     }
 }
 
@@ -185,7 +266,7 @@ impl Default for Config {
 
 /// One provider: a vendor preset, explicit formats, or a preset with some
 /// of its settings replaced.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     /// A vendor preset: `openai`, `anthropic`, `gemini`, `groq`, ...
@@ -204,7 +285,7 @@ pub struct ProviderConfig {
     pub auth: Option<Auth>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Auth {
     /// `Authorization: Bearer <key>`
@@ -648,6 +729,51 @@ fn one_or_many<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_shows_no_secret() {
+        let config = Config::parse(
+            "client_keys: [bare-secret, { name: ops, key: named-secret, admin: true }]
+providers:
+  a: { vendor: openai, key: prov-secret, base_url: 'https://user:url-secret@h.test/v1?k=q-secret' }
+  b: { formats: openai-chat, base_url: 'http://b.test', auth: { type: bearer, key: auth-secret } }
+mcp:
+  m: { command: [npx, --token, arg-secret], env: { T: env-secret } }
+  h:
+    url: 'https://h.test/mcp/tok-in-path'
+    key: mcp-secret
+    oauth: { token_url: 'https://o.test/t', client_id: cid, client_secret: oauth-secret }
+",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let shown = format!("{config:?}");
+        for secret in [
+            "bare-secret",
+            "named-secret",
+            "prov-secret",
+            "url-secret",
+            "q-secret",
+            "auth-secret",
+            "arg-secret",
+            "env-secret",
+            "mcp-secret",
+            "oauth-secret",
+            "tok-in-path",
+        ] {
+            assert!(!shown.contains(secret), "{secret} in {shown}");
+        }
+    }
+
+    #[test]
+    fn a_client_key_entry_with_a_typo_is_named() {
+        let said = |yaml: &str| Config::parse(yaml).err().map(|e| e.to_string());
+        let bad = said("client_keys: [{ name: ci, ky: x }]").unwrap_or_default();
+        assert!(bad.contains("ky") && bad.contains("client key"), "{bad}");
+        assert!(
+            said("client_keys: [{ name: ci, key: x, admin: true, tools: ['a__*'] }]").is_none()
+        );
+        assert!(said("client_keys: [3]").is_some());
+    }
 
     #[test]
     fn a_listen_address_is_a_socket_address() {

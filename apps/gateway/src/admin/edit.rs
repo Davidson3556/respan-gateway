@@ -18,7 +18,6 @@ use serde_norway::Value;
 use super::Admin;
 use crate::app::ReloadError;
 use crate::config::{Config, Source};
-use crate::requests::rfc3339;
 
 /// What stands for a secret in the config the admin API shows.
 pub const PLACEHOLDER: &str = "…";
@@ -53,7 +52,7 @@ fn is_secret(path: &[String], value: &Value) -> bool {
         | ["mcp", _, "oauth", "client_secret" | "refresh_token"]
         | ["mcp", _, "env", _] => !value.is_null(),
         ["mcp", _, "command", i] => *i != "0" && !value.is_null(),
-        ["mcp", _, "url"] => value
+        ["mcp", _, "url"] | ["providers", _, "base_url"] => value
             .as_str()
             .is_some_and(|u| u == PLACEHOLDER || url_holds_secret(u)),
         _ => false,
@@ -114,8 +113,33 @@ fn secrets(value: &mut Value, path: &mut Vec<String>, found: &mut dyn FnMut(&mut
     }
 }
 
-/// `config` with every secret replaced by [`PLACEHOLDER`].
+/// The name a bare client key is logged under, and shown under here.
+fn bare_name(index: usize) -> String {
+    format!("key-{}", index + 1)
+}
+
+/// `config`'s bare literal client keys as `{ name: key-<n>, key }`, so each
+/// has the identity a restore matches it by.
+fn name_bare_keys(config: &mut Value) {
+    let Some(Value::Sequence(items)) = config.get_mut("client_keys") else {
+        return;
+    };
+    for (i, item) in items.iter_mut().enumerate() {
+        if let Value::String(key) = item
+            && !key.starts_with("env:")
+        {
+            let mut named = serde_norway::Mapping::new();
+            named.insert("name".into(), bare_name(i).into());
+            named.insert("key".into(), std::mem::take(key).into());
+            *item = Value::Mapping(named);
+        }
+    }
+}
+
+/// `config` with every secret replaced by [`PLACEHOLDER`]. A bare client
+/// key is shown as a named one (`key-<n>`, the name it is logged under).
 pub fn redact(mut config: Value) -> Value {
+    name_bare_keys(&mut config);
     secrets(&mut config, &mut Vec::new(), &mut |secret| {
         if !is_reference(secret) {
             *secret = Value::String(PLACEHOLDER.to_owned());
@@ -148,10 +172,12 @@ fn scrub(message: &str, secrets: &[String]) -> String {
 
 /// `edited`, an edit of the redacted view, with each [`PLACEHOLDER`] at a
 /// secret replaced by what `current` holds at that place, so a view edited
-/// and sent back leaves its secrets as they are. A list is matched by
-/// position, so reordering `client_keys` or an MCP command's arguments
-/// next to placeholders needs the real values. Returns how many it
-/// restored, or the place of one that has nothing to restore.
+/// and sent back leaves its secrets as they are. A client key is matched by
+/// its `name` (a bare one is `key-<n>` by its place in the file), so it may
+/// be deleted, reordered or inserted; any other list by position, which
+/// holds only while its length does, so a list that changed length with a
+/// placeholder in it is refused. Returns how many it restored, or the
+/// place of one that has nothing to restore.
 fn restore(edited: &mut Value, current: Option<&Value>) -> Result<usize, String> {
     fn walk(
         edited: &mut Value,
@@ -182,6 +208,15 @@ fn restore(edited: &mut Value, current: Option<&Value>) -> Result<usize, String>
                 }
             }
             Value::Sequence(items) => {
+                let held = current.and_then(Value::as_sequence).map(Vec::len);
+                let marked = items.iter().any(|i| i.as_str() == Some(PLACEHOLDER));
+                if marked && held.is_some_and(|len| len != items.len()) {
+                    return Err(format!(
+                        "{}: the list changed length, so '{PLACEHOLDER}' cannot say which \
+                         value it keeps; give the values",
+                        path.join(".")
+                    ));
+                }
                 for (i, child) in items.iter_mut().enumerate() {
                     let before = current.and_then(|c| c.get(i));
                     path.push(i.to_string());
@@ -193,8 +228,55 @@ fn restore(edited: &mut Value, current: Option<&Value>) -> Result<usize, String>
         }
         Ok(())
     }
-    let mut restored = 0;
+    let mut restored = restore_client_keys(edited, current)?;
     walk(edited, current, &mut Vec::new(), &mut restored)?;
+    Ok(restored)
+}
+
+/// Restores the `key` placeholders of `client_keys` entries by `name`.
+fn restore_client_keys(edited: &mut Value, current: Option<&Value>) -> Result<usize, String> {
+    let Some(Value::Sequence(items)) = edited.get_mut("client_keys") else {
+        return Ok(0);
+    };
+    let mut held: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let listed = current.and_then(|c| c.get("client_keys"));
+    let listed = listed.and_then(Value::as_sequence);
+    for (i, entry) in listed.into_iter().flatten().enumerate() {
+        let (name, key) = match entry {
+            Value::String(key) => (Some(bare_name(i)), Some(key.as_str())),
+            entry => (
+                entry.get("name").and_then(Value::as_str).map(str::to_owned),
+                entry.get("key").and_then(Value::as_str),
+            ),
+        };
+        if let (Some(name), Some(key)) = (name, key) {
+            held.entry(name).or_insert_with(|| key.to_owned());
+        }
+    }
+    let mut restored = 0;
+    for entry in items.iter_mut() {
+        if entry.as_str() == Some(PLACEHOLDER) {
+            return Err(format!(
+                "client_keys: '{PLACEHOLDER}' alone keeps nothing; write it as \
+                 {{ name: <the key's name>, key: '{PLACEHOLDER}' }}"
+            ));
+        }
+        if entry.get("key").and_then(Value::as_str) != Some(PLACEHOLDER) {
+            continue;
+        }
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let Some(key) = held.get(name).cloned() else {
+            return Err(format!(
+                "client_keys: there is no key named '{name}' in the file to keep behind \
+                 '{PLACEHOLDER}'; give the key or an env:NAME reference"
+            ));
+        };
+        entry["key"] = Value::String(key);
+        restored += 1;
+    }
     Ok(restored)
 }
 
@@ -262,15 +344,6 @@ fn document(text: &str) -> Result<Value, Invalid> {
 
 // --- the endpoints -----------------------------------------------------
 
-fn source_and_path(admin: &Admin) -> (&'static str, Option<String>) {
-    match &admin.source {
-        Source::File(path) => ("file", Some(path.display().to_string())),
-        Source::Environment => ("environment", None),
-        Source::Proxy => ("proxy", None),
-        Source::Inline => ("inline", None),
-    }
-}
-
 /// Why writes are off, or `None` when they are on.
 fn why_not_writable(admin: &Admin) -> Option<&'static str> {
     if !admin.writes {
@@ -325,7 +398,7 @@ pub async fn show(State(admin): State<Arc<Admin>>) -> Response {
             return error(status, "config_unreadable", &message, None);
         }
     };
-    let (source, path) = source_and_path(&admin);
+    let (source, path) = admin.source_and_path();
     let reason = why_not_writable(&admin);
     let yaml = serde_norway::to_string(&config).unwrap_or_default();
     Json(json!({
@@ -438,18 +511,14 @@ pub async fn save(State(admin): State<Arc<Admin>>, body: String) -> Response {
     let process = admin.process.clone();
     match process.reload() {
         Ok(reloaded) => {
-            let at = *process
-                .reloaded_at
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            Json(json!({
-                "saved": true,
-                "path": path.display().to_string(),
-                "backup": backup.map(|b| b.display().to_string()),
-                "reloaded_at": at.map(rfc3339),
-                "restart_required": reloaded.restart_required,
-            }))
-            .into_response()
+            let mut answer = super::reloaded_json(&process, &reloaded);
+            answer.insert("saved".into(), true.into());
+            answer.insert("path".into(), path.display().to_string().into());
+            answer.insert(
+                "backup".into(),
+                backup.map(|b| b.display().to_string()).into(),
+            );
+            Json(answer).into_response()
         }
         Err(e @ ReloadError::Unavailable) => error(
             StatusCode::CONFLICT,
@@ -471,8 +540,21 @@ pub async fn save(State(admin): State<Arc<Admin>>, body: String) -> Response {
 
 /// Writes `text` to `path` through a temporary file beside it, renamed
 /// over it, after copying the file there now to `<path>.bak`. Returns the
-/// backup if there was a file to keep.
+/// backup if there was a file to keep. A symlink is written through, and a
+/// file that cannot be replaced (a bind mount: `EBUSY`, or another device:
+/// `EXDEV`) is written in place instead, after its backup.
 fn write_atomically(path: &Path, text: &str) -> std::io::Result<Option<PathBuf>> {
+    write_with(path, text, |from, to| std::fs::rename(from, to))
+}
+
+fn write_with(
+    path: &Path,
+    text: &str,
+    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<Option<PathBuf>> {
+    use std::io::ErrorKind::{CrossesDevices, ResourceBusy};
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let path = resolved.as_path();
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
@@ -497,7 +579,12 @@ fn write_atomically(path: &Path, text: &str) -> std::io::Result<Option<PathBuf>>
             std::fs::copy(path, &copy)?;
             backup = Some(copy);
         }
-        std::fs::rename(&temporary, path)?;
+        match rename(&temporary, path) {
+            Err(e) if matches!(e.kind(), CrossesDevices | ResourceBusy) => {
+                std::fs::write(path, text)?;
+            }
+            other => other?,
+        }
         Ok(backup)
     })();
     if result.is_err() {
@@ -565,6 +652,7 @@ mcp:
             assert!(shown.contains(kept), "{kept} missing in {shown}");
         }
         assert_eq!(shown.matches(PLACEHOLDER).count(), 15, "{shown}");
+        assert!(shown.contains("name: key-1"), "{shown}");
     }
 
     #[test]
@@ -575,6 +663,7 @@ mcp:
         let restored = restore(&mut edited, Some(&yaml(FULL))).expect("restored");
         assert_eq!(restored, 15);
         let mut want = yaml(FULL);
+        want["client_keys"][0] = yaml("{ name: key-1, key: gw-secret }");
         want["providers"]["a"]["vendor"] = "anthropic".into();
         want["providers"]["b"]["key"] = "sk-new".into();
         assert_eq!(edited, want);
@@ -585,8 +674,89 @@ mcp:
         let mut edited = yaml("providers: { new: { vendor: openai, key: '…' } }");
         let e = restore(&mut edited, Some(&yaml(FULL))).expect_err("refused");
         assert!(e.starts_with("providers.new.key"), "{e}");
-        let mut plain = yaml("providers: { a: { vendor: openai, base_url: '…' } }");
+        let mut plain = yaml("providers: { a: { vendor: '…' } }");
         assert_eq!(restore(&mut plain, Some(&yaml(FULL))), Ok(0));
+    }
+
+    fn keys(doc: &Value) -> Vec<String> {
+        let list = doc["client_keys"].as_sequence().expect("list").iter();
+        list.map(|k| {
+            let key = k.get("key").unwrap_or(k);
+            key.as_str().expect("string").to_owned()
+        })
+        .collect()
+    }
+
+    const KEYS: &str = "client_keys: [key-a, { name: ops, key: key-b }, key-c]";
+
+    #[test]
+    fn a_deleted_reordered_or_inserted_client_key_keeps_its_own_secret() {
+        let shown = redact(yaml(KEYS));
+        let names: Vec<_> = shown["client_keys"]
+            .as_sequence()
+            .expect("list")
+            .iter()
+            .map(|k| k["name"].as_str().expect("named").to_owned())
+            .collect();
+        assert_eq!(names, ["key-1", "ops", "key-3"]);
+        let edit = |f: &dyn Fn(&mut Vec<Value>)| {
+            let mut edited = shown.clone();
+            if let Some(Value::Sequence(items)) = edited.get_mut("client_keys") {
+                f(items);
+            }
+            restore(&mut edited, Some(&yaml(KEYS))).expect("restored");
+            keys(&edited)
+        };
+        // Delete the first: the others keep theirs.
+        assert_eq!(edit(&|k| drop(k.remove(0))), ["key-b", "key-c"]);
+        // Delete the middle.
+        assert_eq!(edit(&|k| drop(k.remove(1))), ["key-a", "key-c"]);
+        // Reorder.
+        assert_eq!(edit(&|k| k.reverse()), ["key-c", "key-b", "key-a"]);
+        // Insert one with its own value before the others.
+        let new = yaml("{ name: new, key: key-new }");
+        assert_eq!(
+            edit(&|k| k.insert(0, new.clone())),
+            ["key-new", "key-a", "key-b", "key-c"]
+        );
+    }
+
+    #[test]
+    fn a_client_key_placeholder_without_a_known_name_is_refused() {
+        let mut ghost = yaml("client_keys: [{ name: ghost, key: '…' }]");
+        let e = restore(&mut ghost, Some(&yaml(KEYS))).expect_err("refused");
+        assert!(e.contains("ghost"), "{e}");
+        let mut bare = yaml("client_keys: ['…']");
+        assert!(restore(&mut bare, Some(&yaml(KEYS))).is_err());
+    }
+
+    #[test]
+    fn a_list_that_changed_length_around_a_placeholder_is_refused() {
+        let current = yaml("mcp: { m: { command: [npx, a, b] } }");
+        let mut edited = redact(current.clone());
+        edited["mcp"]["m"]["command"] = yaml("[npx, '…']");
+        let e = restore(&mut edited, Some(&current)).expect_err("refused");
+        assert!(e.contains("changed length"), "{e}");
+        let mut same = redact(current.clone());
+        same["mcp"]["m"]["command"][1] = "x".into();
+        assert_eq!(restore(&mut same, Some(&current)), Ok(1));
+    }
+
+    #[test]
+    fn a_save_that_cannot_rename_writes_in_place_after_the_backup() {
+        let dir = std::env::temp_dir().join(format!("respan-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("gateway.yaml");
+        std::fs::write(&file, "old: 1\n").expect("write");
+        let busy = |_: &Path, _: &Path| Err(std::io::ErrorKind::ResourceBusy.into());
+        let backup = write_with(&file, "new: 2\n", busy).expect("written");
+        assert_eq!(std::fs::read_to_string(&file).expect("read"), "new: 2\n");
+        let backup = backup.expect("backup");
+        assert_eq!(std::fs::read_to_string(backup).expect("read"), "old: 1\n");
+        let other = |_: &Path, _: &Path| Err(std::io::ErrorKind::PermissionDenied.into());
+        assert!(write_with(&file, "x: 3\n", other).is_err());
+        assert_eq!(std::fs::read_to_string(&file).expect("read"), "new: 2\n");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -96,9 +96,18 @@ class Price(_Rates, total=False):
     cached_input: float  # for cached input tokens; `input` if unset
 
 
-class NamedClientKey(TypedDict):
+class _NamedKey(TypedDict):
     name: str  # what the request log calls this client
     key: str  # literal or env:NAME
+
+
+class NamedClientKey(_NamedKey, total=False):
+    # Whether the key reaches the admin API (`/ui/api/*`). Unset on every key:
+    # all keys do. Once any key sets True, only the keys that do.
+    admin: bool
+    # The agent and aggregate tools (`server__tool` globs) this key's requests
+    # may use, within the global allow/deny; all if unset.
+    tools: List[str]
 
 
 class GatewayConfig(TypedDict, total=False):
@@ -122,5 +131,5 @@ class GatewayConfig(TypedDict, total=False):
     mcp_aggregate: McpAggregateConfig
     agent: AgentConfig
     cors: CorsConfig
-    admin_writes: bool  # let the admin API and web UI rewrite the config file; needs client_keys
+    admin_writes: bool  # let the admin API and web UI rewrite the config file; needs a client key with admin: True
     ui: bool  # False also turns off the admin API behind models()/requests()/providers()
