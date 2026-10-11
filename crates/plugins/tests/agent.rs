@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
+use mockllm::{Answer, FakeAnthropic, FakeGemini, FakeOpenAi};
 use respan_gateway_conversation::{Input, Output, Tool, Usage};
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
+use respan_gateway_conversation_http::gemini::GeminiGenerate;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
@@ -108,12 +109,13 @@ struct Target;
 #[async_trait]
 impl Plugin for Target {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let claude = cx
-            .input::<Input>()
-            .ok()
-            .and_then(|i| i.model.as_deref().map(|m| m.starts_with("claude")))
-            .unwrap_or(false);
-        cx.set_target(if claude { "anthropic" } else { "openai" });
+        let model = cx.input::<Input>().ok().and_then(|i| i.model.clone());
+        let model = model.unwrap_or_default();
+        cx.set_target(match model {
+            m if m.starts_with("claude") => "anthropic",
+            m if m.starts_with("gemini") => "gemini",
+            _ => "openai",
+        });
         Ok(None)
     }
 }
@@ -182,6 +184,7 @@ struct Rig {
     gw: Gateway,
     openai: FakeOpenAi,
     anthropic: FakeAnthropic,
+    gemini: FakeGemini,
     fake: Arc<Fake>,
     meter: Meter,
     reports: Arc<Mutex<Vec<StepReport>>>,
@@ -193,7 +196,11 @@ impl Rig {
     }
 
     async fn with(fake: Fake, configure: impl FnOnce(Agent) -> Agent) -> Self {
-        let (openai, anthropic) = tokio::join!(FakeOpenAi::start(), FakeAnthropic::start());
+        let (openai, anthropic, gemini) = tokio::join!(
+            FakeOpenAi::start(),
+            FakeAnthropic::start(),
+            FakeGemini::start()
+        );
         let fake = Arc::new(fake);
         let meter = Meter::default();
         let reports: Arc<Mutex<Vec<StepReport>>> = Arc::default();
@@ -212,6 +219,11 @@ impl Rig {
         let agent = configure(agent);
         let oa = http_to(&openai.base_url(), "authorization", "Bearer sk-test");
         let an = http_to(&anthropic.base_url(), "x-api-key", "sk-ant-test");
+        let gm = http_to(
+            &format!("{}/v1beta", gemini.base_url()),
+            "x-goog-api-key",
+            "gm-test",
+        );
         let gw = Gateway::new()
             .provider::<Input, Output, _>(
                 "openai",
@@ -225,6 +237,13 @@ impl Rig {
                     respan_gateway_http::connect(an, LIMIT),
                 )
             })
+            .and_then(|g| {
+                g.provider::<Input, Output, _>(
+                    "gemini",
+                    GeminiGenerate,
+                    respan_gateway_http::connect(gm, LIMIT),
+                )
+            })
             .and_then(|g| g.client::<Input, Output, _>(OpenAiChat))
             .and_then(|g| g.client::<Input, Output, _>(AnthropicMessages))
             .map(|g| g.plugin(meter.clone()).plugin(Target).plugin(agent))
@@ -233,6 +252,7 @@ impl Rig {
             gw,
             openai,
             anthropic,
+            gemini,
             fake,
             meter,
             reports,
@@ -603,7 +623,7 @@ async fn the_whole_loop_has_a_wall_clock_limit() {
     rig.openai.answer(calls(vec![read_a()], (1, 1)));
     rig.openai.answer(says("late", (1, 1)));
     let (status, text) = rig.ask("/v1/chat/completions", ask_gpt()).await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY, "{text}");
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{text}");
     assert!(text.contains("agent_timeout"), "{text}");
 }
 
@@ -714,4 +734,125 @@ async fn text_before_a_held_tool_call_streams_and_the_next_steps_blocks_follow_w
     assert_eq!(history[1]["content"][0]["text"], "Reading.");
     assert_eq!(history[1]["content"][1]["type"], "tool_use");
     assert_eq!(history[2]["content"][0]["content"], "alpha");
+}
+
+/// An Anthropic client with extended thinking on.
+fn thinking_ask(stream: bool) -> Value {
+    json!({"model": "claude-sonnet-4-5", "max_tokens": 4096, "stream": stream,
+           "thinking": {"type": "enabled", "budget_tokens": 2048},
+           "messages": [{"role": "user", "content": "read a.txt"}]})
+}
+
+#[tokio::test]
+async fn signed_thinking_goes_back_before_the_tool_call_so_anthropic_accepts_the_next_step() {
+    // The fake refuses a thinking-enabled request whose last assistant turn
+    // does not begin with its thinking block, as Anthropic does.
+    for stream in [false, true] {
+        let rig = Rig::new(Fake::new().answering("files__read", Outcome::ok("alpha"))).await;
+        let step = Answer::tool_call("files__read", json!({"path": "a.txt"})).reasoning("hmm now");
+        rig.anthropic.answer(step);
+        rig.anthropic
+            .answer(Answer::text("Alpha.").reasoning("fine then"));
+        let (status, text) = rig.ask("/v1/messages", thinking_ask(stream)).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let sent = rig.anthropic.requests();
+        assert_eq!(sent.len(), 2, "{text}");
+        let said = &sent[1].body["messages"][1]["content"];
+        assert_eq!(said[0]["type"], "thinking", "{said}");
+        assert_eq!(said[0]["thinking"], "hmm now", "{said}");
+        let signature = said[0]["signature"].as_str().unwrap();
+        assert!(signature.starts_with("sig_fake"), "{said}");
+        assert_eq!(said[1]["type"], "tool_use", "{said}");
+        // The client sees one reply, the thinking of both steps in it, with
+        // the blocks numbered without gaps and the signatures with them.
+        if stream {
+            let events: Vec<Value> = text
+                .split("\n\n")
+                .filter_map(|f| f.lines().find_map(|l| l.strip_prefix("data: ")))
+                .filter_map(|d| serde_json::from_str(d).ok())
+                .collect();
+            let signed: Vec<(u64, &str)> = events
+                .iter()
+                .filter(|e| e["delta"]["type"] == "signature_delta")
+                .filter(|e| e["delta"]["signature"] != "")
+                .map(|e| {
+                    (
+                        e["index"].as_u64().unwrap(),
+                        e["delta"]["signature"].as_str().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(signed.len(), 2, "{text}");
+            assert_eq!(signed[0].0, 0, "{text}");
+            assert_eq!(signed[1].0, 1, "{text}");
+            assert_eq!(signed[0].1, signature, "{text}");
+            let starts: Vec<u64> = events
+                .iter()
+                .filter(|e| e["type"] == "content_block_start")
+                .map(|e| e["index"].as_u64().unwrap())
+                .collect();
+            assert_eq!(starts, [0, 1, 2], "{text}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_gemini_thought_signature_goes_back_on_its_function_call() {
+    let rig = Rig::new(Fake::new().answering("files__read", Outcome::ok("alpha"))).await;
+    let reply = |parts: Value, reason: &str| {
+        let part = json!({"candidates": [{"content": {"role": "model", "parts": parts},
+                                          "finishReason": reason, "index": 0}],
+                          "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 2,
+                                            "totalTokenCount": 5},
+                          "modelVersion": "gemini-3-flash-preview", "responseId": "r1"});
+        Answer::body(part)
+    };
+    let call = json!({"functionCall": {"name": "files__read", "args": {"path": "a.txt"}},
+                      "thoughtSignature": "sigG1"});
+    rig.gemini.answer(reply(json!([call]), "STOP"));
+    rig.gemini
+        .answer(reply(json!([{"text": "Alpha."}]), "STOP"));
+    let body = json!({"model": "gemini-3-flash-preview",
+                      "messages": [{"role": "user", "content": "read a.txt"}]});
+    let (status, reply) = rig.chat(body).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["choices"][0]["message"]["content"], "Alpha.");
+    let sent = rig.gemini.requests();
+    assert_eq!(sent.len(), 2);
+    // Gemini 3 refuses a function call without the signature it sent; the
+    // fake does not check, so this does.
+    let model = &sent[1].body["contents"][1];
+    assert_eq!(model["role"], "model", "{}", sent[1].body);
+    assert_eq!(model["parts"][0]["thoughtSignature"], "sigG1", "{model}");
+    assert_eq!(model["parts"][0]["functionCall"]["name"], "files__read");
+}
+
+#[tokio::test]
+async fn redacted_thinking_goes_back_whole() {
+    let rig = Rig::new(Fake::new()).await;
+    rig.anthropic.answer(anthropic_stream(&[
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque\"}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"files__read\",\"input\":{}}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":9}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ]));
+    rig.anthropic.answer(Answer::text("Done."));
+    let body = json!({"model": "claude-x", "max_tokens": 100, "stream": true,
+                      "messages": [{"role": "user", "content": "read"}]});
+    let (status, text) = rig.ask("/v1/messages", body).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let sent = rig.anthropic.requests();
+    let said = &sent[1].body["messages"][1]["content"];
+    assert_eq!(
+        said[0],
+        json!({"type": "redacted_thinking", "data": "opaque"})
+    );
+    assert_eq!(said[1]["type"], "tool_use");
+    // The client sees the redacted block once, as block 0, and the answer.
+    assert!(text.contains("redacted_thinking"), "{text}");
+    assert!(text.contains("Done."), "{text}");
 }

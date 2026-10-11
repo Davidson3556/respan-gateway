@@ -17,9 +17,25 @@
 //! The reply is one stream: a step's text and client tool calls flow to the
 //! client as they arrive, while the runner's tool calls are held back and run;
 //! the next step's blocks follow, renumbered, in the same reply. Usage is
-//! summed over the steps and sent once, before the finish. Native events of
-//! steps after the first are dropped: they name blocks by the numbers their
-//! provider used.
+//! summed over the steps and sent once, before the finish.
+//!
+//! What the model said is replayed to it as the conversation kind holds it:
+//! the text, the reasoning and the calls of a step, in order, each with the
+//! fields its format kept beside it, so a signed `thinking` block of
+//! Anthropic or a `thoughtSignature` of Gemini goes back in the assistant
+//! message the next step starts from, and the provider accepts the step. A
+//! block's fields are those of the native events that name it by `index` or
+//! `block` with a `fields` object, and a `signature` delta (Anthropic's
+//! `signature_delta`); a `redacted_thinking` block, which only natives carry,
+//! is replayed whole. Other blocks only natives carry (a provider-run tool's)
+//! are not replayed.
+//!
+//! Native events of a step reach the client as its blocks do. One that names
+//! a block (by `index` or `block`) is renumbered with it, and dropped with it
+//! if the runner holds the block; one that names a block no event opens (a
+//! provider-run tool's) gets a number of its own. Events about the step as a
+//! whole (`ping`, a stop sequence, response fields) are those of the first
+//! step; the client has no use for those of the steps after.
 //!
 //! A tool's failure is the model's to read, not the gateway's: a result with
 //! `is_error` set. Only the provider's failure, a limit, or a malformed reply
@@ -30,15 +46,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use respan_gateway_conversation::{
-    Assembled, Block, Content, Finish, Input, Message, Output, Role, Tool, ToolChoice, Usage,
+    Assembled, AssembledItem, Block, Content, Finish, Input, Message, Output, Role, Tool,
+    ToolChoice, Usage,
 };
 use respan_gateway_core::futures::StreamExt;
 use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::futures::stream::{self, BoxStream};
 use respan_gateway_core::{
-    Call, ClientContext, ErrorCode, Fault, Plugin, Response, Upstream, async_trait,
+    Call, ClientContext, ErrorCode, Fault, NativeFields, NativeValue, Plugin, Response, Upstream,
+    async_trait,
 };
-use serde_json::Value;
+use respan_gateway_http::Status;
+use serde_json::{Map, Value};
 use tokio::time::{Instant, timeout, timeout_at};
 
 /// What a tool said.
@@ -191,7 +210,8 @@ impl Agent {
         self
     }
 
-    /// The whole loop's wall-clock limit; past it the request fails.
+    /// The whole loop's wall-clock limit; past it the request fails with a 504
+    /// (`agent_timeout`).
     #[must_use]
     pub fn timeout(mut self, limit: Duration) -> Self {
         self.limits.timeout = limit;
@@ -336,6 +356,8 @@ struct Reading {
     numbers: HashMap<u32, u32>,
     /// The number the next block the client sees gets.
     next: u32,
+    /// The native events that name a block before it opens, until it does.
+    pending: HashMap<u32, Vec<NativeValue>>,
     finish: Option<Finish>,
     usage: Usage,
     started: Instant,
@@ -380,6 +402,15 @@ async fn advance(mut run: Run) -> Option<(Chunk, Run)> {
 }
 
 impl Reading {
+    /// The number the client's reply gives the provider's `block`.
+    fn number(&mut self, block: u32) -> u32 {
+        let next = &mut self.next;
+        *self.numbers.entry(block).or_insert_with(|| {
+            *next += 1;
+            *next - 1
+        })
+    }
+
     /// What the client is sent for `event`, of the step's reply. The runner's
     /// tool calls, usage and the finish are held: they are decided at the
     /// step's end.
@@ -394,6 +425,7 @@ impl Reading {
             Output::Start(start) if first => vec![Output::Start(start)],
             Output::Start(_) => Vec::new(),
             Output::BlockStart { block, kind } => {
+                let pending = self.pending.remove(&block).unwrap_or_default();
                 if let Block::ToolCall { name, .. } = &kind {
                     if gateway.contains(name) {
                         self.held.insert(block);
@@ -401,12 +433,13 @@ impl Reading {
                     }
                     self.client_calls = true;
                 }
-                let next = &mut self.next;
-                let number = *self.numbers.entry(block).or_insert_with(|| {
-                    *next += 1;
-                    *next - 1
-                });
-                vec![Output::block_start(number, kind)]
+                let number = self.number(block);
+                let mut out: Vec<Output> = pending
+                    .iter()
+                    .map(|n| renumbered(n, block, number))
+                    .collect();
+                out.push(Output::block_start(number, kind));
+                out
             }
             Output::Delta { block, delta } if !self.held.contains(&block) => {
                 let block = self.numbers.get(&block).copied().unwrap_or(block);
@@ -425,8 +458,21 @@ impl Reading {
                 self.finish = Some(finish);
                 Vec::new()
             }
-            Output::Native(native) if first => vec![Output::Native(native)],
-            Output::Native(_) => Vec::new(),
+            Output::Native(native) => match block_of(&native.value) {
+                Some(block) if self.held.contains(&block) => Vec::new(),
+                Some(block) if self.numbers.contains_key(&block) => {
+                    vec![renumbered(&native, block, self.number(block))]
+                }
+                // Fields of a block that is yet to open.
+                Some(block) if native.value["fields"].is_object() => {
+                    self.pending.entry(block).or_default().push(native);
+                    Vec::new()
+                }
+                // A block only natives carry.
+                Some(block) => vec![renumbered(&native, block, self.number(block))],
+                None if first => vec![Output::Native(native)],
+                None => Vec::new(),
+            },
             // An event a later kind adds is the client's to see.
             other => vec![other],
         })
@@ -439,7 +485,11 @@ impl Run {
             "the agent loop ran past its {} s limit",
             self.limits.timeout.as_secs()
         );
-        limit("agent_timeout", message)
+        Fault::new(message)
+            .with(ErrorCode("agent_timeout".into()))
+            .with(Status(
+                respan_gateway_http::http::StatusCode::GATEWAY_TIMEOUT,
+            ))
     }
 
     /// Calls the model for the next step.
@@ -466,6 +516,7 @@ impl Run {
             client_calls: false,
             numbers: HashMap::new(),
             next: self.next_block,
+            pending: HashMap::new(),
             finish: None,
             usage: Usage::default(),
             started,
@@ -517,18 +568,7 @@ impl Run {
         }
         let ran = Instant::now();
         let results = run_tools(&self.toolbox, self.limits, self.deadline, &calls).await;
-        let mut said = reading
-            .said
-            .blocks()
-            .filter_map(|b| match &b.kind {
-                Block::Text if !b.text.is_empty() => Some(Content::from(b.text.clone())),
-                Block::ToolCall { id, name } => {
-                    let arguments = Some(b.text.as_str()).filter(|t| !t.trim().is_empty());
-                    Some(Content::tool_call(id, name, arguments.unwrap_or("{}")))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let mut said = replay(&reading.said);
         let mut assistant = Message::new(Role::Assistant, said.remove(0));
         assistant.content.append(&mut said);
         let flagged = self.flagged;
@@ -572,6 +612,100 @@ impl Run {
             sink(report);
         }
     }
+}
+
+/// The block an event names, by `index` (Anthropic's) or `block` (the
+/// others' natives).
+fn block_of(raw: &Value) -> Option<u32> {
+    let named = raw["index"].as_u64().or_else(|| raw["block"].as_u64());
+    u32::try_from(named?).ok()
+}
+
+/// `native`, which names `block`, naming `number`.
+fn renumbered(native: &NativeValue, block: u32, number: u32) -> Output {
+    let mut value = (*native.value).clone();
+    if let Some(object) = value.as_object_mut() {
+        let key = if object.contains_key("index") && object["index"] == block {
+            "index"
+        } else {
+            "block"
+        };
+        object.insert(key.into(), number.into());
+    }
+    Output::Native(NativeValue::new(native.format.clone(), value))
+}
+
+/// What the model said, as the assistant message holds it: its text,
+/// reasoning and tool calls in order, each with the fields its format kept
+/// beside it.
+fn replay(said: &Assembled) -> Vec<Content> {
+    let mut kept: HashMap<u32, (NativeValue, Map<String, Value>)> = HashMap::new();
+    for item in said.items() {
+        let AssembledItem::Native(native) = item else {
+            continue;
+        };
+        let Some(block) = block_of(&native.value) else {
+            continue;
+        };
+        let raw = &native.value;
+        let entry = kept
+            .entry(block)
+            .or_insert_with(|| (native.clone(), Map::new()));
+        if let Some(fields) = raw["fields"].as_object() {
+            let fields = fields.iter().map(|(k, v)| (k.clone(), v.clone()));
+            entry.1.extend(fields);
+        }
+        if let Some(signature) = raw["delta"]["signature"].as_str() {
+            entry.1.insert("signature".into(), signature.into());
+        }
+    }
+    let native_of = |block: u32| {
+        let (from, fields) = kept.get(&block)?;
+        Some(NativeFields::new(from.format.clone(), fields.clone())).filter(|n| !n.is_empty())
+    };
+    let mut parts = Vec::new();
+    for item in said.items() {
+        match item {
+            AssembledItem::Block(b) => {
+                let native = native_of(b.block);
+                match &b.kind {
+                    Block::Text if !b.text.is_empty() => {
+                        let mut part = Content::from(b.text.clone());
+                        if let Content::Text { native: n, .. } = &mut part {
+                            *n = native;
+                        }
+                        parts.push(part);
+                    }
+                    Block::Reasoning if !b.text.is_empty() || native.is_some() => {
+                        parts.push(Content::Reasoning {
+                            text: b.text.clone(),
+                            native,
+                        });
+                    }
+                    Block::ToolCall { id, name } => {
+                        let arguments = Some(b.text.as_str()).filter(|t| !t.trim().is_empty());
+                        let mut part = Content::tool_call(id, name, arguments.unwrap_or("{}"));
+                        if let Content::ToolCall { native: n, .. } = &mut part {
+                            *n = native;
+                        }
+                        parts.push(part);
+                    }
+                    _ => {}
+                }
+            }
+            // Thinking the provider redacted is only a native block; it must
+            // be sent back as it came.
+            AssembledItem::Native(native) => {
+                let block = &native.value["content_block"];
+                if native.value["type"] == "content_block_start"
+                    && block["type"] == "redacted_thinking"
+                {
+                    parts.push(Content::native(native.format.clone(), block.clone()));
+                }
+            }
+        }
+    }
+    parts
 }
 
 /// Runs `calls` at once; their answers in the order asked.
