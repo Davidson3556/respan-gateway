@@ -1,4 +1,7 @@
 # Build the web UI, then the binary with it embedded, then a slim image.
+# Stages: `source` (default, compiles here) and `prebuilt` (release.yml:
+# `--target prebuilt` copies docker-bin/<amd64|arm64>/respan-gateway, built
+# natively per architecture, so nothing compiles under emulation).
 FROM node:22-slim AS ui
 RUN corepack enable
 WORKDIR /src/apps/ui
@@ -15,12 +18,10 @@ COPY . .
 COPY --from=ui /src/apps/ui/dist apps/ui/dist
 RUN cargo build --release -p respan-gateway
 
-FROM debian:stable-slim
+FROM debian:stable-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --create-home --uid 10001 gateway
-COPY --from=build /src/target/release/respan-gateway /usr/local/bin/respan-gateway
-USER gateway
 WORKDIR /home/gateway
 
 # The image listens on every address (port $PORT, 8080 by default; RESPAN_LISTEN overrides), so the gateway
@@ -33,3 +34,12 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
     CMD sh -c 'curl -fsS "http://127.0.0.1:${PORT:-8080}/healthz" >/dev/null || exit 1'
 ENTRYPOINT ["respan-gateway"]
+
+FROM runtime AS prebuilt
+ARG TARGETARCH
+COPY docker-bin/${TARGETARCH}/respan-gateway /usr/local/bin/respan-gateway
+USER gateway
+
+FROM runtime AS source
+COPY --from=build /src/target/release/respan-gateway /usr/local/bin/respan-gateway
+USER gateway

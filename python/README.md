@@ -100,7 +100,9 @@ async with gw.aserve() as server:    # the same for asyncio
 gw.serve_forever(port=8080)          # blocks; Ctrl-C stops it (serve() picks a free port by default)
 ```
 
-The server is the binary's, web UI included (`server.url + "/ui/"`). Without
+The server is the binary's (`server.url + "/ui/"` is the web UI; wheels from
+PyPI embed it, a build from the sdist or a plain checkout shows a placeholder
+page unless `apps/ui` is built first). Without
 `client_keys` in the config, anyone who reaches it spends your provider keys:
 keep it on a local address. `Gateway.openai()`'s `api_key` is one of those
 client keys when the config sets them; otherwise a placeholder, forwarded
