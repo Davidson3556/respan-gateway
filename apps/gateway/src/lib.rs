@@ -23,6 +23,7 @@ mod cli;
 mod compose;
 mod config;
 mod formats;
+mod history;
 mod init;
 mod jobs;
 mod logging;
@@ -36,8 +37,8 @@ mod requests;
 pub use app::{App, DEFAULT_LISTEN, ReloadError, Reloaded, shutdown_signal};
 pub use cli::{execute, run};
 pub use config::{
-    Auth, Config, DEFAULT_FILE, ModelRoute, PluginConfig, ProviderConfig, ProxyVendor, Source,
-    no_keys_message,
+    Auth, Config, DEFAULT_FILE, ModelRoute, PluginConfig, Price, ProviderConfig, ProxyVendor,
+    Source, no_keys_message,
 };
 pub use init::starter_config;
 pub use logging::LogFormat;

@@ -36,6 +36,21 @@ pub struct Config {
     /// UI's) keeps; 1000 if unset.
     #[serde(default, deserialize_with = "request_history")]
     pub request_history: Option<usize>,
+    /// A file each finished request is appended to as one JSON line (the
+    /// request history's records: no bodies, no keys), and the last
+    /// `request_history` of which are read back at start; none if unset.
+    pub request_history_file: Option<PathBuf>,
+    /// The size at which that file moves to `<file>.1` (replacing the one
+    /// there) and a new one starts; a number of bytes or a size such as
+    /// `64MiB`; 64 MiB if unset.
+    #[serde(default, deserialize_with = "request_history_file_max")]
+    pub request_history_file_max: Option<usize>,
+    /// What models cost, by model prefix (the longest matching wins), in
+    /// dollars per million tokens. Set, each request in the history gets a
+    /// `cost_usd`, and the overview's totals the sum; there is no built-in
+    /// price list.
+    #[serde(default, deserialize_with = "prices")]
+    pub prices: IndexMap<String, Price>,
     /// How long open responses and end hooks get, together, after a stop
     /// signal, before they are cut: seconds, or a duration such as `30s`,
     /// `2m` or `500ms`; 30 s if unset.
@@ -97,6 +112,9 @@ impl Default for Config {
             body_limit: None,
             ws_message_limit: None,
             request_history: None,
+            request_history_file: None,
+            request_history_file_max: None,
+            prices: IndexMap::new(),
             shutdown_grace: None,
             client_keys: Vec::new(),
             log: LogFormat::Text,
@@ -456,6 +474,33 @@ fn body_limit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error
 
 fn ws_message_limit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
     byte_size(d, "ws_message_limit")
+}
+
+fn request_history_file_max<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    byte_size(d, "request_history_file_max")
+}
+
+/// Dollars per million tokens of a model prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    /// For input tokens read from a cache; `input` if unset.
+    pub cached_input: Option<f64>,
+}
+
+fn prices<'de, D: Deserializer<'de>>(d: D) -> Result<IndexMap<String, Price>, D::Error> {
+    let prices = IndexMap::<String, Price>::deserialize(d)?;
+    for (prefix, p) in &prices {
+        let rates = [Some(p.input), Some(p.output), p.cached_input];
+        if rates.iter().flatten().any(|r| !r.is_finite() || *r < 0.0) {
+            return Err(serde::de::Error::custom(format!(
+                "prices: {prefix}: a price must be a number of dollars, 0 or more"
+            )));
+        }
+    }
+    Ok(prices)
 }
 
 fn request_history<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {

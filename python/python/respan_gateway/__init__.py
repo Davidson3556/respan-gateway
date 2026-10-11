@@ -271,6 +271,18 @@ class Gateway:
         """`requests` for asyncio."""
         return _items(await self.arequest("GET", "/ui/api/requests", params={"limit": limit}), "requests")
 
+    def export_requests(self, format: str = "jsonl", **filters: str) -> str:
+        """The requests the gateway kept, oldest first, as `jsonl` (one record per line) or `csv`.
+
+        `filters` narrow it as the web UI's do: `kind`, `status` ("ok", "error", "pending" or a class such as "2xx"),
+        `provider`, `model` (a substring) and `since` (an RFC 3339 time).
+        """
+        return _export(self.request("GET", "/ui/api/requests/export", params={"format": format, **filters}))
+
+    async def aexport_requests(self, format: str = "jsonl", **filters: str) -> str:
+        """`export_requests` for asyncio."""
+        return _export(await self.arequest("GET", "/ui/api/requests/export", params={"format": format, **filters}))
+
     # -- servers -------------------------------------------------------------
 
     def serve(self, host: str = "127.0.0.1", port: int = 0) -> Server:
@@ -323,6 +335,17 @@ def _import(name: str) -> Any:
 
 def _items(response: httpx.Response, key: str) -> List[Dict[str, Any]]:
     """`response`'s JSON list at `key`; an error status is a `GatewayError`."""
+    _check(response)
+    return cast(List[Dict[str, Any]], response.json()[key])
+
+
+def _export(response: httpx.Response) -> str:
+    _check(response)
+    return response.text
+
+
+def _check(response: httpx.Response) -> None:
+    """An error status is a `GatewayError`."""
     if response.status_code != 200:
         try:
             message = response.json()["error"]["message"]
@@ -331,7 +354,6 @@ def _items(response: httpx.Response, key: str) -> List[Dict[str, Any]]:
         hint = " (is `ui: false` set in the config?)" if response.url.path.startswith("/ui/") else ""
         what = f"{response.request.method} {response.url.path} answered {response.status_code}"
         raise GatewayError(f"{what}: {message}{hint}")
-    return cast(List[Dict[str, Any]], response.json()[key])
 
 
 def _models(response: httpx.Response, kind: Optional[str]) -> List[Dict[str, Any]]:

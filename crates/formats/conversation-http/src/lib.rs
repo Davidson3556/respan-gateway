@@ -26,11 +26,25 @@ use gemini::GeminiGenerate;
 use openai::OpenAiChat;
 use responses::OpenAiResponses;
 
+/// Each format here, by name, with what it says about its own events
+/// ([`Schema::is_inert`]).
+type Inertness = (&'static str, fn(&Value) -> bool);
+
+const fn inertness<S: Schema>() -> Inertness {
+    (S::NAME, S::is_inert)
+}
+
+const FORMATS: [Inertness; 4] = [
+    inertness::<OpenAiChat>(),
+    inertness::<AnthropicMessages>(),
+    inertness::<OpenAiResponses>(),
+    inertness::<GeminiGenerate>(),
+];
+
 /// Whether `raw`, an event of `format`, changes no answer, as that format
 /// says ([`Schema::is_inert`]).
 fn is_inert(format: &str, raw: &Value) -> bool {
-    (format == OpenAiChat::NAME && OpenAiChat::is_inert(raw))
-        || (format == AnthropicMessages::NAME && AnthropicMessages::is_inert(raw))
-        || (format == OpenAiResponses::NAME && OpenAiResponses::is_inert(raw))
-        || (format == GeminiGenerate::NAME && GeminiGenerate::is_inert(raw))
+    FORMATS
+        .iter()
+        .any(|(name, inert)| *name == format && inert(raw))
 }

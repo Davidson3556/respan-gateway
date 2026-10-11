@@ -14,6 +14,8 @@ def test_a_full_typed_config_parses() -> None:
         "body_limit": "32MiB",
         "ws_message_limit": "16MiB",
         "request_history": 500,
+        "request_history_file_max": "64MiB",
+        "prices": {"gpt-4o": {"input": 2.5, "output": 10, "cached_input": 1.25}},
         "shutdown_grace": "10s",
         "client_keys": ["client-key"],
         "log": "off",

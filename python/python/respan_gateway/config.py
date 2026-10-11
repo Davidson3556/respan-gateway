@@ -66,6 +66,17 @@ class PluginConfig(TypedDict, total=False):
     models: List[Dict[str, str]]  # [{"prefix": "claude-", "provider": "anthropic"}]
 
 
+class _Rates(TypedDict):
+    input: float
+    output: float
+
+
+class Price(_Rates, total=False):
+    """Dollars per million tokens."""
+
+    cached_input: float  # for cached input tokens; `input` if unset
+
+
 class GatewayConfig(TypedDict, total=False):
     """The top level of a gateway configuration."""
 
@@ -79,6 +90,9 @@ class GatewayConfig(TypedDict, total=False):
     log: str  # "text", "json" or "off"
     ws_message_limit: Union[int, str]  # bytes, or a size such as "16MiB"
     request_history: int  # finished requests the web UI keeps
+    request_history_file: str  # append each finished request as a JSON line; reloaded at start
+    request_history_file_max: Union[int, str]  # bytes, or "64MiB": rotated to `<file>.1` at this size
+    prices: Dict[str, Price]  # by model prefix; requests then get a `cost_usd`
     shutdown_grace: Union[int, float, str]  # seconds, or "30s", "2m", "500ms"
     mcp: Dict[str, McpConfig]
     agent: AgentConfig
