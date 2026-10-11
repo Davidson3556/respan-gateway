@@ -88,6 +88,8 @@ pub(super) fn limit(code: &'static str, message: String) -> Fault {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
