@@ -282,11 +282,14 @@ priced tallies live in private
 kind's typed `Usage` is the shared fact, and applications own prices,
 accounts and stores.
 
-## Not in the binary
+## Reload and admin writes
 
-There are no admin writes; the config is reloaded from its source (SIGHUP,
-`POST /ui/api/reload`, `--watch`) by building a new gateway and swapping it
-in for new requests, the old one finishing its open ones.
+The config is reloaded from its source (SIGHUP, `POST /ui/api/reload`,
+`--watch`) by building a new gateway and swapping it in for new requests,
+the old one finishing its open ones. With `admin_writes: true` and a client
+key marked `admin: true`, `PUT /ui/api/config` validates a new file, writes
+it atomically beside a `.bak`, and reloads; `GET /ui/api/config` shows the
+config with every secret redacted.
 
 ## MCP in the binary
 

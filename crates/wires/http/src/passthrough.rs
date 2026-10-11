@@ -134,18 +134,18 @@ pub fn read_response<F: 'static>(
 
 /// Write opaque response bytes as they come, the head with the first.
 pub fn write_response<F: 'static>(reply: Reply) -> Result<EventSink<Output<F>>, Fault> {
-    Ok(EventSink::new(OpaqueSink {
+    Ok(EventSink::new(PassthroughSink {
         reply: Some(reply),
         sink: None,
     }))
 }
 
-struct OpaqueSink<F> {
+struct PassthroughSink<F> {
     reply: Option<Reply>,
     sink: Option<EventSink<Output<F>>>,
 }
-impl<F> Unpin for OpaqueSink<F> {}
-impl<F: 'static> futures::Sink<Result<Output<F>, Fault>> for OpaqueSink<F> {
+impl<F> Unpin for PassthroughSink<F> {}
+impl<F: 'static> futures::Sink<Result<Output<F>, Fault>> for PassthroughSink<F> {
     type Error = Fault;
     fn poll_ready(
         mut self: std::pin::Pin<&mut Self>,
@@ -172,7 +172,8 @@ impl<F: 'static> futures::Sink<Result<Output<F>, Fault>> for OpaqueSink<F> {
                 return Ok(());
             }
         }
-        std::pin::Pin::new(self.sink.as_mut().expect("opaque sink initialized")).start_send(item)
+        std::pin::Pin::new(self.sink.as_mut().expect("passthrough sink initialized"))
+            .start_send(item)
     }
     fn poll_flush(
         mut self: std::pin::Pin<&mut Self>,
@@ -191,7 +192,7 @@ impl<F: 'static> futures::Sink<Result<Output<F>, Fault>> for OpaqueSink<F> {
             let head = reply.head();
             self.sink = Some(reply.open(head, Bytes::new(), Box::new(Writes)));
         }
-        std::pin::Pin::new(self.sink.as_mut().expect("opaque sink initialized")).poll_close(cx)
+        std::pin::Pin::new(self.sink.as_mut().expect("passthrough sink initialized")).poll_close(cx)
     }
 }
 
