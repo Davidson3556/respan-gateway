@@ -21,8 +21,8 @@ def test_config_from_dict_yaml_and_file(fake, tmp_path):
     cfg = config_for(fake)
     yaml = (
         "providers:\n"
-        f"  p: {{ format: openai-chat, base_url: '{fake.base_url}', auth: {{ type: bearer, key: {KEY} }} }}\n"
-        "serve: [openai-chat]\ntarget: p\n"
+        f"  p: {{ formats: openai-chat, base_url: '{fake.base_url}', auth: {{ type: bearer, key: {KEY} }} }}\n"
+        "formats: [openai-chat]\ndefault: p\n"
     )
     path = tmp_path / "gateway.yaml"
     path.write_text(yaml)
@@ -32,9 +32,9 @@ def test_config_from_dict_yaml_and_file(fake, tmp_path):
 
 def test_bad_config_raises_config_error(tmp_path):
     with pytest.raises(rg.ConfigError, match="unknown format 'nope'"):
-        rg.Gateway(config={"providers": {"p": {"format": "nope", "base_url": "http://x"}}, "serve": []})
+        rg.Gateway(config={"providers": {"p": {"formats": "nope", "base_url": "http://x"}}, "formats": []})
     with pytest.raises(rg.ConfigError):
-        rg.Gateway(config="serve: [unclosed")
+        rg.Gateway(config="formats: [unclosed")
     with pytest.raises(ValueError):  # ConfigError is a ValueError
         rg.Gateway(config={"surprise": 1})
     with pytest.raises(rg.ConfigError, match="missing.yaml"):

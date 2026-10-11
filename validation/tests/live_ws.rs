@@ -157,7 +157,7 @@ async fn translating_gateway() -> (binary::Gateway, std::net::SocketAddr) {
         "providers:
   openai: { vendor: openai, key: env:OPENAI_API_KEY }
   gemini: { vendor: gemini, key: env:GEMINI_API_KEY }
-serve: [openai-realtime, gemini-live]
+formats: [openai-realtime, gemini-live]
 ",
     )
     .await;

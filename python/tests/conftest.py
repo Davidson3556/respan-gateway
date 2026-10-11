@@ -199,16 +199,16 @@ def config_for(fake: FakeOpenAI) -> dict:
     return {
         "providers": {
             "openai": {
-                "format": ["openai-chat", "openai-embeddings", "openai-images", "openai-transcriptions",
+                "formats": ["openai-chat", "openai-embeddings", "openai-images", "openai-transcriptions",
                            "openai-speech", "openai-videos"],
                 "base_url": fake.base_url,
                 "auth": {"type": "bearer", "key": KEY},
             },
-            "any": {"format": "passthrough", "base_url": fake.origin},
+            "any": {"formats": "passthrough", "base_url": fake.origin},
         },
-        "serve": ["openai-chat", "anthropic-messages", "openai-embeddings", "openai-images",
+        "formats": ["openai-chat", "anthropic-messages", "openai-embeddings", "openai-images",
                   "openai-transcriptions", "openai-speech", "openai-videos", "passthrough"],
-        "target": "openai",
+        "default": "openai",
     }
 
 

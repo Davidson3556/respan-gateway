@@ -23,7 +23,7 @@ fn openai_config(serve: &str) -> String {
     // JSON strings are also YAML strings; do not interpolate URLs as YAML.
     let base = serde_json::to_string(&base).unwrap();
     format!(
-        "providers:\n  p:\n    format: openai-chat\n    base_url: {base}\n    auth: {{ type: bearer, key: env:OPENAI_API_KEY }}\nserve: [{serve}]\ntarget: p\n"
+        "providers:\n  p:\n    formats: openai-chat\n    base_url: {base}\n    auth: {{ type: bearer, key: env:OPENAI_API_KEY }}\nformats: [{serve}]\ndefault: p\n"
     )
 }
 
@@ -127,7 +127,7 @@ async fn real_anthropic_streamed_tool_call_translates_to_openai() {
     }
     let base =
         serde_json::to_string(&model("ANTHROPIC_BASE_URL", "https://api.anthropic.com")).unwrap();
-    let gw = Gateway::start(&format!("providers:\n  p:\n    format: anthropic-messages\n    base_url: {base}\n    auth: {{ type: header, name: x-api-key, key: env:ANTHROPIC_API_KEY }}\nserve: [openai-chat]\ntarget: p\n")).await;
+    let gw = Gateway::start(&format!("providers:\n  p:\n    formats: anthropic-messages\n    base_url: {base}\n    auth: {{ type: header, name: x-api-key, key: env:ANTHROPIC_API_KEY }}\nformats: [openai-chat]\ndefault: p\n")).await;
     let request = serde_json::json!({
         "model":model("ANTHROPIC_MODEL","claude-haiku-4-5"),"max_tokens":256,"stream":true,
         "messages":[{"role":"user","content":"Call echo with text exactly 雪😀."}],
@@ -174,7 +174,7 @@ async fn real_gemini_native_stream_through_passthrough() {
     if !has("GEMINI_API_KEY") {
         return;
     }
-    let gw = Gateway::start("providers:\n  p:\n    format: passthrough\n    base_url: https://generativelanguage.googleapis.com\n    auth: { type: header, name: x-goog-api-key, key: env:GEMINI_API_KEY }\nserve: [passthrough]\ntarget: p\n").await;
+    let gw = Gateway::start("providers:\n  p:\n    formats: passthrough\n    base_url: https://generativelanguage.googleapis.com\n    auth: { type: header, name: x-goog-api-key, key: env:GEMINI_API_KEY }\nformats: [passthrough]\ndefault: p\n").await;
     let path = format!(
         "/v1beta/models/{}:streamGenerateContent?alt=sse",
         model("GEMINI_MODEL", "gemini-3.8-flash")
@@ -213,7 +213,7 @@ async fn real_typesafe_custom_decisions_through_passthrough() {
     if !has("TYPESAFE_API_KEY") {
         return;
     }
-    let gw = Gateway::start("providers:\n  p:\n    format: passthrough\n    base_url: https://api.typesafe.ai\n    auth: { type: bearer, key: env:TYPESAFE_API_KEY }\nserve: [passthrough]\ntarget: p\n").await;
+    let gw = Gateway::start("providers:\n  p:\n    formats: passthrough\n    base_url: https://api.typesafe.ai\n    auth: { type: bearer, key: env:TYPESAFE_API_KEY }\nformats: [passthrough]\ndefault: p\n").await;
     let request = serde_json::json!({"model":"jev-latest","state":"The sky is blue.","questions":{"blue":{"type":"noul","instructions":"Is the sky blue?"}}});
     let resp = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(45))
@@ -250,7 +250,7 @@ async fn real_compatible_native_tool_stream_through_passthrough() {
     }
     let base =
         serde_json::to_string(&model("OPENAI_BASE_URL", "https://api.openai.com/v1")).unwrap();
-    let gw = Gateway::start(&format!("providers:\n  p:\n    format: passthrough\n    base_url: {base}\n    auth: {{ type: bearer, key: env:OPENAI_API_KEY }}\nserve: [passthrough]\ntarget: p\n")).await;
+    let gw = Gateway::start(&format!("providers:\n  p:\n    formats: passthrough\n    base_url: {base}\n    auth: {{ type: bearer, key: env:OPENAI_API_KEY }}\nformats: [passthrough]\ndefault: p\n")).await;
     let request = serde_json::json!({
         "model":model("OPENAI_MODEL","gpt-4o-mini"),"max_tokens":256,"stream":true,
         "stream_options":{"include_usage":true},
@@ -309,11 +309,11 @@ async fn real_openai_client_to_anthropic_streamed() {
     let gw = Gateway::start(
         "providers:
   anthropic:
-    format: anthropic-messages
+    formats: anthropic-messages
     base_url: https://api.anthropic.com
     auth: { type: header, name: x-api-key, key: env:ANTHROPIC_API_KEY }
-serve: [openai-chat]
-target: anthropic
+formats: [openai-chat]
+default: anthropic
 ",
     )
     .await;

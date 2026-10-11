@@ -98,7 +98,7 @@ gw.serve_forever(port=8080)          # blocks; Ctrl-C stops it (serve() picks a 
 ```
 
 The server is the binary's, web UI included (`server.url + "/ui/"`). Without
-client `keys` in the config, anyone who reaches it spends your provider keys:
+`client_keys` in the config, anyone who reaches it spends your provider keys:
 keep it on a local address. `Gateway.openai()`'s `api_key` is one of those
 client keys when the config sets them; otherwise a placeholder, forwarded
 only to a provider with no key of its own.

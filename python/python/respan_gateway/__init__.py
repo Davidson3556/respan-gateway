@@ -147,7 +147,7 @@ class Gateway:
         """An `openai.OpenAI` client wired to this gateway: chat, images,
         audio, embeddings and videos as far as the config serves them.
 
-        `api_key` is one of the config's client `keys` if it sets any;
+        `api_key` is one of the config's `client_keys` if it sets any;
         otherwise a placeholder, which reaches a provider only if the gateway
         holds no key of its own for it. Other keyword arguments go to the
         client.
@@ -280,7 +280,7 @@ class Gateway:
         stops on exit. The server keeps running until stopped, the gateway is
         closed or the process exits, even if you drop the returned `Server`
         (so a bare `gw.serve(port=8080)` serves). `port=0` picks a free port.
-        Without client `keys` in the config, anyone who reaches it spends
+        Without `client_keys` in the config, anyone who reaches it spends
         your keys: keep it local.
 
         Besides the HTTP APIs it serves WebSocket sessions (OpenAI Realtime,

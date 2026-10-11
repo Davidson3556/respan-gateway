@@ -66,7 +66,7 @@ def gw(fake):
     """Without `passthrough`, which would relay `/v1/models` to one provider unread."""
     config = config_for(fake)
     del config["providers"]["any"]
-    config["serve"].remove("passthrough")
+    config["formats"].remove("passthrough")
     return rg.Gateway(config=config)
 
 
@@ -84,7 +84,7 @@ def test_models_lists_every_kind(gw):
 
 
 def test_client_keys(fake):
-    config = {**config_for(fake), "keys": ["gw-secret"]}
+    config = {**config_for(fake), "client_keys": ["gw-secret"]}
     with rg.Gateway(config=config) as gw:
         with pytest.raises(openai.AuthenticationError):
             gw.openai().images.generate(model="gpt-image-1", prompt="x")
