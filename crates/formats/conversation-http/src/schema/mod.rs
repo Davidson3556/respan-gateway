@@ -124,6 +124,11 @@ pub trait Schema: Copy + Send + Sync + 'static {
     fn target(&self, _input: &Input, _stream: bool) -> Result<Option<String>, Fault> {
         Ok(None)
     }
+    /// Whether the call at `uri` asks for a stream by its path, as a format
+    /// does that names its method there; else the request body says.
+    fn streams(_uri: &http::Uri) -> bool {
+        false
+    }
     /// Whether `raw`, an event of this format the kind has no form for,
     /// changes no answer: a keep-alive, or what the format keeps beside a
     /// response. Another format drops it when translating, and refuses any
@@ -240,8 +245,14 @@ pub trait Schema: Copy + Send + Sync + 'static {
     /// This format at the client edge: requests in, responses out.
     fn bind_client(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         let schema = *self;
+        let wire = io.extensions().get::<respan_gateway_http::Wire>().cloned();
         Ok(io.bind(
-            move |request| schema.read_request(request),
+            move |request| {
+                if let Some(wire) = &wire {
+                    exchange::seed_asked::<Self>(wire);
+                }
+                schema.read_request(request)
+            },
             move |reply| schema.write_response(reply),
             move |fault, request, head| schema.refusal(fault, request, head),
         ))

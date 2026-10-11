@@ -153,11 +153,6 @@ fn sse(uri: &http::Uri) -> bool {
         .is_some_and(|q| q.split('&').any(|p| p == "alt=sse"))
 }
 
-/// Whether the call at `uri` is a streaming method.
-pub(crate) fn streams(uri: &http::Uri) -> bool {
-    call_of(uri).is_some_and(|(_, method)| method == "streamGenerateContent")
-}
-
 /// Google Gemini's `generateContent`, named `gemini-generate`: a `POST` to a
 /// path `.../models/{model}:generateContent` or `:streamGenerateContent`.
 /// The provider's base URL includes the version, such as
@@ -279,6 +274,11 @@ impl Schema for GeminiGenerate {
         }))
     }
 
+    /// The streaming method is named in the path.
+    fn streams(uri: &http::Uri) -> bool {
+        call_of(uri).is_some_and(|(_, method)| method == "streamGenerateContent")
+    }
+
     /// A stream without `alt=sse` is Gemini's other framing: a JSON array,
     /// its elements the responses the SSE events carry.
     fn response_encoder(
@@ -287,7 +287,7 @@ impl Schema for GeminiGenerate {
         request: &http::Request<Bytes>,
     ) -> Box<dyn Encoder<Output>> {
         let encoder = crate::schema::response_encoder(*self, head, request);
-        let array = streams(request.uri()) && !sse(request.uri()) && head.status.is_success();
+        let array = Self::streams(request.uri()) && !sse(request.uri()) && head.status.is_success();
         if !array {
             return encoder;
         }

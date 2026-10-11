@@ -53,9 +53,10 @@ pub(crate) fn post<C: Schema>(
         head.headers.entry(*name).or_insert(value);
     }
     let original = wire.and_then(Wire::get);
-    let stream = stream
-        .map(|s| s.0)
-        .unwrap_or_else(|| original.is_none_or(|r| asked(r).stream));
+    let stream = stream.map(|s| s.0).unwrap_or_else(|| {
+        let asked = wire.and_then(|w| w.memo(|r| probe(r.body())));
+        asked.is_none_or(|asked| asked.stream)
+    });
     match input.and_then(|input| schema.target(input, stream).transpose()) {
         Some(target) => {
             let target = target?;
@@ -124,13 +125,19 @@ pub struct Asked {
     pub usage: bool,
 }
 
-/// What a client's `request` asks of its response, in any format's way: a
-/// stream by the body's `stream`, or by Gemini's method in the path
-/// ([`crate::gemini::streams`]).
-pub(crate) fn asked(request: &http::Request<Bytes>) -> Asked {
+/// What a client's `request` asks of its response: a stream by the body's
+/// `stream`, or by the path if the client's format says so there
+/// ([`Schema::streams`]).
+pub(crate) fn asked<C: Schema>(request: &http::Request<Bytes>) -> Asked {
     let mut asked = probe(request.body());
-    asked.stream |= crate::gemini::streams(request.uri());
+    asked.stream |= C::streams(request.uri());
     asked
+}
+
+/// Keep what the client of format `C` asked of its response with its
+/// request's wire, for the provider's edge to read.
+pub(crate) fn seed_asked<C: Schema>(wire: &Wire) {
+    wire.memo(asked::<C>);
 }
 
 /// [`Asked`] of a JSON body, reading only its two fields.
@@ -230,7 +237,7 @@ pub(crate) fn response_encoder<C: Schema>(
     head: &mut ResponseHead,
     request: &http::Request<Bytes>,
 ) -> Box<dyn Encoder<Output>> {
-    let asked = asked(request);
+    let asked = asked::<C>(request);
     // A success head's framing is the client's, whatever the provider's was.
     if is_stream(head) != asked.stream {
         head.headers.remove(CONTENT_TYPE);

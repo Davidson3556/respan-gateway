@@ -71,10 +71,12 @@ fn a_path_names_the_model_and_the_method() {
         call("/gw/v1beta/models/g:streamGenerateContent?alt=sse"),
         Some(("g".into(), "streamGenerateContent".into()))
     );
-    assert!(streams(&uri(
+    assert!(GeminiGenerate::streams(&uri(
         "/v1beta/models/g:streamGenerateContent?alt=sse"
     )));
-    assert!(!streams(&uri("/v1beta/models/g:generateContent")));
+    assert!(!GeminiGenerate::streams(&uri(
+        "/v1beta/models/g:generateContent"
+    )));
     for no in [
         "/v1beta/models/g:countTokens",
         "/v1beta/models:generateContent",
