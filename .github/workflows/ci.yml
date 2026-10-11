@@ -55,6 +55,20 @@ jobs:
       - run: cargo test --workspace --all-targets --all-features
       - run: cargo test --workspace --doc --all-features
 
+  # The unix-only code is cfg-gated; this keeps Windows compiling.
+  windows:
+    needs: ui
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: apps/ui/dist
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+
   # validation/ is outside the workspace and its tests are opt-in; compile it.
   validation:
     runs-on: ubuntu-latest

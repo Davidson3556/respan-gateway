@@ -17,7 +17,8 @@ plugins built on one public API, compiled in (no dynamic loading).
 ## Install
 
 - **Release binary**: each `v*` tag attaches `respan-gateway` (web UI built
-  in) for Linux x86_64 and aarch64 and macOS aarch64 to its
+  in) for Linux x86_64 and aarch64, macOS aarch64 and x86_64 (`.tar.gz`)
+  and Windows x86_64 (`.zip`, with `respan-gateway.exe`) to its
   [GitHub release](https://github.com/respanai/respan-gateway/releases).
 - **Docker**: `docker run -p 8080:8080 -e OPENAI_API_KEY -e RESPAN_CLIENT_KEYS=sk-gw-change-me ghcr.io/respanai/respan-gateway`
   (or `docker build -t respan-gateway .`). The image listens on every
@@ -149,6 +150,10 @@ different formats of one kind.
 | transcription, speech | `openai-transcriptions`, `openai-speech` |
 | embedding | `openai-embeddings` |
 | video | `openai-videos` for clients; `gemini-veo` (Veo) as a provider |
+
+Realtime usage after a tool call or an interruption may arrive in the next
+`response.done` rather than the one that ended the turn
+([details](crates/formats/realtime-ws/README.md)).
 
 Reasoning controls (effort, budget, summaries) and `top_k` map between the
 chat formats, or are refused where a format has no form for them

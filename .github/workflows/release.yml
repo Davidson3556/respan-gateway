@@ -41,6 +41,8 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,15 +55,27 @@ jobs:
           targets: ${{ matrix.target }}
       - run: cargo build --release -p respan-gateway --target ${{ matrix.target }}
       - name: Package
+        if: runner.os != 'Windows'
         run: |
           name=respan-gateway-${{ github.ref_name }}-${{ matrix.target }}
           mkdir "$name"
           cp target/${{ matrix.target }}/release/respan-gateway LICENSE-MIT LICENSE-APACHE "$name"/
           tar czf "$name.tar.gz" "$name"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "respan-gateway-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/respan-gateway.exe", LICENSE-MIT, LICENSE-APACHE $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.target }}
-          path: respan-gateway-*.tar.gz
+          path: |
+            respan-gateway-*.tar.gz
+            respan-gateway-*.zip
+          if-no-files-found: error
 
   publish:
     needs: build
@@ -71,7 +85,7 @@ jobs:
         with:
           pattern: bin-*
           merge-multiple: true
-      - run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes respan-gateway-*.tar.gz
+      - run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes respan-gateway-*.tar.gz respan-gateway-*.zip
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
