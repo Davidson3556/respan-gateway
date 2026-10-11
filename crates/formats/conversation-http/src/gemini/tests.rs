@@ -1,5 +1,11 @@
 use super::*;
 
+use super::encode::reason_of;
+use super::request::is_synthetic;
+use crate::schema::Decoder;
+use respan_gateway_conversation::Delta;
+use respan_gateway_http::bytes::{Bytes, BytesMut};
+
 use respan_gateway_conversation::{Content, Role, ToolChoice};
 
 /// The responses of `chunks`, each decoded in turn.
