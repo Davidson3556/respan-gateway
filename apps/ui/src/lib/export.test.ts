@@ -4,9 +4,9 @@ import { downloadExport, exportPath } from "./export";
 
 describe("exportPath", () => {
   it("carries only the filters that are set", () => {
-    const filter = { status: "error", kind: "chat", provider: "all", model: "claude", q: "ignored" };
+    const filter = { status: "error", kind: "chat", provider: "all", model: "claude", client: "ci", q: "ignored" };
     expect(exportPath("csv", filter)).toBe(
-      "/ui/api/requests/export?format=csv&kind=chat&status=error&model=claude",
+      "/ui/api/requests/export?format=csv&kind=chat&status=error&model=claude&client=ci",
     );
   });
 

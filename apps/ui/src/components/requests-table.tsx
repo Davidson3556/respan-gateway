@@ -45,6 +45,8 @@ export function RequestsTable({
   const open = (id: string) => navigate(`/requests/${encodeURIComponent(id)}`);
   const hideOnCompact = compact ? "hidden" : "hidden md:table-cell";
   // A cost column only where the gateway prices anything.
+  // A client column only where client keys are named.
+  const named = requests.some((r) => r.client !== undefined);
   const priced = requests.some((r) => r.cost_usd !== undefined);
 
   return (
@@ -55,6 +57,7 @@ export function RequestsTable({
           <TableHead className="pl-4 sm:pl-3">Model</TableHead>
           <TableHead className={hideOnCompact}>Kind</TableHead>
           <TableHead className="hidden sm:table-cell">Provider</TableHead>
+          {named && <TableHead className="hidden lg:table-cell">Client</TableHead>}
           <TableHead>Status</TableHead>
           <TableHead className="text-right">Latency</TableHead>
           <TableHead className={cn("text-right", !priced && "pr-4", hideOnCompact)}>Tokens in → out</TableHead>
@@ -65,7 +68,7 @@ export function RequestsTable({
         {loading
           ? Array.from({ length: compact ? 5 : 10 }, (_, i) => (
               <TableRow key={i} className="hover:bg-transparent">
-                <TableCell colSpan={priced ? 8 : 7} className="px-4">
+                <TableCell colSpan={7 + (priced ? 1 : 0) + (named ? 1 : 0)} className="px-4">
                   <Skeleton className="h-5 w-full" />
                 </TableCell>
               </TableRow>
@@ -105,6 +108,9 @@ export function RequestsTable({
                 <TableCell className="hidden text-muted-foreground sm:table-cell">
                   {r.provider ?? "—"}
                 </TableCell>
+                {named && (
+                  <TableCell className="hidden text-muted-foreground lg:table-cell">{r.client ?? "—"}</TableCell>
+                )}
                 <TableCell>
                   <StatusBadge record={r} />
                 </TableCell>

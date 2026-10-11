@@ -92,7 +92,7 @@ export function RequestFilters({
   onChange: (name: keyof RequestFilter, value: string) => void;
   onClear: () => void;
   counts: Record<string, number>;
-  options: { kinds: string[]; providers: string[]; models: string[] };
+  options: { kinds: string[]; providers: string[]; models: string[]; clients: string[] };
   shown: number;
   total: number;
 }) {
@@ -120,6 +120,9 @@ export function RequestFilters({
         <FilterSelect label="Kind" value={filter.kind} options={options.kinds} onChange={(v) => onChange("kind", v)} />
         <FilterSelect label="Provider" value={filter.provider} options={options.providers} onChange={(v) => onChange("provider", v)} />
         <FilterSelect label="Model" value={filter.model} options={options.models} onChange={(v) => onChange("model", v)} />
+        {options.clients.length > 0 && (
+          <FilterSelect label="Client" value={filter.client} options={options.clients} onChange={(v) => onChange("client", v)} />
+        )}
         {active && (
           <Button variant="ghost" size="sm" onClick={onClear}>
             <X /> Clear
