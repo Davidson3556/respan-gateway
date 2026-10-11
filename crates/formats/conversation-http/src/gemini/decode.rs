@@ -12,12 +12,6 @@ use std::sync::Arc;
 
 use super::{BLOCKED, GEMINI, SYNTHETIC, extra_usage, finish_of, usage_of};
 
-/// The `fields` a `part_fields` event holds, and the block they are for.
-pub(super) fn fields_of(raw: &Value) -> Option<(u32, &Map<String, Value>)> {
-    let block = u32::try_from(raw["block"].as_u64()?).ok()?;
-    Some((block, raw["fields"].as_object()?))
-}
-
 /// A block of text or reasoning that is open, and may take more.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Open {

@@ -1,7 +1,9 @@
 //! Events as Gemini generateContent, whole or streamed: the encoders.
 
 use crate::is_inert;
-use crate::schema::{Gate, Schema, merge_fields, unwritable_content};
+use crate::schema::{
+    Gate, Schema, block_fields, check_usage, merge_fields, own_fields, unwritable_content,
+};
 use respan_gateway_conversation::{Block, Delta, Finish, Output, Start, Usage};
 use respan_gateway_core::{Fault, NativeValue};
 use respan_gateway_http::Encoder;
@@ -9,9 +11,8 @@ use respan_gateway_http::bytes::BytesMut;
 use respan_gateway_http::framing::sse::event;
 use serde_json::{Map, Value, json};
 
-use super::decode::fields_of;
 use super::request::is_synthetic;
-use super::{BLOCKED, FINISH, GEMINI, GeminiGenerate, check_usage, own_fields, usage_body};
+use super::{BLOCKED, FINISH, GEMINI, GeminiGenerate, USAGE, usage_body};
 
 /// Writes the SSE frames of `inner` as the elements of one JSON array, which
 /// is how Gemini streams without `alt=sse`.
@@ -127,7 +128,7 @@ impl ResponseFields {
     ) -> Result<Value, Fault> {
         let reason = reason_of(finish)?;
         let mut body = Map::new();
-        body.extend(own_fields(start));
+        body.extend(own_fields(start, GEMINI));
         let blocked = reason == BLOCKED;
         let mut candidates = Vec::new();
         if !blocked {
@@ -207,7 +208,7 @@ impl EventStream {
         let first = !std::mem::replace(&mut self.began, true);
         let mut v = Map::new();
         if first {
-            v.extend(own_fields(self.start.as_ref()));
+            v.extend(own_fields(self.start.as_ref(), GEMINI));
         }
         let mut candidate = Map::new();
         if !parts.is_empty() || last.is_none() {
@@ -356,14 +357,14 @@ impl EventStream {
             Output::BlockEnd { block } => self.close(*block, out)?,
             Output::Usage(usage) => {
                 self.usage += usage;
-                check_usage(&self.usage)?;
+                check_usage(&self.usage, USAGE)?;
             }
             Output::Finish(finish) => {
                 reason_of(finish)?;
                 self.finish = Some(finish.clone());
             }
             Output::Native(NativeValue { format, value: raw }) if **format == *GEMINI => {
-                match (raw["type"].as_str(), fields_of(raw)) {
+                match (raw["type"].as_str(), block_fields(raw, "block", None)) {
                     (Some("part_fields"), Some((block, fields))) => {
                         match self.blocks.iter_mut().find(|b| b.block == block) {
                             Some(slot) => slot.fields = Some(fields.clone()),

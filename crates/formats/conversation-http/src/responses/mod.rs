@@ -67,8 +67,8 @@ mod request;
 mod tests;
 
 use crate::schema::{
-    Asked, NativeFieldsExt, Schema, count, merge_details, merge_fields, native_fields,
-    unsupported_fields, unwritable_content, unwritable_usage, usage_extra,
+    Asked, NativeFieldsExt, Schema, UsageFields, count, merge_details, merge_fields, native_fields,
+    unsupported_fields, unwritable_content, usage_extra,
 };
 use respan_gateway_conversation::{Assembled, Content, Finish, Input, Output, Start, Usage};
 use respan_gateway_core::{Connection, Fault, Format};
@@ -130,6 +130,11 @@ const KNOWN: &[&str] = &[
 
 /// Keys that change nothing at these values, as SDKs send by default.
 const DEFAULTS: &[(&str, f64)] = &[("store", 1.0), ("background", 0.0)];
+
+const USAGE: UsageFields = UsageFields {
+    cache_writes: true,
+    reasoning: true,
+};
 
 impl Schema for OpenAiResponses {
     const NAME: &'static str = RESPONSES;
@@ -261,23 +266,6 @@ fn usage_body(u: &Usage, more: &Map<String, Value>) -> Value {
     });
     merge_fields(&mut body, more);
     body
-}
-
-/// Usage the counts of which are not parts of each other, or overflow.
-pub(crate) fn check_usage(usage: &Usage) -> Result<(), Fault> {
-    let cache = usage
-        .cached_input_tokens
-        .checked_add(usage.cache_write_input_tokens);
-    if cache.is_none_or(|both| both > usage.input_tokens)
-        || usage.reasoning_tokens > usage.output_tokens
-        || usage
-            .input_tokens
-            .checked_add(usage.output_tokens)
-            .is_none()
-    {
-        return Err(unwritable_usage());
-    }
-    Ok(())
 }
 
 /// The fields of a response object that are the response's own, not the

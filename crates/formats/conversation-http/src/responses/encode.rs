@@ -1,11 +1,13 @@
 //! Events as Responses, whole or streamed: the encoders.
 
 use super::{
-    ANNOTATION, ITEM_FIELDS, RESPONSE_FIELDS, RESPONSES, USAGE_FIELDS, check_usage, response_body,
+    ANNOTATION, ITEM_FIELDS, RESPONSE_FIELDS, RESPONSES, USAGE, USAGE_FIELDS, response_body,
     status_of,
 };
 use crate::is_inert;
-use crate::schema::{Gate, fits, merge_fields, unix_now, unwritable_content};
+use crate::schema::{
+    Gate, block_fields, check_usage, fits, merge_fields, merge_into, unix_now, unwritable_content,
+};
 use respan_gateway_conversation::{
     Assembled, AssembledItem, Block, Delta, Finish, Output, Start, Usage,
 };
@@ -83,33 +85,17 @@ fn item_of(
     Ok(item)
 }
 
-/// The fields of an [`ITEM_FIELDS`] native: its block and fields.
-fn fields_of(raw: &Value) -> Option<(u32, &Map<String, Value>)> {
-    let block = u32::try_from(raw["block"].as_u64()?).ok()?;
-    (raw["type"] == ITEM_FIELDS).then_some(())?;
-    Some((block, raw["fields"].as_object()?))
-}
-
 /// The fields of a native of `kind` that carries only `fields`.
 fn fields_only<'a>(raw: &'a Value, kind: &str) -> Option<&'a Map<String, Value>> {
     (raw["type"] == kind).then_some(())?;
     raw["fields"].as_object()
 }
 
-/// Merge `fields` into `into`, objects among them field by field.
-fn merge_into(into: &mut Map<String, Value>, fields: &Map<String, Value>) {
-    let mut merged = Value::Object(std::mem::take(into));
-    merge_fields(&mut merged, fields);
-    if let Value::Object(merged) = merged {
-        *into = merged;
-    }
-}
-
 // ------------------------------------------------------------------- whole
 
 /// The events collected, as one response body.
 pub(super) fn whole(whole: &Assembled) -> Result<Value, Fault> {
-    check_usage(&whole.usage)?;
+    check_usage(&whole.usage, USAGE)?;
     let mut fields: Vec<(u32, Map<String, Value>)> = Vec::new();
     let mut annotations: Vec<(u32, Value)> = Vec::new();
     let (mut usage_more, mut changed) = (Map::new(), Map::new());
@@ -120,7 +106,7 @@ pub(super) fn whole(whole: &Assembled) -> Result<Value, Fault> {
         if **format != *RESPONSES {
             continue;
         }
-        if let Some((block, more)) = fields_of(raw) {
+        if let Some((block, more)) = block_fields(raw, "block", Some(ITEM_FIELDS)) {
             fields.push((block, more.clone()));
         } else if raw["type"] == ANNOTATION {
             let block = raw["block"].as_u64().and_then(|b| u32::try_from(b).ok());
@@ -619,7 +605,7 @@ impl Events {
             Output::BlockEnd { block } => self.close(*block, out)?,
             Output::Usage(usage) => {
                 self.usage += usage;
-                check_usage(&self.usage)?;
+                check_usage(&self.usage, USAGE)?;
             }
             Output::Finish(finish) => {
                 status_of(finish)?;
@@ -627,7 +613,7 @@ impl Events {
                 self.begin(out);
             }
             Output::Native(NativeValue { format, value: raw }) if **format == *RESPONSES => {
-                if let Some((block, fields)) = fields_of(raw) {
+                if let Some((block, fields)) = block_fields(raw, "block", Some(ITEM_FIELDS)) {
                     // Fields of a block that is open join its item: they are the
                     // done item's.
                     match self.blocks.iter_mut().find(|b| b.block == block) {

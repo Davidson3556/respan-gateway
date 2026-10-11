@@ -34,18 +34,19 @@ mod tests;
 
 use crate::is_inert;
 use crate::schema::{
-    Asked, Names, NativeFieldsExt, Schema, count, decode_content, decode_message, encode_content,
-    encode_message, merge_details, merge_fields, native_fields, says, set, stop_json,
-    unsupported_fields, unwritable_content, unwritable_usage, usage_extra,
+    Asked, Names, NativeFieldsExt, Schema, UsageFields, block_fields, check_usage, count,
+    decode_content, decode_message, encode_content, encode_message, merge_details, merge_fields,
+    native_fields, own_fields, says, set, stop_json, unsupported_fields, unwritable_content,
+    usage_extra,
 };
 use respan_gateway_conversation::{
-    Assembled, AssembledItem, Block, Content, Finish, Input, Message, Output, Role, Start, Usage,
+    Assembled, AssembledItem, Block, Content, Finish, Input, Message, Output, Role, Usage,
 };
 use respan_gateway_core::{BadRequest, Connection, Fault, Format, NativeValue};
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo, http};
 use serde_json::{Map, Value, json};
 
-use decode::{AnthropicDecoder, fields_of};
+use decode::AnthropicDecoder;
 use encode::EventStream;
 use request::{
     arguments_json, read_output, read_thinking, read_tools_of, write_output, write_thinking,
@@ -77,6 +78,10 @@ fn finish_of(reason: &str) -> Finish {
 
 /// This format's name.
 const ANTHROPIC: &str = "anthropic-messages";
+
+/// The type of an [`Output::Native`] that carries the fields of a block's
+/// start: not an event of the wire, but of this format's words.
+const BLOCK_FIELDS: &str = "content_block_fields";
 
 /// Anthropic Messages, named `anthropic-messages`: a `POST` to any path
 /// ending in `/v1/messages`. The provider's base URL leaves out the
@@ -175,6 +180,12 @@ fn is_empty(m: &Message) -> bool {
     let empty = |c: &Content| matches!(c, Content::Text { text, .. } if text.is_empty());
     m.native.is_empty() && m.content.iter().all(empty)
 }
+
+/// Anthropic counts no reasoning apart from the output.
+const USAGE: UsageFields = UsageFields {
+    cache_writes: true,
+    reasoning: false,
+};
 
 impl Schema for AnthropicMessages {
     const NAME: &'static str = ANTHROPIC;
@@ -336,7 +347,7 @@ impl Schema for AnthropicMessages {
 
     /// The blocks in the order they came, empty text left out.
     fn encode_whole(&self, whole: &Assembled) -> Result<Value, Fault> {
-        check_usage(&whole.usage)?;
+        check_usage(&whole.usage, USAGE)?;
         let mut content: Vec<Value> = Vec::new();
         // Where each block, by number, is in `content`, and the JSON text of
         // the input of an event-made block, which is parsed at the end.
@@ -367,9 +378,12 @@ impl Schema for AnthropicMessages {
                     content.push(block);
                 }
                 AssembledItem::Native(NativeValue { format, value: raw })
-                    if **format == *ANTHROPIC && fields_of(raw).is_some() =>
+                    if **format == *ANTHROPIC
+                        && block_fields(raw, "index", Some(BLOCK_FIELDS)).is_some() =>
                 {
-                    fields.extend(fields_of(raw).map(|(b, f)| (b, f.clone())));
+                    fields.extend(
+                        block_fields(raw, "index", Some(BLOCK_FIELDS)).map(|(b, f)| (b, f.clone())),
+                    );
                 }
                 AssembledItem::Native(NativeValue { format, value: raw })
                     if **format == *ANTHROPIC =>
@@ -434,7 +448,7 @@ impl Schema for AnthropicMessages {
         body.insert("type".into(), "message".into());
         body.insert("role".into(), "assistant".into());
         body.insert("model".into(), model.into());
-        body.extend(own_fields(whole.start.as_ref()));
+        body.extend(own_fields(whole.start.as_ref(), ANTHROPIC));
         body.insert("content".into(), content.into());
         body.insert("stop_reason".into(), stop.reason(finish)?.into());
         let sequence = stop.delta.get("stop_sequence").cloned();
@@ -449,12 +463,6 @@ impl Schema for AnthropicMessages {
             json!({ "type": respan_gateway_http::error_code(fault), "message": fault.message() });
         json!({ "type": "error", "error": merge_details(error, fault) })
     }
-}
-
-/// The start's own fields, if they are in this format.
-fn own_fields(start: Option<&Start>) -> Map<String, Value> {
-    let start = start.filter(|s| s.native.format() == Some(ANTHROPIC));
-    start.map(|s| s.native.fields().clone()).unwrap_or_default()
 }
 
 /// What a `message_delta` [`Output::Native`] says beyond the finish and usage:
@@ -526,17 +534,6 @@ fn extra_usage(u: &Value) -> Map<String, Value> {
     ];
     let details: [(&str, &[&str]); 1] = [("output_tokens_details", &["thinking_tokens"])];
     usage_extra(u, &known, &details)
-}
-
-fn check_usage(usage: &Usage) -> Result<(), Fault> {
-    let (cached, written) = (usage.cached_input_tokens, usage.cache_write_input_tokens);
-    if cached
-        .checked_add(written)
-        .is_none_or(|both| both > usage.input_tokens)
-    {
-        return Err(unwritable_usage());
-    }
-    Ok(())
 }
 
 /// Usage totals; [`Usage::input_tokens`] includes the cache reads and

@@ -11,7 +11,7 @@ use respan_gateway_http::framing::sse::event_json;
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
-use super::{ANTHROPIC, extra_usage, finish_of, usage_of};
+use super::{ANTHROPIC, BLOCK_FIELDS, extra_usage, finish_of, usage_of};
 
 /// Decodes events and whole bodies of Anthropic Messages into events, as
 /// the module says.
@@ -37,17 +37,6 @@ impl Default for AnthropicDecoder {
             others: Vec::new(),
         }
     }
-}
-
-/// The type of an [`Output::Native`] that carries the fields of a block's
-/// start: not an event of the wire, but of this format's words.
-pub(crate) const BLOCK_FIELDS: &str = "content_block_fields";
-
-/// The fields a `Native` of [`BLOCK_FIELDS`] carries for block `block`.
-pub(super) fn fields_of(raw: &Value) -> Option<(u32, &Map<String, Value>)> {
-    let block = u32::try_from(raw["index"].as_u64()?).ok()?;
-    (raw["type"] == BLOCK_FIELDS).then_some(())?;
-    Some((block, raw["fields"].as_object()?))
 }
 
 /// A block's event, as the stream says it, for what the kind has no form for.

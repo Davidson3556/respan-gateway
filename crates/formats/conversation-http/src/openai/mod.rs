@@ -55,9 +55,10 @@ mod tests;
 
 use crate::is_inert;
 use crate::schema::{
-    Asked, Names, NativeFieldsExt, Schema, count, decode_message, merge_details, merge_fields,
-    native_fields, parse_effort, set, stop_json, take_native, tidy, unix_now, unsupported_fields,
-    untranslatable, unwritable_content, unwritable_usage, usage_extra,
+    Asked, Names, NativeFieldsExt, Schema, UsageFields, check_usage, count, decode_message,
+    merge_details, merge_fields, merge_into, native_fields, parse_effort, set, stop_json,
+    take_native, tidy, unix_now, unsupported_fields, untranslatable, unwritable_content,
+    usage_extra,
 };
 use respan_gateway_conversation::{
     Assembled, AssembledBlock, AssembledItem, Block, Content, Finish, Input, Output, Reasoning,
@@ -156,6 +157,12 @@ const ROLES: Names<Role> = Names(
     ],
     OPENAI,
 );
+
+/// OpenAI Chat counts no cache writes.
+const USAGE: UsageFields = UsageFields {
+    cache_writes: false,
+    reasoning: true,
+};
 
 impl Schema for OpenAiChat {
     const NAME: &'static str = OPENAI;
@@ -264,7 +271,7 @@ impl Schema for OpenAiChat {
     /// One text of every block, then the tool calls, as one choice; other
     /// events as the choices they came in.
     fn encode_whole(&self, whole: &Assembled) -> Result<Value, Fault> {
-        check_usage(&whole.usage)?;
+        check_usage(&whole.usage, USAGE)?;
         let join = |kind: Block| -> String {
             let same = |p: &&AssembledBlock| p.kind == kind;
             whole
@@ -439,32 +446,8 @@ fn usage_fields(raw: &Value) -> Option<&Map<String, Value>> {
     only.get("usage")?.as_object()
 }
 
-/// Merge `fields` into `into`, objects among them field by field.
-fn merge_into(into: &mut Map<String, Value>, fields: &Map<String, Value>) {
-    let mut merged = Value::Object(std::mem::take(into));
-    merge_fields(&mut merged, fields);
-    if let Value::Object(merged) = merged {
-        *into = merged;
-    }
-}
-
 /// The response's fields an [`Output::Native`] says, if it says only those.
 fn response_of(raw: &Value) -> Option<&Map<String, Value>> {
     let only = raw.as_object().filter(|o| o.len() == 1)?;
     only.get("response")?.as_object()
-}
-
-/// OpenAI Chat has no count of cache writes.
-fn check_usage(usage: &Usage) -> Result<(), Fault> {
-    if usage.cache_write_input_tokens > 0
-        || usage.cached_input_tokens > usage.input_tokens
-        || usage.reasoning_tokens > usage.output_tokens
-        || usage
-            .input_tokens
-            .checked_add(usage.output_tokens)
-            .is_none()
-    {
-        return Err(unwritable_usage());
-    }
-    Ok(())
 }

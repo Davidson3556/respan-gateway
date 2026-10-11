@@ -1,7 +1,9 @@
 //! Events as OpenAI Chat, whole or streamed: the encoders.
 
 use crate::is_inert;
-use crate::schema::{Gate, NativeFieldsExt, Schema, fits, unix_now, unwritable_content};
+use crate::schema::{
+    Gate, NativeFieldsExt, Schema, check_usage, fits, merge_into, unix_now, unwritable_content,
+};
 use respan_gateway_conversation::{Block, Delta, Finish, Output, Start, Usage};
 use respan_gateway_core::{Fault, NativeValue};
 use respan_gateway_http::Encoder;
@@ -9,10 +11,7 @@ use respan_gateway_http::bytes::BytesMut;
 use respan_gateway_http::framing::sse::event;
 use serde_json::{Map, Value, json};
 
-use super::{
-    FINISH, Fields, OPENAI, OpenAiChat, check_usage, merge_into, response_of, usage_body,
-    usage_fields,
-};
+use super::{FINISH, Fields, OPENAI, OpenAiChat, USAGE, response_of, usage_body, usage_fields};
 
 /// What a [`call_fields`] event says: the block, the entry's fields and the
 /// function's.
@@ -332,7 +331,7 @@ impl Chunks {
             Output::BlockEnd { block } => self.close(*block, out)?,
             Output::Usage(usage) => {
                 self.usage += usage;
-                check_usage(&self.usage)?;
+                check_usage(&self.usage, USAGE)?;
             }
             Output::Finish(finish) => {
                 FINISH.reason(finish)?;

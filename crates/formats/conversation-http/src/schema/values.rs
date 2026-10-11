@@ -5,7 +5,7 @@
 use respan_gateway_conversation::{
     Block, Content, Delta, Finish, Input, Message, Output, Role, Tool, ToolChoice,
 };
-use respan_gateway_conversation::{Effort, Reasoning, Usage};
+use respan_gateway_conversation::{Effort, Reasoning, Start, Usage};
 use respan_gateway_core::{
     BadRequest, ErrorCode, Fault, NativeFields, NativeValue, Truncated, Upstream,
 };
@@ -104,6 +104,65 @@ pub(crate) fn merge_fields(target: &mut Value, native: &Map<String, Value>) {
             _ => _ = target.insert(key.clone(), value.clone()),
         }
     }
+}
+
+/// Merge `fields` into `into`, objects among them field by field.
+pub(crate) fn merge_into(into: &mut Map<String, Value>, fields: &Map<String, Value>) {
+    let mut merged = Value::Object(std::mem::take(into));
+    merge_fields(&mut merged, fields);
+    if let Value::Object(merged) = merged {
+        *into = merged;
+    }
+}
+
+/// The fields of the native a response's start carries, if it is of
+/// `format`.
+pub(crate) fn own_fields(start: Option<&Start>, format: &str) -> Map<String, Value> {
+    let start = start.filter(|s| s.native.format() == Some(format));
+    start.map(|s| s.native.fields().clone()).unwrap_or_default()
+}
+
+/// The fields a native keeps for a block, and the block: its number is at
+/// `index`, and its `type` is `kind` if that is given.
+pub(crate) fn block_fields<'a>(
+    raw: &'a Value,
+    index: &str,
+    kind: Option<&str>,
+) -> Option<(u32, &'a Map<String, Value>)> {
+    let block = u32::try_from(raw[index].as_u64()?).ok()?;
+    if kind.is_some_and(|kind| raw["type"] != kind) {
+        return None;
+    }
+    Some((block, raw["fields"].as_object()?))
+}
+
+/// Which counts a format's usage object has a field for.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct UsageFields {
+    /// Tokens written to a cache, apart from those read from it.
+    pub cache_writes: bool,
+    /// Reasoning tokens, a part of the output.
+    pub reasoning: bool,
+}
+
+/// Whether `usage` can be written in a format with these `fields`: its
+/// counts must be parts of each other and add up, and each it has must have
+/// a field to go in.
+pub(crate) fn check_usage(usage: &Usage, fields: UsageFields) -> Result<(), Fault> {
+    let cache = usage
+        .cached_input_tokens
+        .checked_add(usage.cache_write_input_tokens);
+    if cache.is_none_or(|both| both > usage.input_tokens)
+        || (!fields.cache_writes && usage.cache_write_input_tokens > 0)
+        || (fields.reasoning && usage.reasoning_tokens > usage.output_tokens)
+        || usage
+            .input_tokens
+            .checked_add(usage.output_tokens)
+            .is_none()
+    {
+        return Err(unwritable_usage());
+    }
+    Ok(())
 }
 
 /// A provider's usage count at `v`: `None` if it says none (absent or

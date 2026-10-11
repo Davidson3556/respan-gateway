@@ -65,3 +65,54 @@ fn a_translated_error_keeps_each_formats_schema() {
         assert!(openai["error"].get("error").is_none(), "{shape}");
     }
 }
+
+#[test]
+fn usage_is_written_only_where_each_count_has_a_field() {
+    use crate::schema::{UsageFields, check_usage};
+    use respan_gateway_conversation::Usage;
+
+    let has = |cache_writes, reasoning| UsageFields {
+        cache_writes,
+        reasoning,
+    };
+    let mut usage = Usage::new(10, 5);
+    usage.cached_input_tokens = 4;
+    assert!(check_usage(&usage, has(false, false)).is_ok());
+
+    usage.cache_write_input_tokens = 6;
+    assert!(check_usage(&usage, has(true, false)).is_ok());
+    assert!(
+        check_usage(&usage, has(false, false)).is_err(),
+        "a cache write has nowhere to go"
+    );
+    usage.cache_write_input_tokens = 7;
+    assert!(
+        check_usage(&usage, has(true, false)).is_err(),
+        "the parts exceed the input"
+    );
+
+    usage.cache_write_input_tokens = 0;
+    usage.reasoning_tokens = 6;
+    assert!(check_usage(&usage, has(false, true)).is_err());
+    assert!(check_usage(&usage, has(false, false)).is_ok());
+
+    let mut huge = Usage::new(u64::MAX, 1);
+    assert!(
+        check_usage(&huge, has(true, true)).is_err(),
+        "the total overflows"
+    );
+    huge.output_tokens = 0;
+    assert!(check_usage(&huge, has(true, true)).is_ok());
+}
+
+#[test]
+fn block_fields_are_found_by_their_number_and_type() {
+    use crate::schema::block_fields;
+
+    let raw = json!({ "type": "item_fields", "block": 3, "fields": { "id": "x" } });
+    let (block, fields) = block_fields(&raw, "block", Some("item_fields")).expect("fields");
+    assert_eq!((block, fields["id"].as_str()), (3, Some("x")));
+    assert!(block_fields(&raw, "block", None).is_some());
+    assert!(block_fields(&raw, "block", Some("other")).is_none());
+    assert!(block_fields(&raw, "index", None).is_none());
+}

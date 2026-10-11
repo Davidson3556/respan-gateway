@@ -1,7 +1,9 @@
 //! Events as Anthropic Messages, whole or streamed: the encoders.
 
 use crate::is_inert;
-use crate::schema::{Gate, Schema, fits, merge_fields, unwritable_content};
+use crate::schema::{
+    Gate, Schema, block_fields, check_usage, fits, merge_fields, own_fields, unwritable_content,
+};
 use respan_gateway_conversation::{Block, Delta, Finish, Output, Start, Usage};
 use respan_gateway_core::{Fault, NativeValue};
 use respan_gateway_http::Encoder;
@@ -9,10 +11,7 @@ use respan_gateway_http::bytes::BytesMut;
 use respan_gateway_http::framing::sse::event;
 use serde_json::{Map, Value, json};
 
-use super::decode::fields_of;
-use super::{
-    ANTHROPIC, AnthropicMessages, FINISH, StopFields, check_usage, own_fields, usage_body,
-};
+use super::{ANTHROPIC, AnthropicMessages, BLOCK_FIELDS, FINISH, StopFields, USAGE, usage_body};
 
 /// Writes events as Anthropic's stream: `message_start` at the first need,
 /// each block's events, and at the end `message_delta` and `message_stop`.
@@ -65,7 +64,7 @@ impl EventStream {
         message.insert("type".into(), "message".into());
         message.insert("role".into(), "assistant".into());
         message.insert("model".into(), model.into());
-        message.extend(own_fields(self.start.as_ref()));
+        message.extend(own_fields(self.start.as_ref(), ANTHROPIC));
         message.insert("content".into(), json!([]));
         message.insert("stop_reason".into(), Value::Null);
         message.insert("stop_sequence".into(), Value::Null);
@@ -241,7 +240,7 @@ impl EventStream {
             Output::BlockEnd { block } => self.close(*block, out)?,
             Output::Usage(usage) => {
                 self.usage += usage;
-                check_usage(&self.usage)?;
+                check_usage(&self.usage, USAGE)?;
             }
             Output::Finish(finish) => {
                 FINISH.reason(finish)?;
@@ -249,9 +248,10 @@ impl EventStream {
                 self.begin(out);
             }
             Output::Native(NativeValue { format, value: raw })
-                if **format == *ANTHROPIC && fields_of(raw).is_some() =>
+                if **format == *ANTHROPIC
+                    && block_fields(raw, "index", Some(BLOCK_FIELDS)).is_some() =>
             {
-                if let Some((block, fields)) = fields_of(raw) {
+                if let Some((block, fields)) = block_fields(raw, "index", Some(BLOCK_FIELDS)) {
                     self.fields.push((block, fields.clone()));
                 }
             }

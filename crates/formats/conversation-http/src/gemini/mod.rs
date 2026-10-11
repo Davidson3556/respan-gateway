@@ -76,19 +76,17 @@ mod tests;
 
 use crate::is_inert;
 use crate::schema::{
-    Asked, Keep, Names, NativeFieldsExt, Schema, count, kept_fields, merge_details, merge_fields,
-    native_fields, set, unwritable_content, unwritable_usage, usage_extra,
+    Asked, Keep, Names, NativeFieldsExt, Schema, UsageFields, block_fields, check_usage, count,
+    kept_fields, merge_details, merge_fields, native_fields, set, unwritable_content, usage_extra,
 };
-use respan_gateway_conversation::{
-    Assembled, AssembledItem, Block, Finish, Input, Output, Start, Usage,
-};
+use respan_gateway_conversation::{Assembled, AssembledItem, Block, Finish, Input, Output, Usage};
 use respan_gateway_core::{BadRequest, Connection, Fault, Format, NativeValue};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, StatusCode, request::Parts as RequestHead};
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo};
 use serde_json::{Map, Value, json};
 
-use decode::{GeminiDecoder, fields_of};
+use decode::GeminiDecoder;
 use encode::{EventStream, JsonArray, ResponseFields, part_of};
 use request::{
     read_config, read_messages, read_tools, split_system, write_config, write_messages, write_tools,
@@ -225,6 +223,12 @@ impl GeminiGenerate {
     }
 }
 
+/// Gemini counts no cache writes.
+const USAGE: UsageFields = UsageFields {
+    cache_writes: false,
+    reasoning: true,
+};
+
 impl Schema for GeminiGenerate {
     const NAME: &'static str = GEMINI;
     const PATH: &'static str = "/models/{model}:generateContent";
@@ -347,7 +351,7 @@ impl Schema for GeminiGenerate {
     }
 
     fn encode_whole(&self, whole: &Assembled) -> Result<Value, Fault> {
-        check_usage(&whole.usage)?;
+        check_usage(&whole.usage, USAGE)?;
         let mut body = ResponseFields::default();
         let mut parts: Vec<Value> = Vec::new();
         let mut fields: Vec<(u32, Map<String, Value>)> = Vec::new();
@@ -371,7 +375,7 @@ impl Schema for GeminiGenerate {
                 AssembledItem::Native(NativeValue { format, value: raw })
                     if **format == *GEMINI =>
                 {
-                    match (raw["type"].as_str(), fields_of(raw)) {
+                    match (raw["type"].as_str(), block_fields(raw, "block", None)) {
                         (Some("part_fields"), Some((block, f))) => fields.push((block, f.clone())),
                         (Some("part"), _) => parts.push(raw["part"].clone()),
                         _ if body.add(raw) => {}
@@ -424,22 +428,6 @@ fn google_status(status: StatusCode) -> &'static str {
         504 => "DEADLINE_EXCEEDED",
         s if s >= 500 => "INTERNAL",
         _ => "FAILED_PRECONDITION",
-    }
-}
-
-/// The start's own fields, if they are in this format.
-fn own_fields(start: Option<&Start>) -> Map<String, Value> {
-    let start = start.filter(|s| s.native.format() == Some(GEMINI));
-    start.map(|s| s.native.fields().clone()).unwrap_or_default()
-}
-
-fn check_usage(usage: &Usage) -> Result<(), Fault> {
-    let fits = usage.cache_write_input_tokens == 0
-        && usage.cached_input_tokens <= usage.input_tokens
-        && usage.reasoning_tokens <= usage.output_tokens;
-    match fits {
-        true => Ok(()),
-        false => Err(unwritable_usage()),
     }
 }
 
