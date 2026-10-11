@@ -37,6 +37,7 @@ mod report;
 mod requests;
 
 pub use app::{App, DEFAULT_LISTEN, ReloadError, Reloaded, shutdown_signal};
+pub use auth::Trusted;
 pub use cli::{execute, run};
 pub use config::{
     Auth, Config, DEFAULT_FILE, ModelRoute, PluginConfig, Price, ProviderConfig, ProxyVendor,

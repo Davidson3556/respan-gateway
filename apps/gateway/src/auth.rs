@@ -226,9 +226,23 @@ impl ClientKeys {
     }
 }
 
-/// Refuses a request without a valid key, leaving it as it is.
+/// The mark of a request from the process that owns the gateway: the
+/// embedding library's own reads of the admin API. It is a typed extension of
+/// the in-process request, set only by that code; no header, query or body
+/// can make one, so a request from the network never has it. `require`
+/// accepts it in place of a client key, for `/ui/api/` alone.
+#[derive(Debug, Clone, Copy)]
+pub struct Trusted;
+
+/// Whether `req` is a trusted read of the admin API.
+fn is_trusted(req: &Request) -> bool {
+    req.extensions().get::<Trusted>().is_some() && req.uri().path().starts_with("/ui/api/")
+}
+
+/// Refuses a request without a valid key, leaving it as it is. A
+/// [`Trusted`] request to the admin API needs none.
 pub async fn require(State(keys): State<Arc<ClientKeys>>, req: Request, next: Next) -> Response {
-    match keys.allows(req.headers()) {
+    match is_trusted(&req) || keys.allows(req.headers()) {
         true => next.run(req).await,
         false => unauthorized(),
     }
@@ -586,5 +600,42 @@ mod tests {
         // Served elsewhere than configured, as a host may.
         local.serving_on("0.0.0.0:9".parse().unwrap_or_else(|e| panic!("{e}")));
         assert!(!refused(&local, &[("host", "gateway.lan:9")]));
+    }
+
+    fn request(uri: &str, trusted: bool) -> Request {
+        let mut req = Request::builder().uri(uri).body(axum::body::Body::empty());
+        if let Ok(req) = req.as_mut()
+            && trusted
+        {
+            req.extensions_mut().insert(Trusted);
+        }
+        req.unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    async fn status(keys: &Arc<ClientKeys>, req: Request) -> StatusCode {
+        use tower::ServiceExt;
+        let app = axum::Router::new()
+            .route("/ui/api/x", axum::routing::get(|| async { "ok" }))
+            .route("/v1/x", axum::routing::get(|| async { "ok" }))
+            .route_layer(axum::middleware::from_fn_with_state(keys.clone(), require));
+        app.oneshot(req)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"))
+            .status()
+    }
+
+    #[tokio::test]
+    async fn only_the_in_process_mark_stands_in_for_a_key_and_only_on_the_admin_api() {
+        let keys = ClientKeys::new(vec![client("a", "k1")]);
+        assert_eq!(status(&keys, request("/ui/api/x", true)).await, 200);
+        assert_eq!(status(&keys, request("/ui/api/x", false)).await, 401);
+        assert_eq!(status(&keys, request("/v1/x", true)).await, 401);
+        // Nothing a remote client sends is the mark.
+        let mut forged = request("/ui/api/x", false);
+        for name in ["trusted", "x-respan-trusted", "x-respan-agent", "host"] {
+            let value = HeaderValue::from_static("respan-gateway");
+            forged.headers_mut().insert(name, value);
+        }
+        assert_eq!(status(&keys, forged).await, 401);
     }
 }

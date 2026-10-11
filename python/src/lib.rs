@@ -18,7 +18,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
-use respan_gateway::{App, Config, LogFormat};
+use respan_gateway::{App, Config, LogFormat, Trusted};
 use tokio::runtime::Runtime;
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle};
@@ -260,6 +260,7 @@ impl Native {
         target: &str,
         headers: &[(String, String)],
         body: &[u8],
+        trusted: bool,
     ) -> PyResult<Request<Body>> {
         let mut request = Request::builder()
             .method(Method::from_bytes(method.as_bytes()).map_err(gateway_error)?)
@@ -269,9 +270,13 @@ impl Native {
             let value = HeaderValue::from_bytes(&unlatin1(value)?).map_err(gateway_error)?;
             request = request.header(name, value);
         }
-        request
+        let mut request = request
             .body(Body::from(Bytes::copy_from_slice(body)))
-            .map_err(gateway_error)
+            .map_err(gateway_error)?;
+        if trusted {
+            request.extensions_mut().insert(Trusted);
+        }
+        Ok(request)
     }
 }
 
@@ -313,7 +318,24 @@ impl Native {
         body: &[u8],
         timeout: Option<f64>,
     ) -> PyResult<Reply> {
-        let request = Self::request(method, target, &headers, body)?;
+        let request = Self::request(method, target, &headers, body, false)?;
+        wait(py, open(self.router.clone(), request, timeout)).map(Head::into_reply)
+    }
+
+    /// `send` for the package's own reads of the admin API: the request is
+    /// marked [`Trusted`], which stands in for a client key there. Nothing
+    /// else uses it; client traffic goes through `send` and presents keys.
+    #[pyo3(signature = (method, target, headers, body, timeout=None))]
+    fn send_admin(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        target: &str,
+        headers: Vec<(String, String)>,
+        body: &[u8],
+        timeout: Option<f64>,
+    ) -> PyResult<Reply> {
+        let request = Self::request(method, target, &headers, body, true)?;
         wait(py, open(self.router.clone(), request, timeout)).map(Head::into_reply)
     }
 
@@ -329,7 +351,26 @@ impl Native {
         done: Py<PyAny>,
         timeout: Option<f64>,
     ) -> PyResult<Pending> {
-        let request = Self::request(method, target, &headers, body)?;
+        let request = Self::request(method, target, &headers, body, false)?;
+        Ok(start(
+            open(self.router.clone(), request, timeout),
+            done,
+            |py, head| Ok(Py::new(py, head.into_reply())?.into_any()),
+        ))
+    }
+
+    /// `send_admin` without blocking, as `send_async` is to `send`.
+    #[pyo3(signature = (method, target, headers, body, done, timeout=None))]
+    fn send_admin_async(
+        &self,
+        method: &str,
+        target: &str,
+        headers: Vec<(String, String)>,
+        body: &[u8],
+        done: Py<PyAny>,
+        timeout: Option<f64>,
+    ) -> PyResult<Pending> {
+        let request = Self::request(method, target, &headers, body, true)?;
         Ok(start(
             open(self.router.clone(), request, timeout),
             done,

@@ -80,6 +80,8 @@ class Gateway:
         self._clients: List[Any] = []  # httpx clients handed to SDKs
         self._sync: Optional[httpx.Client] = None
         self._async: Optional[httpx.AsyncClient] = None
+        self._admin_sync: Optional[httpx.Client] = None  # trusted, for the helpers
+        self._admin_async: Optional[httpx.AsyncClient] = None
 
     @classmethod
     def from_file(cls, path: Union[str, "os.PathLike[str]"]) -> "Gateway":
@@ -105,7 +107,7 @@ class Gateway:
             server.stop()
         clients = [c for c in (*self._clients, self._sync) if c is not None and not hasattr(c, "aclose")]
         self._clients = [c for c in self._clients if c not in clients]
-        self._sync = None
+        self._sync = self._admin_sync = None
         for client in clients:
             client.close()
 
@@ -116,7 +118,7 @@ class Gateway:
             await server.astop()
         clients = [c for c in (*self._clients, self._async) if c is not None and hasattr(c, "aclose")]
         self._clients = [c for c in self._clients if c not in clients]
-        self._async = None
+        self._async = self._admin_async = None
         for client in clients:
             await client.aclose()
         self.close()
@@ -207,6 +209,22 @@ class Gateway:
             self._async = httpx.AsyncClient(base_url=_BASE, transport=self.async_transport(), timeout=None)
         return self._async
 
+    def _admin(self, path: str, **kwargs: Any) -> httpx.Response:
+        """A read of the admin API for the helpers below. This process owns the
+        gateway, so these (and only these) need no client key."""
+        if self._admin_sync is None:
+            transport = transports(httpx)[0](self._native, trusted=True)
+            self._admin_sync = httpx.Client(base_url=_BASE, transport=transport, timeout=None)
+            self._clients.append(self._admin_sync)
+        return self._admin_sync.get(path, **kwargs)
+
+    async def _aadmin(self, path: str, **kwargs: Any) -> httpx.Response:
+        if self._admin_async is None:
+            transport = transports(httpx)[1](self._native, trusted=True)
+            self._admin_async = httpx.AsyncClient(base_url=_BASE, transport=transport, timeout=None)
+            self._clients.append(self._admin_async)
+        return await self._admin_async.get(path, **kwargs)
+
     def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Sends one request and reads the whole response.
 
@@ -254,11 +272,11 @@ class Gateway:
 
         Like `requests()`, this is the web UI's admin API, off with `ui: false`.
         """
-        return _items(self.request("GET", "/ui/api/providers"), "providers")
+        return _items(self._admin("/ui/api/providers"), "providers")
 
     async def aproviders(self) -> List[Dict[str, Any]]:
         """`providers` for asyncio."""
-        return _items(await self.arequest("GET", "/ui/api/providers"), "providers")
+        return _items(await self._aadmin("/ui/api/providers"), "providers")
 
     def requests(self, limit: int = 100, **filters: str) -> List[Dict[str, Any]]:
         """The last `limit` requests the gateway served, newest first, as the web UI lists them.
@@ -267,11 +285,11 @@ class Gateway:
 
         The log is in memory, and `log: off` (the default here) only silences stderr; this admin API is off with `ui: false`.
         """
-        return _items(self.request("GET", "/ui/api/requests", params={"limit": limit, **filters}), "requests")
+        return _items(self._admin("/ui/api/requests", params={"limit": limit, **filters}), "requests")
 
     async def arequests(self, limit: int = 100, **filters: str) -> List[Dict[str, Any]]:
         """`requests` for asyncio."""
-        return _items(await self.arequest("GET", "/ui/api/requests", params={"limit": limit, **filters}), "requests")
+        return _items(await self._aadmin("/ui/api/requests", params={"limit": limit, **filters}), "requests")
 
     def export_requests(self, format: str = "jsonl", **filters: str) -> str:
         """The requests the gateway kept, oldest first, as `jsonl` (one record per line) or `csv`.
@@ -279,11 +297,11 @@ class Gateway:
         `filters` narrow it as the web UI's do: `kind`, `status` ("ok", "error", "pending" or a class such as "2xx"),
         `provider`, `client` (a client key's name), `model` (a substring) and `since` (an RFC 3339 time).
         """
-        return _export(self.request("GET", "/ui/api/requests/export", params={"format": format, **filters}))
+        return _export(self._admin("/ui/api/requests/export", params={"format": format, **filters}))
 
     async def aexport_requests(self, format: str = "jsonl", **filters: str) -> str:
         """`export_requests` for asyncio."""
-        return _export(await self.arequest("GET", "/ui/api/requests/export", params={"format": format, **filters}))
+        return _export(await self._aadmin("/ui/api/requests/export", params={"format": format, **filters}))
 
     # -- servers -------------------------------------------------------------
 

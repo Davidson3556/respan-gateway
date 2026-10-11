@@ -91,6 +91,17 @@ def test_client_keys(fake):
         assert gw.openai(api_key="gw-secret").images.generate(model="gpt-image-1", prompt="x").data
 
 
+def test_only_the_introspection_helpers_skip_the_key(fake):
+    config = {**config_for(fake), "client_keys": ["gw-secret"]}
+    with rg.Gateway(config=config) as gw:
+        assert gw.request("GET", "/ui/api/requests").status_code == 401
+        assert gw.request("GET", "/ui/api/requests", headers={"authorization": "Bearer gw-secret"}).status_code == 200
+        with pytest.raises(openai.AuthenticationError):
+            gw.openai().images.generate(model="gpt-image-1", prompt="x")
+        assert not [r for r in gw.requests() if r["path"].startswith("/ui/")]  # admin reads are not logged
+        assert gw.providers()
+
+
 def test_client_keys_are_named_in_the_request_log(fake):
     keys = ["plain", {"name": "ci", "key": "ci-secret"}]
     with rg.Gateway(config={**config_for(fake), "client_keys": keys}) as gw:

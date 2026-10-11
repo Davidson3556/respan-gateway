@@ -124,13 +124,14 @@ def transports(httpx: ModuleType) -> Tuple[Type[Any], Type[Any]]:
     class GatewayTransport(httpx.BaseTransport):  # type: ignore[misc,name-defined]
         """Sends every request to the gateway, whatever its host."""
 
-        def __init__(self, native: "_native.Native") -> None:
+        def __init__(self, native: "_native.Native", trusted: bool = False) -> None:
             self._native = native
+            self._send = native.send_admin if trusted else native.send
 
         def handle_request(self, request: Any) -> Any:
             method, target, headers = _call(request)
             try:
-                reply = self._native.send(method, target, headers, request.read(), _read_timeout(request))
+                reply = self._send(method, target, headers, request.read(), _read_timeout(request))
             except _native.GatewayTimeout:
                 raise timed_out(request) from None
             return response(request, reply, SyncBody(reply, request))
@@ -138,8 +139,9 @@ def transports(httpx: ModuleType) -> Tuple[Type[Any], Type[Any]]:
     class AsyncGatewayTransport(httpx.AsyncBaseTransport):  # type: ignore[misc,name-defined]
         """Sends every request to the gateway, whatever its host; for asyncio."""
 
-        def __init__(self, native: "_native.Native") -> None:
+        def __init__(self, native: "_native.Native", trusted: bool = False) -> None:
             self._native = native
+            self._send_async = native.send_admin_async if trusted else native.send_async
 
         async def handle_async_request(self, request: Any) -> Any:
             method, target, headers = _call(request)
@@ -147,7 +149,7 @@ def transports(httpx: ModuleType) -> Tuple[Type[Any], Type[Any]]:
             timeout = _read_timeout(request)
             try:
                 reply = await _await(
-                    lambda done: self._native.send_async(method, target, headers, body, done, timeout)
+                    lambda done: self._send_async(method, target, headers, body, done, timeout)
                 )
             except _native.GatewayTimeout:
                 raise timed_out(request) from None
