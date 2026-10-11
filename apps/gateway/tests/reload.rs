@@ -8,7 +8,8 @@ mod support;
 use std::path::Path;
 use std::time::Duration;
 
-use mockllm::FakeOpenAi;
+use futures::StreamExt;
+use mockllm::{Answer, FakeOpenAi};
 use serde_json::{Value, json};
 use support::{Gateway, client, write_config};
 
@@ -217,4 +218,157 @@ async fn the_request_log_keeps_the_configured_number_of_requests_across_reloads(
     let kept = kept["requests"].as_array().unwrap();
     assert_eq!(kept.len(), 2);
     assert_eq!(get(&gw, "/ui/api/overview").await["totals"]["requests"], 5);
+}
+
+/// The text of an OpenAI stream, joined.
+fn streamed_text(body: &str) -> String {
+    let data = body.lines().filter_map(|l| l.strip_prefix("data: "));
+    let events = data.filter_map(|d| serde_json::from_str::<Value>(d).ok());
+    let deltas = events.filter_map(|e| {
+        e["choices"][0]["delta"]["content"]
+            .as_str()
+            .map(String::from)
+    });
+    deltas.collect()
+}
+
+async fn chat_stream(gw: &Gateway, model: &str) -> reqwest::Response {
+    let body = json!({"model": model, "stream": true,
+                      "messages": [{"role": "user", "content": "hi"}]});
+    let request = client().post(gw.url(CHAT)).body(body.to_string());
+    request.send().await.unwrap()
+}
+
+#[tokio::test]
+async fn a_request_in_flight_finishes_on_the_old_config_across_a_reload() {
+    let (old, new) = (FakeOpenAi::start().await, FakeOpenAi::start().await);
+    old.answer(Answer::text("old config").pace(300));
+    new.answer(Answer::text("new config"));
+    let path = write_config(&config("127.0.0.1:0", &[("alpha", &old.base_url())], ""));
+    let gw = serve(&path, &[]).await;
+
+    let mut slow = chat_stream(&gw, "alpha/m").await;
+    assert_eq!(slow.status(), 200);
+    // Open: its first chunk is here, the rest 300 ms apart.
+    let first = slow.chunk().await.unwrap().unwrap();
+
+    std::fs::write(
+        &path,
+        config("127.0.0.1:0", &[("alpha", &new.base_url())], ""),
+    )
+    .unwrap();
+    let resp = client()
+        .post(gw.url("/ui/api/reload"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // A request after the reload goes to the new provider, while the old
+    // stream is still open.
+    let fresh = chat_stream(&gw, "alpha/m").await;
+    assert_eq!(fresh.status(), 200);
+    assert_eq!(streamed_text(&fresh.text().await.unwrap()), "new config");
+    assert_eq!(new.requests().len(), 1);
+
+    let (rest, ended) = support::read_all(slow).await;
+    assert_eq!(ended, Ok(()));
+    let body = format!("{}{rest}", String::from_utf8_lossy(&first));
+    assert_eq!(streamed_text(&body), "old config", "{body}");
+    assert_eq!(old.requests().len(), 1);
+}
+
+/// An OpenAI-shaped server whose streams send two events and then stall for
+/// a minute: the base URL.
+async fn stalled() -> String {
+    let event = |content: &str| {
+        let delta = json!({"role": "assistant", "content": content});
+        let chunk = json!({"id": "c", "object": "chat.completion.chunk", "created": 1,
+            "model": "m", "choices": [{"index": 0, "delta": delta, "finish_reason": null}]});
+        format!("data: {chunk}\n\n")
+    };
+    let (one, two) = (event("x"), event("y"));
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move || {
+            let events = futures::stream::iter([one.clone(), two.clone()]);
+            let body = events.map(Ok::<_, std::io::Error>);
+            let body = body.chain(futures::stream::pending());
+            async move {
+                let head = [("content-type", "text/event-stream")];
+                (head, axum::body::Body::from_stream(body))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    base
+}
+
+/// Sends SIGTERM to the gateway.
+#[cfg(unix)]
+fn terminate(gw: &Gateway) {
+    let pid = gw.child.id().unwrap().to_string();
+    let killed = std::process::Command::new("kill")
+        .args(["-TERM", &pid])
+        .status();
+    assert!(killed.unwrap().success());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_grace_lets_a_fast_request_finish_and_cuts_a_slow_one() {
+    let fast = FakeOpenAi::start().await;
+    fast.answer(Answer::text("a b").pace(150));
+    let slow = stalled().await;
+    let config = config(
+        "127.0.0.1:0",
+        &[("fast", &fast.base_url()), ("slow", &slow)],
+        "shutdown_grace: 2s",
+    );
+    let path = write_config(&config);
+    let mut gw = serve(&path, &[]).await;
+
+    let long = client()
+        .post(gw.url(CHAT))
+        .timeout(Duration::from_secs(30))
+        .body(
+            json!({"model": "slow/m", "stream": true,
+                   "messages": [{"role": "user", "content": "hi"}]})
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let mut long = long;
+    assert_eq!(long.status(), 200);
+    let first = long.chunk().await.unwrap().unwrap();
+    assert!(!first.is_empty());
+    let mut quick = chat_stream(&gw, "fast/m").await;
+    let quick_first = quick.chunk().await.unwrap().unwrap();
+
+    let started = tokio::time::Instant::now();
+    terminate(&gw);
+
+    // The fast one completes: its remaining events are well inside the grace.
+    let (rest, ended) = support::read_all(quick).await;
+    assert_eq!(ended, Ok(()));
+    let body = format!("{}{rest}", String::from_utf8_lossy(&quick_first));
+    assert_eq!(streamed_text(&body), "a b", "{body}");
+    assert!(body.contains("[DONE]"), "{body}");
+
+    // The slow one is cut at the grace, and the process ends then.
+    let status = tokio::time::timeout(Duration::from_secs(10), gw.child.wait())
+        .await
+        .expect("the gateway must exit after its grace")
+        .unwrap();
+    assert!(status.success(), "{status}");
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_millis(1800) && took < Duration::from_secs(8),
+        "{took:?}"
+    );
+    let (rest, _) = support::read_all(long).await;
+    assert!(!rest.contains("[DONE]"), "{rest}");
 }
