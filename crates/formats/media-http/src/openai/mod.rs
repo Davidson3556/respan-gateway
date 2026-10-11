@@ -41,6 +41,7 @@ use respan_gateway_core::{
     BadRequest, Connection, Details, ErrorCode, Fault, NativeFields, NativeValue, Upstream,
 };
 use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::framing::fields::{merge_missing, rest_of, set, unix_now};
 use respan_gateway_http::framing::{self, path_ends_with, sse};
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{
@@ -49,6 +50,7 @@ use respan_gateway_http::http::{
 };
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo, RawReply, Wire, error_code};
 use serde_json::{Map, Value, json};
+use std::sync::LazyLock;
 
 use multipart::Writer;
 
@@ -254,32 +256,6 @@ fn native_of(format: &str, fields: Map<String, Value>) -> Option<NativeFields> {
     (!fields.is_empty()).then(|| NativeFields::new(format, fields))
 }
 
-/// Add to `base` the fields of `more` it lacks, objects field by field:
-/// what a value's typed fields say takes precedence over its native.
-fn merge_missing(base: &mut Map<String, Value>, more: &Map<String, Value>) {
-    for (key, value) in more {
-        match (base.get_mut(key), value) {
-            (Some(Value::Object(had)), Value::Object(more)) => merge_missing(had, more),
-            (Some(_), _) => {}
-            (None, value) => _ = base.insert(key.clone(), value.clone()),
-        }
-    }
-}
-
-/// The fields of `v` but those named `taken` and null ones.
-fn rest_of(v: &Value, taken: &[&str]) -> Map<String, Value> {
-    let fields = v.as_object().into_iter().flatten();
-    let rest = fields.filter(|(k, v)| !taken.contains(&k.as_str()) && !v.is_null());
-    rest.map(|(k, v)| (k.clone(), v.clone())).collect()
-}
-
-/// Insert `value` at `key` if it says something.
-fn set(map: &mut Map<String, Value>, key: &str, value: Option<impl Into<Value>>) {
-    if let Some(value) = value {
-        map.insert(key.into(), value.into());
-    }
-}
-
 /// `seconds` as JSON: a whole number as one, as OpenAI writes it.
 fn seconds_json(seconds: f64) -> Value {
     match seconds.fract() == 0.0 && (0.0..9e15).contains(&seconds) {
@@ -419,12 +395,6 @@ fn unreadable(format: &str, what: &str) -> Fault {
     Upstream::fault(format!("the provider's {format} response {what}"))
 }
 
-/// The seconds since the Unix epoch.
-fn unix_now() -> u64 {
-    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
-    since.map_or(0, |d| d.as_secs())
-}
-
 /// A refusal in OpenAI's error schema, under the fault's status: its
 /// details merged, or the provider's own answer if a plugin asked for it
 /// ([`RawReply`]). A status that says no error is a plain 500, as the
@@ -449,23 +419,31 @@ fn refusal(fault: &Fault, _request: &http::Request<Bytes>, head: &mut ResponseHe
         .into()
 }
 
+/// Chooses the encoder of a response from the client's request, the text
+/// fields it asked ([`asked`]) and the response's head, whose content type
+/// it sets.
+type ChooseEncoder<O> =
+    fn(&http::Request<Bytes>, &Map<String, Value>, &mut ResponseHead) -> Box<dyn Encoder<O>>;
+
 /// The client edge of a format: a request decoded by `decode`, and its
 /// response written by the encoder `encoder` chooses for the client's
 /// request, with the head's content type it sets.
 fn bind_client<I, O>(
     io: ClientIo,
     decode: fn(&RequestHead, Bytes) -> Result<I, Fault>,
-    encoder: fn(&http::Request<Bytes>, &mut ResponseHead) -> Box<dyn Encoder<O>>,
+    encoder: ChooseEncoder<O>,
 ) -> Connection<I, O>
 where
     I: Clone + Send + Sync + 'static,
     O: Clone + Send + Sync + 'static,
 {
+    let wire = io.extensions().get::<Wire>().cloned();
     io.bind(
         move |request| respan_gateway_http::messages(request, decode),
         move |reply| {
             let mut head = reply.head();
-            let encoder = encoder(reply.request(), &mut head);
+            let fields = asked(wire.as_ref());
+            let encoder = encoder(reply.request(), fields, &mut head);
             Ok(reply.write(head, encoder))
         },
         refusal,
@@ -488,18 +466,23 @@ fn streams(io: &ProviderIo, paths: &[&str], wants: fn(&Map<String, Value>) -> bo
     if let Some(StreamResponse(stream)) = io.extensions().get::<StreamResponse>() {
         return *stream;
     }
-    let request = io.extensions().get::<Wire>().and_then(Wire::get);
-    request
-        .filter(|r| paths.iter().any(|p| path_ends_with(r.uri(), p)))
-        .is_some_and(|r| wants(&asked(r)))
+    let wire = io.extensions().get::<Wire>();
+    let paths_match = wire
+        .and_then(Wire::get)
+        .is_some_and(|r| paths.iter().any(|p| path_ends_with(r.uri(), p)));
+    paths_match && wants(asked(wire))
 }
 
-/// The text fields of a client's request, for its response's framing: a
-/// form's files are skipped, not read; none if it cannot be read, as it
-/// then was refused.
-fn asked(request: &http::Request<Bytes>) -> Map<String, Value> {
-    let fields = read_fields_in(request.headers(), request.body(), false);
-    fields.map(|f| f.map).unwrap_or_default()
+/// The text fields of a client's request, for its response's framing, read
+/// once per wire: a form's files are skipped; none if it cannot be read, as
+/// it then was refused.
+fn asked(wire: Option<&Wire>) -> &Map<String, Value> {
+    static NONE: LazyLock<Map<String, Value>> = LazyLock::new(Map::new);
+    let read = |r: &http::Request<Bytes>| {
+        let fields = read_fields_in(r.headers(), r.body(), false);
+        fields.map(|f| f.map).unwrap_or_default()
+    };
+    wire.and_then(|w| w.memo(read)).unwrap_or(&NONE)
 }
 
 /// Write the field `name` of JSON `value` into a form, as OpenAI's SDKs

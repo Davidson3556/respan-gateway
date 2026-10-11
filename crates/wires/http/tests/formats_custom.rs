@@ -1593,7 +1593,9 @@ async fn a_router_overrides_the_default_target() {
         |j: &Jev| j.model.as_deref(),
         |j, model| j.model = Some(model),
     );
-    let router = Routing::new(Arc::new(routes)).format("jev-v2", JEV, model);
+    let router = Routing::new(Arc::new(routes))
+        .format("jev-v2", JEV, model)
+        .over("v2");
     let gw = serving(V2, list, vec![Arc::new(router)], Some("v2")).expect("builds");
 
     for model in ["old-1", "new-1"] {

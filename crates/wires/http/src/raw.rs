@@ -5,6 +5,7 @@ use crate::Credential;
 use bytes::Bytes;
 use http::{Request, Response, response::Parts};
 use respan_gateway_core::{ClientContext, Fault, Plugin, async_trait};
+use std::any::Any;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The client's request as it came, without its
@@ -17,6 +18,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[derive(Clone)]
 pub struct Wire {
     request: Arc<OnceLock<Request<Bytes>>>,
+    memo: Arc<OnceLock<Box<dyn Any + Send + Sync>>>,
     live: bool,
 }
 impl std::fmt::Debug for Wire {
@@ -42,6 +44,7 @@ impl Wire {
     pub fn new(request: Request<Bytes>, live: bool) -> Self {
         Self {
             request: Arc::new(OnceLock::from(request)),
+            memo: Arc::default(),
             live,
         }
     }
@@ -49,6 +52,7 @@ impl Wire {
     pub(crate) fn unread(live: bool) -> Self {
         Self {
             request: Arc::default(),
+            memo: Arc::default(),
             live,
         }
     }
@@ -59,6 +63,18 @@ impl Wire {
     /// The original head and collected bytes (empty for live input).
     pub fn get(&self) -> Option<&Request<Bytes>> {
         self.request.get()
+    }
+    /// A value `make` derives from the request, computed once for every
+    /// holder of this wire, such as what a format must read of the body to
+    /// frame its response. The first `T` asked for is the one kept: none for
+    /// another type, or while the request is unread.
+    pub fn memo<T: Send + Sync + 'static>(
+        &self,
+        make: impl FnOnce(&Request<Bytes>) -> T,
+    ) -> Option<&T> {
+        let request = self.request.get()?;
+        let kept = self.memo.get_or_init(|| Box::new(make(request)));
+        kept.downcast_ref()
     }
     /// Whether subsequent input consists of live events.
     pub fn is_live(&self) -> bool {

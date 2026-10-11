@@ -3,13 +3,22 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use http::HeaderMap;
+use bytes::Bytes;
+use http::header::{AUTHORIZATION, COOKIE, LOCATION, PROXY_AUTHORIZATION};
+use http::{HeaderMap, Method, StatusCode, Uri};
 use http_body_util::BodyExt;
 use respan_gateway_core::{Fault, Upstream};
 
+use crate::credential::is_credential;
 use crate::{
     Body, Completion, ProviderIo, is_connection_header, prepare_call, strip_origin_headers,
 };
+
+/// The most redirects a call follows.
+const REDIRECTS: usize = 5;
+
+/// Whether a redirect to a URI is followed.
+type Allow = dyn Fn(&Uri) -> bool + Send + Sync;
 
 /// A call the provider cannot be sent; the error is for logs.
 fn invalid(e: impl std::error::Error + Send + Sync + 'static) -> Fault {
@@ -40,6 +49,7 @@ pub struct HttpTransport {
     base: String,
     headers: HeaderMap,
     limit: usize,
+    follow: Option<Arc<Allow>>,
 }
 
 impl std::fmt::Debug for HttpTransport {
@@ -80,6 +90,7 @@ impl HttpTransport {
             base: crate::base_url(&base_url.into(), &["http", "https"])?,
             headers: HeaderMap::new(),
             limit: LIMIT,
+            follow: None,
         })
     }
 
@@ -98,9 +109,24 @@ impl HttpTransport {
     }
 
     /// Use `client` and its pool instead of the shared one. It should not
-    /// follow redirects: they are the client's to follow.
+    /// follow redirects: they are the client's to follow, or
+    /// [`follow_redirects`](Self::follow_redirects)'s, which keeps the call's
+    /// credentials to its origin.
     pub fn with_client(mut self, client: reqwest::Client) -> Self {
         self.client = client;
+        self
+    }
+
+    /// Follow a redirect of a `GET` or `HEAD` call to a location `allow`
+    /// accepts, up to 5 in a row; any other answer is the client's to follow.
+    /// A call that leaves its origin leaves its credentials behind: its
+    /// `Authorization`, `Cookie` and every header or query parameter that
+    /// names a key, token or secret.
+    pub fn follow_redirects(
+        mut self,
+        allow: impl Fn(&Uri) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.follow = Some(Arc::new(allow));
         self
     }
 
@@ -123,23 +149,45 @@ impl HttpTransport {
         mut call: http::Request<Body>,
     ) -> Result<(http::Response<Body>, Option<Completion>), Fault> {
         prepare_call(&mut call, &self.base, &self.headers)?;
-        let (parts, body) = call.into_parts();
+        let (mut parts, body) = call.into_parts();
+        let bodiless = !body.is_streaming() && body.full_bytes().is_none_or(|b| b.is_empty());
+        let reads = matches!(parts.method, Method::GET | Method::HEAD);
+        let follow = self.follow.as_ref().filter(|_| bodiless && reads);
         // A whole call is one frame, or none if empty, and goes with its length.
-        let body = match body.full_bytes() {
-            Some(bytes) => reqwest::Body::from(bytes.clone()),
-            None => reqwest::Body::wrap_stream(body),
+        let mut body = Some(body);
+        let mut hops = 0;
+        let resp = loop {
+            let sent = match body.take() {
+                Some(body) if body.is_streaming() => reqwest::Body::wrap_stream(body),
+                Some(body) => body.full_bytes().cloned().unwrap_or_default().into(),
+                None => reqwest::Body::from(Bytes::new()),
+            };
+            let mut head = http::Request::new(sent);
+            *head.method_mut() = parts.method.clone();
+            *head.uri_mut() = parts.uri.clone();
+            *head.headers_mut() = parts.headers.clone();
+            let req = reqwest::Request::try_from(head).map_err(invalid)?;
+            let resp = self
+                .client
+                .execute(req)
+                .await
+                // The error names the provider's URL, which is for logs only.
+                .map_err(|e| match e.is_builder() {
+                    true => invalid(e),
+                    false => Upstream::fault("the provider could not be reached").with_source(e),
+                })?;
+            let next = follow.and_then(|allow| redirect(&resp, &parts.uri, allow.as_ref()));
+            match next {
+                Some(next) if hops < REDIRECTS => {
+                    if origin(&next) != origin(&parts.uri) {
+                        leave_origin(&mut parts.headers);
+                    }
+                    parts.uri = next;
+                    hops += 1;
+                }
+                _ => break resp,
+            }
         };
-        let req =
-            reqwest::Request::try_from(http::Request::from_parts(parts, body)).map_err(invalid)?;
-        let resp = self
-            .client
-            .execute(req)
-            .await
-            // The error names the provider's URL, which is for logs only.
-            .map_err(|e| match e.is_builder() {
-                true => invalid(e),
-                false => Upstream::fault("the provider could not be reached").with_source(e),
-            })?;
         if resp.status() == http::StatusCode::SWITCHING_PROTOCOLS {
             return Err(Upstream::fault(
                 "the provider switched protocols, which this transport does not",
@@ -151,6 +199,7 @@ impl HttpTransport {
         strip_origin_headers(resp.headers_mut());
         Ok((resp, None))
     }
+
     /// A provider factory sharing this client's pool and configuration.
     pub fn connect(
         self,
@@ -165,5 +214,45 @@ impl HttpTransport {
             },
             limit,
         )
+    }
+}
+
+/// Where `resp`, an answer to a call to `from`, redirects it, if `allow`
+/// accepts that.
+fn redirect(resp: &reqwest::Response, from: &Uri, allow: &Allow) -> Option<Uri> {
+    let redirects = matches!(
+        resp.status(),
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    );
+    let location = resp.headers().get(LOCATION)?.to_str().ok()?;
+    let to = reqwest::Url::parse(&from.to_string())
+        .ok()?
+        .join(location)
+        .ok()?;
+    let to: Uri = to.as_str().parse().ok()?;
+    (redirects && allow(&to)).then_some(to)
+}
+
+/// A URI's scheme, host and port.
+fn origin(uri: &Uri) -> (Option<&str>, Option<&str>, Option<u16>) {
+    (uri.scheme_str(), uri.host(), uri.port_u16())
+}
+
+/// Remove from `headers` what only the origin they were meant for may see.
+fn leave_origin(headers: &mut HeaderMap) {
+    for name in [AUTHORIZATION, COOKIE, PROXY_AUTHORIZATION] {
+        headers.remove(name);
+    }
+    let named: Vec<_> = headers
+        .keys()
+        .filter(|n| is_credential(n.as_str()))
+        .cloned()
+        .collect();
+    for name in named {
+        headers.remove(name);
     }
 }

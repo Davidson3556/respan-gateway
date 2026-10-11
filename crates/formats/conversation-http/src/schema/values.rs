@@ -10,6 +10,7 @@ use respan_gateway_core::{
     BadRequest, ErrorCode, Fault, NativeFields, NativeValue, Truncated, Upstream,
 };
 use respan_gateway_http::Status;
+use respan_gateway_http::framing::fields;
 use respan_gateway_http::http::StatusCode;
 use serde_json::{Map, Value};
 
@@ -158,26 +159,11 @@ pub(crate) fn remainder(v: &Value, keys: &[&str]) -> Map<String, Value> {
     rest.map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
-/// The fields of `v` but those named `taken` and null ones.
-pub(crate) fn rest_of(v: &Value, taken: &[&str]) -> Map<String, Value> {
-    let fields = v.as_object().into_iter().flatten();
-    let rest = fields.filter(|(k, v)| !taken.contains(&k.as_str()) && !v.is_null());
-    rest.map(|(k, v)| (k.clone(), v.clone())).collect()
-}
-
-/// Add to `base`, an object, the fields of `fields` it lacks, objects
-/// field by field: the semantic fields `base` was written with take
-/// precedence over native edits.
+/// Add to `base`, an object, the fields of `fields` it lacks: the semantic
+/// fields `base` was written with take precedence over native edits.
 pub(crate) fn merge_missing(base: &mut Value, fields: Map<String, Value>) {
-    let Some(base) = base.as_object_mut() else {
-        return;
-    };
-    for (key, value) in fields {
-        match (base.get_mut(&key), value) {
-            (Some(had), Value::Object(more)) if had.is_object() => merge_missing(had, more),
-            (Some(_), _) => {}
-            (None, value) => _ = base.insert(key, value),
-        }
+    if let Some(base) = base.as_object_mut() {
+        fields::merge_missing(base, &fields);
     }
 }
 
@@ -460,13 +446,6 @@ pub(crate) fn ended(done: bool) -> Result<(), Fault> {
         true => Ok(()),
         false => Err(Truncated::fault()),
     }
-}
-
-/// Seconds since the Unix epoch, as a response's `created` says.
-pub(crate) fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 /// The fields of `v` not in `known` that say something other than their

@@ -167,11 +167,11 @@ fn stream_event(done: &mut bool, raw: &[u8], out: &mut Vec<Output>) -> Result<()
 /// The encoder of a response to a client's `request`, in the framing it
 /// asked for.
 fn response_encoder(
-    request: &http::Request<Bytes>,
+    _request: &http::Request<Bytes>,
+    asked: &Map<String, Value>,
     head: &mut http::response::Parts,
 ) -> Box<dyn Encoder<Output>> {
-    let asked = super::asked(request);
-    if asks_events(&asked) {
+    if asks_events(asked) {
         super::content_type(head, "text/event-stream");
         return Box::new(StreamEncoder::default());
     }

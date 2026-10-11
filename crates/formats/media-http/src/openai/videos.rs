@@ -401,6 +401,7 @@ fn job_of(v: &Value) -> Result<Job, Fault> {
 /// else one JSON body.
 fn response_encoder(
     request: &http::Request<Bytes>,
+    _asked: &Map<String, Value>,
     head: &mut ResponseHead,
 ) -> Box<dyn Encoder<Output>> {
     if !matches!(

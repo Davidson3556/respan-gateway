@@ -1535,3 +1535,108 @@ async fn until_end_falls_back_when_a_provider_filter_fails_at_end() {
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
     }
 }
+
+#[tokio::test]
+async fn routing_refuses_a_model_read_from_another_input_type() {
+    let mock = Fakes::start().await;
+    let routing = Routing::new(Arc::new(Routes::new())).format(
+        "openai-chat",
+        CHAT,
+        Model::of::<String>(|s| Some(s.as_str()), |s, model| *s = model),
+    );
+    let gw = Gateway::new()
+        .client::<Input, _, _>(OpenAiChat)
+        .expect("chat client")
+        .provider::<Input, _, _>(
+            "a",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(A), LIMIT),
+        )
+        .expect("a provider")
+        .plugin(routing)
+        .target("a")
+        .expect("default target");
+    let body = r#"{"model":"gpt","messages":[{"role":"user","content":"hi"}]}"#;
+    let (resp, outcome) = serve(&gw, post("/v1/chat/completions", body)).await;
+    let (status, _, _) = read_whole(resp).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(outcome.await.is_err_and(|f| f.is::<Internal>()));
+    assert!(mock.sent().is_empty());
+}
+
+/// Targets provider `b` before routing sees a request.
+struct TargetsB;
+
+#[async_trait]
+impl Plugin for TargetsB {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        cx.set_target("b");
+        Ok(None)
+    }
+}
+
+/// Providers `a` and `b` of OpenAI Chat and routing that claims `gpt` for
+/// `a`, after a plugin that targets `b` if `earlier`, else over a gateway
+/// whose default target is `b`.
+fn targeted_gateway(mock: &Fakes, earlier: bool) -> Gateway {
+    let speaks = |internal: &str| {
+        vec![Speaks {
+            format: "openai-chat".into(),
+            kind: CHAT,
+            internal: internal.into(),
+        }]
+    };
+    let routes = Routes::new()
+        .provider("a", speaks("a"))
+        .provider("b", speaks("b"))
+        .claim("gpt", "a");
+    let mut routing = Routing::new(Arc::new(routes)).format(
+        "openai-chat",
+        CHAT,
+        Model::of(Input::model, Input::set_model),
+    );
+    if !earlier {
+        routing = routing.over("b");
+    }
+    let gw = Gateway::new()
+        .client::<Input, _, _>(OpenAiChat)
+        .expect("chat client")
+        .provider::<Input, _, _>(
+            "a",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(A), LIMIT),
+        )
+        .expect("a provider")
+        .provider::<Input, _, _>(
+            "b",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(B), LIMIT),
+        )
+        .expect("b provider");
+    match earlier {
+        true => gw.plugin(TargetsB).plugin(routing),
+        false => gw.plugin(routing).target("b").expect("default target"),
+    }
+}
+
+#[tokio::test]
+async fn routing_keeps_a_target_an_earlier_plugin_set() {
+    const ASK: &str = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#;
+    let mock = Fakes::start().await;
+    mock.reply(B, Answer::text("an earlier plugin's choice"));
+    let (status, answer) = routed_post(&targeted_gateway(&mock, true), ASK).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(answer.contains("an earlier plugin's choice"), "{answer}");
+    assert_eq!(mock.sent(), ["b.test"]);
+}
+
+#[tokio::test]
+async fn routing_overrides_the_gateways_default_target_it_was_told_of() {
+    const ASK: &str = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#;
+    let mock = Fakes::start().await;
+    mock.reply(A, Answer::text("routed"));
+    let (status, answer) = routed_post(&targeted_gateway(&mock, false), ASK).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(answer.contains("routed"), "{answer}");
+    assert_eq!(mock.sent(), ["a.test"]);
+}
