@@ -31,7 +31,7 @@ pub(crate) use errors::{says, says_error};
 pub use exchange::Asked;
 #[cfg(test)]
 pub(crate) use exchange::OutputParser;
-pub(crate) use exchange::{Gate, error_event, unreadable_event};
+pub(crate) use exchange::{Gate, error_event, response_encoder, unreadable_event};
 pub(crate) use respan_gateway_http::framing::fields::{rest_of, unix_now};
 pub(crate) use values::{
     INERT, Keep, Names, NativeFieldsExt, Totals, count, decode_content, decode_message,
@@ -40,6 +40,7 @@ pub(crate) use values::{
     tool_field, unsupported_fields, untranslatable, unwritable_content, unwritable_usage,
     usage_extra,
 };
+pub(crate) use values::{effort_name, own_native, parse_effort, reasoning_of, take_native};
 
 use respan_gateway_conversation::{Assembled, Content, Input, Output};
 use respan_gateway_core::{Connection, EventSink, EventStream, Fault};

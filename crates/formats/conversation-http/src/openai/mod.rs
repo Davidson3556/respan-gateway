@@ -54,13 +54,13 @@ mod tests;
 use crate::is_inert;
 use crate::schema::{
     Asked, Decoder, Gate, Names, NativeFieldsExt, Schema, Totals, count, decode_message, ended,
-    error_event, fits, merge_details, merge_fields, native_fields, remainder, says, says_error,
-    set, stop_json, tidy, unix_now, unreadable_event, unsupported_fields, unwritable_content,
-    unwritable_usage, usage_extra,
+    error_event, fits, merge_details, merge_fields, native_fields, parse_effort, remainder, says,
+    says_error, set, stop_json, take_native, tidy, unix_now, unreadable_event, unsupported_fields,
+    untranslatable, unwritable_content, unwritable_usage, usage_extra,
 };
 use respan_gateway_conversation::{
-    Assembled, AssembledBlock, AssembledItem, Block, Content, Delta, Finish, Input, Output, Role,
-    Start, Usage,
+    Assembled, AssembledBlock, AssembledItem, Block, Content, Delta, Finish, Input, Output,
+    Reasoning, Role, Start, Usage,
 };
 use respan_gateway_core::{BadRequest, Connection, Fault, Format, NativeValue, Upstream};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
@@ -71,7 +71,7 @@ use std::sync::Arc;
 
 use request::{
     read_openai_message, read_openai_tools, read_response_format, write_openai_message,
-    write_openai_tools, write_response_format,
+    write_openai_tools, write_reasoning, write_response_format,
 };
 
 /// The wire format's name ([`Schema::NAME`]).
@@ -159,8 +159,12 @@ impl Schema for OpenAiChat {
     const PATH: &'static str = "/chat/completions";
     /// The two spellings of a response's token limit, and the structured
     /// output requirement.
-    const OWN: &'static [&'static str] =
-        &["max_tokens", "max_completion_tokens", "response_format"];
+    const OWN: &'static [&'static str] = &[
+        "max_tokens",
+        "max_completion_tokens",
+        "response_format",
+        "reasoning_effort",
+    ];
     type Decoding = OpenAiDecoder;
 
     fn decoder(&self) -> OpenAiDecoder {
@@ -198,6 +202,9 @@ impl Schema for OpenAiChat {
         read_openai_tools(v, &mut chat);
         chat.native = native_fields(OPENAI, std::mem::take(chat.native.fields_mut(OPENAI)));
         read_response_format(v, &mut chat);
+        chat.options.reasoning =
+            take_native(&mut chat, "reasoning_effort", |e| parse_effort(e.as_str()?))
+                .map(Reasoning::effort);
         chat
     }
 
@@ -232,6 +239,10 @@ impl Schema for OpenAiChat {
         set(&mut v, "stop", stop_json(&chat.options.stop));
         set(&mut v, "user", chat.user.clone().map(Into::into));
         set(&mut v, "response_format", write_response_format(chat));
+        set(&mut v, "reasoning_effort", write_reasoning(chat)?);
+        if chat.options.top_k.is_some() {
+            return Err(untranslatable("top_k in OpenAI Chat"));
+        }
         Ok(v)
     }
 
@@ -575,6 +586,8 @@ pub struct OpenAiDecoder {
     done: bool,
     /// Every block opened so far; a block's number is its place.
     blocks: Vec<Opened>,
+    /// Whether the response made a tool call.
+    called: bool,
 }
 
 #[derive(Debug)]
@@ -604,6 +617,7 @@ impl OpenAiDecoder {
             said: Map::new(),
             done: false,
             blocks: Vec::new(),
+            called: false,
         }
     }
 }
@@ -691,6 +705,7 @@ impl OpenAiDecoder {
             }
         }
         let block = u32::try_from(self.blocks.len()).unwrap_or(u32::MAX);
+        self.called |= matches!(kind, Block::ToolCall { .. });
         let call_id = match &kind {
             Block::ToolCall { id, .. } => Some(id.clone()),
             _ => None,
@@ -811,7 +826,13 @@ impl OpenAiDecoder {
         }
         if let Some(reason) = first["finish_reason"].as_str() {
             self.close(out);
-            out.push(Output::finished(FINISH.finish(reason)));
+            // A call the request forced finishes as "stop" at OpenAI; a
+            // response that made calls ends in tool use all the same.
+            let finish = match (FINISH.finish(reason), self.called) {
+                (Finish::Stop, true) => Finish::ToolUse,
+                (finish, _) => finish,
+            };
+            out.push(Output::finished(finish));
         }
         Ok(())
     }

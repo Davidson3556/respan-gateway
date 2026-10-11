@@ -84,8 +84,8 @@ another provider answered.
 
 What the kind has no form for stays native and is refused in translation:
 `previous_response_id` and `conversation` (another provider cannot resolve
-them), `store: false`, `include`, `truncation`, `reasoning` (effort and
-summary), `metadata`, built-in tools (web search, file search, computer use,
+them), `store: false`, `include`, `truncation`, the rest of `reasoning`
+(a summary but `auto`), `metadata`, built-in tools (web search, file search, computer use,
 code interpreter, MCP) and the items they make, refusals, and annotations. A
 relay in this format sends them back. The ids and statuses of items, and a
 function tool's default `strict`, are inert: any other format drops them, and
@@ -96,8 +96,9 @@ request, and log probabilities are not carried. The module docs say it all.
 ## Google Gemini
 
 `gemini::GeminiGenerate`, named `gemini-generate`: a `POST` to a path
-`.../models/{model}:generateContent` or `:streamGenerateContent?alt=sse`
-(the JSON-array stream, without `alt=sse`, is refused); its provider base URL
+`.../models/{model}:generateContent` or `:streamGenerateContent` (SSE with
+`?alt=sse`, else Gemini's JSON array of the same responses; a provider is
+always asked for SSE); its provider base URL
 includes the version, such as `https://generativelanguage.googleapis.com/v1beta`,
 with the key in `x-goog-api-key`.
 
@@ -120,8 +121,8 @@ gives the output limit, `temperature`, `topP`, stop sequences and structured
 output (`responseMimeType` with a schema).
 
 What the kind has no form for stays native and is refused in another format:
-`safetySettings`, `cachedContent`, `topK`, `thinkingConfig` and other
-`generationConfig` fields, tools Google runs (`googleSearch`), a `toolConfig`
+`safetySettings`, `cachedContent`, a `thinkingConfig` beyond what
+[reasoning](#reasoning-and-sampling) maps, and other `generationConfig` fields, tools Google runs (`googleSearch`), a `toolConfig`
 beyond the choice, video parts. A part's `thoughtSignature` is the one native
 field another format drops, as it only hints at the thinking behind the part
 (Gemini 3 needs one on a function call in the history; the
@@ -137,6 +138,33 @@ when calls were made. Reasons that filter (`SAFETY`, `RECITATION`, `BLOCKLIST`,
 the answer finished. Usage counts the thoughts in the output, and the cached
 tokens in the input. A stream with no `finishReason` was cut. Errors are
 `{"error": {"code", "message", "status"}}`.
+
+## Reasoning and sampling
+
+`Input.options.reasoning` and `top_k` are the kind's; each format reads and
+writes them as below. A value the kind has no form for (an unknown effort, a
+`summary` of `detailed`, adaptive or dynamic thinking) stays native, goes back
+to its own format unchanged, and is refused in another.
+
+| Kind | OpenAI Chat | Responses | Anthropic | Gemini |
+| --- | --- | --- | --- | --- |
+| `effort: Off` | `reasoning_effort: "none"` | `reasoning.effort: "none"` | `thinking: {type: "disabled"}` | `thinkingBudget: 0` |
+| `effort: Minimal/Low/Medium/High` | `reasoning_effort` | `reasoning.effort` | refused | `thinkingLevel` |
+| `budget_tokens: n` | refused | refused | `thinking: {type: "enabled", budget_tokens: n}` | `thinkingBudget: n` |
+| `summary: true` | refused | `reasoning.summary: "auto"` | (thinking is returned) | `includeThoughts: true` |
+| `summary: false` | (nothing) | (no summary) | refused | `includeThoughts: false` |
+| `top_k: n` | refused | refused | `top_k` | `generationConfig.topK` |
+
+An effort and a budget do not convert, so each travels only to a format that
+has it (see the [kind](../../kinds/conversation/README.md)); asking for both
+at once is refused everywhere. Gemini levels are read in either case and
+written in lower case.
+
+## Finish
+
+A response that made tool calls finishes as tool use when the provider says
+`stop` (as OpenAI does when `tool_choice` forces a function, and Gemini
+always, and Responses when `completed`); Anthropic says `tool_use` itself.
 
 ## Tests
 

@@ -386,13 +386,30 @@ async fn a_request_the_provider_refuses_is_the_clients_error() {
 }
 
 #[tokio::test]
-async fn a_stream_without_sse_is_refused_before_a_call() {
-    let h = Harness::to("gemini").await;
-    let req = post(&format!("{MODEL}:streamGenerateContent"), hi().to_string());
-    let (status, v) = h.json(req).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
-    assert_eq!(v["error"]["status"], "INVALID_ARGUMENT");
-    assert!(h.gemini.requests().is_empty());
+async fn a_stream_without_sse_is_a_json_array_of_the_same_responses() {
+    for target in ["gemini", "openai"] {
+        let h = Harness::to(target).await;
+        let answer = Answer::text("one two three");
+        match target {
+            "gemini" => h.gemini.answer(answer),
+            _ => h.openai.answer(answer),
+        };
+        let req = post(&format!("{MODEL}:streamGenerateContent"), hi().to_string());
+        let (status, headers, body) = h.send(req).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let kind = headers.get("content-type").and_then(|v| v.to_str().ok());
+        assert_eq!(kind, Some("application/json"), "{target}");
+        let chunks: Vec<Value> = serde_json::from_str(&body).expect("one JSON array");
+        assert_eq!(gemini_text(&chunks), "one two three", "{target}");
+        assert!(chunks.len() >= 3, "{chunks:?}");
+        let last = chunks.last().unwrap_or(&Value::Null);
+        assert_eq!(last["candidates"][0]["finishReason"], "STOP");
+        // The provider is still asked for SSE.
+        if target == "gemini" {
+            let sent = only(h.gemini.requests());
+            assert_eq!(sent.query_param("alt"), Some("sse"));
+        }
+    }
 }
 
 // ---- Gemini client to other providers ----

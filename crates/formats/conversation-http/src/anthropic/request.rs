@@ -5,12 +5,12 @@
 
 use crate::schema::{
     Keep, NativeFieldsExt, decode_content, decode_tools, each_tool, encode_content, encode_native,
-    kept_fields, merge_missing, native_fields, only, remainder, rest_of, set, tool_field,
-    untranslatable,
+    kept_fields, merge_missing, native_fields, only, own_native, reasoning_of, remainder, rest_of,
+    set, take_native, tool_field, untranslatable,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use respan_gateway_conversation::{
-    Content, Input, Media, MediaSource, ResponseFormat, Tool, ToolChoice,
+    Content, Effort, Input, Media, MediaSource, Reasoning, ResponseFormat, Tool, ToolChoice,
 };
 use respan_gateway_core::NativeFields;
 use respan_gateway_core::{BadRequest, Fault};
@@ -365,4 +365,45 @@ pub(crate) fn write_output(input: &Input, out: &mut Map<String, Value>) -> Resul
     }
     set(out, "output_config", config);
     Ok(())
+}
+
+/// The kind's reasoning of `thinking`, if it is exactly an enabled budget or
+/// disabled: then it leaves the request's `native`.
+pub(crate) fn read_thinking(input: &mut Input) {
+    input.options.reasoning = take_native(input, "thinking", |t| {
+        let only_keys = |keys: &[&str]| {
+            t.as_object()
+                .is_some_and(|m| m.keys().all(|k| keys.contains(&k.as_str())))
+        };
+        match t["type"].as_str()? {
+            "enabled" if only_keys(&["type", "budget_tokens"]) => {
+                Some(Reasoning::budget(t["budget_tokens"].as_u64()?))
+            }
+            "disabled" if only_keys(&["type"]) => Some(Reasoning::effort(Effort::Off)),
+            _ => None,
+        }
+    });
+}
+
+/// The request's `thinking`: the kind's reasoning, else the request's own.
+/// Anthropic thinks to a token budget, not an effort, and returns its
+/// thinking whenever it thinks.
+pub(crate) fn write_thinking(input: &Input) -> Result<Option<Value>, Fault> {
+    let own = || own_native(input, ANTHROPIC, "thinking");
+    let Some(r) = reasoning_of(input)? else {
+        return Ok(own());
+    };
+    if r.summary == Some(false) {
+        return Err(untranslatable("withholding the thinking in Anthropic"));
+    }
+    Ok(match (r.effort, r.budget_tokens) {
+        (Some(Effort::Off), _) => Some(json!({ "type": "disabled" })),
+        (Some(_), _) => {
+            return Err(untranslatable(
+                "a named reasoning effort in Anthropic, which takes a token budget",
+            ));
+        }
+        (None, Some(budget)) => Some(json!({ "type": "enabled", "budget_tokens": budget })),
+        (None, None) => own(),
+    })
 }

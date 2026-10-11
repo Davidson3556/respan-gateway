@@ -10,12 +10,13 @@
 //! a user message. Consecutive items of an assistant are one assistant
 //! message ([`request`] says how an item's own fields are kept). Function
 //! tools, `tool_choice`, `parallel_tool_calls`, `max_output_tokens`,
-//! `temperature`, `top_p`, `user` and `text.format` are the kind's.
+//! `temperature`, `top_p`, `user`, `text.format` and `reasoning` (its `effort`,
+//! and a `summary` of `auto`) are the kind's.
 //!
 //! What the kind has no form for stays native to this format and is refused
 //! in translation: `previous_response_id` and `conversation` (another
 //! provider cannot resolve them), `store: false`, `include`, `truncation`,
-//! `reasoning` (effort and summary), `metadata`, built-in tools (web search,
+//! the rest of `reasoning` (`generate_summary`, a summary but `auto`), `metadata`, built-in tools (web search,
 //! file search, computer use, code interpreter, MCP) and the items they
 //! make, and the rest of what the request says beyond the spec's defaults.
 //! Item ids and statuses, and the default `strict` of a function tool, are
@@ -134,7 +135,7 @@ impl Schema for OpenAiResponses {
     const NAME: &'static str = RESPONSES;
     const PATH: &'static str = "/responses";
     /// The structured output requirement is in `text`.
-    const OWN: &'static [&'static str] = &["text"];
+    const OWN: &'static [&'static str] = &["text", "reasoning"];
     type Decoding = ResponsesDecoder;
 
     fn decoder(&self) -> ResponsesDecoder {
@@ -155,6 +156,7 @@ impl Schema for OpenAiResponses {
         request::read_tools(v, &mut chat);
         chat.native = native_fields(RESPONSES, std::mem::take(chat.native.fields_mut(RESPONSES)));
         request::read_format(v, &mut chat);
+        request::read_reasoning(&mut chat);
         chat
     }
 
@@ -178,6 +180,10 @@ impl Schema for OpenAiResponses {
         crate::schema::set(&mut v, "top_p", chat.options.top_p.map(Into::into));
         crate::schema::set(&mut v, "user", chat.user.clone().map(Into::into));
         request::write_format(chat, &mut v);
+        request::write_reasoning(chat, &mut v)?;
+        if chat.options.top_k.is_some() {
+            return Err(crate::schema::untranslatable("top_k in Responses"));
+        }
         Ok(v)
     }
 

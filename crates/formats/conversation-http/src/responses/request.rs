@@ -14,12 +14,13 @@
 
 use super::RESPONSES;
 use crate::schema::{
-    INERT, Keep, Names, NativeFieldsExt, decode_tools, each_tool, encode_native, kept_fields,
-    merge_missing, native_fields, only, remainder, rest_of, says, set, tool_field, untranslatable,
+    INERT, Keep, Names, NativeFieldsExt, decode_tools, each_tool, effort_name, encode_native,
+    kept_fields, merge_missing, native_fields, only, own_native, parse_effort, reasoning_of,
+    remainder, rest_of, says, set, tool_field, untranslatable,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use respan_gateway_conversation::{
-    Content, Input, Media, MediaSource, Message, ResponseFormat, Role, Tool, ToolChoice,
+    Content, Input, Media, MediaSource, Message, Reasoning, ResponseFormat, Role, Tool, ToolChoice,
 };
 use respan_gateway_core::{Fault, NativeFields};
 use serde_json::{Map, Value, json};
@@ -815,4 +816,62 @@ pub(super) fn encode_part(c: &Content) -> Result<Value, Fault> {
         Content::Reasoning { .. } => Err(untranslatable("reasoning outside an assistant")),
         _ => Err(untranslatable("an unsupported kind of part")),
     }
+}
+
+/// The kind's reasoning of `reasoning`: its effort, and a summary of `auto`
+/// (the summaries `concise` and `detailed` have no form in the kind). What
+/// else it holds stays in the request's `native`.
+pub(super) fn read_reasoning(input: &mut Input) {
+    let Some(native) = input.native.as_mut() else {
+        return;
+    };
+    let Some(Value::Object(config)) = native.fields.get_mut("reasoning") else {
+        return;
+    };
+    let mut r = Reasoning::default();
+    if let Some(effort) = config
+        .get("effort")
+        .and_then(Value::as_str)
+        .and_then(parse_effort)
+    {
+        config.shift_remove("effort");
+        r.effort = Some(effort);
+    }
+    if config.get("summary").and_then(Value::as_str) == Some("auto") {
+        config.shift_remove("summary");
+        r.summary = Some(true);
+    }
+    if config.is_empty() {
+        native.fields.shift_remove("reasoning");
+    }
+    if native.is_empty() {
+        input.native = None;
+    }
+    if r != Reasoning::default() {
+        input.options.reasoning = Some(r);
+    }
+}
+
+/// The request's `reasoning`: its own fields, with the kind's effort and
+/// summary. Responses has no token budget.
+pub(super) fn write_reasoning(input: &Input, out: &mut Map<String, Value>) -> Result<(), Fault> {
+    let mut config = own_native(input, RESPONSES, "reasoning").unwrap_or_else(|| json!({}));
+    if let Some(r) = reasoning_of(input)? {
+        if r.budget_tokens.is_some() {
+            return Err(untranslatable("a reasoning token budget in Responses"));
+        }
+        if let Some(config) = config.as_object_mut() {
+            if let Some(effort) = r.effort {
+                config.insert("effort".into(), effort_name(effort).into());
+            }
+            match r.summary {
+                Some(true) => _ = config.insert("summary".into(), "auto".into()),
+                Some(false) => _ = config.shift_remove("summary"),
+                None => {}
+            }
+        }
+    }
+    let empty = config.as_object().is_none_or(Map::is_empty);
+    set(out, "reasoning", (!empty).then_some(config));
+    Ok(())
 }

@@ -5,8 +5,9 @@
 //! The model is in the path, not the body: a client's request names it there
 //! (`models/` is left off), and a call to a provider writes it there from the
 //! input's model. A stream is asked for by the method (`streamGenerateContent`),
-//! not by a field of the body, and only as SSE (`alt=sse`): the JSON array
-//! stream of a request without it is refused.
+//! not by a field of the body: with `alt=sse` it is SSE, without it Gemini's
+//! other framing, one JSON array whose elements are the same responses. The
+//! provider is always asked for SSE.
 //!
 //! # Requests
 //!
@@ -22,12 +23,15 @@
 //! (`error` for a failed call). `systemInstruction` is a leading system
 //! message; `tools` are the function declarations, their `parameters` (or
 //! `parametersJsonSchema`) JSON Schema; `toolConfig` gives the tool choice;
-//! `generationConfig` the output limit, `temperature`, `topP`, stop
-//! sequences and structured output (`responseMimeType` with a schema).
+//! `generationConfig` the output limit, `temperature`, `topP`, `topK`, stop
+//! sequences, structured output (`responseMimeType` with a schema) and
+//! `thinkingConfig`: `thinkingLevel` is an effort, `thinkingBudget` a token
+//! budget (`0` is off), `includeThoughts` the summary. A `thinkingBudget`
+//! beside a `thinkingLevel`, or a dynamic one (`-1`), stays native.
 //!
 //! What the kind has no form for is this format's `native`, where it
 //! appeared, and refused in another format: `safetySettings`,
-//! `cachedContent`, `topK`, `thinkingConfig`, other `generationConfig`
+//! `cachedContent`, other `thinkingConfig` fields, other `generationConfig`
 //! fields, tools Google runs, a `toolConfig` the kind has no choice for,
 //! video parts, and a part's `thoughtSignature` (which another format drops).
 //! A request for several candidates, one tool call at a time, or an end
@@ -145,6 +149,49 @@ fn call_of(uri: &http::Uri) -> Option<(&str, &str)> {
     (named && known).then_some((model, method))
 }
 
+/// Whether a streaming call at `uri` asks for server-sent events (`alt=sse`).
+fn sse(uri: &http::Uri) -> bool {
+    uri.query()
+        .is_some_and(|q| q.split('&').any(|p| p == "alt=sse"))
+}
+
+/// Writes the SSE frames of `inner` as the elements of one JSON array, which
+/// is how Gemini streams without `alt=sse`.
+struct JsonArray {
+    inner: Box<dyn Encoder<Output>>,
+    began: bool,
+}
+
+impl JsonArray {
+    /// The elements in `frames`, the SSE events `inner` wrote.
+    fn elements(&mut self, frames: &[u8], out: &mut BytesMut) {
+        let text = String::from_utf8_lossy(frames);
+        for data in text.split("\n\n").filter_map(|f| f.strip_prefix("data: ")) {
+            out.extend_from_slice(if self.began { b",\n" } else { b"[" });
+            self.began = true;
+            out.extend_from_slice(data.as_bytes());
+        }
+    }
+}
+
+impl Encoder<Output> for JsonArray {
+    fn encode(&mut self, reply: &Output, out: &mut BytesMut) -> Result<(), Fault> {
+        let mut made = BytesMut::new();
+        self.inner.encode(reply, &mut made)?;
+        self.elements(&made, out);
+        Ok(())
+    }
+
+    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+        let mut made = BytesMut::new();
+        let ended = self.inner.end(end, &mut made);
+        self.elements(&made, out);
+        ended?;
+        out.extend_from_slice(if self.began { b"]" } else { b"[]" });
+        Ok(())
+    }
+}
+
 /// Whether the call at `uri` is a streaming method.
 pub(crate) fn streams(uri: &http::Uri) -> bool {
     call_of(uri).is_some_and(|(_, method)| method == "streamGenerateContent")
@@ -209,16 +256,6 @@ impl GeminiGenerate {
             Ok(v) if v.is_object() => v,
             _ => return Err(BadRequest::fault("request body is not a JSON object")),
         };
-        if streams(&head.uri)
-            && !head
-                .uri
-                .query()
-                .is_some_and(|q| q.split('&').any(|p| p == "alt=sse"))
-        {
-            return Err(BadRequest::fault(
-                "streamGenerateContent is served as SSE only: add ?alt=sse",
-            ));
-        }
         let mut chat = self.decode_json(&v);
         chat.model = call_of(&head.uri).map(|(model, _)| model.to_owned());
         Ok(chat)
@@ -273,6 +310,28 @@ impl Schema for GeminiGenerate {
             true => format!("/models/{model}:streamGenerateContent?alt=sse"),
             false => format!("/models/{model}:generateContent"),
         }))
+    }
+
+    /// A stream without `alt=sse` is Gemini's other framing: a JSON array,
+    /// its elements the responses the SSE events carry.
+    fn response_encoder(
+        &self,
+        head: &mut http::response::Parts,
+        request: &http::Request<Bytes>,
+    ) -> Box<dyn Encoder<Output>> {
+        let encoder = crate::schema::response_encoder(*self, head, request);
+        let array = streams(request.uri()) && !sse(request.uri()) && head.status.is_success();
+        if !array {
+            return encoder;
+        }
+        head.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
+        Box::new(JsonArray {
+            inner: encoder,
+            began: false,
+        })
     }
 
     fn decode_part(_: &Value) -> Option<respan_gateway_conversation::Content> {

@@ -955,7 +955,7 @@ async fn what_another_provider_cannot_resolve_is_refused_before_a_call() {
         ("conversation", json!("conv_1")),
         ("store", json!(false)),
         ("include", json!(["reasoning.encrypted_content"])),
-        ("reasoning", json!({ "effort": "low" })),
+        ("reasoning", json!({ "summary": "detailed" })),
         ("truncation", json!("auto")),
         ("tools", json!([{ "type": "web_search_preview" }])),
         ("tool_choice", json!({ "type": "file_search" })),

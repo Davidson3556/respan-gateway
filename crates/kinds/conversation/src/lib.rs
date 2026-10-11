@@ -54,6 +54,10 @@ pub struct GenerationOptions {
     pub temperature: Option<f64>,
     /// Nucleus sampling cutoff.
     pub top_p: Option<f64>,
+    /// Sampling from the `top_k` likeliest tokens only.
+    pub top_k: Option<u64>,
+    /// How hard the model thinks before it answers.
+    pub reasoning: Option<Reasoning>,
     /// Stop sequences.
     pub stop: Vec<String>,
     /// Tool selection policy.
@@ -62,6 +66,60 @@ pub struct GenerationOptions {
     pub parallel_tool_calls: Option<bool>,
     /// Required shape of the generated answer.
     pub response_format: Option<ResponseFormat>,
+}
+
+/// How much the model thinks before it answers, and whether it says so.
+///
+/// A vendor states this as a named effort or as a token budget; the two do
+/// not convert (a budget does not pick an effort, and the same effort buys
+/// different thinking from different models), so a format that has only
+/// one refuses the other. Only [`Effort::Off`] is the same in both. A plugin
+/// that wants an effort as a budget decides it by its own policy, in a
+/// filter.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Reasoning {
+    /// A named effort.
+    pub effort: Option<Effort>,
+    /// A limit on the thinking, in tokens.
+    pub budget_tokens: Option<u64>,
+    /// Whether the thinking is returned, summarized where the provider only
+    /// summarizes it. `Some(false)` asks that it is withheld.
+    pub summary: Option<bool>,
+}
+
+impl Reasoning {
+    /// Thinking of this named `effort`.
+    pub fn effort(effort: Effort) -> Self {
+        Self {
+            effort: Some(effort),
+            ..Self::default()
+        }
+    }
+
+    /// Thinking of at most `tokens`.
+    pub fn budget(tokens: u64) -> Self {
+        Self {
+            budget_tokens: Some(tokens),
+            ..Self::default()
+        }
+    }
+}
+
+/// A named amount of thinking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Effort {
+    /// No thinking.
+    Off,
+    /// The least thinking.
+    Minimal,
+    /// Little thinking.
+    Low,
+    /// Moderate thinking.
+    Medium,
+    /// Much thinking.
+    High,
 }
 
 /// A common structured-output requirement.

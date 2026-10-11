@@ -2,10 +2,10 @@
 //! the fields a value keeps for its own format, tools, usage totals, the
 //! faults of what cannot be written, and small JSON helpers.
 
-use respan_gateway_conversation::Usage;
 use respan_gateway_conversation::{
     Block, Content, Delta, Finish, Input, Message, Output, Role, Tool, ToolChoice,
 };
+use respan_gateway_conversation::{Effort, Reasoning, Usage};
 use respan_gateway_core::{
     BadRequest, ErrorCode, Fault, NativeFields, NativeValue, Truncated, Upstream,
 };
@@ -515,6 +515,65 @@ impl NativeFieldsExt for Option<NativeFields> {
     fn is_empty(&self) -> bool {
         self.as_ref().is_none_or(NativeFields::is_empty)
     }
+}
+
+/// An effort as vendors name it: `none` (thinking off) to `high`.
+pub(crate) fn effort_name(effort: Effort) -> &'static str {
+    match effort {
+        Effort::Off => "none",
+        Effort::Minimal => "minimal",
+        Effort::Low => "low",
+        Effort::Medium => "medium",
+        Effort::High => "high",
+        _ => "high",
+    }
+}
+
+/// The effort a vendor's `name` says, in either case; `None` for any other
+/// name, which then stays native to its format.
+pub(crate) fn parse_effort(name: &str) -> Option<Effort> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "none" => Effort::Off,
+        "minimal" => Effort::Minimal,
+        "low" => Effort::Low,
+        "medium" => Effort::Medium,
+        "high" => Effort::High,
+        _ => return None,
+    })
+}
+
+/// The reasoning controls of `input`, refused if they name an effort and a
+/// budget at once, as no vendor takes both.
+pub(crate) fn reasoning_of(input: &Input) -> Result<Option<&Reasoning>, Fault> {
+    match &input.options.reasoning {
+        Some(r) if r.effort.is_some() && r.budget_tokens.is_some() => Err(BadRequest::fault(
+            "reasoning with both an effort and a token budget cannot be written",
+        )),
+        r => Ok(r.as_ref()),
+    }
+}
+
+/// The value of the request's native field `key` if `parse` reads all of it,
+/// which then leaves the native.
+pub(crate) fn take_native<T>(
+    input: &mut Input,
+    key: &str,
+    parse: impl FnOnce(&Value) -> Option<T>,
+) -> Option<T> {
+    let native = input.native.as_mut()?;
+    let parsed = parse(native.fields.get(key)?)?;
+    native.fields.shift_remove(key);
+    if native.is_empty() {
+        input.native = None;
+    }
+    Some(parsed)
+}
+
+/// The request's own native field `key`, if it is of `format`.
+pub(crate) fn own_native(input: &Input, format: &str, key: &str) -> Option<Value> {
+    (input.native.format() == Some(format))
+        .then(|| input.native.fields().get(key).cloned())
+        .flatten()
 }
 
 #[cfg(test)]

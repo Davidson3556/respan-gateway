@@ -260,7 +260,7 @@ fn what_the_kind_has_no_form_for_is_native_and_refused_in_translation() {
         ("store", json!(false)),
         ("include", json!(["reasoning.encrypted_content"])),
         ("truncation", json!("auto")),
-        ("reasoning", json!({ "effort": "low" })),
+        ("reasoning", json!({ "effort": "xhigh" })),
         ("metadata", json!({ "k": "v" })),
         ("tools", json!([{ "type": "web_search_preview" }])),
         ("tool_choice", json!({ "type": "web_search_preview" })),

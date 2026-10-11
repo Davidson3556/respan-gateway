@@ -1468,3 +1468,44 @@ fn a_plugins_fault_takes_one_shape_on_every_path() {
         (&json!("messages"), &json!("context_length_exceeded"))
     );
 }
+
+#[test]
+fn stop_after_a_tool_call_finishes_as_tool_use() {
+    // A call forced by `tool_choice` finishes as "stop" at OpenAI.
+    let body = json!({
+        "id": "c1", "object": "chat.completion", "model": "m",
+        "choices": [{ "index": 0, "finish_reason": "stop", "message": {
+            "role": "assistant", "content": null,
+            "tool_calls": [{ "id": "call_1", "type": "function",
+                "function": { "name": "echo", "arguments": "{}" } }] } }],
+    });
+    let finish = |out: Vec<Output>| {
+        out.into_iter().find_map(|o| match o {
+            Output::Finish(f) => Some(f),
+            _ => None,
+        })
+    };
+    assert_eq!(finish(decode_body(&body)), Some(Finish::ToolUse));
+
+    let chunk = |delta: Value, reason: Value| {
+        let c = json!({ "id": "c1", "model": "m", "choices": [
+            { "index": 0, "delta": delta, "finish_reason": reason }] });
+        format!("data: {c}\n\n")
+    };
+    let call = json!({ "tool_calls": [{ "index": 0, "id": "call_1", "type": "function",
+        "function": { "name": "echo", "arguments": "{}" } }] });
+    let (out, end) = decode_all(&[
+        &chunk(call, Value::Null),
+        &chunk(json!({}), "stop".into()),
+        "data: [DONE]\n\n",
+    ]);
+    assert!(end.is_ok());
+    assert_eq!(finish(out), Some(Finish::ToolUse));
+
+    // Without a call, "stop" stays a stop.
+    let (out, _) = decode_all(&[
+        &chunk(json!({ "content": "hi" }), "stop".into()),
+        "data: [DONE]\n\n",
+    ]);
+    assert_eq!(finish(out), Some(Finish::Stop));
+}

@@ -48,7 +48,10 @@ use respan_gateway_http::{ClientIo, Encoder, ProviderIo, http};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
-use request::{arguments_json, read_output, read_tools_of, write_output, write_tools};
+use request::{
+    arguments_json, read_output, read_thinking, read_tools_of, write_output, write_thinking,
+    write_tools,
+};
 
 /// The `max_tokens` of a translated request without one, as it is required.
 const DEFAULT_MAX_TOKENS: u64 = 4096;
@@ -119,6 +122,7 @@ const KNOWN: &[&str] = &[
     "max_tokens",
     "temperature",
     "top_p",
+    "top_k",
     "stop_sequences",
     "stream",
     "metadata",
@@ -178,7 +182,7 @@ impl Schema for AnthropicMessages {
     const PATH: &'static str = "/v1/messages";
     /// The API version sent when the client names none.
     const HEADERS: &'static [(&'static str, &'static str)] = &[("anthropic-version", "2023-06-01")];
-    const OWN: &'static [&'static str] = &["metadata", "output_config"];
+    const OWN: &'static [&'static str] = &["metadata", "output_config", "thinking"];
     type Decoding = AnthropicDecoder;
 
     fn decoder(&self) -> AnthropicDecoder {
@@ -224,6 +228,7 @@ impl Schema for AnthropicMessages {
         chat.options.max_output_tokens = v["max_tokens"].as_u64();
         chat.options.temperature = v["temperature"].as_f64();
         chat.options.top_p = v["top_p"].as_f64();
+        chat.options.top_k = v["top_k"].as_u64();
         chat.options.stop = v["stop_sequences"]
             .as_array()
             .into_iter()
@@ -254,6 +259,7 @@ impl Schema for AnthropicMessages {
         read_tools_of(v, &mut chat);
         chat.native = native_fields(ANTHROPIC, std::mem::take(chat.native.fields_mut(ANTHROPIC)));
         read_output(v, &mut chat);
+        read_thinking(&mut chat);
         chat
     }
 
@@ -295,6 +301,7 @@ impl Schema for AnthropicMessages {
             chat.options.temperature.map(Into::into),
         );
         set(&mut v, "top_p", chat.options.top_p.map(Into::into));
+        set(&mut v, "top_k", chat.options.top_k.map(Into::into));
         set(&mut v, "stop_sequences", stop_json(&chat.options.stop));
         let mut metadata = Value::Object(Map::new());
         if let Some(user) = &chat.user {
@@ -320,6 +327,7 @@ impl Schema for AnthropicMessages {
         set(&mut v, "metadata", (!empty).then_some(metadata));
         write_tools(chat, &mut v)?;
         write_output(chat, &mut v)?;
+        set(&mut v, "thinking", write_thinking(chat)?);
         Ok(v)
     }
 

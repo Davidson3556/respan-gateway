@@ -214,7 +214,7 @@ fn what_the_kind_has_no_form_for_stays_native_and_goes_back() {
         "safetySettings": [{ "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE" }],
         "tools": [{ "googleSearch": {} }],
         "toolConfig": { "functionCallingConfig": { "mode": "VALIDATED" } },
-        "generationConfig": { "topK": 3, "thinkingConfig": { "includeThoughts": true }, "temperature": 1 },
+        "generationConfig": { "seed": 3, "thinkingConfig": { "thinkingBudget": -1 }, "temperature": 1 },
     });
     let chat = GeminiGenerate.decode_json(&body);
     let native = chat.native.fields();
@@ -223,7 +223,7 @@ fn what_the_kind_has_no_form_for_stays_native_and_goes_back() {
     }
     assert_eq!(
         native["generationConfig"],
-        json!({ "topK": 3, "thinkingConfig": { "includeThoughts": true } })
+        json!({ "seed": 3, "thinkingConfig": { "thinkingBudget": -1 } })
     );
     assert_eq!(chat.options.temperature, Some(1.0));
     assert!(matches!(chat.messages[0].content[1], Content::Native(..)));
@@ -232,7 +232,7 @@ fn what_the_kind_has_no_form_for_stays_native_and_goes_back() {
     assert_eq!(back["tools"], body["tools"]);
     assert_eq!(back["toolConfig"], body["toolConfig"]);
     assert_eq!(back["contents"], body["contents"]);
-    assert_eq!(back["generationConfig"]["topK"], 3);
+    assert_eq!(back["generationConfig"]["seed"], 3);
     assert_eq!(back["generationConfig"]["temperature"], 1.0);
 }
 

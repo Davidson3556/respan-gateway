@@ -6,15 +6,16 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use respan_gateway_conversation::{
-    Content, Input, Media, MediaSource, Message, ResponseFormat, Role, Tool, ToolChoice,
+    Content, Effort, Input, Media, MediaSource, Message, Reasoning, ResponseFormat, Role, Tool,
+    ToolChoice,
 };
 use respan_gateway_core::{BadRequest, Fault, NativeFields};
 use serde_json::{Map, Value, json};
 
 use super::{GEMINI, ROLES, SYNTHETIC};
 use crate::schema::{
-    Keep, NativeFieldsExt, kept_fields, merge_fields, merge_missing, native_fields, remainder, set,
-    untranslatable,
+    Keep, NativeFieldsExt, effort_name, kept_fields, merge_fields, merge_missing, native_fields,
+    parse_effort, reasoning_of, remainder, set, untranslatable,
 };
 
 /// The id a call of Gemini's without one is given: its position, so that its
@@ -628,12 +629,14 @@ pub(super) fn read_config(v: &Value, chat: &mut Input) {
     chat.options.max_output_tokens = take("maxOutputTokens").and_then(|v| v.as_u64());
     chat.options.temperature = take("temperature").and_then(|v| v.as_f64());
     chat.options.top_p = take("topP").and_then(|v| v.as_f64());
+    chat.options.top_k = take("topK").and_then(|v| v.as_u64());
     if let Some(Value::Array(stops)) = take("stopSequences") {
         chat.options.stop = stops
             .iter()
             .filter_map(|s| s.as_str().map(Into::into))
             .collect();
     }
+    chat.options.reasoning = read_thinking(&mut rest);
     // One candidate is what the kind writes; asking for it says nothing.
     if rest.get("candidateCount") == Some(&json!(1)) {
         rest.shift_remove("candidateCount");
@@ -663,6 +666,7 @@ pub(super) fn write_config(chat: &Input, v: &mut Map<String, Value>) -> Result<(
     set_field("maxOutputTokens", o.max_output_tokens.map(Into::into));
     set_field("temperature", o.temperature.map(Into::into));
     set_field("topP", o.top_p.map(Into::into));
+    set_field("topK", o.top_k.map(Into::into));
     set_field("stopSequences", crate::schema::stop_json(&o.stop));
     match &o.response_format {
         None | Some(ResponseFormat::Text) => {}
@@ -689,6 +693,9 @@ pub(super) fn write_config(chat: &Input, v: &mut Map<String, Value>) -> Result<(
     if chat.user.is_some() {
         return Err(untranslatable("an end user's id"));
     }
+    if let Some(r) = reasoning_of(chat)? {
+        write_thinking(r, &mut config);
+    }
     set(
         v,
         "generationConfig",
@@ -698,4 +705,67 @@ pub(super) fn write_config(chat: &Input, v: &mut Map<String, Value>) -> Result<(
             .then_some(config),
     );
     Ok(())
+}
+
+/// The kind's reasoning of `thinkingConfig`: a budget (0 is off) or a level,
+/// and `includeThoughts`. What else it holds, and a budget beside a level,
+/// stays in `config`.
+fn read_thinking(config: &mut Map<String, Value>) -> Option<Reasoning> {
+    let Some(Value::Object(thinking)) = config.get_mut("thinkingConfig") else {
+        return None;
+    };
+    let mut r = Reasoning::default();
+    let both = thinking.contains_key("thinkingBudget") && thinking.contains_key("thinkingLevel");
+    if !both {
+        if let Some(budget) = thinking.get("thinkingBudget").and_then(Value::as_u64) {
+            thinking.shift_remove("thinkingBudget");
+            match budget {
+                0 => r.effort = Some(Effort::Off),
+                n => r.budget_tokens = Some(n),
+            }
+        } else if let Some(level) = thinking
+            .get("thinkingLevel")
+            .and_then(Value::as_str)
+            .and_then(parse_effort)
+            .filter(|e| *e != Effort::Off)
+        {
+            thinking.shift_remove("thinkingLevel");
+            r.effort = Some(level);
+        }
+    }
+    if let Some(shown) = thinking.get("includeThoughts").and_then(Value::as_bool) {
+        thinking.shift_remove("includeThoughts");
+        r.summary = Some(shown);
+    }
+    if thinking.is_empty() {
+        config.shift_remove("thinkingConfig");
+    }
+    (r != Reasoning::default()).then_some(r)
+}
+
+/// `thinkingConfig` of `config` with the kind's reasoning over its own.
+fn write_thinking(r: &Reasoning, config: &mut Value) {
+    let Some(config) = config.as_object_mut() else {
+        return;
+    };
+    let thinking = config.entry("thinkingConfig").or_insert_with(|| json!({}));
+    let Some(thinking) = thinking.as_object_mut() else {
+        return;
+    };
+    if r.effort.is_some() || r.budget_tokens.is_some() {
+        thinking.shift_remove("thinkingBudget");
+        thinking.shift_remove("thinkingLevel");
+    }
+    match (r.effort, r.budget_tokens) {
+        (Some(Effort::Off), _) => _ = thinking.insert("thinkingBudget".into(), 0.into()),
+        (Some(level), _) => _ = thinking.insert("thinkingLevel".into(), effort_name(level).into()),
+        (None, Some(n)) => _ = thinking.insert("thinkingBudget".into(), n.into()),
+        (None, None) => {}
+    }
+    if let Some(shown) = r.summary {
+        thinking.insert("includeThoughts".into(), shown.into());
+    }
+    if thinking.is_empty() {
+        config.shift_remove("thinkingConfig");
+    }
 }
