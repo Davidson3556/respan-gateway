@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ["v*"]
     paths: ["python/**", "apps/gateway/**", "crates/**", "Cargo.*", "apps/ui/**", ".github/workflows/python.yml"]
+  workflow_dispatch:
   pull_request:
     paths: ["python/**", "apps/gateway/**", "crates/**", "Cargo.*", "apps/ui/**", ".github/workflows/python.yml"]
 
