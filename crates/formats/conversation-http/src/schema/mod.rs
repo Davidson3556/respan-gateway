@@ -68,8 +68,7 @@ pub struct StreamResponse(pub bool);
 pub trait Schema: Copy + Send + Sync + 'static {
     /// The wire format's name, which tags what its values hold that the
     /// kind has no place for (`NativeFields`, `Content::Native`,
-    /// `Output::Native`, a native role or finish). The dialects of one wire
-    /// format share it, so each writes what another read.
+    /// `Output::Native`, a native role or finish).
     const NAME: &'static str;
     /// The path a request is posted to, which a client's request ends with.
     const PATH: &'static str;
@@ -81,10 +80,6 @@ pub trait Schema: Copy + Send + Sync + 'static {
     /// Decodes a response, whole or streamed, into events.
     type Decoding: Decoder;
 
-    /// This format's name: [`Schema::NAME`], or its dialect's own.
-    fn name(&self) -> &'static str {
-        Self::NAME
-    }
     /// A decoder of one response.
     fn decoder(&self) -> Self::Decoding;
     /// A JSON request as a conversation, noting what it has no place for.

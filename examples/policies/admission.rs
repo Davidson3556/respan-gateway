@@ -208,7 +208,7 @@ fn gateway(
     Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             respan_gateway_http::connect(
                 supervised(move |request| {
                     let client = provider.clone();
@@ -217,7 +217,7 @@ fn gateway(
                 LIMIT,
             ),
         )?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(admission)
         .target("openai")
 }

@@ -7,22 +7,18 @@ Nothing here reads a provider's events: OpenAI Realtime, Responses over
 WebSocket and Gemini Live run through the same code, each a value naming
 only its endpoint, subprotocol and framing.
 
-- `JsonEvents::from_static(name, path, SessionQuirks { .. })`: a vendor's
-  session, as a constant. Its knobs: `protocol`, a subprotocol it speaks,
-  and `binary_text`, a server that sends JSON in binary frames. The vendors'
-  (`openai::{REALTIME, RESPONSES_WS}`, `gemini::LIVE`, named
-  `openai-realtime`, `responses-ws` and `gemini-live`) are the
-  [providers crate](../../providers/README.md)'s, each setting documented
-  with the vendor's reason. Each is served at, and sends
-  to, the path its vendor's SDK adds to its base URL (`/realtime` and
-  `/responses` after `wss://api.openai.com/v1`; Gemini's
+- `JsonEvents::{OPENAI_REALTIME, RESPONSES_WS, GEMINI_LIVE}`: the specs,
+  named `openai-realtime`, `responses-ws` and `gemini-live`, each with what
+  its spec says of the session. Each is served at, and sends to, the path
+  its SDK adds to its base URL (`/realtime` and `/responses` after
+  `wss://api.openai.com/v1`; Gemini's
   `/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent`
   after `wss://generativelanguage.googleapis.com`). OpenAI Realtime speaks
-  the subprotocol `realtime` its browser clients offer.
-  `format.transport(base_url)` is a `WsTransport` to its provider, taking
-  binary text for Gemini Live, whose server sends JSON in binary frames.
-  The key is the transport's (`with_headers`: OpenAI's
-  `Authorization: Bearer`, Gemini's `x-goog-api-key`) or the client's.
+  the subprotocol `realtime` its browser clients offer; Gemini Live's server
+  sends JSON in binary frames, which `format.transport(base_url)`, a
+  `WsTransport` to its provider, takes as text. The key is the transport's
+  (`with_headers`: OpenAI's `Authorization: Bearer`, Gemini's
+  `x-goog-api-key`) or the client's.
 - `JsonEvents::new(name, path)`: client and provider `Format` bindings
   whose kind is one JSON event per frame, `Input` in and
   `Output` out (each a format-tagged `NativeValue`, read with `json()`). Every event is written from

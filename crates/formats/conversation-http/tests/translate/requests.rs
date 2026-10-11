@@ -42,18 +42,14 @@ async fn only_a_relay_is_marked_and_carries_the_clients_key() {
         http_sender(HttpTransport::new(openai_fake.base_url()).unwrap_or_else(|f| panic!("{f}")));
     let anthropic_http = provider_http(&anthropic_fake.base_url(), "x-api-key", "sk-ant-test");
     let gw = providers([
-        add_provider(
-            "openai",
-            OpenAiChat::OPENAI,
-            Marks(openai_http, Arc::clone(&marks)),
-        ),
+        add_provider("openai", OpenAiChat, Marks(openai_http, Arc::clone(&marks))),
         add_provider(
             "anthropic",
             AnthropicMessages,
             Marks(anthropic_http, Arc::clone(&marks)),
         ),
     ])
-    .and_then(|gw| gw.client::<Input, _, _>(OpenAiChat::OPENAI))
+    .and_then(|gw| gw.client::<Input, _, _>(OpenAiChat))
     .map(|gw| {
         let router = ModelRouter::new(|c: &Input| c.model.as_deref());
         let plugins: Vec<Arc<dyn Plugin>> = vec![

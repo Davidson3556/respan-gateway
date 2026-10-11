@@ -99,8 +99,8 @@ fn gateway(
     ledger: impl Ledger,
 ) -> Gateway {
     let accounting = Accounting::new(ledger, quote).ttl(Duration::from_millis(200));
-    let gw = Gateway::new().client::<Input, _, _>(OpenAiChat::OPENAI);
-    let gw = gw.and_then(|g| g.provider::<Input, _, _>("p", OpenAiChat::OPENAI, transport));
+    let gw = Gateway::new().client::<Input, _, _>(OpenAiChat);
+    let gw = gw.and_then(|g| g.provider::<Input, _, _>("p", OpenAiChat, transport));
     let gw = gw.and_then(|g| g.target("p"));
     let gw = gw.map(|g| g.plugin(first));
     gw.map(|g| g.plugin(accounting))
@@ -310,8 +310,8 @@ async fn a_quote_without_accounts_is_refused_with_http_401() {
     let ledger = wallet(1000);
     let accounting = Accounting::new(ledger.clone(), |_, _| Ok(Quote::new([] as [&str; 0], 100)));
     let gw = Gateway::new()
-        .client::<Input, _, _>(OpenAiChat::OPENAI)
-        .and_then(|g| g.provider::<Input, _, _>("p", OpenAiChat::OPENAI, http(&fake)))
+        .client::<Input, _, _>(OpenAiChat)
+        .and_then(|g| g.provider::<Input, _, _>("p", OpenAiChat, http(&fake)))
         .and_then(|g| g.target("p"))
         .map(|g| g.plugin(accounting))
         .unwrap_or_else(|f| panic!("{f}"));
@@ -423,7 +423,7 @@ async fn a_hold_that_lands_after_its_settlement_expires_with_its_ttl() {
 async fn a_call_sent_that_times_out_before_its_head_is_charged_the_reserve() {
     let ledger = wallet(1000);
     let accounting = Accounting::new(ledger.clone(), quote);
-    let gw = Gateway::new().client::<Input, _, _>(OpenAiChat::OPENAI);
+    let gw = Gateway::new().client::<Input, _, _>(OpenAiChat);
     // The call is handed to the transport, but its head never arrives.
     let no_head = respan_gateway_http::connect(
         |_call| async {
@@ -432,7 +432,7 @@ async fn a_call_sent_that_times_out_before_its_head_is_charged_the_reserve() {
         },
         LIMIT,
     );
-    let gw = gw.and_then(|g| g.provider::<Input, _, _>("p", OpenAiChat::OPENAI, no_head));
+    let gw = gw.and_then(|g| g.provider::<Input, _, _>("p", OpenAiChat, no_head));
     let gw = gw.and_then(|g| g.target("p"));
     let gw = gw.map(|g| g.plugin(accounting));
     let gw = gw.unwrap_or_else(|f| panic!("{f}"));

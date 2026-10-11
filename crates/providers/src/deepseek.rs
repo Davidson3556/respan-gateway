@@ -1,8 +1,9 @@
-//! DeepSeek: Chat Completions in its dialect.
+//! DeepSeek: Chat Completions.
 
-use respan_gateway_conversation_http::openai::{ChatQuirks, OpenAiChat};
+use respan_gateway_conversation_http::openai::OpenAiChat;
+use respan_gateway_core::{Plugin, ProviderContext, Result, async_trait};
 
-use crate::{Format, Provider, Quirk, Speaks};
+use crate::{Format, Provider, Quirk, Speaks, chat};
 
 /// DeepSeek.
 pub const PROVIDER: Provider = Provider {
@@ -11,20 +12,23 @@ pub const PROVIDER: Provider = Provider {
     key_env: &["DEEPSEEK_API_KEY"],
     prefixes: &["deepseek"],
     example_model: "deepseek-chat",
-    formats: &[Speaks::new(Format::OpenAiChat(CHAT))],
+    formats: &[Speaks::new(Format::OpenAiChat(OpenAiChat))],
     model_id_prefix: None,
     quirks: &[Quirk {
         name: "reasoning_content",
         description: "Reasoning is `reasoning_content`, in a request's messages and a \
                       response's message or delta.",
     }],
+    plugin: Some(&DeepSeekQuirks),
 };
 
-/// DeepSeek's Chat Completions, `deepseek-chat`.
-pub const CHAT: OpenAiChat = OpenAiChat::new(
-    "deepseek-chat",
-    ChatQuirks {
-        reasoning_content: true,
-        ..ChatQuirks::NONE
-    },
-);
+/// DeepSeek's quirks: reasoning is `reasoning_content`.
+#[derive(Debug)]
+pub struct DeepSeekQuirks;
+
+#[async_trait]
+impl Plugin for DeepSeekQuirks {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
+        chat::reasoning_content(px)
+    }
+}

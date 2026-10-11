@@ -17,3 +17,7 @@ respan-gateway-http.workspace = true
 respan-gateway-realtime.workspace = true
 respan-gateway-ws.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false }

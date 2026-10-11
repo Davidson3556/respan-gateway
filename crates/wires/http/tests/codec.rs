@@ -489,11 +489,11 @@ fn chat(
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             respan_gateway_http::connect(transport, LIMIT),
         )
         .and_then(|g| {
-            g.client::<Input, _, _>(OpenAiChat::OPENAI)?
+            g.client::<Input, _, _>(OpenAiChat)?
                 .client::<Input, _, _>(AnthropicMessages)?
                 .target("openai")
         });
@@ -563,13 +563,10 @@ async fn cookies_and_forwarding_headers_reach_no_transport() {
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             respan_gateway_http::connect(transport, LIMIT),
         )
-        .and_then(|g| {
-            g.client::<Input, _, _>(OpenAiChat::OPENAI)?
-                .target("openai")
-        })
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat)?.target("openai"))
         .unwrap_or_else(|e| panic!("{e}"));
     let _ = read_whole(
         serve(&gw, with_headers("/v1/chat/completions", CHAT))
@@ -725,7 +722,7 @@ async fn r2_an_encoder_writes_its_own_formats_events_as_they_are_and_no_others()
             .and_then(|g| {
                 g.provider::<Input, _, _>(
                     "openai",
-                    OpenAiChat::OPENAI,
+                    OpenAiChat,
                     respan_gateway_http::connect(sse(&[chunk, "data: [DONE]\n\n"]), LIMIT),
                 )
             })

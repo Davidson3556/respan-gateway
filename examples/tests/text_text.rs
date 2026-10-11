@@ -436,9 +436,9 @@ fn gateway_with(
     plugin: impl Plugin,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, openai)?
+        .provider::<Input, _, _>("openai", OpenAiChat, openai)?
         .provider::<Input, _, _>("anthropic", AnthropicMessages, anthropic)?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .client::<Input, _, _>(OpenAiChat)?
         .client::<Input, _, _>(AnthropicMessages)?
         .plugin(plugin)
         .target(target)

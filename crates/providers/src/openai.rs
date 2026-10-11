@@ -5,9 +5,9 @@ use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_media_http::openai::{
     OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
 };
-use respan_gateway_realtime_ws::{JsonEvents, SessionQuirks};
+use respan_gateway_realtime_ws::JsonEvents;
 
-use crate::{Format, Provider, Quirk, Speaks};
+use crate::{Format, Provider, Speaks};
 
 /// OpenAI.
 pub const PROVIDER: Provider = Provider {
@@ -30,9 +30,9 @@ pub const PROVIDER: Provider = Provider {
     ],
     example_model: "gpt-4o-mini",
     formats: &[
-        Speaks::new(Format::OpenAiChat(OpenAiChat::OPENAI)),
-        Speaks::new(Format::JsonEvents(REALTIME)),
-        Speaks::new(Format::JsonEvents(RESPONSES_WS)),
+        Speaks::new(Format::OpenAiChat(OpenAiChat)),
+        Speaks::new(Format::JsonEvents(JsonEvents::OPENAI_REALTIME)),
+        Speaks::new(Format::JsonEvents(JsonEvents::RESPONSES_WS)),
         Speaks::new(Format::OpenAiImages(OpenAiImages)),
         Speaks::new(Format::OpenAiTranscriptions(OpenAiTranscriptions)),
         Speaks::new(Format::OpenAiSpeech(OpenAiSpeech)),
@@ -40,26 +40,6 @@ pub const PROVIDER: Provider = Provider {
         Speaks::new(Format::OpenAiEmbeddings(OpenAiEmbeddings)),
     ],
     model_id_prefix: None,
-    quirks: &[Quirk {
-        name: "protocol",
-        description: "Realtime speaks the subprotocol `realtime`, which its browser clients \
-                      offer beside their key; a browser that offered one refuses a `101` that \
-                      names none.",
-    }],
+    quirks: &[],
+    plugin: None,
 };
-
-/// OpenAI Realtime, `openai-realtime`: at `/realtime`, after the base URL
-/// its SDKs take (`wss://api.openai.com/v1`).
-pub const REALTIME: JsonEvents = JsonEvents::from_static(
-    "openai-realtime",
-    "/realtime",
-    SessionQuirks {
-        protocol: Some("realtime"),
-        ..SessionQuirks::NONE
-    },
-);
-
-/// Responses over WebSocket, `responses-ws`: at `/responses`, as for HTTP.
-/// Only an upgrade is this format's: a `POST` there is no session.
-pub const RESPONSES_WS: JsonEvents =
-    JsonEvents::from_static("responses-ws", "/responses", SessionQuirks::NONE);

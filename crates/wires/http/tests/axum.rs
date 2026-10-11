@@ -57,7 +57,7 @@ where
 {
     Gateway::new()
         .provider("local", format, transport)
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"))
 }
@@ -65,7 +65,7 @@ where
 /// A gateway relaying OpenAI clients raw, with their own paths, to the
 /// provider's origin `base`.
 fn openai_gateway(base: impl Into<String>) -> Gateway {
-    gateway_to(OpenAiChat::OPENAI, http(base).connect()).plugin(relay::Relay::RAW)
+    gateway_to(OpenAiChat, http(base).connect()).plugin(relay::Relay::RAW)
 }
 
 async fn spawn(app: Router) -> String {
@@ -229,7 +229,7 @@ async fn an_upgrade_the_server_does_not_switch_is_ignored() {
     }
 
     let note = Note::default();
-    let app = router(gateway_to(OpenAiChat::OPENAI, note.clone().connect()));
+    let app = router(gateway_to(OpenAiChat, note.clone().connect()));
     let chat = r#"{"model":"m","messages":[]}"#;
     let req = http::Request::post("/v1/chat/completions")
         .header("upgrade", "h2c")
@@ -340,7 +340,7 @@ async fn it_joins_its_base_with_the_path_and_sends_its_headers() {
     headers.append("x-team", value("b"));
     let transport = http(format!("{provider}/v1beta/openai/")).with_headers(headers);
     let transport = transport.unwrap_or_else(|e| panic!("{e}"));
-    let gateway = gateway_to(OpenAiChat::OPENAI, transport.connect());
+    let gateway = gateway_to(OpenAiChat, transport.connect());
     let base = spawn(router(gateway)).await;
 
     let resp = reqwest::Client::new()
@@ -542,10 +542,10 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
     let gateway = Gateway::new()
         .provider::<Input, _, _>(
             "local",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             http(format!("{provider}/v1")).connect(),
         )
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .map(|g| g.plugin(log.clone()).plugin(relay::Relay::HEADS))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));

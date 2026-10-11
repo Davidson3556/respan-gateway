@@ -86,7 +86,7 @@ fn gateway() -> Result<Gateway, Fault> {
     let model: Model = Arc::new(echo);
     Gateway::new()
         .provider::<Input, _, _>("local", Local, move |_| model.clone())?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .client::<Input, _, _>(OpenAiChat)?
         .target("local")
 }
 

@@ -136,12 +136,12 @@ It relays chat and every other endpoint of that vendor (`count_tokens`,
 A provider's `base_url` is the one its own SDK takes. OpenAI-compatible
 ones include the version, such as `https://api.openai.com/v1` or
 `https://generativelanguage.googleapis.com/v1beta/openai` (format
-`openai-chat`), `https://api.groq.com/openai/v1` (`groq-chat`) or
-`https://openrouter.ai/api/v1` (`openrouter-chat`); Anthropic's does not:
-`https://api.anthropic.com`. `openai-chat` reads only OpenAI's own fields; a
-vendor whose fields the gateway reads has a format of its own name (the
-[dialects](crates/providers/README.md)), and one whose additions it does not
-read, as Gemini's endpoint, is `openai-chat`. The media formats
+`openai-chat`), `https://api.groq.com/openai/v1` or
+`https://openrouter.ai/api/v1` (`openai-chat` too); Anthropic's does not:
+`https://api.anthropic.com`. A format is its spec: what a vendor sends beyond
+it stays native, and a provider with `vendor:` gets that vendor's
+[quirks](crates/providers/README.md), such as Groq's usage under `x_groq` or
+DeepSeek's `reasoning_content`, read into the gateway's events. The media formats
 (`openai-images`, `openai-transcriptions`, `openai-speech`,
 `openai-videos`, `openai-embeddings`) take the same base URL; Veo (`gemini-veo`, a provider
 format only) takes the Gemini API's,
@@ -237,11 +237,11 @@ the gateway, and the binary chooses what to compose. See the
 | `crates/kinds/mcp/` | The MCP kind: typed JSON-RPC messages and their envelopes. |
 | `crates/wires/http/` | The HTTP wire: owned edges, native bodies, stream/sink helpers, credentials, retry classification, the opaque format, and optional Reqwest transport and Axum hosting. |
 | `crates/wires/ws/` | The WebSocket wire: sessions at both edges, close codes and limits, and optional Axum hosting. |
-| `crates/formats/conversation-http/` | The conversation kind over HTTP: OpenAI Chat (with `ChatQuirks` for vendors' dialects) and Anthropic Messages, sharing the `Schema` trait. |
+| `crates/formats/conversation-http/` | The conversation kind over HTTP: OpenAI Chat and Anthropic Messages, sharing the `Schema` trait. |
 | `crates/formats/media-http/` | The media kinds over HTTP: OpenAI Images, Audio Transcriptions, Speech, Embeddings and Videos, and Google's Veo as a provider. |
-| `crates/formats/realtime-ws/` | The realtime kind over WebSocket: `JsonEvents` (with `SessionQuirks`). |
+| `crates/formats/realtime-ws/` | The realtime kind over WebSocket: `JsonEvents`, and the specs OpenAI Realtime, Responses over WebSocket and Gemini Live. |
 | `crates/formats/mcp-http/` | MCP over HTTP: streamable HTTP, and a stdio server as a transport. |
-| `crates/providers/` | Every vendor, a file each: base URL, key, models, the formats it speaks set with its quirks, and a table of them. |
+| `crates/providers/` | Every vendor, a file each: base URL, key, models, the formats it speaks, its quirks (data and a plugin), and a table of them. |
 | `crates/plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |
 | `apps/gateway/` | The binary and its library (`respan_gateway`): configuration (YAML, vendor presets, or none, from the environment), routing (by model within each kind, video jobs by id), client keys, `/v1/models`, the request log, the web UI and its admin API; `serve`, `check`, `init` and `proxy`. |
 | `tests/support/` | Private source-only helpers shared by integration tests; not a public crate. |

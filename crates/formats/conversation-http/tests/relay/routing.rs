@@ -400,8 +400,8 @@ async fn a_race_by_completion_picks_the_provider_that_finishes_first() {
         let slow = Paced(sites.openai.plain(), Duration::ZERO, ms(600));
         let fast = Paced(sites.backup.plain(), ms(100), Duration::ZERO);
         let list = [
-            add_provider("openai", OpenAiChat::OPENAI, slow),
-            add_provider("backup", OpenAiChat::OPENAI, fast),
+            add_provider("openai", OpenAiChat, slow),
+            add_provider("backup", OpenAiChat, fast),
         ];
         let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(ends.clone()), Arc::new(Race(to_end))];
         let gw = gateway(list, plugins, None).unwrap_or_else(|e| panic!("{e}"));

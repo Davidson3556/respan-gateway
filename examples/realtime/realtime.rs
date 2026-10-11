@@ -84,8 +84,8 @@ use respan_gateway_http::{Credential, Status};
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::{Amount, HoldId, Ledger, MemoryLedger};
-use respan_gateway_providers::openai;
 use respan_gateway_realtime::{Input, Output};
+use respan_gateway_realtime_ws::JsonEvents;
 use respan_gateway_ws::{CloseCode, WsTransport};
 use serde_json::{Value, json};
 use text::{Placeholders, Rewrite};
@@ -852,10 +852,10 @@ fn gateway_with_audio(
     allow_audio: bool,
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
-        .client::<Input, _, _>(openai::REALTIME)?
+        .client::<Input, _, _>(JsonEvents::OPENAI_REALTIME)?
         .provider::<Input, _, _>(
             "openai",
-            openai::REALTIME,
+            JsonEvents::OPENAI_REALTIME,
             WsTransport::new(provider)?.connect(),
         )?
         .target("openai")?

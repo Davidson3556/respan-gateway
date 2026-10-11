@@ -1,42 +1,123 @@
-//! What the vendors' tests share: a provider's answer, decoded.
+//! What the vendors' tests share: a gateway serving OpenAI Chat and
+//! Anthropic Messages, whose one provider speaks Chat Completions with a
+//! vendor's plugin and answers as told.
 
-use respan_gateway_conversation::Output;
-use respan_gateway_conversation_http::Schema;
+#![allow(dead_code)]
+
+#[path = "../../../../tests/support/http.rs"]
+mod http_support;
+
+use std::sync::{Arc, Mutex};
+
+use respan_gateway_conversation::Input;
+use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
-use respan_gateway_http::bytes::Bytes;
+use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, async_trait};
+use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, header::CONTENT_TYPE};
+use respan_gateway_http::http_body_util::BodyExt;
 use serde_json::Value;
 
-/// The events of a whole answer, `body`, in `chat`.
-#[allow(dead_code)]
-pub fn whole(chat: OpenAiChat, body: Value) -> Vec<Output> {
-    decoded(chat, "application/json", body.to_string())
+pub use serde_json::json;
+
+/// A vendor's plugin, run on every call.
+struct Quirks(&'static dyn Plugin);
+
+#[async_trait]
+impl Plugin for Quirks {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        self.0.on_provider(px).await
+    }
 }
 
-/// The events of a stream of `chunks`, then `[DONE]`, in `chat`.
-#[allow(dead_code)]
-pub fn streamed(chat: OpenAiChat, chunks: &[Value]) -> Vec<Output> {
-    let mut stream: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
-    stream.push_str("data: [DONE]\n\n");
-    decoded(chat, "text/event-stream", stream)
+/// A gateway whose provider, with `plugin`, answers every call with `body`
+/// of `content_type`, and the requests it was sent.
+pub struct Vendor {
+    gateway: Gateway,
+    sent: Arc<Mutex<Vec<Value>>>,
 }
 
-fn decoded(chat: OpenAiChat, content_type: &str, body: String) -> Vec<Output> {
-    let answer = http::Response::builder()
-        .header(CONTENT_TYPE, content_type)
-        .body(Bytes::from(body))
-        .expect("an answer");
-    let call = http::Request::post("/chat/completions")
-        .body(())
-        .expect("a call")
-        .into_parts()
-        .0;
-    chat.decode_response(answer, &call)
-        .expect("the answer's events")
+impl Vendor {
+    pub fn new(plugin: &'static dyn Plugin, content_type: &'static str, body: String) -> Self {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let seen = sent.clone();
+        let answer = move |request: http::Request<Body>| {
+            let (seen, body) = (seen.clone(), body.clone());
+            async move {
+                let bytes = request.into_body().collect().await?.to_bytes();
+                let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                seen.lock().expect("sent").push(json);
+                let answer = http::Response::builder()
+                    .header(CONTENT_TYPE, content_type)
+                    .body(Body::full(body))
+                    .expect("an answer");
+                Ok((answer, None))
+            }
+        };
+        let transport = respan_gateway_http::connect(answer, http_support::LIMIT);
+        let gateway = Gateway::new()
+            .provider::<Input, _, _>("p", OpenAiChat, transport)
+            .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
+            .and_then(|g| g.client::<Input, _, _>(AnthropicMessages))
+            .and_then(|g| g.target("p"))
+            .expect("a gateway")
+            .plugin(Quirks(plugin));
+        Self { gateway, sent }
+    }
+
+    /// A provider answering with `chunks` as a stream, then `[DONE]`.
+    pub fn streaming(plugin: &'static dyn Plugin, chunks: &[Value]) -> Self {
+        let mut stream: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+        stream.push_str("data: [DONE]\n\n");
+        Self::new(plugin, "text/event-stream", stream)
+    }
+
+    /// A provider answering with `body`, whole.
+    pub fn whole(plugin: &'static dyn Plugin, body: Value) -> Self {
+        Self::new(plugin, "application/json", body.to_string())
+    }
+
+    /// What a client of OpenAI Chat gets for `request`.
+    pub async fn openai(&self, request: Value) -> String {
+        self.send("/v1/chat/completions", request).await
+    }
+
+    /// What a client of Anthropic Messages gets for `request`.
+    pub async fn anthropic(&self, request: Value) -> String {
+        self.send("/v1/messages", request).await
+    }
+
+    /// The requests the provider was sent.
+    pub fn sent(&self) -> Vec<Value> {
+        self.sent.lock().expect("sent").clone()
+    }
+
+    async fn send(&self, path: &str, request: Value) -> String {
+        let call = http_support::post(path, request.to_string());
+        let (answer, _) = http_support::serve(&self.gateway, call).await;
+        let (status, _, body) = http_support::read_whole(answer).await;
+        let body = body.expect("a body");
+        let body = String::from_utf8_lossy(&body).into_owned();
+        assert!(status.is_success(), "{status}: {body}");
+        self.gateway.idle().await;
+        body
+    }
 }
 
-/// Whether `events` hold anything the kind has no form for.
-#[allow(dead_code)]
-pub fn any_native(events: &[Output]) -> bool {
-    events.iter().any(|e| matches!(e, Output::Native(_)))
+/// An OpenAI Chat request, streamed if `stream`, asking for usage.
+pub fn chat(stream: bool) -> Value {
+    json!({ "model": "m", "stream": stream, "stream_options": { "include_usage": true },
+        "messages": [{ "role": "user", "content": "hi" }] })
+}
+
+/// An Anthropic Messages request, streamed if `stream`.
+pub fn messages(stream: bool) -> Value {
+    json!({ "model": "m", "max_tokens": 10, "stream": stream,
+        "messages": [{ "role": "user", "content": "hi" }] })
+}
+
+/// The JSON of each data line of a stream, but `[DONE]`.
+pub fn data(stream: &str) -> Vec<Value> {
+    let lines = stream.lines().filter_map(|l| l.strip_prefix("data: "));
+    lines.filter_map(|d| serde_json::from_str(d).ok()).collect()
 }

@@ -2,15 +2,6 @@
 
 use super::*;
 
-/// A dialect whose usage is under `x_groq`, beside the response, as Groq's is.
-const GROQ: OpenAiChat = OpenAiChat::new(
-    "groq-chat",
-    ChatQuirks {
-        usage_under: Some("x_groq"),
-        ..ChatQuirks::NONE
-    },
-);
-
 #[tokio::test]
 async fn a_stream_is_relayed_with_usage() {
     let h = relay();
@@ -299,24 +290,6 @@ async fn usage_on_every_chunk_does_not_hold_the_stream() {
 }
 
 #[tokio::test]
-async fn groqs_usage_beside_the_response_is_counted() {
-    let (sites, usage) = (Sites::default(), Metered::default());
-    let reply = json!({"id": "c2", "choices": [{"index": 0, "message": {"content": "hi"}}],
-        "x_groq": {"usage": {"prompt_tokens": 7, "completion_tokens": 3}}});
-    sites
-        .openai
-        .reply(fixture::json(StatusCode::OK, &reply.to_string()));
-    let groq = add_provider("groq", GROQ, sites.openai.transport(HeaderMap::new()));
-    let gw = gateway([groq], vec![Arc::new(usage.clone())], Some("groq")).expect("a gateway");
-
-    let _ = read_whole(serve(&gw, unary_chat()).await.0).await;
-    gw.idle().await;
-
-    let usage = usage.total();
-    assert_eq!((usage.input_tokens, usage.output_tokens), (7, 3));
-}
-
-#[tokio::test]
 async fn a_reframed_stream_gets_usage_only_if_it_asked() {
     let h = Harness::new(vec![Arc::new(Flip)], Some("openai"));
     h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
@@ -489,21 +462,21 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
 
     impl Format<ClientIo, Input, Output> for Tally {
         fn name(&self) -> &str {
-            OpenAiChat::OPENAI.name()
+            OpenAiChat::NAME
         }
         fn matches(&self, io: &ClientIo) -> bool {
-            <OpenAiChat as Format<ClientIo, Input, Output>>::matches(&OpenAiChat::OPENAI, io)
+            <OpenAiChat as Format<ClientIo, Input, Output>>::matches(&OpenAiChat, io)
         }
         fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
             let tally = self.0.clone();
             Ok(io.bind(
-                |request| OpenAiChat::OPENAI.read_request(request),
+                |request| OpenAiChat.read_request(request),
                 move |reply| {
                     let mut head = reply.head();
-                    let encoder = OpenAiChat::OPENAI.response_encoder(&mut head, reply.request());
+                    let encoder = OpenAiChat.response_encoder(&mut head, reply.request());
                     Ok(reply.write(head, Box::new(Tallying(tally.clone(), encoder))))
                 },
-                |fault, request, head| OpenAiChat::OPENAI.refusal(fault, request, head),
+                |fault, request, head| OpenAiChat.refusal(fault, request, head),
             ))
         }
     }

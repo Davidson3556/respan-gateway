@@ -240,7 +240,7 @@ async fn a_client_that_leaves_before_the_head_ends_abandoned() {
 
     let log = Outcomes::default();
     let gw = gateway(
-        [add_provider("openai", OpenAiChat::OPENAI, Silent)],
+        [add_provider("openai", OpenAiChat, Silent)],
         vec![Arc::new(log.clone())],
         Some("openai"),
     )
@@ -383,11 +383,7 @@ async fn a_response_dropped_unsent_cancels_its_provider_body() {
     let dropped = Arc::new(AtomicBool::new(false));
     let log = Outcomes::default();
     let gw = gateway(
-        [add_provider(
-            "openai",
-            OpenAiChat::OPENAI,
-            Endless(dropped.clone()),
-        )],
+        [add_provider("openai", OpenAiChat, Endless(dropped.clone()))],
         vec![Arc::new(log.clone()), Arc::new(Discard)],
         None,
     )
@@ -751,7 +747,7 @@ async fn a_reader_waiting_on_a_kept_response_wakes_as_its_request_closes() {
     let gw = gateway(
         [
             provider(&sites.openai, "openai", Some("Bearer sk-test")),
-            add_provider("slow", OpenAiChat::OPENAI, Endless(dropped.clone())),
+            add_provider("slow", OpenAiChat, Endless(dropped.clone())),
         ],
         vec![Arc::new(Watch(Arc::clone(&reader)))],
         Some("openai"),
@@ -1047,8 +1043,8 @@ async fn a_panicking_call_leaves_its_sibling_abandoned() {
 
     let ends = Ends::default();
     let list = [
-        add_provider("never", OpenAiChat::OPENAI, Never),
-        add_provider("boom", OpenAiChat::OPENAI, Boom),
+        add_provider("never", OpenAiChat, Never),
+        add_provider("boom", OpenAiChat, Boom),
     ];
     let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(ends.clone()), Arc::new(Race)];
     let gw = gateway(list, plugins, None).unwrap_or_else(|e| panic!("gateway: {e}"));

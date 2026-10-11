@@ -314,6 +314,34 @@ serve: [anthropic-messages, passthrough]
     assert_eq!(both.entries[1].base_url, "https://x.test");
 }
 
+/// Vendors share `openai-chat`: each takes its key as its own vendor says,
+/// and a provider of no vendor as OpenAI's does.
+#[test]
+fn a_key_goes_where_its_own_vendor_takes_it() {
+    let keys = plan(
+        "providers:
+  az: { vendor: azure, base_url: 'https://r.test/openai/v1', key: a }
+  oa: { vendor: openai, key: o }
+  plain: { format: openai-chat, base_url: 'https://p.test/v1', key: p }
+",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let auth = |i: usize, name: &str| {
+        let auth = &keys.upstreams[i].entries[0].auth;
+        auth.get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    assert_eq!(auth(0, "api-key").as_deref(), Some("a"));
+    assert_eq!(auth(0, "authorization"), None);
+    assert_eq!(auth(1, "authorization").as_deref(), Some("Bearer o"));
+    assert_eq!(auth(2, "authorization").as_deref(), Some("Bearer p"));
+    // A vendor's dialect is no format of its own.
+    let dialect =
+        plan("providers:\n  g: { format: groq-chat, base_url: 'https://g.test', key: k }");
+    assert!(dialect.is_err_and(|e: String| e.contains("unknown format 'groq-chat'")));
+}
+
 #[test]
 fn a_bad_provider_is_an_error() {
     let cases = [
@@ -510,7 +538,7 @@ fn an_unknown_format_names_the_compiled_in_ones() {
     assert_eq!(
         resolve(yaml).err().as_deref(),
         Some(
-            "serve: unknown format 'nope'; compiled-in formats: [openai-chat, openai-realtime, responses-ws, openai-images, openai-transcriptions, openai-speech, openai-videos, openai-embeddings, anthropic-messages, gemini-live, gemini-veo, groq-chat, deepseek-chat, openrouter-chat, azure-chat, vllm-chat, passthrough]"
+            "serve: unknown format 'nope'; compiled-in formats: [openai-chat, openai-realtime, responses-ws, openai-images, openai-transcriptions, openai-speech, openai-videos, openai-embeddings, anthropic-messages, gemini-live, gemini-veo, passthrough]"
         )
     );
 }

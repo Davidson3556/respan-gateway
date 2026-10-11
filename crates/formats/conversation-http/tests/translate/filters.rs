@@ -548,27 +548,6 @@ async fn a_whole_anthropic_message_a_filter_took_the_start_of_is_sent() {
 }
 
 #[tokio::test]
-async fn azures_filter_annotation_after_the_finish_ends_a_translated_stream_cleanly() {
-    let h = Harness::new(vec![Arc::new(To("azure"))]).await;
-    let mut stream: Vec<String> = OPENAI_STREAM.iter().map(|s| s.to_string()).collect();
-    let annotation = json!({"id": "", "choices": [{"index": 0, "delta": {},
-        "content_filter_offsets": {"check_offset": 0, "start_offset": 0, "end_offset": 11},
-        "content_filter_results": {"hate": {"filtered": false, "severity": "safe"}}}]});
-    stream.insert(4, format!("data: {annotation}\n\n"));
-    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
-    h.openai.answer(sse(&chunks));
-
-    let (status, out) = h.text(anthropic_request(true)).await;
-
-    assert_eq!(status, StatusCode::OK, "{out}");
-    assert!(!out.contains("event: error"), "{out}");
-    assert!(
-        out.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
-        "{out}"
-    );
-}
-
-#[tokio::test]
 async fn text_held_across_two_anthropic_blocks_stays_in_its_block() {
     let h = filtered(LagByOne::default()).await;
     let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");

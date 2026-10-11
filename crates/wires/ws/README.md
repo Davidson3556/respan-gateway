@@ -68,7 +68,7 @@ wire works with the transport and the adapter: the tests relay through
 
 - **Text messages by default.** A provider's binary frame is a fault unless
   `with_binary_text(true)` enables UTF-8 normalization, as
-  `respan_gateway_providers::gemini::LIVE.transport(..)` does for Gemini Live's JSON in
+  `JsonEvents::GEMINI_LIVE.transport(..)` does for Gemini Live's JSON in
   binary frames. A client's binary frame is `bad_request`, closed 1003.
   Ping and pong are answered by each hop's library and never reach a
   plugin.

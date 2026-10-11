@@ -417,7 +417,7 @@ async fn a_placeholder_split_across_anthropic_tool_input_is_restored() -> Result
             AnthropicMessages,
             provider_support::anthropic(&fake.base_url())?.connect(),
         )?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Pii)
         .plugin(PiiInput)
         .target("anthropic")?;

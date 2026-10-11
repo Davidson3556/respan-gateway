@@ -115,9 +115,9 @@ fn gateway(
     tenants: Tenants,
 ) -> Result<Gateway, Fault> {
     Ok(Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, openai)?
-        .provider::<Input, _, _>("azure", OpenAiChat::OPENAI, azure)?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .provider::<Input, _, _>("openai", OpenAiChat, openai)?
+        .provider::<Input, _, _>("azure", OpenAiChat, azure)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(tenants))
 }
 

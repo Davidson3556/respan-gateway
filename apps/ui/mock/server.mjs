@@ -43,14 +43,15 @@ const providers = [
   {
     name: "groq",
     vendor: "groq",
-    formats: ["groq-chat"],
-    kinds: ["chat"],
+    formats: ["openai-chat", "openai-transcriptions", "openai-speech"],
+    kinds: ["chat", "transcription", "speech"],
     base_url: "https://api.groq.com/openai/v1",
     credentials: "client",
     quirks: [
       {
-        name: "usage_under",
-        description: "A stream reports usage under `x_groq`, beside the response; the object's other fields stay native.",
+        name: "x_groq_usage",
+        description:
+          "A response reports usage under `x_groq`, beside it, rather than in `usage`; the object's other fields stay native.",
       },
     ],
   },
@@ -62,10 +63,6 @@ const providers = [
     base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
     credentials: "gateway",
     quirks: [
-      {
-        name: "binary_text",
-        description: "Live sends each JSON event in a binary frame, as Google's SDK reads frames as bytes.",
-      },
       { name: "model_id_prefix", description: "Its OpenAI-compatible model list names each model `models/<id>`." },
     ],
   },

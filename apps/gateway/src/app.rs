@@ -28,6 +28,7 @@ use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{Kind, KnownFormat, formats};
 use crate::jobs::VideoJobs;
 use crate::models::{self, Models};
+use crate::quirks::with_quirks;
 use crate::requests::{self, Recorder, RequestLog};
 use crate::routing::Routing;
 use crate::{Config, Error};
@@ -290,7 +291,7 @@ impl App {
 }
 
 /// The gateway with the binary's plugins: the request log, routing, video
-/// jobs, and whose credentials go where.
+/// jobs, whose credentials go where, and last the vendors' quirks.
 fn with_plugins(
     gateway: Gateway,
     config: &Config,
@@ -317,14 +318,15 @@ fn with_plugins(
         .plugin(VideoJobs::new(&plan.upstreams, formats))
         .plugin(locate);
     // A raw relay sends each client's credentials itself.
-    match config.raw_relay {
+    let gateway = match config.raw_relay {
         true => gateway.plugin(Relay::RAW),
         false => {
             let keyless = plan.upstreams.iter().filter(|u| !u.own_key);
             let keyless = keyless.flat_map(|u| u.entries.iter().map(|e| e.internal.clone()));
             gateway.plugin(ClientCredentials::new(keyless.collect()))
         }
-    }
+    };
+    with_quirks(gateway, &plan.upstreams)
 }
 
 /// The router of the formats served: a WebSocket upgrade is a session if a

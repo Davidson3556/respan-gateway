@@ -13,9 +13,10 @@ pub const PROVIDER: Provider = Provider {
     prefixes: &["mistral", "codestral", "magistral", "pixtral"],
     example_model: "mistral-small-latest",
     formats: &[
-        Speaks::new(Format::OpenAiChat(OpenAiChat::OPENAI)),
+        Speaks::new(Format::OpenAiChat(OpenAiChat)),
         Speaks::new(Format::OpenAiEmbeddings(OpenAiEmbeddings)),
     ],
     model_id_prefix: None,
     quirks: &[],
+    plugin: None,
 };

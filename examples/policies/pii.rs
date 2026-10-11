@@ -132,8 +132,8 @@ fn gateway_with(
     middle: impl FnOnce(Gateway) -> Gateway,
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, transport)?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Pii);
     middle(gw).plugin(PiiInput).target("openai")
 }

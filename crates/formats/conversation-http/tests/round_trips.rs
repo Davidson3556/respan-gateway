@@ -5,23 +5,14 @@
 use respan_gateway_conversation::{Block, Content, Finish, Output, Role};
 use respan_gateway_conversation_http::Schema;
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
-use respan_gateway_conversation_http::openai::{ChatQuirks, OpenAiChat};
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::Upstream;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{Body, Status};
 use serde_json::{Value, json};
 
-/// A dialect whose reasoning is `reasoning_content`, as DeepSeek's is.
-const DEEPSEEK: OpenAiChat = OpenAiChat::new(
-    "deepseek-chat",
-    ChatQuirks {
-        reasoning_content: true,
-        ..ChatQuirks::NONE
-    },
-);
-
-const OPENAI: OpenAiChat = OpenAiChat::OPENAI;
+const OPENAI: OpenAiChat = OpenAiChat;
 const ANTHROPIC: AnthropicMessages = AnthropicMessages;
 
 /// `body` as a request of format `from`, written as a request of format `to`.
@@ -155,14 +146,14 @@ fn a_role_and_a_finish_of_a_format_are_written_by_that_format_alone() {
     head.headers
         .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
     let stream = "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"insufficient_system_resource\"}]}\n\ndata: [DONE]\n\n";
-    let replies = OpenAiChat::OPENAI
+    let replies = OpenAiChat
         .decode_response(http::Response::from_parts(head, Bytes::from(stream)), &call)
         .expect("decoded");
     assert!(replies.contains(&Output::finished(Finish::native(
         "openai-chat",
         "insufficient_system_resource"
     ))));
-    let streamed = OpenAiChat::OPENAI
+    let streamed = OpenAiChat
         .encode_response(&ask, &replies)
         .expect("a stream");
     let streamed = String::from_utf8_lossy(streamed.body()).into_owned();
@@ -170,7 +161,7 @@ fn a_role_and_a_finish_of_a_format_are_written_by_that_format_alone() {
         streamed.contains("\"finish_reason\":\"insufficient_system_resource\""),
         "{streamed}"
     );
-    let whole = OpenAiChat::OPENAI
+    let whole = OpenAiChat
         .encode_response(&ask_whole, &replies)
         .expect("a body");
     let whole: Value = serde_json::from_slice(whole.body()).unwrap_or_default();
@@ -296,14 +287,10 @@ fn the_vendor_fields_of_openai_usage_survive_its_format_and_are_dropped_by_anoth
         json!({ "id": "c", "model": "m", "choices": [{ "index": 0, "delta": { "content": "hi" }, "finish_reason": "stop" }] })
     );
     let call = http::Request::new(()).into_parts().0;
-    let decode = |r| {
-        OpenAiChat::OPENAI
-            .decode_response(r, &call)
-            .expect("decoded")
-    };
+    let decode = |r| OpenAiChat.decode_response(r, &call).expect("decoded");
     for (is_stream, text) in [(false, whole.to_string()), (true, stream)] {
         let replies = decoded(decode, is_stream, &text);
-        let out = OpenAiChat::OPENAI
+        let out = OpenAiChat
             .encode_response(&request_of(is_stream), &replies)
             .expect("written");
         let body = String::from_utf8_lossy(out.body()).into_owned();
@@ -373,7 +360,7 @@ fn the_vendor_fields_of_anthropic_usage_survive_its_format_and_are_dropped_by_an
         ] {
             assert_eq!(found[key], value, "stream {is_stream}: {body}");
         }
-        let to_openai = OpenAiChat::OPENAI.encode_response(&request_of(is_stream), &replies);
+        let to_openai = OpenAiChat.encode_response(&request_of(is_stream), &replies);
         assert!(to_openai.is_ok(), "stream {is_stream}");
     }
 }
@@ -447,9 +434,12 @@ fn unknown_fields_of_an_anthropic_block_survive_its_format_and_are_dropped_by_an
             for (key, value) in &native {
                 assert_eq!(&found[key.as_str()], value, "stream {is_stream}: {body}");
             }
-            // Another format drops them, and does not refuse: a dialect with
-            // reasoning, as one block is thinking.
-            let to_openai = DEEPSEEK.encode_response(&request_of(is_stream), &replies);
+            // Another format drops them, and does not refuse; OpenAI Chat
+            // has no field for thinking itself.
+            if block["type"] == "thinking" {
+                continue;
+            }
+            let to_openai = OPENAI.encode_response(&request_of(is_stream), &replies);
             let to_openai = to_openai.expect("translated");
             let words = String::from_utf8_lossy(to_openai.body());
             for (key, _) in &native {
@@ -486,11 +476,7 @@ fn unknown_fields_of_an_openai_tool_call_survive_its_format_and_are_dropped_by_a
     let whole = json!({ "id": "c", "model": "m", "choices": [{ "index": 0, "finish_reason": "tool_calls",
         "message": { "role": "assistant", "content": null, "tool_calls": [entry("{}")] } }] });
     let call = http::Request::new(()).into_parts().0;
-    let decode = |r| {
-        OpenAiChat::OPENAI
-            .decode_response(r, &call)
-            .expect("decoded")
-    };
+    let decode = |r| OpenAiChat.decode_response(r, &call).expect("decoded");
     for (is_stream, text) in [(false, whole.to_string()), (true, stream)] {
         let replies = decoded(decode, is_stream, &text);
         // The choice stays readable events: no opaque choice among them.
@@ -500,7 +486,7 @@ fn unknown_fields_of_an_openai_tool_call_survive_its_format_and_are_dropped_by_a
                 .any(|r| matches!(r, Output::BlockStart { .. })),
             "stream {is_stream}"
         );
-        let out = OpenAiChat::OPENAI
+        let out = OpenAiChat
             .encode_response(&request_of(is_stream), &replies)
             .expect("written");
         let body = String::from_utf8_lossy(out.body()).into_owned();
@@ -597,10 +583,10 @@ fn media_native_fields_survive_locally_and_prevent_lossy_translation() {
 
 #[test]
 fn reasoning_is_typed_but_signatures_remain_format_specific() {
-    let body =
-        openai(json!([{"role":"assistant","reasoning_content":"consider","content":"answer"}]));
-    let deepseek = DEEPSEEK;
-    let chat = deepseek.decode_request(Bytes::from(body.to_string()));
+    let body = anthropic(
+        json!([{"role":"assistant","content":[{"type":"thinking","thinking":"consider"}]}]),
+    );
+    let chat = ANTHROPIC.decode_request(Bytes::from(body.to_string()));
     let chat = chat.expect("supported request");
     assert!(
         chat.messages[0]
@@ -608,12 +594,14 @@ fn reasoning_is_typed_but_signatures_remain_format_specific() {
             .iter()
             .any(|p| matches!(p, Content::Reasoning {text,..} if text=="consider"))
     );
-    assert_eq!(same(deepseek, &body), body);
+    assert_eq!(same(ANTHROPIC, &body), body);
     let signed = anthropic(
         json!([{"role":"assistant","content":[{"type":"thinking","thinking":"consider","signature":"sig"}]}]),
     );
     assert_eq!(same(ANTHROPIC, &signed), signed);
-    assert!(refused(ANTHROPIC, deepseek, &signed));
+    // OpenAI Chat has no field for reasoning, signed or not.
+    assert!(refused(ANTHROPIC, OPENAI, &body));
+    assert!(refused(ANTHROPIC, OPENAI, &signed));
 }
 
 #[test]

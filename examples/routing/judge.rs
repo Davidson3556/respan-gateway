@@ -112,20 +112,20 @@ fn gateway(
     Gateway::new()
         .provider::<Input, _, _>(
             "judge",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             provider_support::openai(&judge.base_url())?.connect(),
         )?
         .provider::<Input, _, _>(
             "cheap",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             provider_support::openai(&cheap.base_url())?.connect(),
         )?
         .provider::<Input, _, _>(
             "strong",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             provider_support::openai(&strong.base_url())?.connect(),
         )?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(egress)
         .plugin(Judge)
         .target("cheap")

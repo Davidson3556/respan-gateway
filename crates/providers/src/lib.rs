@@ -1,19 +1,26 @@
 #![warn(missing_docs)]
 //! The vendors, one module each: where a vendor is, how it takes a key, the
-//! models it serves, and the formats it speaks, each a value set with the
-//! vendor's quirks. [`ALL`] lists them.
+//! models it serves, the formats it speaks, and its quirks. [`ALL`] lists
+//! them.
 //!
-//! Formats name no vendor: a format offers knobs, such as
-//! [`ChatQuirks`](respan_gateway_conversation_http::openai::ChatQuirks), and
-//! a vendor's module sets them, describing each as a [`Quirk`].
+//! A format is a spec and names no vendor. Where a vendor's deployment
+//! departs from a spec, its module says so: as data, such as the header a
+//! key goes in ([`Speaks`]) or what its model list puts before an id, or as
+//! a [`Plugin`] that turns what the vendor sends beyond the spec into the
+//! kind's events and back ([`Provider::plugin`]). Each is described as a
+//! [`Quirk`].
 
+use respan_gateway_conversation_http::Schema;
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
+use respan_gateway_core::Plugin;
 use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_media_http::openai::{
     OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
 };
 use respan_gateway_realtime_ws::JsonEvents;
+
+mod chat;
 
 pub mod anthropic;
 pub mod azure;
@@ -29,8 +36,9 @@ pub mod together;
 pub mod vllm;
 pub mod xai;
 
-/// Every vendor. A format is reached as the first that speaks it says,
-/// for a provider of no vendor too.
+/// Every vendor. A format's own vendor, whose spec it is, comes before any
+/// other that speaks it: a provider of no vendor takes its key and sits as
+/// that vendor's does.
 pub const ALL: &[&Provider] = &[
     &openai::PROVIDER,
     &anthropic::PROVIDER,
@@ -53,7 +61,6 @@ pub fn find(id: &str) -> Option<&'static Provider> {
 }
 
 /// A vendor.
-#[derive(Debug)]
 pub struct Provider {
     /// Its id, as a config names it: `{ vendor: <id> }`.
     pub id: &'static str,
@@ -71,8 +78,22 @@ pub struct Provider {
     pub formats: &'static [Speaks],
     /// What its model list puts before each model's id.
     pub model_id_prefix: Option<&'static str>,
-    /// Its quirks, one per knob its values set ([`Provider::knobs`]).
+    /// How it departs from the specs it speaks, each tested in
+    /// `tests/<id>.rs` by a test named for it.
     pub quirks: &'static [Quirk],
+    /// The plugin of its quirks, run on its providers' calls alone, before
+    /// any other plugin sees their events.
+    pub plugin: Option<&'static dyn Plugin>,
+}
+
+impl std::fmt::Debug for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Provider")
+            .field("id", &self.id)
+            .field("formats", &self.formats)
+            .field("quirks", &self.quirks)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Provider {
@@ -82,22 +103,12 @@ impl Provider {
         let prefix = self.model_id_prefix.unwrap_or_default();
         listed.strip_prefix(prefix).unwrap_or(listed)
     }
-
-    /// The names of the knobs its values set, which its quirks describe.
-    pub fn knobs(&self) -> Vec<&'static str> {
-        let mut knobs: Vec<&'static str> =
-            self.formats.iter().flat_map(|s| s.format.knobs()).collect();
-        knobs.extend(self.model_id_prefix.map(|_| "model_id_prefix"));
-        knobs.sort_unstable();
-        knobs.dedup();
-        knobs
-    }
 }
 
-/// A way a vendor departs from the formats it speaks, which a knob handles.
+/// A way a vendor's deployment departs from a spec it speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Quirk {
-    /// The knob's name, such as `usage_under`.
+    /// Its name, such as `x_groq_usage`.
     pub name: &'static str,
     /// What the vendor does.
     pub description: &'static str,
@@ -106,7 +117,7 @@ pub struct Quirk {
 /// A format a vendor speaks, as it speaks it.
 #[derive(Debug, Clone)]
 pub struct Speaks {
-    /// The format, set with the vendor's quirks.
+    /// The format.
     pub format: Format,
     /// How it takes the key.
     pub auth: Auth,
@@ -161,7 +172,7 @@ pub enum Base {
 /// A format, as its value.
 #[derive(Debug, Clone)]
 pub enum Format {
-    /// Chat Completions, in a dialect.
+    /// OpenAI Chat Completions.
     OpenAiChat(OpenAiChat),
     /// Anthropic Messages.
     AnthropicMessages(AnthropicMessages),
@@ -185,8 +196,8 @@ impl Format {
     /// Its name, as a config names it.
     pub fn name(&self) -> &str {
         match self {
-            Format::OpenAiChat(f) => f.name(),
-            Format::AnthropicMessages(f) => f.name(),
+            Format::OpenAiChat(_) => OpenAiChat::NAME,
+            Format::AnthropicMessages(_) => AnthropicMessages::NAME,
             Format::OpenAiImages(_) => OpenAiImages::NAME,
             Format::OpenAiTranscriptions(_) => OpenAiTranscriptions::NAME,
             Format::OpenAiSpeech(_) => OpenAiSpeech::NAME,
@@ -194,25 +205,6 @@ impl Format {
             Format::OpenAiVideos(_) => OpenAiVideos::NAME,
             Format::GeminiVeo(_) => GeminiVeo::NAME,
             Format::JsonEvents(f) => f.name(),
-        }
-    }
-
-    /// The names of the knobs its value sets.
-    pub fn knobs(&self) -> Vec<&'static str> {
-        match self {
-            Format::OpenAiChat(f) => f.quirks().names(),
-            Format::JsonEvents(f) => {
-                let knobs = [
-                    ("protocol", f.subprotocol().is_some()),
-                    ("binary_text", f.binary_text()),
-                ];
-                knobs
-                    .into_iter()
-                    .filter(|(_, on)| *on)
-                    .map(|(k, _)| k)
-                    .collect()
-            }
-            _ => Vec::new(),
         }
     }
 }

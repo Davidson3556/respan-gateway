@@ -46,7 +46,7 @@ fn a_translated_error_keeps_each_formats_schema() {
     for shape in shapes {
         let mut refused = http::Response::new(Bytes::from(shape.to_string()));
         *refused.status_mut() = StatusCode::BAD_REQUEST;
-        let fault = answer(&OpenAiChat::OPENAI, refused);
+        let fault = answer(&OpenAiChat, refused);
         let words = (
             json!(respan_gateway_http::error_code(&fault)),
             json!(fault.message()),

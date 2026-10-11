@@ -3,12 +3,11 @@
 //! A format supplies its [`Schema`], its names and its JSON both ways; the
 //! HTTP around it, on either edge, is shared.
 //!
-//! - [`openai`]: OpenAI Chat Completions, as OpenAI serves it or in a
-//!   vendor's dialect ([`openai::ChatQuirks`]).
+//! - [`openai`]: OpenAI Chat Completions.
 //! - [`anthropic`]: Anthropic Messages.
 //!
-//! A format names no vendor but its own: a vendor's dialect is a value of
-//! the format, set with the knobs it offers.
+//! A format is its spec: what a provider sends beyond it is kept native, at
+//! the place it appeared, for a plugin to read (each module says where).
 
 use serde_json::Value;
 

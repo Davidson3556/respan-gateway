@@ -25,7 +25,7 @@ processes or several components.
 | Kernel contracts | Hook ordering, ownership, cancellation, buffering, panic handling and progress | `crates/core/tests/`, core unit tests |
 | Shared data contracts | Input assembly, text access and message representation | Input unit tests |
 | HTTP behavior | Encoding, framing, credentials, headers, retry hints, body handling and stream completion | `crates/wires/http/tests/`, HTTP unit tests |
-| Provider compatibility | Native relay, OpenAI/Anthropic translation, vendor dialects, tools, errors and usage | `crates/formats/conversation-http/tests/{relay,translate,round_trips}`, format unit tests; each vendor's quirks in `crates/providers/tests/<vendor>.rs` |
+| Provider compatibility | Native relay, OpenAI/Anthropic translation, tools, errors and usage | `crates/formats/conversation-http/tests/{relay,translate,round_trips}`, format unit tests; each vendor's quirks in `crates/providers/tests/<vendor>.rs` |
 | Hosting and WebSocket sessions | HTTP ingress, upgrade, subprotocols, session events, backpressure, concurrency and close/recovery behavior | `crates/wires/ws/tests/`, `crates/wires/http/tests/axum.rs`, WS unit tests |
 | MCP behavior | JSON-RPC messages, session state, streamable HTTP, stdio and reference-server interoperability | `crates/formats/mcp-http/tests/`, MCP unit tests |
 | Routing policy | Attempts, retries, fallback, races and explicit retry classification | `crates/plugins/tests/routing.rs`, routing unit tests |

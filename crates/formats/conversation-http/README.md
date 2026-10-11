@@ -36,25 +36,19 @@ raw relay ([`Relay::RAW`](../../wires/http/src/relay.rs)) sends a client's own b
 `openai::OpenAiChat`: a `POST` to a path ending in `/chat/completions`; its
 provider base URL includes the version, such as `https://api.openai.com/v1`.
 
-`OpenAiChat::OPENAI`, named `openai-chat`, reads only OpenAI's own fields.
-Another vendor's field stays native, so it survives a relay in this format
-and is refused in translation where it could change the answer. A vendor
-whose fields the kind has a form for gets a dialect of its own name,
-`OpenAiChat::new(name, ChatQuirks { .. })`, which reads and writes them.
-`ChatQuirks` are the knobs, each off in `ChatQuirks::NONE`:
+`OpenAiChat`, named `openai-chat`, is the spec and nothing else: it reads
+OpenAI's fields, and keeps what else a provider sends native, where it
+appeared, so a relay in this format sends it back and a plugin can read it
+(the module docs give each shape): the response's own fields in the start's
+`native`, or, when a later chunk changes them, as a native
+`{"response": {..}}`; a choice's and its message's or delta's as a native
+`{"choices": [..]}`; usage's own as a native `{"usage": {..}}`. A vendor's
+departures from the spec, such as reasoning in `reasoning_content`, are its
+plugins' in the [providers crate](../../providers/README.md), which read
+these. Reasoning has no field in this format, and is refused.
 
-| Knob | What the dialect reads |
-| --- | --- |
-| `reasoning_content` | Reasoning as `reasoning_content` |
-| `usage_under` | A response's usage under this object, beside it |
-| `inert_choice` | These fields of a choice, which describe it and carry no content: dropped as read, rather than kept native and so refusing translation |
-
-The vendors' dialects (`groq-chat`, `deepseek-chat`, `vllm-chat`,
-`openrouter-chat`, `azure-chat`) are the
-[providers crate](../../providers/README.md)'s. Every dialect's values are
-`openai-chat`'s, so what one keeps native another writes. A dialect writes
-what it reads: serve `deepseek-chat` to give clients reasoning, which
-`openai-chat` has no field for and refuses.
+A block is any number unique in a response, such as a plugin's own: both
+formats' encoders write blocks in the order they open.
 
 ## Anthropic Messages
 

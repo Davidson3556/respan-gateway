@@ -141,7 +141,7 @@ async fn a_plugin_knows_which_format_the_client_speaks() {
     let sites = Sites::default();
     let gw = providers([provider(&sites.openai, "openai", Some("Bearer sk-test"))])
         .and_then(|g| {
-            g.client::<Input, _, _>(OpenAiChat::OPENAI)?
+            g.client::<Input, _, _>(OpenAiChat)?
                 .client::<Input, _, _>(AnthropicMessages)
         })
         .and_then(|g| g.plugin(Seen(seen.clone())).target("openai"))
@@ -470,7 +470,7 @@ async fn extensions_set_in_on_provider_reach_the_transport() {
     let gw = gateway(
         [add_provider(
             "openai",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             TenantSender(sites.openai.plain()),
         )],
         vec![Arc::new(key)],
@@ -502,7 +502,7 @@ async fn a_calls_own_extension_reaches_its_transport() {
     let sites = Sites::default();
     let transport = TenantSender(sites.openai.plain());
     let gw = gateway(
-        [add_provider("openai", OpenAiChat::OPENAI, transport)],
+        [add_provider("openai", OpenAiChat, transport)],
         vec![Arc::new(Tenant)],
         None,
     )

@@ -169,7 +169,7 @@ async fn check(answer: Answer, whole: bool, read: bool) {
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             respan_gateway_http::connect(
                 move |request| async move { Scripted { whole }.send(request).await },
                 LIMIT,
@@ -178,14 +178,14 @@ async fn check(answer: Answer, whole: bool, read: bool) {
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "backup",
-                OpenAiChat::OPENAI,
+                OpenAiChat,
                 respan_gateway_http::connect(
                     move |request| async move { Scripted { whole }.send(request).await },
                     LIMIT,
                 ),
             )
         })
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .map(|g| g.plugin(probing))
         .and_then(|g| g.target("openai"))
         .unwrap_or_else(|f| panic!("{f}"));

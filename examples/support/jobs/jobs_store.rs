@@ -52,7 +52,7 @@ fn encode(replies: &[Output]) -> Result<Vec<u8>, Fault> {
     let head = respan_gateway_http::http::Request::new(()).into_parts().0;
     let request = Bytes::from_static(br#"{"stream":true}"#);
     let request = http::Request::from_parts(head, request);
-    Ok(OpenAiChat::OPENAI
+    Ok(OpenAiChat
         .encode_response(&request, replies)?
         .into_body()
         .to_vec())
@@ -65,7 +65,7 @@ fn decode(bytes: Vec<u8>) -> Result<Replies, Fault> {
         HeaderValue::from_static("text/event-stream"),
     );
     let response = http::Response::from_parts(head, Bytes::from(bytes));
-    Ok(Arc::new(OpenAiChat::OPENAI.decode_response(
+    Ok(Arc::new(OpenAiChat.decode_response(
         response,
         &respan_gateway_http::http::Request::new(()).into_parts().0,
     )?))

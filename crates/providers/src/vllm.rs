@@ -1,8 +1,9 @@
-//! vLLM: Chat Completions in its dialect, as a server one runs serves it.
+//! vLLM: Chat Completions, as a server one runs serves it.
 
-use respan_gateway_conversation_http::openai::{ChatQuirks, OpenAiChat};
+use respan_gateway_conversation_http::openai::OpenAiChat;
+use respan_gateway_core::{Plugin, ProviderContext, Result, async_trait};
 
-use crate::{Format, Provider, Quirk, Speaks};
+use crate::{Format, Provider, Quirk, Speaks, chat};
 
 /// vLLM. It has no base URL of its own, and takes a key only if its server
 /// was started with one.
@@ -12,7 +13,7 @@ pub const PROVIDER: Provider = Provider {
     key_env: &[],
     prefixes: &[],
     example_model: "Qwen/Qwen3-8B",
-    formats: &[Speaks::new(Format::OpenAiChat(CHAT))],
+    formats: &[Speaks::new(Format::OpenAiChat(OpenAiChat))],
     model_id_prefix: None,
     quirks: &[
         Quirk {
@@ -26,14 +27,18 @@ pub const PROVIDER: Provider = Provider {
                           describes its finish.",
         },
     ],
+    plugin: Some(&VllmQuirks),
 };
 
-/// vLLM's Chat Completions, `vllm-chat`.
-pub const CHAT: OpenAiChat = OpenAiChat::new(
-    "vllm-chat",
-    ChatQuirks {
-        reasoning_content: true,
-        inert_choice: &["stop_reason"],
-        ..ChatQuirks::NONE
-    },
-);
+/// vLLM's quirks: reasoning is `reasoning_content`, and a choice's
+/// `stop_reason` only describes it.
+#[derive(Debug)]
+pub struct VllmQuirks;
+
+#[async_trait]
+impl Plugin for VllmQuirks {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
+        chat::reasoning_content(px)?;
+        chat::inert_choice(px, &["stop_reason"])
+    }
+}

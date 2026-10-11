@@ -360,7 +360,8 @@ pub enum Output {
     Start(Start),
     /// Content block `block` opens.
     BlockStart {
-        /// The block, numbered in the order blocks open.
+        /// The block: a number unique in the response, which a format
+        /// gives in the order blocks open, and a plugin may give its own.
         block: u32,
         /// What it holds.
         kind: Block,

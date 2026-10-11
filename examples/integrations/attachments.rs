@@ -591,12 +591,12 @@ fn gateway(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
     Ok(Gateway::new()
         .provider::<Input, _, _>(
             "text-only",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             provider_support::openai(&fixture.text.base_url())?.connect(),
         )?
         .provider::<Input, _, _>(
             "reads-pdf",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             provider_support::openai(&fixture.pdf.base_url())?.connect(),
         )?
         .provider::<Ask, _, _>(
@@ -604,7 +604,7 @@ fn gateway(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
             FILES,
             HttpTransport::new(&fixture.files.url)?.connect(),
         )?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(pdfs)
         .plugin(Fallback))
 }
@@ -628,7 +628,7 @@ fn gateway_claude(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fa
     Ok(Gateway::new()
         .provider::<Input, _, _>(
             "text-only",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             provider_support::openai(&fixture.text.base_url())?.connect(),
         )?
         .provider::<Input, _, _>(
@@ -641,7 +641,7 @@ fn gateway_claude(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fa
             FILES,
             HttpTransport::new(&fixture.files.url)?.connect(),
         )?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(pdfs)
         .plugin(Fallback))
 }

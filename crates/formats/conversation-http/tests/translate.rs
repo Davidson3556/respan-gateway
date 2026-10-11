@@ -9,7 +9,7 @@ use http::{HeaderValue, StatusCode};
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi, Request};
 use respan_gateway_conversation::{Block, Delta, Finish, Input, Output};
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
-use respan_gateway_conversation_http::openai::{ChatQuirks, OpenAiChat};
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::NativeFields;
 use respan_gateway_core::async_trait;
 use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, Response, Upstream};
@@ -33,15 +33,6 @@ use support::{
     with_plugins,
 };
 use support::{SendRequest, http_sender, sender};
-
-/// A dialect whose choices carry the moderation they passed, as Azure's do.
-const AZURE: OpenAiChat = OpenAiChat::new(
-    "azure-chat",
-    ChatQuirks {
-        inert_choice: &["content_filter_results", "content_filter_offsets"],
-        ..ChatQuirks::NONE
-    },
-);
 
 fn call(path: &str, body: impl Into<bytes::Bytes>) -> Call {
     post(path, body)
@@ -176,12 +167,11 @@ impl Harness {
         let usage = Metered::default();
         plugins.push(Arc::new(usage.clone()));
         let gw = providers([
-            add_provider("openai", OpenAiChat::OPENAI, openai_http.clone()),
-            add_provider("azure", AZURE, openai_http),
+            add_provider("openai", OpenAiChat, openai_http),
             add_provider("anthropic", AnthropicMessages, anthropic_http),
         ])
         .and_then(|gw| {
-            gw.client::<Input, _, _>(OpenAiChat::OPENAI)?
+            gw.client::<Input, _, _>(OpenAiChat)?
                 .client::<Input, _, _>(AnthropicMessages)
         })
         .map(|gw| with_plugins(gw, plugins))

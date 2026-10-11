@@ -13,9 +13,10 @@ pub const PROVIDER: Provider = Provider {
     prefixes: &[],
     example_model: "llama3.2",
     formats: &[
-        Speaks::new(Format::OpenAiChat(OpenAiChat::OPENAI)),
+        Speaks::new(Format::OpenAiChat(OpenAiChat)),
         Speaks::new(Format::OpenAiEmbeddings(OpenAiEmbeddings)),
     ],
     model_id_prefix: None,
     quirks: &[],
+    plugin: None,
 };

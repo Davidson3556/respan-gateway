@@ -29,11 +29,14 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
   the provider edge and **hosting** for the client edge (behind features).
 - A **format** (`crates/formats/`) is a kind over a wire, a crate per pair
   (`conversation-http`, `media-http`, `realtime-ws`, `mcp-http`), each a
-  `Format`. Formats name no vendor: a vendor's departure from one is a knob
-  the format offers.
+  `Format`. A format is a spec and names no vendor: what a provider sends
+  beyond the spec stays native to it, where it appeared. It picks the wire
+  capabilities its spec uses, such as a subprotocol or binary frames.
 - The **providers** crate (`crates/providers/`) is every vendor, a file
-  each: where it is, its key, its models, and the formats it speaks, set
-  with its quirks, each described.
+  each: where it is, its key, its models, the formats it speaks, and its
+  quirks, each described. A quirk, a deployment's departure from a spec, is
+  data (such as a key header) or the vendor's plugin, which turns what it
+  sends beyond the spec into the kind's events and back.
 
 | Location | Sort | Owns | Internal production dependencies |
 | --- | --- | --- | --- |
@@ -44,11 +47,11 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes | Core |
 | `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the opaque format; optional Reqwest transport and Axum hosting | Core |
 | `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`); optional Axum hosting | Core, HTTP |
-| `crates/formats/conversation-http/` | Format | The HTTP binding (`Schema`), OpenAI Chat (with `ChatQuirks`) and Anthropic Messages | Conversation, HTTP |
+| `crates/formats/conversation-http/` | Format | The HTTP binding (`Schema`), OpenAI Chat and Anthropic Messages | Conversation, HTTP |
 | `crates/formats/media-http/` | Format | OpenAI's media endpoints as compatible vendors serve them, and Veo's as a provider | Media, conversation-http, HTTP |
-| `crates/formats/realtime-ws/` | Format | `JsonEvents` (with `SessionQuirks`) | Realtime, HTTP, WS |
+| `crates/formats/realtime-ws/` | Format | `JsonEvents` and its specs (OpenAI Realtime, Responses over WebSocket, Gemini Live) | Realtime, HTTP, WS |
 | `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
-| `crates/providers/` | Providers | Every vendor, a file each, and their quirks | The formats |
+| `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins | Core, the formats |
 | `crates/plugins/` | Plugins | Model routing, attempts, fallback, races and backoff | Core |
 | `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), its routing step, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | All of the above |
 | `python/` | Python package | PyO3 extension hosting the `apps/gateway` library in-process, plus httpx transports and SDK clients | `apps/gateway` |
@@ -89,7 +92,9 @@ their filesystem locations.
 The application (`apps/gateway`) composes these crates with public APIs only.
 A configured provider may speak several formats (a vendor preset speaks every
 format of its vendor, as `crates/providers` says); the application registers one core
-provider per format and routes with one plugin of its own: `provider/model`,
+provider per format, runs each vendor's plugin on its providers' calls alone,
+registered last so every other plugin sees the kind's events, and routes
+with one plugin of its own: `provider/model`,
 then `models` routes, then preset model prefixes, then the kind's default,
 among the providers serving the request's kind. Each media operation
 (`image`, `transcription`, `speech`, `embedding`, `video`) is a kind that translates

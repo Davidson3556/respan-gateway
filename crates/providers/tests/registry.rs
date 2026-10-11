@@ -1,4 +1,4 @@
-//! The registry: each vendor once, its quirks its knobs, and the README's
+//! The registry: each vendor once, each quirk tested, and the README's
 //! table of them as the code says.
 
 use respan_gateway_providers::{ALL, Provider};
@@ -11,12 +11,29 @@ fn every_vendor_is_listed_once() {
     assert_eq!(ids.len(), ALL.len());
 }
 
+/// The tests of each vendor with quirks.
+const TESTS: &[(&str, &str)] = &[
+    ("azure", include_str!("azure.rs")),
+    ("deepseek", include_str!("deepseek.rs")),
+    ("gemini", include_str!("gemini.rs")),
+    ("groq", include_str!("groq.rs")),
+    ("openrouter", include_str!("openrouter.rs")),
+    ("vllm", include_str!("vllm.rs")),
+];
+
+/// A quirk is tested by a test of `tests/<vendor>.rs` whose name has it.
 #[test]
-fn a_vendors_quirks_are_the_knobs_it_sets() {
-    for provider in ALL {
-        let mut quirks: Vec<&str> = provider.quirks.iter().map(|q| q.name).collect();
-        quirks.sort_unstable();
-        assert_eq!(quirks, provider.knobs(), "{}", provider.id);
+fn every_quirk_has_a_test_named_for_it() {
+    for provider in ALL.iter().filter(|p| !p.quirks.is_empty()) {
+        let tests = TESTS.iter().find(|(id, _)| *id == provider.id);
+        let (_, tests) = tests.unwrap_or_else(|| panic!("no tests/{}.rs", provider.id));
+        for quirk in provider.quirks {
+            let named = tests.lines().any(|l| {
+                let l = l.trim_start();
+                l.starts_with("fn ") || l.starts_with("async fn ")
+            } && l.contains(quirk.name));
+            assert!(named, "{}: no test named for {}", provider.id, quirk.name);
+        }
     }
 }
 

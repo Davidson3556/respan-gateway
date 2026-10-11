@@ -14,4 +14,5 @@ pub const PROVIDER: Provider = Provider {
     formats: &[Speaks::new(Format::AnthropicMessages(AnthropicMessages)).key_in("x-api-key")],
     model_id_prefix: None,
     quirks: &[],
+    plugin: None,
 };

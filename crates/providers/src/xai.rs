@@ -13,9 +13,10 @@ pub const PROVIDER: Provider = Provider {
     prefixes: &["grok"],
     example_model: "grok-4",
     formats: &[
-        Speaks::new(Format::OpenAiChat(OpenAiChat::OPENAI)),
+        Speaks::new(Format::OpenAiChat(OpenAiChat)),
         Speaks::new(Format::OpenAiImages(OpenAiImages)),
     ],
     model_id_prefix: None,
     quirks: &[],
+    plugin: None,
 };

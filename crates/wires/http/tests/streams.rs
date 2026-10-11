@@ -322,7 +322,7 @@ fn talk_with_openai(
     let calls = Calls::default();
     let list = [
         add_provider("echo", Talk, echo.sender()),
-        add_provider("openai", OpenAiChat::OPENAI, openai),
+        add_provider("openai", OpenAiChat, openai),
     ];
     let gw = providers(list).and_then(|g| g.client::<Say, _, _>(Talk));
     let gw = gw.map(|g| g.plugin(calls.clone()));

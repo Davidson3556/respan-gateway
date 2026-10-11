@@ -182,8 +182,8 @@ fn gateway(
 ) -> Result<Gateway, Fault> {
     let accounting = Accounting::new(ledger, quote);
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, transport)?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Cap) // before accounting
         .plugin(accounting)
         .target("openai")

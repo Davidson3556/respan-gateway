@@ -61,10 +61,7 @@ async fn plugins_run_in_registration_order_on_both_edges() {
     let sites = Sites::default();
     // Registered d, b, a, c, and they run in that order.
     let gw = providers([provider(&sites.openai, "openai", None)])
-        .and_then(|g| {
-            g.client::<Input, _, _>(OpenAiChat::OPENAI)?
-                .target("openai")
-        })
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat)?.target("openai"))
         .map(|g| {
             let g = g.plugin(named("d")).plugin(named("b"));
             g.plugin(named("a")).plugin(named("c"))
@@ -431,7 +428,7 @@ async fn a_providers_trailers_are_not_passed_on() {
 
     let log = Outcomes::default();
     let gw = gateway(
-        [add_provider("openai", OpenAiChat::OPENAI, Trailed)],
+        [add_provider("openai", OpenAiChat, Trailed)],
         vec![Arc::new(log.clone())],
         Some("openai"),
     )

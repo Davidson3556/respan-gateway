@@ -1,6 +1,6 @@
 //! What a request says beyond text, in OpenAI's terms: tools and their
-//! choice, an assistant's calls and their results, media, reasoning in a
-//! dialect that has it, and structured output. What the kind has no form
+//! choice, an assistant's calls and their results, media, and structured
+//! output. What the kind has no form
 //! for, such as a tool the provider runs, stays in the `native` of the
 //! request, the message or the tool.
 
@@ -117,26 +117,10 @@ pub(crate) fn write_openai_tools(chat: &Input, v: &mut Map<String, Value>) -> Re
 
 /// An OpenAI message read as the kind's
 /// ([`decode_message`](crate::schema::decode_message)) with what it says
-/// beside its content: reasoning, in a dialect that has it, before its
-/// content; a tool message as a user message of one result; an assistant's
-/// `tool_calls` as calls after its content. What the kind cannot say of
-/// them stays in the message's `native`.
-pub(crate) fn read_openai_message(chat: OpenAiChat, m: &Value, message: &mut Message) {
-    if let Some(text) = m["reasoning_content"]
-        .as_str()
-        .filter(|_| chat.quirks().reasoning_content)
-    {
-        message.content.insert(
-            0,
-            Content::Reasoning {
-                text: text.into(),
-                native: None,
-            },
-        );
-        if let Some(native) = &mut message.native {
-            native.fields.remove("reasoning_content");
-        }
-    }
+/// beside its content: a tool message as a user message of one result; an
+/// assistant's `tool_calls` as calls after its content. What the kind cannot
+/// say of them stays in the message's `native`.
+pub(crate) fn read_openai_message(m: &Value, message: &mut Message) {
     if matches!(&message.role, Role::Native { name, .. } if name == "tool") {
         let Some(id) = m["tool_call_id"].as_str() else {
             return;
@@ -221,13 +205,9 @@ fn openai_result(
 }
 
 /// A message as OpenAI's: each result a tool message of its own, then, if
-/// it says more, the message, its calls in `tool_calls` and its reasoning
-/// as `reasoning_content`, which only a dialect that has it can write.
-pub(crate) fn write_openai_message(
-    chat: OpenAiChat,
-    m: &Message,
-    roles: &Names<Role>,
-) -> Result<Vec<Value>, Fault> {
+/// it says more, the message and its calls in `tool_calls`. It has no field
+/// for reasoning.
+pub(crate) fn write_openai_message(m: &Message, roles: &Names<Role>) -> Result<Vec<Value>, Fault> {
     let is = |p: &&Content, result: bool| matches!(p, Content::ToolResult { .. }) == result;
     let results: Vec<&Content> = m.content.iter().filter(|p| is(p, true)).collect();
     let rest: Vec<&Content> = m.content.iter().filter(|p| is(p, false)).collect();
@@ -255,28 +235,14 @@ pub(crate) fn write_openai_message(
         let calls: Vec<&Content> = rest.iter().copied().filter(call).collect();
         let mut said = m.clone();
         said.content = rest.into_iter().filter(|p| !call(p)).cloned().collect();
-        let mut reasoning = String::new();
-        let mut native_reasoning = None;
-        for part in &said.content {
-            if let Content::Reasoning { text, native } = part {
-                reasoning.push_str(text);
-                if native.as_ref().is_some_and(|n| !n.is_empty()) {
-                    native_reasoning = native.clone();
-                }
-            }
+        if said
+            .content
+            .iter()
+            .any(|p| matches!(p, Content::Reasoning { .. }))
+        {
+            return Err(untranslatable("reasoning in OpenAI Chat"));
         }
-        if native_reasoning.is_some() {
-            return Err(untranslatable("native reasoning fields in OpenAI Chat"));
-        }
-        said.content
-            .retain(|p| !matches!(p, Content::Reasoning { .. }));
         let mut v = encode_message::<OpenAiChat>(&said, roles)?;
-        if !reasoning.is_empty() {
-            if !chat.quirks().reasoning_content {
-                return Err(untranslatable(&format!("reasoning in {}", chat.name())));
-            }
-            v["reasoning_content"] = reasoning.into();
-        }
         if !calls.is_empty() {
             v["tool_calls"] = openai_calls(&calls)?.into();
             if said.content.is_empty() {

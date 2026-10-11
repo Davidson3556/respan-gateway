@@ -372,7 +372,7 @@ fn gateway<S: Store>(
     Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             respan_gateway_http::connect(
                 supervised(move |request| {
                     let client = transport.clone();
@@ -381,7 +381,7 @@ fn gateway<S: Store>(
                 LIMIT,
             ),
         )?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Idempotent(store.clone()))
         .target("openai")
 }

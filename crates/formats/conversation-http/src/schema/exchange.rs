@@ -42,7 +42,7 @@ pub(crate) fn post<C: Schema>(
     if input.is_none() {
         return Err(Fault::config(format!(
             "{} does not accept streaming inputs",
-            schema.name()
+            C::NAME
         )));
     }
     head.method = http::Method::POST;
@@ -200,7 +200,7 @@ fn unary_reply<C: Schema>(schema: C, status: StatusCode, raw: Bytes) -> Result<V
         return Ok(out);
     }
     Err(match failure_json(&raw).filter(says_error) {
-        Some(v) => said_error(schema.name(), status, raw, &v),
+        Some(v) => said_error(C::NAME, status, raw, &v),
         None => Upstream::fault("the provider's success is not a response of its format"),
     })
 }

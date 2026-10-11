@@ -144,8 +144,9 @@ pub struct KnownFormat {
     pub kind: Kind,
     /// What its clients send, as `METHOD /path`.
     pub endpoints: Vec<String>,
-    /// How a provider of it takes a key, and where it sits beside a base
-    /// URL: as the first vendor that speaks it does.
+    /// How a provider of no vendor takes a key, and where it sits beside a
+    /// base URL: as the format's own vendor, the first in [`ALL`] that
+    /// speaks it, does.
     pub key: Auth,
     pub base: Base,
     pub websocket: bool,
@@ -294,7 +295,7 @@ const VIDEOS: &[&str] = &[
 ];
 
 /// Every format this binary speaks: each format a vendor speaks
-/// ([`ALL`]), reached as the first that speaks it is, and passthrough. Its
+/// ([`ALL`]), reached as its own vendor's is, and passthrough. Its
 /// providers are reached over HTTP, reading up to `limit` bytes of an answer
 /// at once, or over WebSocket for a session.
 pub fn formats(limit: usize) -> Vec<KnownFormat> {

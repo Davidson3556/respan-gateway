@@ -51,7 +51,7 @@ async fn a_mock_llm_tool_round_trip_uses_mcp_and_keeps_the_provider_call_id() ->
     let mut headers = respan_gateway_http::http::HeaderMap::new();
     headers.insert("x-api-key", HeaderValue::from_static("sk-ant-test"));
     let chat = Gateway::new()
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .client::<Input, _, _>(OpenAiChat)?
         .provider::<Input, _, _>(
             "llm",
             AnthropicMessages,

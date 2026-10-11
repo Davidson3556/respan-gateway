@@ -37,8 +37,8 @@ fn gateway(
     tally: Meter,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, provider)?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .provider::<Input, _, _>("openai", OpenAiChat, provider)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(tally)
         .target("openai")
 }

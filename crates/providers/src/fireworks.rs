@@ -13,9 +13,10 @@ pub const PROVIDER: Provider = Provider {
     prefixes: &["accounts/"],
     example_model: "accounts/fireworks/models/llama-v3p3-70b-instruct",
     formats: &[
-        Speaks::new(Format::OpenAiChat(OpenAiChat::OPENAI)),
+        Speaks::new(Format::OpenAiChat(OpenAiChat)),
         Speaks::new(Format::OpenAiEmbeddings(OpenAiEmbeddings)),
     ],
     model_id_prefix: None,
     quirks: &[],
+    plugin: None,
 };

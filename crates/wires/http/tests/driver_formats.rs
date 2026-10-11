@@ -132,7 +132,7 @@ impl Harness {
         let gw = Gateway::new()
             .provider::<Input, _, _>(
                 "openai",
-                OpenAiChat::OPENAI,
+                OpenAiChat,
                 respan_gateway_http::connect(openai, LIMIT),
             )
             .and_then(|g| {
@@ -143,7 +143,7 @@ impl Harness {
                 )
             })
             .and_then(|g| {
-                g.client::<Input, _, _>(OpenAiChat::OPENAI)?
+                g.client::<Input, _, _>(OpenAiChat)?
                     .client::<Input, _, _>(AnthropicMessages)
             });
         let gw = gw
@@ -578,13 +578,13 @@ async fn a_slow_refusal_is_refused() {
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             respan_gateway_http::connect(
                 |request| async move { SlowRefusal.send(request).await },
                 LIMIT,
             ),
         )
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .map(|g| g.plugin(head_only.clone()).plugin(explicit::Relay::RAW))
         .and_then(|g| g.target("openai"))
         .unwrap();
@@ -630,13 +630,13 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
         let gw = Gateway::new()
             .provider::<Input, _, _>(
                 "openai",
-                OpenAiChat::OPENAI,
+                OpenAiChat,
                 respan_gateway_http::connect(
                     |request| async move { HugeRefusal.send(request).await },
                     LIMIT,
                 ),
             )
-            .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
+            .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
             .map(|g| g.plugin(outcomes.clone()))
             .map(|g| g.plugin(head_only.clone()))
             .and_then(|g| g.target("openai"))

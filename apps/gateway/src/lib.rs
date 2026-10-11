@@ -26,6 +26,7 @@ mod init;
 mod jobs;
 mod models;
 mod presets;
+mod quirks;
 mod requests;
 mod routing;
 

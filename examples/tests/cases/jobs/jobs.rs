@@ -234,10 +234,10 @@ async fn a_lost_lease_cancels_provider_opening_and_retries_with_the_same_upstrea
         }
     };
     let gw = Gateway::new()
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .client::<Input, _, _>(OpenAiChat)?
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             respan_gateway_http::connect(supervised(transport), LIMIT),
         )?
         .plugin(Idempotent(store))

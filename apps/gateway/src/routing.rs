@@ -212,7 +212,10 @@ mod tests {
             |format: &str, kind, internal: &str| (format.to_owned(), kind, internal.to_owned());
         Routes {
             providers: vec![
-                ("groq".into(), vec![entry("groq-chat", Kind::CHAT, "groq")]),
+                (
+                    "groq".into(),
+                    vec![entry("openai-chat", Kind::CHAT, "groq")],
+                ),
                 (
                     "openai".into(),
                     vec![

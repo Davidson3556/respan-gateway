@@ -1153,6 +1153,40 @@ mod tests {
         }
     }
 
+    /// A block is any number unique in the response, such as a plugin's
+    /// own: each takes the next index as it opens on the wire.
+    #[test]
+    fn blocks_of_any_numbers_take_indexes_in_the_order_they_open() {
+        let far = u32::MAX - 1;
+        let replies = [
+            Output::start("x", "m"),
+            Output::block_start(far, Block::Reasoning),
+            Output::reasoning(far, "hm"),
+            Output::block_end(far),
+            Output::block_start(7, Block::Text),
+            Output::text(7, "hi"),
+            Output::block_end(7),
+            Output::block_start(u32::MAX, call("t", "f")),
+            Output::block_end(u32::MAX),
+        ];
+        let stream = stream_of(&replies).expect("a stream");
+        let starts: Vec<Value> = stream_events(&stream)
+            .into_iter()
+            .filter(|e| e["type"] == "content_block_start")
+            .map(|e| json!([e["index"], e["content_block"]["type"]]))
+            .collect();
+        let expected = json!([[0, "thinking"], [1, "text"], [2, "tool_use"]]);
+        assert_eq!(Value::from(starts), expected);
+        let body = body_of(&replies).expect("a body");
+        let kinds: Vec<&Value> = body["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|b| &b["type"])
+            .collect();
+        assert_eq!(kinds, ["thinking", "text", "tool_use"]);
+    }
+
     fn text_events(block: u32, text: &str) -> Vec<Output> {
         vec![
             Output::block_start(block, Block::Text),

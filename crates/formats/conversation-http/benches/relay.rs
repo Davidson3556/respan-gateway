@@ -42,10 +42,10 @@ async fn time(name: &str, stream: bool, reply: &str, content_type: &'static str)
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "p",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             respan_gateway_http::connect(transport, LIMIT),
         )
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .and_then(|g| g.target("p"))
         .unwrap_or_else(|f| panic!("{f}"));
     let body = request(stream);

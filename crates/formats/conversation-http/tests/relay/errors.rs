@@ -411,10 +411,7 @@ async fn an_empty_stream_of_another_kind_is_refused() {
 async fn a_translated_304_is_a_bad_gateway() {
     let sites = Sites::default();
     let p = add_provider("anthropic", AnthropicMessages, sites.claude.plain());
-    let gw = providers([p]).and_then(|g| {
-        g.client::<Input, _, _>(OpenAiChat::OPENAI)?
-            .target("anthropic")
-    });
+    let gw = providers([p]).and_then(|g| g.client::<Input, _, _>(OpenAiChat)?.target("anthropic"));
     let gw = gw.unwrap_or_else(|e| panic!("gateway: {e}"));
     let not_modified = http::Response::builder().status(StatusCode::NOT_MODIFIED);
     sites
@@ -439,7 +436,7 @@ async fn the_relay_grants_raw_errors_only_within_one_format() {
     let sites = Sites::default();
     let seen = RawPermission::default();
     let same = providers([provider(&sites.openai, "openai", None)]).and_then(|g| {
-        g.client::<Input, _, _>(OpenAiChat::OPENAI)?
+        g.client::<Input, _, _>(OpenAiChat)?
             .plugin(explicit::Relay::HEADS)
             .plugin(seen.clone())
             .target("openai")
@@ -451,7 +448,7 @@ async fn the_relay_grants_raw_errors_only_within_one_format() {
 
     let other = add_provider("anthropic", AnthropicMessages, sites.claude.plain());
     let other = providers([other]).and_then(|g| {
-        g.client::<Input, _, _>(OpenAiChat::OPENAI)?
+        g.client::<Input, _, _>(OpenAiChat)?
             .plugin(explicit::Relay::HEADS)
             .plugin(seen.clone())
             .target("anthropic")

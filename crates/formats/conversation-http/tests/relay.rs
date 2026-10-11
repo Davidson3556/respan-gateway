@@ -29,7 +29,7 @@ use respan_gateway_conversation::{
     Assembled, Content, Delta, Finish, Input, Message, Output, Role, set_model,
 };
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
-use respan_gateway_conversation_http::openai::{ChatQuirks, OpenAiChat};
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::Details;
 use respan_gateway_core::async_trait;
 use respan_gateway_core::{
@@ -76,7 +76,7 @@ fn events_of(body: &str) -> Vec<Output> {
         .insert(http::header::CONTENT_TYPE, HeaderValue::from_static(kind));
     let ask = http::Request::new(()).into_parts().0;
     let answer = http::Response::from_parts(head, bytes::Bytes::from(body.to_owned()));
-    OpenAiChat::OPENAI
+    OpenAiChat
         .decode_response(answer, &ask)
         .unwrap_or_else(|f| panic!("{f}: {body}"))
 }
@@ -256,7 +256,7 @@ fn provider(site: &Local, name: &str, key: Option<&'static str>) -> support::Add
     if let Some(key) = key {
         headers.insert(http::header::AUTHORIZATION, HeaderValue::from_static(key));
     }
-    add_provider(name, OpenAiChat::OPENAI, site.transport(headers))
+    add_provider(name, OpenAiChat, site.transport(headers))
 }
 fn real_sse(chunks: &[&str]) -> Answer {
     let events = chunks
@@ -286,10 +286,7 @@ fn gateway(
     plugins: Vec<Arc<dyn Plugin>>,
     target: Option<&str>,
 ) -> Result<Gateway, Fault> {
-    let gw = with_plugins(
-        providers(list)?.client::<Input, _, _>(OpenAiChat::OPENAI)?,
-        plugins,
-    );
+    let gw = with_plugins(providers(list)?.client::<Input, _, _>(OpenAiChat)?, plugins);
     match target {
         Some(target) => gw.target(target),
         None => Ok(gw),
@@ -322,7 +319,7 @@ impl Harness {
         let usage = Metered::default();
         plugins.push(Arc::new(usage.clone()));
         let openai = match fake {
-            Some(fake) => add_provider("openai", OpenAiChat::OPENAI, fake_transport(fake)),
+            Some(fake) => add_provider("openai", OpenAiChat, fake_transport(fake)),
             None => provider(&sites.openai, "openai", Some("Bearer sk-test")),
         };
         let list = [openai, provider(&sites.backup, "backup", None)];
@@ -811,20 +808,20 @@ struct Fragile;
 
 impl Format<ClientIo, Input, Output> for Fragile {
     fn name(&self) -> &str {
-        OpenAiChat::OPENAI.name()
+        OpenAiChat::NAME
     }
     fn matches(&self, io: &ClientIo) -> bool {
-        <OpenAiChat as Format<ClientIo, Input, Output>>::matches(&OpenAiChat::OPENAI, io)
+        <OpenAiChat as Format<ClientIo, Input, Output>>::matches(&OpenAiChat, io)
     }
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         Ok(io.bind(
-            |request| OpenAiChat::OPENAI.read_request(request),
+            |request| OpenAiChat.read_request(request),
             move |reply| {
                 let mut head = reply.head();
-                let encoder = OpenAiChat::OPENAI.response_encoder(&mut head, reply.request());
+                let encoder = OpenAiChat.response_encoder(&mut head, reply.request());
                 Ok(reply.write(head, Box::new(Garbling(encoder))))
             },
-            |fault, request, head| OpenAiChat::OPENAI.refusal(fault, request, head),
+            |fault, request, head| OpenAiChat.refusal(fault, request, head),
         ))
     }
 }
@@ -872,7 +869,7 @@ impl Plugin for PanicFilter {
 fn translating(sites: &Sites, relay: explicit::Relay) -> Gateway {
     let p = add_provider("anthropic", AnthropicMessages, sites.claude.plain());
     let gw = providers([p]).and_then(|g| {
-        g.client::<Input, _, _>(OpenAiChat::OPENAI)?
+        g.client::<Input, _, _>(OpenAiChat)?
             .plugin(relay)
             .target("anthropic")
     });

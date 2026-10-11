@@ -562,7 +562,7 @@ async fn a_default_target_of_another_kind_is_not_used() {
     let (transport, sent) = local(|_, _| panic!("wrong kind reached provider"));
     let openai = add_provider(
         "openai",
-        respan_gateway_conversation_http::openai::OpenAiChat::OPENAI,
+        respan_gateway_conversation_http::openai::OpenAiChat,
         transport,
     );
     let gw = serving(V1, [openai], Vec::new(), Some("openai")).expect("builds");
@@ -589,7 +589,7 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
     #[async_trait]
     impl Plugin for ByFormat {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            if cx.format() == respan_gateway_conversation_http::openai::OpenAiChat::OPENAI.name() {
+            if cx.format() == "openai-chat" {
                 cx.set_target("openai");
             }
             Ok(None)
@@ -601,14 +601,13 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
     let gw = |plugins: Vec<Arc<dyn Plugin>>| {
         let openai = add_provider(
             "openai",
-            respan_gateway_conversation_http::openai::OpenAiChat::OPENAI,
+            respan_gateway_conversation_http::openai::OpenAiChat,
             openai(&fake),
         );
         providers([openai, add_provider("v2", V2, v2.clone())])
             .and_then(|gw| {
-                gw.client::<Jev, _, _>(V1)?.client::<Input, _, _>(
-                    respan_gateway_conversation_http::openai::OpenAiChat::OPENAI,
-                )
+                gw.client::<Jev, _, _>(V1)?
+                    .client::<Input, _, _>(respan_gateway_conversation_http::openai::OpenAiChat)
             })
             .map(|gw| plugins.into_iter().fold(gw, Gateway::plugin))
             .and_then(|gw| gw.target("openai")?.target("v2"))
@@ -676,7 +675,7 @@ async fn a_call_to_a_provider_of_another_kind_is_refused_when_made() {
     let (transport, sent) = local(|_, _| panic!("wrong kind reached provider"));
     let openai = add_provider(
         "openai",
-        respan_gateway_conversation_http::openai::OpenAiChat::OPENAI,
+        respan_gateway_conversation_http::openai::OpenAiChat,
         transport,
     );
     let gw = serving(V1, [openai], vec![Arc::new(Stray)], None).expect("builds");
@@ -809,7 +808,7 @@ fn formats_of_one_name_and_different_kinds_do_not_build() {
         ..V1
     };
     let err = serving(
-        respan_gateway_conversation_http::openai::OpenAiChat::OPENAI,
+        respan_gateway_conversation_http::openai::OpenAiChat,
         [add_provider("jev", impostor, unused())],
         Vec::new(),
         Some("jev"),

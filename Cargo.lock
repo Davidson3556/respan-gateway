@@ -1606,10 +1606,8 @@ dependencies = [
  "respan-gateway-http",
  "respan-gateway-media-http",
  "respan-gateway-realtime-ws",
- "respan-gateway-ws",
  "serde_json",
  "tokio",
- "tokio-tungstenite",
 ]
 
 [[package]]
@@ -1643,6 +1641,8 @@ dependencies = [
  "respan-gateway-realtime",
  "respan-gateway-ws",
  "serde_json",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

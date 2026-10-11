@@ -64,10 +64,10 @@ async fn a_filter_registered_earlier_cannot_hide_usage_from_billing() -> Result<
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             provider_support::openai(&openai.base_url())?.connect(),
         )?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Refuses)
         .plugin(Billing {
             prices,

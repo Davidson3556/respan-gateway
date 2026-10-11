@@ -1,8 +1,9 @@
-//! OpenRouter: Chat Completions in its dialect, for many vendors' models.
+//! OpenRouter: Chat Completions, for many vendors' models.
 
-use respan_gateway_conversation_http::openai::{ChatQuirks, OpenAiChat};
+use respan_gateway_conversation_http::openai::OpenAiChat;
+use respan_gateway_core::{Plugin, ProviderContext, Result, async_trait};
 
-use crate::{Format, Provider, Quirk, Speaks};
+use crate::{Format, Provider, Quirk, Speaks, chat};
 
 /// OpenRouter. Its models' names are `<vendor>/<model>`: a configured
 /// provider named `<vendor>` takes the name first.
@@ -27,20 +28,24 @@ pub const PROVIDER: Provider = Provider {
         "perplexity/",
     ],
     example_model: "openai/gpt-4o-mini",
-    formats: &[Speaks::new(Format::OpenAiChat(CHAT))],
+    formats: &[Speaks::new(Format::OpenAiChat(OpenAiChat))],
     model_id_prefix: None,
     quirks: &[Quirk {
         name: "inert_choice",
         description: "A choice's `native_finish_reason`, the upstream provider's own reason, \
                       describes its finish.",
     }],
+    plugin: Some(&OpenRouterQuirks),
 };
 
-/// OpenRouter's Chat Completions, `openrouter-chat`.
-pub const CHAT: OpenAiChat = OpenAiChat::new(
-    "openrouter-chat",
-    ChatQuirks {
-        inert_choice: &["native_finish_reason"],
-        ..ChatQuirks::NONE
-    },
-);
+/// OpenRouter's quirks: a choice's `native_finish_reason` only describes
+/// it.
+#[derive(Debug)]
+pub struct OpenRouterQuirks;
+
+#[async_trait]
+impl Plugin for OpenRouterQuirks {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
+        chat::inert_choice(px, &["native_finish_reason"])
+    }
+}

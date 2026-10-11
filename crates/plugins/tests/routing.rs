@@ -323,67 +323,67 @@ struct Harness {
 async fn harness(plan: Plan) -> Harness {
     let (mock, record) = (Fakes::start().await, Record::default());
     let gw = Gateway::new()
-        .client::<Input, _, _>(OpenAiChat::OPENAI)
+        .client::<Input, _, _>(OpenAiChat)
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "a",
-                OpenAiChat::OPENAI,
+                OpenAiChat,
                 respan_gateway_http::connect(mock.at(A), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "b",
-                OpenAiChat::OPENAI,
+                OpenAiChat,
                 respan_gateway_http::connect(mock.at(B), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "slow",
-                OpenAiChat::OPENAI,
+                OpenAiChat,
                 respan_gateway_http::connect(slow(mock.at(A), secs(5)), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "stalled",
-                OpenAiChat::OPENAI,
+                OpenAiChat,
                 respan_gateway_http::connect(watchdog(stall), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "silent",
-                OpenAiChat::OPENAI,
+                OpenAiChat,
                 respan_gateway_http::connect(watchdog(silent), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "refused",
-                OpenAiChat::OPENAI,
+                OpenAiChat,
                 respan_gateway_http::connect(refused, LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "dribble",
-                OpenAiChat::OPENAI,
+                OpenAiChat,
                 respan_gateway_http::connect(dribble, LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "b-in-1s",
-                OpenAiChat::OPENAI,
+                OpenAiChat,
                 respan_gateway_http::connect(slow(mock.at(B), secs(1)), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "late",
-                OpenAiChat::OPENAI,
+                OpenAiChat,
                 respan_gateway_http::connect(watchdog(slow(mock.at(A), secs(3))), LIMIT),
             )
         })
@@ -428,17 +428,17 @@ fn model(input: &Input) -> Option<&str> {
 
 fn model_gateway(mock: &Fakes, router: ModelRouter<Input>) -> Gateway {
     Gateway::new()
-        .client::<Input, _, _>(OpenAiChat::OPENAI)
+        .client::<Input, _, _>(OpenAiChat)
         .expect("chat client")
         .provider::<Input, _, _>(
             "a",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             respan_gateway_http::connect(mock.at(A), LIMIT),
         )
         .expect("a provider")
         .provider::<Input, _, _>(
             "b",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             respan_gateway_http::connect(mock.at(B), LIMIT),
         )
         .expect("b provider")
@@ -510,7 +510,7 @@ async fn model_router_leaves_unreadable_input_on_its_original_target() {
 #[tokio::test]
 async fn model_router_passes_other_kinds_without_changing_their_target() {
     let gw = Gateway::new()
-        .client::<Input, _, _>(OpenAiChat::OPENAI)
+        .client::<Input, _, _>(OpenAiChat)
         .expect("chat client")
         .client::<respan_gateway_http::formats::opaque::Input<Passthrough>, _, _>(Passthrough)
         .expect("opaque client")
@@ -917,7 +917,7 @@ async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
         }),
     );
     let gw = Gateway::new()
-        .client::<Input, _, _>(OpenAiChat::OPENAI)
+        .client::<Input, _, _>(OpenAiChat)
         .expect("client format")
         .provider::<Input, _, _>("local", Local, {
             let invocations = invocations.clone();

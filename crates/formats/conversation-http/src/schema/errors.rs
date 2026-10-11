@@ -147,9 +147,9 @@ pub(crate) fn failure_json(raw: &Bytes) -> Option<Value> {
 /// answer, kept as it came, is JSON if it says no type, as the format's are.
 ///
 /// [`ProviderIo::bind`]: respan_gateway_http::ProviderIo::bind
-pub(crate) fn answer<C: Schema>(schema: &C, answer: http::Response<Bytes>) -> Fault {
+pub(crate) fn answer<C: Schema>(_: &C, answer: http::Response<Bytes>) -> Fault {
     let status = C::status(answer.status());
-    read_answer(schema.name(), status, answer)
+    read_answer(C::NAME, status, answer)
 }
 
 /// The fault of a provider's `answer` in format `name` that is no success,

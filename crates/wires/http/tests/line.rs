@@ -477,7 +477,7 @@ async fn f3b_a_translated_204_is_a_success_of_the_clients_format() {
             AnthropicMessages,
             respan_gateway_http::connect(transport, LIMIT),
         )
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .and_then(|g| g.target("anthropic"))
         .unwrap_or_else(|e| panic!("{e}"));
     let r = http_helpers::post(

@@ -4,7 +4,7 @@
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_media_http::openai::{OpenAiEmbeddings, OpenAiImages};
-use respan_gateway_realtime_ws::{JsonEvents, SessionQuirks};
+use respan_gateway_realtime_ws::JsonEvents;
 
 use crate::{Base, Format, Provider, Quirk, Speaks};
 
@@ -20,8 +20,8 @@ pub const PROVIDER: Provider = Provider {
     prefixes: &["gemini", "imagen", "veo"],
     example_model: "gemini-2.5-flash",
     formats: &[
-        Speaks::new(Format::OpenAiChat(OpenAiChat::OPENAI)),
-        Speaks::new(Format::JsonEvents(LIVE))
+        Speaks::new(Format::OpenAiChat(OpenAiChat)),
+        Speaks::new(Format::JsonEvents(JsonEvents::GEMINI_LIVE))
             .key_in(KEY)
             .at(Base::Origin),
         Speaks::new(Format::OpenAiImages(OpenAiImages)),
@@ -31,26 +31,9 @@ pub const PROVIDER: Provider = Provider {
         Speaks::new(Format::OpenAiEmbeddings(OpenAiEmbeddings)),
     ],
     model_id_prefix: Some("models/"),
-    quirks: &[
-        Quirk {
-            name: "binary_text",
-            description: "Live sends each JSON event in a binary frame, as Google's SDK reads \
-                          frames as bytes.",
-        },
-        Quirk {
-            name: "model_id_prefix",
-            description: "Its OpenAI-compatible model list names each model `models/<id>`.",
-        },
-    ],
+    quirks: &[Quirk {
+        name: "model_id_prefix",
+        description: "Its OpenAI-compatible model list names each model `models/<id>`.",
+    }],
+    plugin: None,
 };
-
-/// Gemini Live, `gemini-live`: at the Live API's endpoint, after the origin
-/// Google's SDK takes (`wss://generativelanguage.googleapis.com`).
-pub const LIVE: JsonEvents = JsonEvents::from_static(
-    "gemini-live",
-    "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
-    SessionQuirks {
-        binary_text: true,
-        ..SessionQuirks::NONE
-    },
-);

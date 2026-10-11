@@ -279,7 +279,7 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
     let mut entries = Vec::new();
     for (i, format) in names.iter().enumerate() {
         let known = format_named(formats, format, &owner)?;
-        // As its vendor speaks it, else as the format's first vendor does.
+        // As its vendor speaks it, else as the format's own vendor does.
         let spoken = preset.and_then(|v| v.formats.iter().find(|s| s.format.name() == format));
         let (key_in, base) = spoken.map_or((known.key, known.base), |s| (s.auth, s.base));
         let auth = match (&p.auth, &key) {

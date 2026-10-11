@@ -104,8 +104,8 @@ fn gateway(
     let prices = prices();
     let accounting = Accounting::new(ledger, move |px, tally| quote(px, tally, &prices));
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, transport)?
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
+        .client::<Input, _, _>(OpenAiChat)?
         // Register it last, so it prices the call as other plugins left it.
         .plugin(accounting)
         .target("openai")

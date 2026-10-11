@@ -148,15 +148,15 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
         idle,
     );
     let gw = Gateway::new()
-        .client::<Input, _, _>(OpenAiChat::OPENAI)?
+        .client::<Input, _, _>(OpenAiChat)?
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             respan_gateway_http::connect(primary, LIMIT),
         )?
         .provider::<Input, _, _>(
             "openai-eu",
-            OpenAiChat::OPENAI,
+            OpenAiChat,
             provider_support::openai(&europe.base_url())?.connect(),
         )?
         .provider::<Input, _, _>(

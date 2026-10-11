@@ -1,8 +1,9 @@
 #![warn(missing_docs)]
 //! The realtime kind over WebSocket: a session of JSON events, the kind's
 //! `Input` in and `Output` out, as a format on the HTTP wire
-//! ([`JsonEvents`]). A vendor's session is a value of it, set with the
-//! knobs it offers ([`SessionQuirks`]).
+//! ([`JsonEvents`]). Each spec of such a session is a value of it, with its
+//! path, its subprotocol and its frames, such as
+//! [`JsonEvents::OPENAI_REALTIME`].
 
 use std::borrow::Cow;
 
@@ -54,9 +55,9 @@ fn refusal(fault: &Fault, _request: &Request<Bytes>, head: &mut ResponseHead) ->
 /// `bad_request`; the provider's, `upstream`. A handshake it refuses is
 /// answered text/plain with the fault's error code, never its message.
 ///
-/// It speaks a subprotocol only if told one ([`protocol`](Self::protocol)).
-/// Its provider is reached by [`transport`](Self::transport), set as the
-/// vendor's frames need.
+/// It speaks a subprotocol only if its spec has one, or it is told one
+/// ([`protocol`](Self::protocol)). Its provider is reached by
+/// [`transport`](Self::transport), set as the spec's frames need.
 ///
 /// ```
 /// # use respan_gateway_realtime_ws::JsonEvents;
@@ -71,35 +72,37 @@ pub struct JsonEvents {
     binary_text: bool,
 }
 
-/// How a vendor's session departs from plain JSON events: each knob off
-/// ([`SessionQuirks::NONE`]) is none.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SessionQuirks {
-    /// The subprotocol it speaks ([`JsonEvents::protocol`]).
-    pub protocol: Option<&'static str>,
-    /// Whether its server sends each JSON event in a binary frame, which
-    /// its [`transport`](JsonEvents::transport) then takes as text.
-    pub binary_text: bool,
-}
-
-impl SessionQuirks {
-    /// No knob set.
-    pub const NONE: Self = Self {
-        protocol: None,
-        binary_text: false,
-    };
-}
-
 impl JsonEvents {
-    /// A format called `name`, served at a path ending in `path` and sent
-    /// to it, as a vendor's session is, by `quirks`. A session of a
-    /// subprotocol that is no token is refused, `config`.
-    pub const fn from_static(
+    /// OpenAI Realtime, `openai-realtime`: at `/realtime`, after the base
+    /// URL its SDKs take (`wss://api.openai.com/v1`), in the subprotocol
+    /// `realtime`, which its browser clients offer beside their key.
+    pub const OPENAI_REALTIME: Self =
+        Self::spec("openai-realtime", "/realtime", Some("realtime"), false);
+
+    /// OpenAI's Responses over WebSocket, `responses-ws`: at `/responses`,
+    /// as for HTTP. Only an upgrade is this format's: a `POST` there is no
+    /// session.
+    pub const RESPONSES_WS: Self = Self::spec("responses-ws", "/responses", None, false);
+
+    /// Gemini Live, `gemini-live`: at the Live API's endpoint, after the
+    /// origin Google's SDK takes (`wss://generativelanguage.googleapis.com`).
+    /// Its server sends each JSON event in a binary frame.
+    pub const GEMINI_LIVE: Self = Self::spec(
+        "gemini-live",
+        "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+        None,
+        true,
+    );
+
+    /// A spec's session, `name`, at `path`, in `protocol` if it has one; its
+    /// provider sends JSON in binary frames if `binary_text`.
+    const fn spec(
         name: &'static str,
         path: &'static str,
-        quirks: SessionQuirks,
+        protocol: Option<&'static str>,
+        binary_text: bool,
     ) -> Self {
-        let protocol = match quirks.protocol {
+        let protocol = match protocol {
             Some(protocol) => Some(Cow::Borrowed(protocol)),
             None => None,
         };
@@ -107,7 +110,7 @@ impl JsonEvents {
             name: Cow::Borrowed(name),
             path: Cow::Borrowed(path),
             protocol,
-            binary_text: quirks.binary_text,
+            binary_text,
         }
     }
 
@@ -151,7 +154,8 @@ impl JsonEvents {
         self.protocol.as_deref()
     }
 
-    /// Whether its transport takes binary frames as text.
+    /// Whether its provider sends JSON in binary frames, which its
+    /// transport takes as text.
     pub fn binary_text(&self) -> bool {
         self.binary_text
     }
@@ -164,8 +168,8 @@ impl JsonEvents {
     }
 
     /// A transport to this format's provider at `base_url`
-    /// ([`WsTransport::new`]), taking binary text if its vendor sends
-    /// binary frames ([`WsTransport::with_binary_text`]).
+    /// ([`WsTransport::new`]), taking binary text if its spec sends binary
+    /// frames ([`WsTransport::with_binary_text`]).
     pub fn transport(&self, base_url: impl Into<String>) -> Result<WsTransport, Fault> {
         Ok(WsTransport::new(base_url)?.with_binary_text(self.binary_text))
     }
