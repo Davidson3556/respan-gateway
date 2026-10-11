@@ -71,10 +71,9 @@ at `https://generativelanguage.googleapis.com/v1beta` with the key in
   Veo's filters took them all, `failed`.
 - Content is a `GET` of the URL its job names at the provider's base, its
   path after the version, so the key goes to no other host. The Gemini API
-  may redirect it to storage: the transport follows only if its client does
-  (`HttpTransport::with_client` with a redirect policy), else the answer is
-  a 502. Such a client sends its headers on, the key too, to the host it is
-  redirected to.
+  may redirect it to storage: the transport follows only if told to
+  (`HttpTransport::follow_redirects`, which says which locations), else the
+  answer is a 502. A redirect to another origin leaves the key behind.
 - Veo cannot remix, delete or list videos, nor make a thumbnail or
   spritesheet: those are refused, 400 `unsupported`, before any call.
 - No client speaks the format, so what Veo answers beyond the kind is

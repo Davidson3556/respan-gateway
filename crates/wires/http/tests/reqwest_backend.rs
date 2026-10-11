@@ -87,3 +87,88 @@ async fn a_switch_of_protocols_is_an_upstream_fault() {
     let fault = transport.send(call).await.err().expect("a 101 is refused");
     assert!(fault.is::<respan_gateway_core::Upstream>(), "{fault:?}");
 }
+
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// A local server that answers every request with `answer` and keeps what
+/// it was sent, lowercased.
+#[allow(clippy::unwrap_used)]
+async fn serving(answer: String) -> (std::net::SocketAddr, Seen) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = server.local_addr().unwrap();
+    let seen = Seen::default();
+    let kept = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = server.accept().await.unwrap();
+            let mut buf = [0; 4096];
+            let n = socket.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+            kept.lock().unwrap().push(request);
+            let _ = socket.write_all(answer.as_bytes()).await;
+        }
+    });
+    (addr, seen)
+}
+
+const STORED: &str = "HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nvideo";
+
+fn redirecting_to(location: &str) -> String {
+    format!(
+        "HTTP/1.1 302 Found\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+    )
+}
+
+fn keyed(addr: std::net::SocketAddr) -> HttpTransport {
+    let key = http::HeaderValue::from_static("secret-key");
+    let name = http::HeaderName::from_static("x-goog-api-key");
+    HttpTransport::new(format!("http://{addr}"))
+        .and_then(|t| t.with_headers(http::HeaderMap::from_iter([(name, key)])))
+        .unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn get() -> http::Request<respan_gateway_http::Body> {
+    http::Request::new(respan_gateway_http::Body::default())
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn a_followed_redirect_to_another_origin_leaves_the_key_behind() {
+    let (storage, stored) = serving(STORED.into()).await;
+    let (api, asked) = serving(redirecting_to(&format!("http://{storage}/file?sig=1"))).await;
+    let transport = keyed(api).follow_redirects(|_| true);
+    let (resp, _) = transport.send(get()).await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::OK);
+    assert!(asked.lock().unwrap()[0].contains("x-goog-api-key: secret-key"));
+    let stored = stored.lock().unwrap();
+    assert_eq!(stored.len(), 1);
+    assert!(stored[0].starts_with("get /file?sig=1 "), "{}", stored[0]);
+    assert!(!stored[0].contains("secret-key"), "{}", stored[0]);
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn a_redirect_within_the_origin_keeps_the_key() {
+    let (api, asked) = serving(redirecting_to("/elsewhere")).await;
+    let transport = keyed(api).follow_redirects(|_| true);
+    let (resp, _) = transport.send(get()).await.unwrap();
+    // It redirects to itself, so it stops at the limit.
+    assert_eq!(resp.status(), http::StatusCode::FOUND);
+    let asked = asked.lock().unwrap();
+    assert!(asked.len() > 1);
+    let key = "x-goog-api-key: secret-key";
+    assert!(asked.iter().all(|request| request.contains(key)));
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn a_redirect_not_allowed_is_the_clients_to_follow() {
+    let (storage, stored) = serving(STORED.into()).await;
+    let (api, _) = serving(redirecting_to(&format!("http://{storage}/file"))).await;
+    for transport in [keyed(api), keyed(api).follow_redirects(|_| false)] {
+        let (resp, _) = transport.send(get()).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::FOUND);
+    }
+    assert!(stored.lock().unwrap().is_empty());
+}

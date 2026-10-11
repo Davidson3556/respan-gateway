@@ -15,7 +15,7 @@ use futures::StreamExt;
 use respan_gateway_core::Extensions;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{HttpTransport, ProviderIo, reqwest};
+use respan_gateway_http::{HttpTransport, ProviderIo};
 use serde_json::{Value, json};
 
 use super::answered;
@@ -104,13 +104,9 @@ impl Veo {
         self.http().connect()
     }
 
-    /// A transport to it whose client follows redirects.
+    /// A transport to it that follows redirects.
     pub fn following(&self) -> impl Fn(Extensions) -> ProviderIo + Clone + Send + Sync + 'static {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(3))
-            .build()
-            .expect("a client");
-        self.http().with_client(client).connect()
+        self.http().follow_redirects(|_| true).connect()
     }
 }
 

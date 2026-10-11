@@ -43,8 +43,8 @@ const PREFIX: &str = "veo_";
 /// the request ([`LocateContent`](respan_gateway_media::video::LocateContent) finds it), at
 /// the provider's base: its path after its version segment, so the key
 /// never goes to another host. The Gemini API may answer it with a redirect
-/// to storage, which a transport follows only if its client does
-/// (`HttpTransport::with_client`).
+/// to storage, which a transport follows only if told to
+/// (`HttpTransport::follow_redirects`), leaving the key behind.
 ///
 /// Veo cannot remix, delete or list videos, nor make a thumbnail or a
 /// spritesheet: those are refused, 400, before any call. As no client
