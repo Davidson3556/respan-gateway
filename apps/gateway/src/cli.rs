@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::init::Chosen;
 use crate::logging::{Level, LogFormat};
-use crate::{App, Config, ProxyVendor, VERSION};
+use crate::{App, Config, ProxyVendor, Source, VERSION};
 use clap::{ArgGroup, Parser, Subcommand};
 use serde_json::{Map, json};
 
@@ -37,6 +37,11 @@ struct Cli {
     /// How requests are logged to stderr, in place of the config's
     #[arg(long, global = true, value_name = "FORMAT", env = "RESPAN_LOG")]
     log: Option<LogFormat>,
+
+    /// While serving, reload the config file when it changes (checked every
+    /// 2 s). SIGHUP and `POST /ui/api/reload` reload it either way
+    #[arg(long, global = true)]
+    watch: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -117,7 +122,11 @@ Environment (also read from ./.env):
                      `client_keys:`; a gateway on a non-loopback address needs one
   RESPAN_LOG         text, json or off, as --log
   RESPAN_<VENDOR>_BASE_URL
-                     Moves a vendor's base URL when there is no config file";
+                     Moves a vendor's base URL when there is no config file
+
+Reloading the config without a restart: send SIGHUP, POST /ui/api/reload, or
+serve with --watch. Open requests finish on the old config; an invalid one is
+refused. A changed listen address needs a restart.";
 
 /// Runs the `respan-gateway` command line on `args` (the program name
 /// first) and returns its exit status.
@@ -202,35 +211,20 @@ where
         Command::Serve => (Config::discover(cli.config.as_deref()), false),
         Command::Check { .. } | Command::Models => (Config::discover(cli.config.as_deref()), true),
     };
-    let mut config = match config {
-        Ok(config) => config,
-        Err(e) => return fail(&e.to_string()),
+    let overrides = Overrides {
+        listen: cli.listen.filter(|l| !l.is_empty()),
+        log: cli.log,
     };
-    let listen = cli.listen.filter(|l| !l.is_empty());
-    if let Some(listen) = listen {
-        match crate::config::parse_listen(&listen) {
-            Ok(addr) => config.listen = Some(addr),
-            Err(e) => return fail(&format!("listen {listen}: {e}")),
-        }
-    } else if config.listen.is_none() {
-        // What a PaaS host sets: its router reaches us from outside.
-        let port = std::env::var("PORT").ok().filter(|p| !p.is_empty());
-        if let Some(port) = port {
-            match port.trim().parse::<u16>() {
-                Ok(n) => config.listen = Some(SocketAddr::from(([0, 0, 0, 0], n))),
-                Err(_) => return fail(&format!("PORT={port}: not a port number")),
-            }
-        }
-    }
-    if let Ok(keys) = std::env::var("RESPAN_CLIENT_KEYS") {
-        let keys = keys.split(',').map(str::trim).filter(|k| !k.is_empty());
-        config.client_keys.extend(keys.map(str::to_owned));
-    }
-    if let Some(log) = cli.log {
-        config.log = log;
-    }
+    let config = match config
+        .map_err(|e| e.to_string())
+        .and_then(|c| overrides.apply(c))
+    {
+        Ok(config) => config,
+        Err(e) => return fail(&e),
+    };
     let log = config.log;
     let source = config.source().to_string();
+    let reload_source = config.source().clone();
     let app = match App::new(config) {
         Ok(app) => app,
         Err(e) => return fail(&format!("{source}: {e}")),
@@ -255,6 +249,15 @@ where
         log.say(Level::Info, &format!("loaded {}", path.display()));
     }
 
+    // Reloads read the source the gateway started from, with the same
+    // overrides; the proxy has none.
+    let app = match reload_source {
+        Source::File(path) => app.reload_from(move || overrides.apply_to(Config::load(&path))),
+        Source::Environment => app.reload_from(move || overrides.apply_to(Config::from_env())),
+        _ => app,
+    };
+    #[cfg(unix)]
+    let hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).ok();
     let addr = app.listen();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -269,9 +272,90 @@ where
         }
         _ => println!("{}", app.banner(bound)),
     }
+    #[cfg(unix)]
+    if let Some(hangup) = hangup {
+        tokio::spawn(reload_on_hangup(app.clone(), hangup));
+    }
+    if let (true, Source::File(path)) = (cli.watch, app.config().source()) {
+        tokio::spawn(reload_on_change(app.clone(), path.clone()));
+    } else if cli.watch {
+        log.say(Level::Warn, "--watch needs a config file; not watching");
+    }
     match app.serve(listener, crate::shutdown_signal()).await {
         Ok(()) => SUCCESS,
         Err(e) => fail(&e.to_string()),
+    }
+}
+
+/// What the command line and the environment set over the config, applied
+/// to each config read, so a reload keeps them.
+#[derive(Debug, Clone)]
+struct Overrides {
+    listen: Option<String>,
+    log: Option<LogFormat>,
+}
+
+impl Overrides {
+    fn apply_to(&self, config: Result<Config, crate::Error>) -> Result<Config, crate::Error> {
+        let config = config.map_err(|e| e.to_string());
+        config
+            .and_then(|c| self.apply(c))
+            .map_err(crate::Error::new)
+    }
+
+    fn apply(&self, mut config: Config) -> Result<Config, String> {
+        if let Some(listen) = &self.listen {
+            config.listen = Some(
+                crate::config::parse_listen(listen).map_err(|e| format!("listen {listen}: {e}"))?,
+            );
+        } else if config.listen.is_none() {
+            // What a PaaS host sets: its router reaches us from outside.
+            let port = std::env::var("PORT").ok().filter(|p| !p.is_empty());
+            if let Some(port) = port {
+                let n = port
+                    .trim()
+                    .parse::<u16>()
+                    .map_err(|_| format!("PORT={port}: not a port number"))?;
+                config.listen = Some(SocketAddr::from(([0, 0, 0, 0], n)));
+            }
+        }
+        if let Ok(keys) = std::env::var("RESPAN_CLIENT_KEYS") {
+            let keys = keys.split(',').map(str::trim).filter(|k| !k.is_empty());
+            config.client_keys.extend(keys.map(str::to_owned));
+        }
+        if let Some(log) = self.log {
+            config.log = log;
+        }
+        Ok(config)
+    }
+}
+
+/// Reloads on each SIGHUP.
+#[cfg(unix)]
+async fn reload_on_hangup(app: App, mut hangup: tokio::signal::unix::Signal) {
+    while hangup.recv().await.is_some() {
+        app.config()
+            .log
+            .say(Level::Info, "SIGHUP: reloading the config");
+        let _ = app.reload();
+    }
+}
+
+/// Reloads whenever the config file at `path` is modified, checked every 2 s.
+async fn reload_on_change(app: App, path: PathBuf) {
+    let modified = || std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    let mut seen = modified();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // A file mid-replacement is missing for a moment: wait for it.
+        let now = modified();
+        if now.is_some() && now != seen {
+            seen = now;
+            app.config()
+                .log
+                .say(Level::Info, "config file changed: reloading");
+            let _ = app.reload();
+        }
     }
 }
 

@@ -179,7 +179,7 @@ async fn the_example_config_routes_by_model_both_ways() {
 /// The plan of `yaml`.
 fn plan(yaml: &str) -> Result<Plan, String> {
     let config = Config::parse(yaml).map_err(|e| e.to_string())?;
-    let formats = crate::formats::formats(1 << 20);
+    let formats = crate::formats::formats(1 << 20, Default::default());
     let composed = compose(&config, &formats);
     composed
         .map(|(_, plan)| plan)

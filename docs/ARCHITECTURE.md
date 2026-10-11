@@ -276,6 +276,7 @@ accounts and stores.
 
 ## Not in the binary
 
-The config is read once (no hot reload, no admin writes). The `mcp` kind
-and `mcp-http` formats are libraries the binary does not compose yet. The
-request log keeps the last 1000 requests; graceful shutdown waits 30 s.
+There are no admin writes; the config is reloaded from its source (SIGHUP,
+`POST /ui/api/reload`, `--watch`) by building a new gateway and swapping it
+in for new requests, the old one finishing its open ones. The `mcp` kind and
+`mcp-http` formats are libraries the binary does not compose yet.

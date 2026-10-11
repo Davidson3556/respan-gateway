@@ -28,8 +28,9 @@ use tokio::sync::broadcast;
 use crate::formats::KnownFormat;
 use crate::logging::{Level, LogFormat};
 
-/// How many finished requests are kept.
-const KEPT: usize = 1000;
+/// How many finished requests are kept unless the config's `request_log`
+/// says.
+pub const KEPT: usize = 1000;
 /// How much of an error body is read for its message.
 const ERROR_BODY: usize = 4096;
 /// The most characters of a client's path or model kept.
@@ -141,8 +142,11 @@ impl Entry {
 #[derive(Debug, Clone)]
 struct Tracked(Arc<Entry>);
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Kept {
+    /// The most requests held in `recent`.
+    capacity: usize,
+    format: LogFormat,
     recent: VecDeque<Arc<Entry>>,
     totals: Totals,
     providers: HashMap<String, ProviderStats>,
@@ -153,17 +157,34 @@ pub struct RequestLog {
     next_id: AtomicU64,
     kept: Mutex<Kept>,
     events: broadcast::Sender<Arc<str>>,
-    format: LogFormat,
 }
 
 impl RequestLog {
-    pub fn new(format: LogFormat) -> Arc<Self> {
+    /// An empty log keeping the last `capacity` requests, printing each as
+    /// `format` says.
+    pub fn new(capacity: usize, format: LogFormat) -> Arc<Self> {
         Arc::new(Self {
             next_id: AtomicU64::new(1),
-            kept: Mutex::default(),
+            kept: Mutex::new(Kept {
+                capacity,
+                format,
+                recent: VecDeque::new(),
+                totals: Totals::default(),
+                providers: HashMap::new(),
+            }),
             events: broadcast::channel(256).0,
-            format,
         })
+    }
+
+    /// Keeps the last `capacity` requests and prints as `format` from now
+    /// on, as a reloaded config says; what is kept stays, up to `capacity`.
+    pub fn configure(&self, capacity: usize, format: LogFormat) {
+        let mut kept = self.kept();
+        kept.capacity = capacity;
+        kept.format = format;
+        while kept.recent.len() > capacity {
+            kept.recent.pop_front();
+        }
     }
 
     fn kept(&self) -> MutexGuard<'_, Kept> {
@@ -243,7 +264,7 @@ impl RequestLog {
         {
             let mut kept = self.kept();
             kept.recent.push_back(entry.clone());
-            if kept.recent.len() > KEPT {
+            while kept.recent.len() > kept.capacity {
                 kept.recent.pop_front();
             }
             kept.totals.requests += 1;
@@ -266,7 +287,7 @@ impl RequestLog {
             record.clone()
         };
         let failed = record.error.is_some() || record.status.is_some_and(|s| s >= 400);
-        {
+        let format = {
             let mut kept = self.kept();
             let totals = &mut kept.totals;
             totals.in_flight = totals.in_flight.saturating_sub(1);
@@ -281,10 +302,11 @@ impl RequestLog {
                 stats.errors += u64::from(failed);
                 stats.total_ms += record.duration_ms.unwrap_or_default();
             }
-        }
+            kept.format
+        };
         self.publish(entry);
-        if self.format != LogFormat::Off {
-            self.print(&record);
+        if format != LogFormat::Off {
+            self.print(format, &record);
         }
     }
 }
@@ -292,7 +314,7 @@ impl RequestLog {
 impl RequestLog {
     /// Writes a finished request to stderr: a warning if it was refused, an
     /// error if it failed.
-    fn print(&self, record: &RequestRecord) {
+    fn print(&self, format: LogFormat, record: &RequestRecord) {
         let level = match record.status {
             _ if record.error.is_some() => Level::Error,
             Some(s) if s >= 500 => Level::Error,
@@ -303,11 +325,11 @@ impl RequestLog {
             Ok(Value::Object(fields)) => fields,
             _ => Map::new(),
         };
-        let message = match self.format {
+        let message = match format {
             LogFormat::Json => "request".to_owned(),
             _ => escape_controls(&line(record)),
         };
-        eprintln!("{}", self.format.line(level, &message, fields));
+        eprintln!("{}", format.line(level, &message, fields));
     }
 }
 

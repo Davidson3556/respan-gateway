@@ -16,7 +16,7 @@ use respan_gateway_realtime as realtime;
 use respan_gateway_realtime_ws::{
     GeminiLive, OpenAiRealtime, ResponsesWs, SessionModel, requested_model,
 };
-use respan_gateway_ws::WsTransport;
+use respan_gateway_ws::{Limits, WsTransport};
 
 use crate::presets::origin;
 
@@ -232,8 +232,9 @@ const VIDEOS: &[&str] = &[
 /// Every format this binary speaks: each format a vendor speaks
 /// ([`ALL`]), reached as its own vendor's is, and passthrough. Its
 /// providers are reached over HTTP, reading up to `limit` bytes of an answer
-/// at once, or over WebSocket for a session.
-pub fn formats(limit: usize) -> Vec<KnownFormat> {
+/// at once, or over WebSocket for a session, which takes what `sessions`
+/// says.
+pub fn formats(limit: usize, sessions: Limits) -> Vec<KnownFormat> {
     let http = move |provider: &str, base_url: &str, auth| -> Result<_, Fault> {
         let client = HttpTransport::new(base_url)?.with_headers(auth)?;
         Ok(explained(client, provider, base_url, limit))
@@ -318,6 +319,7 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
                 f,
                 OpenAiRealtime::PATH,
                 speaks.base,
+                sessions,
                 |f, base| f.transport(base),
             )
             .model(realtime()),
@@ -326,6 +328,7 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
                 f,
                 GeminiLive::PATH,
                 speaks.base,
+                sessions,
                 |f, base| f.transport(base),
             )
             .model(realtime()),
@@ -334,6 +337,7 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
                 f,
                 ResponsesWs::PATH,
                 speaks.base,
+                sessions,
                 |f, base| f.transport(base),
             ),
         };
@@ -367,12 +371,13 @@ fn realtime() -> Model {
 
 /// A session `format` of `kind`, its clients sending to its `path`: after
 /// `/v1`, as an SDK adds it to the gateway's base URL, unless it sits at the
-/// origin. Its providers are reached by `transport`.
+/// origin. Its providers are reached by `transport`, taking `limits`.
 fn session<F>(
     kind: Kind,
     format: F,
     path: &str,
     base: Base,
+    limits: Limits,
     transport: fn(&F, &str) -> Result<WsTransport, Fault>,
 ) -> KnownFormat
 where
@@ -392,7 +397,8 @@ where
         &[&endpoint],
         format.clone(),
         move |_: &str, base_url: &str, auth| {
-            Ok(transport(&format, base_url)?.with_headers(auth)?.connect())
+            let transport = transport(&format, base_url)?.with_limits(limits);
+            Ok(transport.with_headers(auth)?.connect())
         },
     )
     .websocket()

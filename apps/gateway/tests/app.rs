@@ -332,6 +332,40 @@ async fn models_are_merged_from_every_provider() {
 }
 
 #[tokio::test]
+async fn models_are_listed_in_anthropics_shape_for_a_request_with_its_version() {
+    let (openai, _) = listing(&["gpt-4o", "text-embedding-3-small"]).await;
+    let gw = Gateway::start(&format!(
+        "providers:\n  openai: {{ vendor: openai, base_url: '{openai}', key: sk-openai }}\n"
+    ))
+    .await;
+    let list = client()
+        .get(gw.url("/v1/models"))
+        .header("anthropic-version", "2023-06-01")
+        .header("x-api-key", "sk-ant")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.status(), 200);
+    let list: Value = support::json(&list.text().await.unwrap());
+    assert_eq!(list["has_more"], false);
+    assert_eq!(list["first_id"], "gpt-4o");
+    assert_eq!(list["last_id"], "gpt-4o");
+    assert_eq!(
+        list["data"],
+        json!([{
+            "type": "model",
+            "id": "gpt-4o",
+            "display_name": "gpt-4o",
+            "created_at": "1970-01-01T00:00:01.000Z",
+        }])
+    );
+    // Without the header, OpenAI's.
+    let plain = get_json(&gw, "/v1/models").await;
+    assert_eq!(plain["object"], "list");
+    assert_eq!(plain["data"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn models_are_listed_in_geminis_shape_for_its_sdks() {
     let (openai, seen) = listing(&["gpt-4o", "text-embedding-3-small"]).await;
     let gw = Gateway::start(&format!(

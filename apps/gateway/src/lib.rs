@@ -31,7 +31,7 @@ mod quirks;
 mod report;
 mod requests;
 
-pub use app::{App, DEFAULT_LISTEN, shutdown_signal};
+pub use app::{App, DEFAULT_LISTEN, ReloadError, Reloaded, shutdown_signal};
 pub use cli::{execute, run};
 pub use config::{
     Auth, Config, DEFAULT_FILE, ModelRoute, PluginConfig, ProviderConfig, ProxyVendor, Source,

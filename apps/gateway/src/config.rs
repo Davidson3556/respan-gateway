@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
@@ -23,8 +24,22 @@ pub struct Config {
     /// The most bytes of a client's request, and of a provider's answer
     /// held at once, past which the request fails 413 or the answer 502; a
     /// number of bytes or a size such as `32MiB`; 32 MiB if unset.
-    #[serde(default, deserialize_with = "byte_size")]
+    #[serde(default, deserialize_with = "body_limit")]
     pub body_limit: Option<usize>,
+    /// The largest WebSocket message of a session, from the client or the
+    /// provider, past which the session ends (close 1009); a number of
+    /// bytes or a size such as `16MiB`; 16 MiB if unset.
+    #[serde(default, deserialize_with = "ws_message_limit")]
+    pub ws_message_limit: Option<usize>,
+    /// How many finished requests the in-memory request log (the web UI's)
+    /// keeps; 1000 if unset.
+    #[serde(default, deserialize_with = "request_log")]
+    pub request_log: Option<usize>,
+    /// How long open responses and end hooks get, together, after a stop
+    /// signal, before they are cut: seconds, or a duration such as `30s`,
+    /// `2m` or `500ms`; 30 s if unset.
+    #[serde(default, deserialize_with = "shutdown_grace")]
+    pub shutdown_grace: Option<Duration>,
     /// Client keys, literal or `env:NAME`. When set, every request needs
     /// one; it is consumed by the gateway and never sent to a provider.
     #[serde(default)]
@@ -70,6 +85,9 @@ impl Default for Config {
         Self {
             listen: None,
             body_limit: None,
+            ws_message_limit: None,
+            request_log: None,
+            shutdown_grace: None,
             client_keys: Vec::new(),
             log: LogFormat::Text,
             ui: true,
@@ -299,21 +317,82 @@ fn listen_address<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SocketAddr>,
         .map_err(|e| serde::de::Error::custom(format!("listen: {e}")))
 }
 
-/// A number of bytes, or a size such as `32MiB`, `512 KB` or `1GiB`.
-fn byte_size<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+/// A number of bytes, or a size such as `32MiB`, `512 KB` or `1GiB`, of
+/// the config key `key`; at least one byte.
+fn byte_size<'de, D: Deserializer<'de>>(d: D, key: &str) -> Result<Option<usize>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Size {
         Bytes(usize),
         Text(String),
     }
-    match Option::<Size>::deserialize(d)? {
-        None => Ok(None),
-        Some(Size::Bytes(bytes)) => Ok(Some(bytes)),
-        Some(Size::Text(text)) => parse_size(&text)
-            .map(Some)
-            .map_err(|e| serde::de::Error::custom(format!("body_limit: {e}"))),
+    let bytes = match Option::<Size>::deserialize(d)? {
+        None => return Ok(None),
+        Some(Size::Bytes(bytes)) => bytes,
+        Some(Size::Text(text)) => {
+            parse_size(&text).map_err(|e| serde::de::Error::custom(format!("{key}: {e}")))?
+        }
+    };
+    match bytes {
+        0 => Err(serde::de::Error::custom(format!("{key}: must be above 0"))),
+        bytes => Ok(Some(bytes)),
     }
+}
+
+fn body_limit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    byte_size(d, "body_limit")
+}
+
+fn ws_message_limit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    byte_size(d, "ws_message_limit")
+}
+
+fn request_log<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    match Option::<usize>::deserialize(d)? {
+        Some(0) => Err(serde::de::Error::custom("request_log: must be above 0")),
+        kept => Ok(kept),
+    }
+}
+
+/// A number of seconds, or a duration such as `30s`, `2m`, `1h` or `500ms`.
+fn shutdown_grace<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Span {
+        Seconds(u64),
+        Text(String),
+    }
+    Ok(match Option::<Span>::deserialize(d)? {
+        None => None,
+        Some(Span::Seconds(s)) => Some(Duration::from_secs(s)),
+        Some(Span::Text(text)) => Some(
+            parse_duration(&text)
+                .map_err(|e| serde::de::Error::custom(format!("shutdown_grace: {e}")))?,
+        ),
+    })
+}
+
+/// The time `text` says: a number and a unit (`ms`, `s`, `m`, `h`),
+/// seconds if none.
+pub fn parse_duration(text: &str) -> Result<Duration, String> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let millis: u64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "ms" => 1,
+        "" | "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        _ => return Err(format!("'{text}' is not a duration such as 30s or 2m")),
+    };
+    number
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(millis))
+        .map(Duration::from_millis)
+        .ok_or_else(|| format!("'{text}' is not a duration such as 30s or 2m"))
 }
 
 /// The bytes `text` says: a number and a unit (`B`, `KB`, `MB`, `GB` as
@@ -431,6 +510,42 @@ providers:
         assert_eq!(limit("body_limit: 2 kb"), Ok(Some(2000)));
         let bad = limit("body_limit: lots").err().map(|e| e.to_string());
         assert!(bad.is_some_and(|e| e.contains("body_limit")));
+    }
+
+    #[test]
+    fn limits_are_sizes_counts_and_durations() {
+        let config = Config::parse("ws_message_limit: 1MiB\nrequest_log: 50\nshutdown_grace: 2m")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(config.ws_message_limit, Some(1 << 20));
+        assert_eq!(config.request_log, Some(50));
+        assert_eq!(config.shutdown_grace, Some(Duration::from_secs(120)));
+        let grace = |text: &str| Config::parse(text).map(|c| c.shutdown_grace);
+        assert_eq!(
+            grace("shutdown_grace: 30s"),
+            Ok(Some(Duration::from_secs(30)))
+        );
+        assert_eq!(
+            grace("shutdown_grace: 45"),
+            Ok(Some(Duration::from_secs(45)))
+        );
+        assert_eq!(
+            grace("shutdown_grace: 500ms"),
+            Ok(Some(Duration::from_millis(500)))
+        );
+        let defaults = Config::parse("{}").unwrap_or_else(|e| panic!("{e}"));
+        assert!(defaults.request_log.is_none() && defaults.shutdown_grace.is_none());
+        for (text, key) in [
+            ("shutdown_grace: soon", "shutdown_grace"),
+            ("shutdown_grace: 5 days", "shutdown_grace"),
+            ("request_log: 0", "request_log"),
+            ("request_log: many", "request_log"),
+            ("ws_message_limit: 0", "ws_message_limit"),
+            ("ws_message_limit: big", "ws_message_limit"),
+            ("body_limit: 0", "body_limit"),
+        ] {
+            let said = Config::parse(text).err().map(|e| e.to_string());
+            assert!(said.is_some_and(|e| e.contains(key)), "{text}");
+        }
     }
 
     #[test]

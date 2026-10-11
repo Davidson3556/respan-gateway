@@ -126,16 +126,21 @@ format, never across a translation.
 **Configuration** is one YAML file, every setting shown in
 [`gateway.example.yaml`](gateway.example.yaml): providers (vendor presets or
 spelled out), `formats` served, `client_keys`, `default`, `plugins` (model
-prefixes), `log`, `ui`, `body_limit`. Routing order: `name/model` goes to
+prefixes), `log`, `ui`, `body_limit`, `ws_message_limit`, `request_log`,
+`shutdown_grace`. Routing order: `name/model` goes to
 provider `name`; else the `models` plugin's prefixes; else the vendors'
 prefixes (longest wins); else the kind's default
 ([routing](docs/ARCHITECTURE.md#routing)).
 
-Not there yet: the config is read once, so **changing it needs a restart**
-(no hot reload, no admin writes; the web UI and admin API are read-only);
-the **MCP kind** exists as a library but is not wired into the binary;
-the request log keeps the last 1000 requests in memory; shutdown waits up to
-30 s for open requests.
+**Reloading**: `kill -HUP <pid>`, `POST /ui/api/reload` (with a client key if
+keys are set) or `--watch` (on a change of the file) re-read the config and
+swap it in for new requests; open requests and sessions finish on the old
+one, the request log carries over, and an invalid config is refused while the
+old one keeps serving. A changed `listen` needs a restart.
+
+Not there yet: no admin writes (the web UI and admin API are read-only apart
+from reload); the **MCP kind** exists as a library but is not wired into the
+binary.
 
 ## What it speaks
 

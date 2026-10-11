@@ -1,10 +1,11 @@
 //! `GET /v1/models`: every provider's models in one OpenAI-shaped list,
 //! each named as a client asks for it: as it is if routing sends that name
 //! to its provider, else as `provider/model`. `GET /v1beta/models` is the
-//! same list in Gemini's shape, for Gemini SDKs.
+//! same list in Gemini's shape, for Gemini SDKs; a request to `/v1/models`
+//! with `anthropic-version` gets Anthropic's shape.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -17,6 +18,7 @@ use serde_json::{Value, json};
 use crate::auth;
 use crate::compose::{Entry, Upstream};
 use crate::formats::{first_of_each_kind, kind, unreachable};
+use crate::requests::rfc3339;
 use respan_gateway_plugins::{Kind, Routes};
 use respan_gateway_providers::Provider;
 
@@ -266,11 +268,45 @@ fn kind_of(id: &str) -> Option<Kind> {
     Some(kind)
 }
 
-pub async fn list(State(models): State<Arc<Models>>) -> Response {
-    match models.list().await {
-        Ok(list) => Json(list).into_response(),
-        Err(why) => auth::error(StatusCode::BAD_GATEWAY, "upstream_error", &why),
+/// `GET /v1/models`: the merged list in OpenAI's shape, or in Anthropic's
+/// for a request that carries `anthropic-version`, as Anthropic's SDKs send.
+pub async fn list(State(models): State<Arc<Models>>, headers: HeaderMap) -> Response {
+    let anthropic = headers.contains_key("anthropic-version");
+    match (models.list().await, anthropic) {
+        (Ok(list), false) => Json(list).into_response(),
+        (Ok(list), true) => Json(anthropic_list(&list)).into_response(),
+        (Err(why), false) => auth::error(StatusCode::BAD_GATEWAY, "upstream_error", &why),
+        (Err(why), true) => {
+            let error = json!({"type": "error", "error": {"type": "api_error", "message": why}});
+            (StatusCode::BAD_GATEWAY, Json(error)).into_response()
+        }
     }
+}
+
+/// The chat models of an OpenAI-shaped `list` as Anthropic lists them, in
+/// one page.
+fn anthropic_list(list: &Value) -> Value {
+    let models = list["data"].as_array().into_iter().flatten();
+    let data: Vec<Value> = models
+        .filter(|m| m["kind"] == "chat")
+        .filter_map(|m| {
+            let id = m["id"].as_str()?;
+            let created = m["created"].as_u64().unwrap_or_default();
+            let created = SystemTime::UNIX_EPOCH + Duration::from_secs(created);
+            Some(json!({
+                "type": "model",
+                "id": id,
+                "display_name": id,
+                "created_at": rfc3339(created),
+            }))
+        })
+        .collect();
+    json!({
+        "first_id": data.first().map(|m| &m["id"]),
+        "last_id": data.last().map(|m| &m["id"]),
+        "has_more": false,
+        "data": data,
+    })
 }
 
 /// A Gemini-shaped error body.
