@@ -126,11 +126,15 @@ function ThemeCard() {
   );
 }
 
-const sources = {
-  "gateway.yaml": "Config file (gateway.yaml)",
+const sources: Record<string, string> = {
   environment: "Environment variables",
   proxy: "Proxy mode (no providers configured)",
+  inline: "Built in code",
 };
+
+function describeSource(source: string) {
+  return sources[source] ?? `Config file (${source})`;
+}
 
 function ConnectCard() {
   const base = `${window.location.origin}/v1`;
@@ -154,8 +158,8 @@ function AboutCard() {
   if (!data) return null;
   const rows: [string, string][] = [
     ["Version", data.version],
-    ["Listening on", data.listen],
-    ["Configuration", sources[data.config_source]],
+    ["Listening on", data.listen ?? "not listening yet"],
+    ["Configuration", describeSource(data.config_source)],
     ["Client keys", data.auth_required ? "Required" : "Not required"],
     ["Uptime", formatUptime(data.uptime_seconds)],
     ["Started", formatDateTime(data.started_at)],

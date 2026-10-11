@@ -41,7 +41,7 @@ function Stats() {
         label="Uptime"
         icon={Clock}
         value={data && formatUptime(data.uptime_seconds)}
-        hint={data && `config: ${data.config_source}`}
+        hint={data && `config: ${data.config_source.split(/[\\/]/).pop()}`}
       />
     </div>
   );
@@ -129,7 +129,8 @@ export function OverviewPage() {
         description={
           data ? (
             <>
-              Gateway <span className="font-mono">{data.listen}</span> · v{data.version}
+              Gateway{" "}
+              {data.listen && <span className="font-mono">{data.listen} · </span>}v{data.version}
               {data.auth_required && " · keys required"}
             </>
           ) : (

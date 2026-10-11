@@ -69,7 +69,7 @@ function Brand() {
       <div className="grid min-w-0 leading-tight group-data-[collapsible=icon]:hidden">
         <span className="truncate text-sm font-semibold">respan gateway</span>
         <span className="truncate font-mono text-[11px] text-muted-foreground">
-          {data ? `v${data.version} · ${data.listen}` : "connecting…"}
+          {data ? `v${data.version}${data.listen ? ` · ${data.listen}` : ""}` : "connecting…"}
         </span>
       </div>
     </div>

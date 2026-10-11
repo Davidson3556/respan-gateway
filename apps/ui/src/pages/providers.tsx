@@ -103,10 +103,12 @@ function ProviderCard({ provider: p }: { provider: Provider }) {
           </Badge>
         </div>
         <div className="flex min-w-0 items-center gap-1 pt-1">
-          <p className="truncate font-mono text-xs text-muted-foreground" title={p.base_url}>
-            {p.base_url}
+          <p className="truncate font-mono text-xs text-muted-foreground" title={p.base_url ?? ""}>
+            {p.base_url ?? "no base URL"}
           </p>
-          <CopyButton value={p.base_url} label="Copy base URL" className="size-6 shrink-0" />
+          {p.base_url && (
+            <CopyButton value={p.base_url} label="Copy base URL" className="size-6 shrink-0" />
+          )}
         </div>
       </CardHeader>
       <CardContent className="flex flex-1 flex-col gap-4">
