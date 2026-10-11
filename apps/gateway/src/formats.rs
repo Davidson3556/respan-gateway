@@ -11,7 +11,7 @@ use respan_gateway_http::passthrough::Passthrough;
 use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo, Wire, reqwest};
 use respan_gateway_media::{embedding, image, speech, transcription, video};
 use respan_gateway_plugins::{Kind, Model};
-use respan_gateway_providers::{ALL, Auth, Base, Format as Spoken};
+use respan_gateway_providers::{ALL, Auth, Base, Format as Spoken, Speaks};
 use respan_gateway_realtime as realtime;
 use respan_gateway_realtime_ws::{
     GeminiLive, OpenAiRealtime, ResponsesWs, SessionModel, requested_model,
@@ -235,15 +235,32 @@ impl KnownFormat {
     }
 }
 
-const CHAT_COMPLETIONS: &[&str] = &["POST /v1/chat/completions"];
-const VIDEOS: &[&str] = &[
-    "POST /v1/videos",
-    "GET /v1/videos",
-    "GET /v1/videos/{id}",
-    "DELETE /v1/videos/{id}",
-    "GET /v1/videos/{id}/content",
-    "POST /v1/videos/{id}/remix",
-];
+/// What clients of each format send, as `METHOD /path`.
+mod endpoints {
+    pub const CHAT_COMPLETIONS: &[&str] = &["POST /v1/chat/completions"];
+    pub const RESPONSES: &[&str] = &["POST /v1/responses"];
+    pub const MESSAGES: &[&str] = &["POST /v1/messages"];
+    pub const GENERATE_CONTENT: &[&str] = &[
+        "POST /v1beta/models/{model}:generateContent",
+        "POST /v1beta/models/{model}:streamGenerateContent",
+    ];
+    pub const IMAGES: &[&str] = &["POST /v1/images/generations", "POST /v1/images/edits"];
+    pub const TRANSCRIPTIONS: &[&str] = &[
+        "POST /v1/audio/transcriptions",
+        "POST /v1/audio/translations",
+    ];
+    pub const SPEECH: &[&str] = &["POST /v1/audio/speech"];
+    pub const EMBEDDINGS: &[&str] = &["POST /v1/embeddings"];
+    pub const VIDEOS: &[&str] = &[
+        "POST /v1/videos",
+        "GET /v1/videos",
+        "GET /v1/videos/{id}",
+        "DELETE /v1/videos/{id}",
+        "GET /v1/videos/{id}/content",
+        "POST /v1/videos/{id}/remix",
+    ];
+    pub const PASSTHROUGH: &[&str] = &["ANY /* (every other request)"];
+}
 
 /// Every format this binary speaks: each format a vendor speaks
 /// ([`ALL`]), reached as its own vendor's is, and passthrough. Its
@@ -251,125 +268,133 @@ const VIDEOS: &[&str] = &[
 /// at once, or over WebSocket for a session, which takes what `sessions`
 /// says.
 pub fn formats(limit: usize, sessions: Limits) -> Vec<KnownFormat> {
-    let http = move |provider: &str, base_url: &str, auth| -> Result<_, Fault> {
-        let client = HttpTransport::new(base_url)?.with_headers(auth)?;
-        Ok(explained(client, provider, base_url, limit, None))
-    };
-    let google = move |provider: &str, base_url: &str, auth| -> Result<_, Fault> {
-        let client = HttpTransport::new(base_url)?
-            .with_connect_timeout(std::time::Duration::from_secs(10))?
-            .follow_redirects(google_storage);
-        Ok(explained(
-            client.with_headers(auth)?,
-            provider,
-            base_url,
-            limit,
-            None,
-        ))
-    };
-    let chat = || Model::of(conversation::Input::model, conversation::Input::set_model);
-    // Only a `Create` names a model; a follow-up goes by its job's id
-    // ([`crate::jobs`]).
-    let video = || Model::of(video::Input::model, video::Input::set_model);
     let mut known: Vec<KnownFormat> = Vec::new();
     for speaks in ALL.iter().flat_map(|p| p.formats) {
         if known.iter().any(|k| k.name == speaks.format.name()) {
             continue;
         }
-        let format = match speaks.format.clone() {
-            Spoken::OpenAiChat(f) => {
-                KnownFormat::of(kind::CHAT, CHAT_COMPLETIONS, f, http).model(chat())
-            }
-            Spoken::OpenAiResponses(f) => {
-                KnownFormat::of(kind::CHAT, &["POST /v1/responses"], f, http).model(chat())
-            }
-            Spoken::AnthropicMessages(f) => {
-                KnownFormat::of(kind::CHAT, &["POST /v1/messages"], f, http).model(chat())
-            }
-            Spoken::GeminiGenerate(f) => KnownFormat::of(
-                kind::CHAT,
-                &[
-                    "POST /v1beta/models/{model}:generateContent",
-                    "POST /v1beta/models/{model}:streamGenerateContent",
-                ],
-                f,
-                http,
-            )
-            .model(chat()),
-            Spoken::OpenAiImages(f) => KnownFormat::of(
-                kind::IMAGE,
-                &["POST /v1/images/generations", "POST /v1/images/edits"],
-                f,
-                http,
-            )
-            .model(Model::of(image::Input::model, image::Input::set_model)),
-            Spoken::OpenAiTranscriptions(f) => KnownFormat::of(
-                kind::TRANSCRIPTION,
-                &[
-                    "POST /v1/audio/transcriptions",
-                    "POST /v1/audio/translations",
-                ],
-                f,
-                http,
-            )
-            .model(Model::of(
-                transcription::Input::model,
-                transcription::Input::set_model,
-            )),
-            Spoken::OpenAiSpeech(f) => {
-                KnownFormat::of(kind::SPEECH, &["POST /v1/audio/speech"], f, http)
-                    .model(Model::of(speech::Input::model, speech::Input::set_model))
-            }
-            Spoken::OpenAiEmbeddings(f) => {
-                KnownFormat::of(kind::EMBEDDING, &["POST /v1/embeddings"], f, http).model(
-                    Model::of(embedding::Input::model, embedding::Input::set_model),
-                )
-            }
-            Spoken::OpenAiVideos(f) => KnownFormat::of(kind::VIDEO, VIDEOS, f, http)
-                .job_ids("video_")
-                .model(video()),
-            Spoken::GeminiVeo(f) => {
-                KnownFormat::provider_only(kind::VIDEO, f, google).job_ids("veo_")
-            }
-            Spoken::OpenAiRealtime(f) => session(
-                kind::REALTIME,
-                f,
-                OpenAiRealtime::PATH,
-                speaks.base,
-                sessions,
-                |f, base| f.transport(base),
-            )
-            .model(realtime()),
-            Spoken::GeminiLive(f) => session(
-                kind::REALTIME,
-                f,
-                GeminiLive::PATH,
-                speaks.base,
-                sessions,
-                |f, base| f.transport(base),
-            )
-            .model(realtime()),
-            Spoken::ResponsesWs(f) => session(
-                kind::RESPONSES,
-                f,
-                ResponsesWs::PATH,
-                speaks.base,
-                sessions,
-                |f, base| f.transport(base),
-            ),
-        };
-        known.push(format.key(speaks.auth).base(speaks.base));
+        known.push(
+            known_format(speaks, limit, sessions)
+                .key(speaks.auth)
+                .base(speaks.base),
+        );
     }
     known.push(
         KnownFormat::of(
             kind::PASSTHROUGH,
-            &["ANY /* (every other request)"],
+            endpoints::PASSTHROUGH,
             Passthrough,
-            http,
+            move |provider: &str, base_url: &str, auth| http_reach(limit, provider, base_url, auth),
         )
         .base(Base::Origin),
     );
     known
+}
+
+/// The format `speaks`, one entry per format: its kind, endpoints, how its
+/// model is named, and how its providers are reached.
+fn known_format(speaks: &Speaks, limit: usize, sessions: Limits) -> KnownFormat {
+    let http =
+        move |provider: &str, base_url: &str, auth| http_reach(limit, provider, base_url, auth);
+    let google =
+        move |provider: &str, base_url: &str, auth| google_reach(limit, provider, base_url, auth);
+    match speaks.format.clone() {
+        Spoken::OpenAiChat(f) => {
+            KnownFormat::of(kind::CHAT, endpoints::CHAT_COMPLETIONS, f, http).model(chat())
+        }
+        Spoken::OpenAiResponses(f) => {
+            KnownFormat::of(kind::CHAT, endpoints::RESPONSES, f, http).model(chat())
+        }
+        Spoken::AnthropicMessages(f) => {
+            KnownFormat::of(kind::CHAT, endpoints::MESSAGES, f, http).model(chat())
+        }
+        Spoken::GeminiGenerate(f) => {
+            KnownFormat::of(kind::CHAT, endpoints::GENERATE_CONTENT, f, http).model(chat())
+        }
+        Spoken::OpenAiImages(f) => KnownFormat::of(kind::IMAGE, endpoints::IMAGES, f, http)
+            .model(Model::of(image::Input::model, image::Input::set_model)),
+        Spoken::OpenAiTranscriptions(f) => {
+            KnownFormat::of(kind::TRANSCRIPTION, endpoints::TRANSCRIPTIONS, f, http).model(
+                Model::of(transcription::Input::model, transcription::Input::set_model),
+            )
+        }
+        Spoken::OpenAiSpeech(f) => KnownFormat::of(kind::SPEECH, endpoints::SPEECH, f, http)
+            .model(Model::of(speech::Input::model, speech::Input::set_model)),
+        Spoken::OpenAiEmbeddings(f) => {
+            KnownFormat::of(kind::EMBEDDING, endpoints::EMBEDDINGS, f, http).model(Model::of(
+                embedding::Input::model,
+                embedding::Input::set_model,
+            ))
+        }
+        // Only a `Create` names a model; a follow-up goes by its job's id
+        // ([`crate::jobs`]).
+        Spoken::OpenAiVideos(f) => KnownFormat::of(kind::VIDEO, endpoints::VIDEOS, f, http)
+            .job_ids("video_")
+            .model(Model::of(video::Input::model, video::Input::set_model)),
+        Spoken::GeminiVeo(f) => KnownFormat::provider_only(kind::VIDEO, f, google).job_ids("veo_"),
+        Spoken::OpenAiRealtime(f) => session(
+            kind::REALTIME,
+            f,
+            OpenAiRealtime::PATH,
+            speaks.base,
+            sessions,
+            |f, base| f.transport(base),
+        )
+        .model(realtime()),
+        Spoken::GeminiLive(f) => session(
+            kind::REALTIME,
+            f,
+            GeminiLive::PATH,
+            speaks.base,
+            sessions,
+            |f, base| f.transport(base),
+        )
+        .model(realtime()),
+        Spoken::ResponsesWs(f) => session(
+            kind::RESPONSES,
+            f,
+            ResponsesWs::PATH,
+            speaks.base,
+            sessions,
+            |f, base| f.transport(base),
+        ),
+    }
+}
+
+/// How the model of a chat request is named.
+fn chat() -> Model {
+    Model::of(conversation::Input::model, conversation::Input::set_model)
+}
+
+/// A provider reached over HTTP, reading up to `limit` bytes of an answer.
+fn http_reach(
+    limit: usize,
+    provider: &str,
+    base_url: &str,
+    auth: HeaderMap,
+) -> Result<impl Fn(Extensions) -> ProviderIo + Send + Sync + use<>, Fault> {
+    let client = HttpTransport::new(base_url)?.with_headers(auth)?;
+    Ok(explained(client, provider, base_url, limit, None))
+}
+
+/// A provider of Google's, whose video bytes come by redirect from its
+/// storage ([`google_storage`]).
+fn google_reach(
+    limit: usize,
+    provider: &str,
+    base_url: &str,
+    auth: HeaderMap,
+) -> Result<impl Fn(Extensions) -> ProviderIo + Send + Sync + use<>, Fault> {
+    let client = HttpTransport::new(base_url)?
+        .with_connect_timeout(std::time::Duration::from_secs(10))?
+        .follow_redirects(google_storage);
+    Ok(explained(
+        client.with_headers(auth)?,
+        provider,
+        base_url,
+        limit,
+        None,
+    ))
 }
 
 /// How a realtime session names its model: at `?model=` on its handshake,
