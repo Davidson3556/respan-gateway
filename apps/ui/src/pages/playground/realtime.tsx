@@ -1,0 +1,287 @@
+import { AudioLines, Hand, Mic, PhoneOff } from "lucide-react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { EmptyState } from "@/components/empty-state";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { useGatewayKey, useRoutes } from "@/hooks/queries";
+import { useModelChoice } from "@/hooks/use-model-choice";
+import {
+  initialRealtime,
+  openRealtime,
+  realtimeReducer,
+  type Line,
+  type RealtimeSocket,
+  type ServerEvent,
+  type RealtimeState,
+} from "@/lib/realtime";
+import { Player, startMic, type Mic as MicHandle } from "@/lib/realtime-io";
+import { cn } from "@/lib/utils";
+import { ModelPicker } from "./model-picker";
+
+const REFUSED =
+  "The gateway refused the session. Check that a provider serves realtime for this model and that the gateway key is right.";
+
+/** Turns session.update asking for transcripts of what the user says. */
+const transcribeInput = {
+  type: "session.update",
+  session: {
+    type: "realtime",
+    audio: { input: { transcription: { model: "gpt-4o-mini-transcribe" } } },
+  },
+};
+
+/** A realtime session: the socket, the mic, the speaker, and the transcript they make. */
+function useRealtimeSession(model: string) {
+  const key = useGatewayKey();
+  const [state, dispatch] = useReducer(realtimeReducer, initialRealtime);
+  const [level, setLevel] = useState(0);
+  const socket = useRef<RealtimeSocket | null>(null);
+  const mic = useRef<MicHandle | null>(null);
+  const player = useRef<Player | null>(null);
+  /** The item whose audio is playing, so a barge-in can say how much was heard. */
+  const playing = useRef<{ id: string; index: number } | null>(null);
+
+  const cutOff = useCallback(() => {
+    const heard = player.current?.stop() ?? 0;
+    if (playing.current) {
+      socket.current?.send({
+        type: "conversation.item.truncate",
+        item_id: playing.current.id,
+        content_index: playing.current.index,
+        audio_end_ms: heard,
+      });
+      playing.current = null;
+    }
+  }, []);
+
+  const teardown = useCallback(() => {
+    mic.current?.stop();
+    mic.current = null;
+    player.current?.close();
+    player.current = null;
+    playing.current = null;
+    setLevel(0);
+  }, []);
+
+  const stop = useCallback(() => {
+    socket.current?.close();
+    socket.current = null;
+    teardown();
+  }, [teardown]);
+
+  useEffect(() => stop, [stop]);
+
+  const start = useCallback(() => {
+    stop();
+    dispatch({ type: "connecting" });
+    const speaker = new Player();
+    player.current = speaker;
+    const ws = openRealtime({
+      model,
+      key,
+      onOpen: () => {
+        dispatch({ type: "open" });
+        ws.send(transcribeInput);
+        startMic(
+          (audio) => ws.send({ type: "input_audio_buffer.append", audio }),
+          setLevel,
+        ).then(
+          (m) => {
+            if (socket.current === ws) mic.current = m;
+            else m.stop();
+          },
+          (error: unknown) => {
+            dispatch({
+              type: "close",
+              error:
+                error instanceof DOMException && error.name === "NotAllowedError"
+                  ? "Microphone access was blocked. Allow it for this page and start again."
+                  : `The microphone could not be opened: ${error instanceof Error ? error.message : String(error)}`,
+            });
+            stop();
+          },
+        );
+      },
+      onEvent: (event: ServerEvent) => {
+        dispatch({ type: "event", event });
+        if (event.type === "input_audio_buffer.speech_started") cutOff();
+        if (
+          (event.type === "response.output_audio.delta" || event.type === "response.audio.delta") &&
+          typeof event.delta === "string"
+        ) {
+          speaker.play(event.delta);
+          playing.current = {
+            id: String(event.item_id ?? ""),
+            index: Number(event.content_index ?? 0),
+          };
+        }
+      },
+      onClose: ({ opened, reason }) => {
+        if (socket.current === ws) socket.current = null;
+        teardown();
+        dispatch({ type: "close", error: opened ? undefined : reason || REFUSED });
+      },
+    });
+    socket.current = ws;
+  }, [cutOff, key, model, stop, teardown]);
+
+  const interrupt = useCallback(() => {
+    cutOff();
+    socket.current?.send({ type: "response.cancel" });
+  }, [cutOff]);
+
+  return { state, level, start, stop, interrupt };
+}
+
+function status(state: RealtimeState): { label: string; hint: string } {
+  if (state.phase === "connecting") return { label: "Connecting…", hint: "Opening the session" };
+  if (state.phase === "live") {
+    if (state.speaker === "user") return { label: "You're speaking", hint: "Listening to you" };
+    if (state.speaker === "assistant") return { label: "Model is speaking", hint: "Speak to interrupt" };
+    return { label: "Listening", hint: "Say something" };
+  }
+  if (state.phase === "ended") return { label: "Session ended", hint: "Start again to continue" };
+  if (state.phase === "failed") return { label: "Couldn't connect", hint: "See the message below" };
+  return { label: "Not connected", hint: "Start a session to talk" };
+}
+
+/** A disc that pulses with whoever is speaking: brand for the model, foreground for the user. */
+function Presence({ state, level }: { state: RealtimeState; level: number }) {
+  const live = state.phase === "live";
+  const { label, hint } = status(state);
+  return (
+    <div className="flex flex-col items-center gap-3 py-2">
+      <div className="relative flex size-24 items-center justify-center" aria-hidden="true">
+        <span
+          className={cn(
+            "absolute inset-0 rounded-full transition-all duration-150",
+            state.speaker === "assistant" ? "animate-pulse bg-brand/25" : "bg-muted",
+          )}
+          style={
+            state.speaker === "user" || (live && state.speaker === null)
+              ? { transform: `scale(${1 + level * 0.35})` }
+              : undefined
+          }
+        />
+        <span
+          className={cn(
+            "relative flex size-14 items-center justify-center rounded-full",
+            state.speaker === "assistant"
+              ? "bg-brand text-brand-foreground"
+              : live
+                ? "bg-secondary text-secondary-foreground"
+                : "bg-muted text-muted-foreground",
+          )}
+        >
+          {state.speaker === "assistant" ? <AudioLines className="size-6" /> : <Mic className="size-6" />}
+        </span>
+      </div>
+      <div className="text-center">
+        <p role="status" className="text-sm font-medium">
+          {label}
+        </p>
+        <p className="text-xs text-muted-foreground">{hint}</p>
+      </div>
+    </div>
+  );
+}
+
+function Transcript({ lines }: { lines: Line[] }) {
+  const bottom = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ block: "nearest" });
+  }, [lines]);
+  return (
+    <ol className="grid gap-4" aria-label="Transcript">
+      {lines.map((line) =>
+        line.role === "user" ? (
+          <li key={line.id} className="flex justify-end">
+            <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 text-sm text-secondary-foreground">
+              {line.text || <span className="text-muted-foreground">Listening…</span>}
+            </div>
+          </li>
+        ) : (
+          <li key={line.id} className="max-w-[92%] text-sm">
+            {line.text}
+            {!line.done && (
+              <span className="ml-0.5 inline-block h-4 w-1.5 translate-y-0.5 animate-pulse rounded-sm bg-brand" />
+            )}
+            {line.interrupted && <span className="ml-2 text-xs text-muted-foreground">interrupted</span>}
+          </li>
+        ),
+      )}
+      <div ref={bottom} />
+    </ol>
+  );
+}
+
+export function RealtimeTab() {
+  const choice = useModelChoice("realtime", "gpt-realtime");
+  const { data: routes } = useRoutes();
+  const { state, level, start, stop, interrupt } = useRealtimeSession(choice.model);
+  const active = state.phase === "connecting" || state.phase === "live";
+  const unserved =
+    !choice.isPending &&
+    !choice.models?.length &&
+    routes !== undefined &&
+    !routes.defaults.some((d) => d.kind === "realtime");
+
+  if (unserved) {
+    return (
+      <Card className="py-0">
+        <EmptyState icon={AudioLines} title="No realtime provider" className="border-none">
+          <p>
+            No provider here serves realtime voice. Add one that speaks OpenAI Realtime or Gemini Live
+            (kind <code>realtime</code>) to the gateway's config, and it shows up here.
+          </p>
+        </EmptyState>
+      </Card>
+    );
+  }
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-[18rem_1fr]">
+      <Card className="h-fit gap-5 p-4">
+        <ModelPicker id="realtime-model" choice={choice} />
+        {active ? (
+          <div className="grid gap-2">
+            <Button variant="outline" onClick={interrupt} disabled={state.speaker !== "assistant"}>
+              <Hand /> Interrupt
+            </Button>
+            <Button variant="destructive" onClick={stop}>
+              <PhoneOff /> End session
+            </Button>
+          </div>
+        ) : (
+          <Button onClick={start}>
+            <Mic /> {state.phase === "idle" ? "Start session" : "Start a new session"}
+          </Button>
+        )}
+        <p className="text-xs text-muted-foreground">
+          Talks to <code>/v1/realtime</code> over a WebSocket. The browser asks for your microphone
+          once the session opens; audio is sent as 24 kHz PCM16.
+        </p>
+      </Card>
+
+      <Card className="flex h-[calc(100dvh-17rem)] min-h-[28rem] flex-col gap-0 overflow-hidden py-0">
+        <div className="border-b bg-muted/20 p-3">
+          <Presence state={state} level={level} />
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+          {state.error && (
+            <p role="alert" className="mb-4 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              {state.error}
+            </p>
+          )}
+          {state.lines.length === 0 ? (
+            <p className="text-center text-sm text-muted-foreground">
+              Transcripts of both sides appear here as you talk.
+            </p>
+          ) : (
+            <Transcript lines={state.lines} />
+          )}
+        </div>
+      </Card>
+    </div>
+  );
+}

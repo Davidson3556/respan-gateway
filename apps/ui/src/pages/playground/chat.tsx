@@ -1,17 +1,24 @@
-import { ArrowUp, Eraser, MessageSquare, Sparkles, Square } from "lucide-react";
+import { ArrowUp, ChevronRight, Eraser, MessageSquare, Sparkles, Square, Wrench } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { Link } from "react-router";
 import { CopyButton } from "@/components/copy-button";
 import { EmptyState } from "@/components/empty-state";
 import { Markdown } from "@/components/markdown";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { useProviders, useRoutes } from "@/hooks/queries";
 import { useModelChoice } from "@/hooks/use-model-choice";
+import { api, type Provider, type RequestRecord } from "@/lib/api";
+import { chatApi, servedChatApis, type ChatApiId } from "@/lib/chat-apis";
 import { streamChat, type ChatMessage, type ChatStats } from "@/lib/chat";
 import { formatCount, formatMs } from "@/lib/format";
+import { findCall, servedBy } from "@/lib/served";
 import { ModelPicker } from "./model-picker";
 import { RequestError } from "./request-error";
+import { SelectField } from "./select-field";
 
 const suggestions = ["Explain how an API gateway works", "Write a haiku about latency", "Summarise HTTP/3 in three bullets"];
 
@@ -21,6 +28,73 @@ interface Turn {
   stats?: ChatStats;
   error?: unknown;
   stopped?: boolean;
+  /** The gateway's record of the call, once it has one. */
+  record?: RequestRecord;
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The record of the call just made; the gateway finishes it a moment after the stream ends. */
+async function locate(want: { api: ChatApiId; model: string; since: number }) {
+  let found: RequestRecord | undefined;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await sleep(400);
+    found = findCall(await api.requests(20), want) ?? found;
+    if (found && found.status !== null) break;
+  }
+  return found;
+}
+
+function Served({ record, providers }: { record: RequestRecord; providers: Provider[] | undefined }) {
+  const served = servedBy(record, providers);
+  const tools = (served.steps ?? []).flatMap((s) => s.tools);
+  return (
+    <div className="mt-2 grid gap-2">
+      <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+        {served.provider && (
+          <Badge variant="outline" className="font-normal">
+            served by <span className="font-mono">{served.provider}</span>
+          </Badge>
+        )}
+        {served.translatedFrom && (
+          <Badge variant="secondary" className="font-normal">
+            translated from {chatApi(served.translatedFrom).label}
+          </Badge>
+        )}
+        <Link to={`/requests/${served.id}`} className="underline-offset-2 hover:underline">
+          Request details
+        </Link>
+      </div>
+      {tools.length > 0 && (
+        <details className="group text-xs">
+          <summary className="flex w-fit cursor-pointer list-none items-center gap-1 rounded text-muted-foreground hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none [&::-webkit-details-marker]:hidden">
+            <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
+            <Wrench className="size-3.5" aria-hidden="true" />
+            Used {tools.length} {tools.length === 1 ? "tool" : "tools"}
+          </summary>
+          <ul className="mt-2 grid gap-1 border-l-2 border-brand/40 pl-3" aria-label="Tools used">
+            {tools.map((tool, i) => (
+              <li key={i} className="flex flex-wrap items-baseline gap-x-2">
+                <span className={`font-mono break-all ${tool.error ? "text-destructive" : ""}`}>
+                  {tool.name}
+                </span>
+                <span className="font-mono text-muted-foreground tabular">
+                  {formatMs(tool.duration_ms)}
+                  {tool.error && " · failed"}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <Link
+            to={`/requests/${served.id}`}
+            className="mt-2 inline-block text-muted-foreground underline-offset-2 hover:underline"
+          >
+            See every step
+          </Link>
+        </details>
+      )}
+    </div>
+  );
 }
 
 function Stats({ stats }: { stats: ChatStats }) {
@@ -34,7 +108,15 @@ function Stats({ stats }: { stats: ChatStats }) {
   return <p className="text-xs text-muted-foreground tabular">{parts.join(" · ")}</p>;
 }
 
-function Message({ turn, streaming }: { turn: Turn; streaming: boolean }) {
+function Message({
+  turn,
+  streaming,
+  providers,
+}: {
+  turn: Turn;
+  streaming: boolean;
+  providers: Provider[] | undefined;
+}) {
   if (turn.role === "user") {
     return (
       <div className="flex justify-end">
@@ -72,6 +154,7 @@ function Message({ turn, streaming }: { turn: Turn; streaming: boolean }) {
             <CopyButton value={turn.content} label="Copy reply" className="size-6" />
           </div>
         )}
+        {turn.record && <Served record={turn.record} providers={providers} />}
         {turn.stopped && <p className="mt-2 text-xs text-muted-foreground">Stopped</p>}
       </div>
     </div>
@@ -80,6 +163,11 @@ function Message({ turn, streaming }: { turn: Turn; streaming: boolean }) {
 
 export function ChatTab() {
   const choice = useModelChoice("chat", "gpt-4o-mini");
+  const { data: routes } = useRoutes();
+  const { data: providers } = useProviders();
+  const apis = servedChatApis(routes?.serve);
+  const [apiChoice, setApiChoice] = useState<ChatApiId>("openai-chat");
+  const selected = apis.find((a) => a.id === apiChoice) ?? apis[0];
   const [system, setSystem] = useState("");
   const [input, setInput] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -93,8 +181,8 @@ export function ChatTab() {
 
   useEffect(() => () => controller?.abort(), [controller]);
 
-  const updateLast = (patch: (t: Turn) => Turn) =>
-    setTurns((prev) => [...prev.slice(0, -1), patch(prev[prev.length - 1])]);
+  const updateAt = (index: number, patch: (t: Turn) => Turn) =>
+    setTurns((prev) => prev.map((t, i) => (i === index ? patch(t) : t)));
 
   const send = async (e?: FormEvent) => {
     e?.preventDefault();
@@ -109,14 +197,21 @@ export function ChatTab() {
     setInput("");
     setTurns([...history, { role: "assistant", content: "" }]);
     setController(ctrl);
+    const index = history.length;
+    const updateLast = (patch: (t: Turn) => Turn) => updateAt(index, patch);
+    const since = Date.now();
     try {
       const stats = await streamChat({
+        api: selected.id,
         model: choice.model,
         messages,
         signal: ctrl.signal,
         onDelta: (delta) => updateLast((t) => ({ ...t, content: t.content + delta })),
       });
       updateLast((t) => ({ ...t, stats }));
+      void locate({ api: selected.id, model: choice.model, since })
+        .then((record) => record && updateLast((t) => ({ ...t, record })))
+        .catch(() => undefined);
     } catch (error) {
       updateLast((t) => (ctrl.signal.aborted ? { ...t, stopped: true } : { ...t, error }));
     } finally {
@@ -134,6 +229,16 @@ export function ChatTab() {
   return (
     <div className="grid gap-4 lg:grid-cols-[18rem_1fr]">
       <Card className="h-fit gap-5 p-4">
+        {apis.length > 1 && (
+          <SelectField
+            id="chat-api"
+            label="API"
+            value={selected.id}
+            onChange={(v) => setApiChoice(v as ChatApiId)}
+            options={apis.map((a) => a.id)}
+            optionLabel={(id) => chatApi(id).label}
+          />
+        )}
         <ModelPicker id="chat-model" choice={choice} />
         <div className="grid gap-2">
           <Label htmlFor="chat-system">System prompt</Label>
@@ -164,7 +269,7 @@ export function ChatTab() {
           {turns.length === 0 ? (
             <EmptyState icon={MessageSquare} title="Talk to any model" className="border-none">
               <p>
-                Messages go through the gateway's <code>/v1/chat/completions</code>, streamed, so
+                Messages go through the gateway's <code>{selected.endpoint}</code>, streamed, so
                 you'll see routing, translation and usage exactly as a client would.
               </p>
               <div className="flex flex-wrap justify-center gap-2">
@@ -178,7 +283,12 @@ export function ChatTab() {
           ) : (
             <div className="grid gap-6">
               {turns.map((t, i) => (
-                <Message key={i} turn={t} streaming={streaming && i === turns.length - 1} />
+                <Message
+                  key={i}
+                  turn={t}
+                  streaming={streaming && i === turns.length - 1}
+                  providers={providers}
+                />
               ))}
               <div ref={bottom} />
             </div>

@@ -1,10 +1,8 @@
 import { gatewayFetch } from "@/lib/api";
+import { chatApi, type ChatApiId, type ChatMessage } from "@/lib/chat-apis";
 import { readSse } from "@/lib/sse";
 
-export interface ChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
-}
+export type { ChatMessage } from "@/lib/chat-apis";
 
 export interface ChatStats {
   inputTokens: number | null;
@@ -14,32 +12,25 @@ export interface ChatStats {
   finishReason: string | null;
 }
 
-interface ChunkChoice {
-  delta?: { content?: string | null };
-  finish_reason?: string | null;
-}
-
-interface Chunk {
-  choices?: ChunkChoice[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
-  error?: { message?: string };
-}
-
 /**
- * Streams an OpenAI chat completion through the gateway, calling onDelta with
- * each piece of text as it arrives. Abort with `signal` to stop early.
+ * Streams a chat reply through the gateway over the chosen client API,
+ * calling onDelta with each piece of text as it arrives. Abort with `signal`
+ * to stop early.
  */
 export async function streamChat({
+  api = "openai-chat",
   model,
   messages,
   signal,
   onDelta,
 }: {
+  api?: ChatApiId;
   model: string;
   messages: ChatMessage[];
   signal: AbortSignal;
   onDelta: (text: string) => void;
 }): Promise<ChatStats> {
+  const adapter = chatApi(api);
   const started = performance.now();
   const stats: ChatStats = {
     inputTokens: null,
@@ -48,34 +39,23 @@ export async function streamChat({
     totalMs: 0,
     finishReason: null,
   };
-  const res = await gatewayFetch("/v1/chat/completions", {
+  const res = await gatewayFetch(adapter.path(model), {
     method: "POST",
     signal,
     headers: { "content-type": "application/json", accept: "text/event-stream" },
-    body: JSON.stringify({
-      model,
-      messages,
-      stream: true,
-      stream_options: { include_usage: true },
-    }),
+    body: JSON.stringify(adapter.body(model, messages)),
   });
   if (!res.body) throw new Error("The gateway sent an empty response");
 
-  await readSse(res.body, ({ data }) => {
-    if (data === "[DONE]") return;
-    const chunk = JSON.parse(data) as Chunk;
-    if (chunk.error) throw new Error(chunk.error.message ?? "The provider reported an error");
-    const choice = chunk.choices?.[0];
-    const text = choice?.delta?.content;
-    if (text) {
+  await readSse(res.body, (event) => {
+    const delta = adapter.read(event);
+    if (delta.text) {
       stats.ttfbMs ??= performance.now() - started;
-      onDelta(text);
+      onDelta(delta.text);
     }
-    if (choice?.finish_reason) stats.finishReason = choice.finish_reason;
-    if (chunk.usage) {
-      stats.inputTokens = chunk.usage.prompt_tokens ?? null;
-      stats.outputTokens = chunk.usage.completion_tokens ?? null;
-    }
+    if (delta.finishReason) stats.finishReason = delta.finishReason;
+    if (delta.inputTokens !== undefined) stats.inputTokens = delta.inputTokens;
+    if (delta.outputTokens !== undefined) stats.outputTokens = delta.outputTokens;
   });
   stats.totalMs = performance.now() - started;
   return stats;
