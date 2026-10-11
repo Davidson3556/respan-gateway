@@ -41,6 +41,9 @@ pub(super) struct Provider {
     /// Whether `voiceActivity` said the user began speaking, since the
     /// last interruption.
     spoke: bool,
+    /// Whether an interruption said the user began speaking before
+    /// `voiceActivity`, which the Live API sends just after it.
+    told: bool,
 }
 
 impl Provider {
@@ -49,6 +52,7 @@ impl Provider {
             shared,
             ended: false,
             spoke: false,
+            told: false,
         }
     }
 
@@ -91,6 +95,8 @@ impl Provider {
         };
         if state.cancelled {
             let content = &v["serverContent"];
+            // An interrupted turn still ends, which says nothing more.
+            self.ended |= content["interrupted"] == true;
             state.cancelled = content["turnComplete"] != true && content["interrupted"] != true;
             for path in CANCELLED {
                 json::remove(v, path);
@@ -109,31 +115,32 @@ impl Provider {
             };
             events.push(Output::Updated(session));
         }
-        let activity = at(v, &["voiceActivity", "voiceActivityType"]).and_then(Value::as_str);
-        let native = |v: &Value| json::native(NAME, json!({"voiceActivity": v["voiceActivity"]}));
-        match activity {
+        let activity = at(v, &["voiceActivity", "type"]).and_then(Value::as_str);
+        let activity = activity.map(str::to_owned);
+        let activity_event = |v: &mut Value| {
+            let at_ms = take(v, &["voiceActivity", "audioOffset"], millis, offset);
+            let native = json::native(NAME, json!({"voiceActivity": v["voiceActivity"]}));
+            json::remove(v, &["voiceActivity"]);
+            (at_ms, native)
+        };
+        match activity.as_deref() {
+            // The interruption already said so.
+            Some("ACTIVITY_START") if std::mem::take(&mut self.told) => {}
             Some("ACTIVITY_START") => {
                 self.spoke = true;
-                let native = native(v);
-                json::remove(v, &["voiceActivity"]);
-                events.push(Output::SpeechStarted {
-                    at_ms: None,
-                    native,
-                });
+                let (at_ms, native) = activity_event(v);
+                events.push(Output::SpeechStarted { at_ms, native });
             }
             Some("ACTIVITY_END") => {
-                let native = native(v);
-                json::remove(v, &["voiceActivity"]);
-                events.push(Output::SpeechStopped {
-                    at_ms: None,
-                    native,
-                });
+                let (at_ms, native) = activity_event(v);
+                events.push(Output::SpeechStopped { at_ms, native });
             }
             _ => {}
         }
         if at(v, &["serverContent", "interrupted"]) == Some(&Value::Bool(true)) {
             let said = !self.spoke || state.open;
             if !self.spoke {
+                self.told = true;
                 events.push(Output::SpeechStarted {
                     at_ms: None,
                     native: None,
@@ -162,6 +169,7 @@ impl Provider {
         let path = ["serverContent", "modelTurn", "parts"];
         let parts = at(v, &path).and_then(Value::as_array);
         if let Some(parts) = parts.and_then(|p| p.iter().map(part).collect::<Option<Vec<_>>>()) {
+            self.told = false;
             start(&mut state.open, &mut self.ended);
             events.extend(parts);
             json::remove(v, &path);
@@ -284,6 +292,26 @@ fn call(c: &Value) -> Option<Output> {
     })
 }
 
+/// Milliseconds of a duration as the Live API writes one, such as
+/// `"0.760s"` or `"8s"`.
+fn millis(v: &Value) -> Option<u64> {
+    let seconds = v.as_str()?.strip_suffix('s')?;
+    let (whole, fraction) = seconds.split_once('.').unwrap_or((seconds, ""));
+    let fraction = format!("{fraction:0<3}");
+    Some(whole.parse::<u64>().ok()? * 1_000 + fraction.get(..3)?.parse::<u64>().ok()?)
+}
+
+/// A duration of `ms` as the Live API writes one.
+fn offset(ms: &u64) -> Option<Value> {
+    Some(
+        match ms % 1_000 {
+            0 => format!("{}s", ms / 1_000),
+            rest => format!("{}.{rest:03}s", ms / 1_000),
+        }
+        .into(),
+    )
+}
+
 /// How a turn ended, by the reason the Live API gives.
 fn status(reason: String) -> Status {
     match reason.as_str() {
@@ -403,6 +431,9 @@ pub(super) struct Client {
     calls: Vec<Value>,
     /// Whether the response's interruption was written.
     interrupted: bool,
+    /// Whether the response began in another format, whose end the Live
+    /// API's own turn's end does not follow.
+    foreign: bool,
     /// Whether part of the user's turn's transcript was written.
     heard: bool,
     /// Whether a response is being written, which its reader reads.
@@ -418,6 +449,7 @@ impl Client {
             usage: None,
             calls: Vec::new(),
             interrupted: false,
+            foreign: false,
             heard: false,
             answering,
             convert: Convert::default(),
@@ -431,6 +463,9 @@ impl Client {
         {
             return Err(untranslatable_output(NAME, "an MCP event"));
         }
+        if let Output::ResponseStart { native, .. } = event {
+            self.foreign = native.as_ref().is_some_and(|n| *n.format != *NAME);
+        }
         let Some(event) = foreign::strip(NAME, event) else {
             return Ok(());
         };
@@ -439,38 +474,32 @@ impl Client {
             Output::ResponseDone { .. } => self.answering.store(false, Ordering::Relaxed),
             _ => {}
         }
-        if let Some(v) = self.encode(&event)? {
+        for v in self.encode(&event)? {
             out.push(json::frame(&v)?);
         }
         Ok(())
     }
 
-    fn encode(&mut self, event: &Output) -> Result<Option<Value>, Fault> {
+    fn encode(&mut self, event: &Output) -> Result<Vec<Value>, Fault> {
         let refuse = |what: &str| untranslatable_output(NAME, what);
         let interrupted = json!({"serverContent": {"interrupted": true}});
         let content = |field: &str, value: Value| json!({"serverContent": {field: value}});
         let (v, native) = match event {
-            Output::Opened(_) => return Ok(None),
+            Output::Opened(_) => return Ok(Vec::new()),
             Output::Updated(s) if !std::mem::replace(&mut self.setup, true) => {
                 (json!({"setupComplete": {}}), &s.native)
             }
-            Output::Updated(_) => return Ok(None),
-            Output::SpeechStarted { native, .. } if says(native, "voiceActivity") => {
-                (json!({}), native)
+            Output::Updated(_) => return Ok(Vec::new()),
+            Output::SpeechStarted { at_ms, native } if says(native, "voiceActivity") => {
+                (activity("ACTIVITY_START", at_ms), native)
             }
             Output::SpeechStarted { native, .. } => {
                 self.interrupted = true;
                 (interrupted, native)
             }
-            Output::SpeechStopped { native, .. } if says(native, "voiceActivity") => {
-                (json!({}), native)
-            }
-            Output::SpeechStopped { native, .. } => (
-                json!({"voiceActivity": {"voiceActivityType": "ACTIVITY_END"}}),
-                native,
-            ),
+            Output::SpeechStopped { at_ms, native } => (activity("ACTIVITY_END", at_ms), native),
             Output::InputTranscript { complete: true, .. } if std::mem::take(&mut self.heard) => {
-                return Ok(None);
+                return Ok(Vec::new());
             }
             Output::InputTranscript {
                 text,
@@ -483,7 +512,7 @@ impl Client {
             Output::ResponseStart { native, .. } => {
                 own(NAME, native, || refuse("another format's event"))?;
                 self.interrupted = false;
-                return Ok(None);
+                return Ok(Vec::new());
             }
             Output::Audio { audio, native } => {
                 // The Live API's audio is always 24 kHz PCM.
@@ -523,35 +552,53 @@ impl Client {
                     own(NAME, native, || refuse("another format's call"))?,
                 );
                 self.calls.push(call);
-                return Ok(None);
+                return Ok(Vec::new());
             }
             Output::Usage(used) => {
                 let held = self.usage.get_or_insert_default();
                 held.tokens += &used.tokens;
                 held.input_audio_tokens += used.input_audio_tokens;
                 held.output_audio_tokens += used.output_audio_tokens;
-                return Ok(None);
+                return Ok(Vec::new());
             }
+            // The Live API ends a turn of calls, or one interrupted, with
+            // its turn's end; a response of its own is followed by it.
             Output::ResponseDone { status, native } => {
                 let interrupted_already = std::mem::take(&mut self.interrupted);
-                let v = match (std::mem::take(&mut self.calls), status) {
+                let turn_complete = content("turnComplete", true.into());
+                let (v, then) = match (std::mem::take(&mut self.calls), status) {
                     (calls, _) if !calls.is_empty() => {
-                        json!({"toolCall": {"functionCalls": calls}})
+                        (json!({"toolCall": {"functionCalls": calls}}), true)
+                    }
+                    (_, Status::Interrupted) if interrupted_already && self.foreign => {
+                        (turn_complete, false)
                     }
                     (_, Status::Interrupted) if interrupted_already => {
                         own(NAME, native, || refuse("another format's event"))?;
-                        return Ok(None);
+                        return Ok(Vec::new());
                     }
-                    (_, Status::Interrupted) => interrupted,
+                    (_, Status::Interrupted) => (interrupted, true),
                     (_, status) => {
-                        let mut v = content("turnComplete", true.into());
+                        let mut v = turn_complete;
                         if let Some(reason) = reason(status) {
                             v["serverContent"]["turnCompleteReason"] = reason.into();
                         }
-                        v
+                        (v, false)
                     }
                 };
-                (v, native)
+                let mut v = v;
+                merge(
+                    &mut v,
+                    own(NAME, native, || refuse("another format's event"))?,
+                );
+                let mut messages = vec![v];
+                if then && self.foreign {
+                    messages.push(content("turnComplete", true.into()));
+                }
+                if let (Some(used), Some(last)) = (self.usage.take(), messages.last_mut()) {
+                    put_usage(last, &used);
+                }
+                return Ok(messages);
             }
             Output::Error { code, message, .. } => {
                 // A Live API client knows a refusal only as its session's close.
@@ -575,8 +622,17 @@ impl Client {
         if let Some(used) = self.usage.take() {
             put_usage(&mut v, &used);
         }
-        Ok(Some(v))
+        Ok(vec![v])
     }
+}
+
+/// A `voiceActivity` message of `kind`, at `at_ms` into the user's audio.
+fn activity(kind: &str, at_ms: &Option<u64>) -> Value {
+    let mut v = json!({"voiceActivity": {"type": kind}});
+    if let Some(ms) = at_ms.as_ref().and_then(offset) {
+        v["voiceActivity"]["audioOffset"] = ms;
+    }
+    v
 }
 
 /// Whether `native` is this format's and holds `key`.

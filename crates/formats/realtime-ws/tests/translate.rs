@@ -187,6 +187,7 @@ async fn openai_to_gemini_tells_of_a_response_as_openai_does() {
     assert_eq!(
         kinds(&response),
         [
+            "input_audio_buffer.speech_stopped",
             "response.created",
             "response.output_item.added",
             "conversation.item.added",
@@ -196,15 +197,15 @@ async fn openai_to_gemini_tells_of_a_response_as_openai_does() {
             "response.output_audio.done",
             "response.output_audio_transcript.done",
             "response.content_part.done",
-            "response.output_item.done",
             "conversation.item.done",
+            "response.output_item.done",
             "response.done",
         ]
     );
     assert_eq!(spoken(&response), pcm(300));
     let done = &response.last().unwrap()["response"];
     assert_eq!(done["status"], "completed");
-    assert_eq!(done["id"], response[0]["response"]["id"]);
+    assert_eq!(done["id"], response[1]["response"]["id"]);
     assert_eq!(done["output"][0]["content"][0]["transcript"], "It is noon.");
     assert_eq!(
         done["usage"],
@@ -212,7 +213,7 @@ async fn openai_to_gemini_tells_of_a_response_as_openai_does() {
             "input_token_details": {"cached_tokens": 8, "audio_tokens": 30},
             "output_token_details": {"audio_tokens": 10}})
     );
-    let item = &response[1]["item"]["id"];
+    let item = &response[2]["item"]["id"];
     for delta in response
         .iter()
         .filter(|e| e["type"] == "response.output_audio.delta")
@@ -253,6 +254,7 @@ async fn openai_to_gemini_barges_in() {
         .position(|e| e["type"] == "input_audio_buffer.speech_started");
     let done = cut.last().unwrap();
     assert!(started.is_some(), "{cut:?}");
+
     assert_eq!(done["response"]["status"], "cancelled");
     assert_eq!(
         done["response"]["status_details"]["reason"],
@@ -270,6 +272,24 @@ async fn openai_to_gemini_barges_in() {
         "{received:?}"
     );
     assert!(seen.inputs().iter().any(|e| matches!(e, Input::Native(_))));
+    // The interruption, then the voice activity that made it, then the
+    // turn's end, are the user's one start.
+    let ended = |outputs: &[Output]| {
+        let native = |e: &Output| matches!(e, Output::Native(n) if n.value["serverContent"]["turnComplete"] == true);
+        outputs.iter().any(native)
+    };
+    for _ in 0..50 {
+        if ended(&seen.outputs()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let outputs = seen.outputs();
+    assert!(ended(&outputs), "{outputs:?}");
+    let starts = outputs
+        .iter()
+        .filter(|e| matches!(e, Output::SpeechStarted { .. }));
+    assert_eq!(starts.count(), 1, "{outputs:?}");
 }
 
 // 17: the model calls a tool: OpenAI's function call item; its answer and
@@ -290,17 +310,18 @@ async fn openai_to_gemini_calls_a_tool() {
     assert_eq!(
         kinds(&call),
         [
+            "input_audio_buffer.speech_stopped",
             "response.created",
             "response.output_item.added",
             "conversation.item.added",
             "response.function_call_arguments.delta",
             "response.function_call_arguments.done",
-            "response.output_item.done",
             "conversation.item.done",
+            "response.output_item.done",
             "response.done",
         ]
     );
-    let done = &call[4];
+    let done = &call[5];
     assert_eq!(done["name"], "weather");
     assert_eq!(done["arguments"], "{\"city\":\"Paris\"}");
     let id = done["call_id"].clone();
@@ -436,7 +457,7 @@ fn setup() -> Value {
         "generationConfig": {"responseModalities": ["AUDIO"]},
         "systemInstruction": {"parts": [{"text": "Be brief."}]},
         "tools": [{"functionDeclarations": [{"name": "weather",
-            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}]}],
+            "parameters": {"type": "OBJECT", "properties": {"city": {"type": "STRING"}}}}]}],
         "outputAudioTranscription": {}}})
 }
 
@@ -465,8 +486,9 @@ async fn gemini_to_openai_dials_the_model_at_its_url() {
     assert_eq!(handshakes[0].uri, "/v1/realtime?model=gpt-realtime");
 }
 
-// 22: the setup is a session.update of 24 kHz PCM out; its session.updated
-// is the setup's completion, once.
+// 22: the setup is a session.update of 24 kHz PCM out, its schemas' types
+// named as JSON Schema names them; its session.updated is the setup's
+// completion, once.
 #[tokio::test]
 async fn gemini_to_openai_sets_up() {
     let (fake, mut client, _) = set_up_gemini().await;
@@ -556,6 +578,8 @@ async fn gemini_to_openai_calls_a_tool() {
     let call = &call.last().unwrap()["toolCall"]["functionCalls"][0];
     assert_eq!(call["name"], "weather");
     assert_eq!(call["args"], json!({"city": "Paris"}));
+    // The turn of the call ends, as the Live API's does.
+    assert_eq!(client.hear().await["serverContent"]["turnComplete"], true);
     fake.answer(Turn {
         audio: Some(pcm(100)),
         ..Turn::default()

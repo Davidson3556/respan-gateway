@@ -297,8 +297,8 @@ async fn openai_says_a_turn_in_the_documented_order() {
             "response.output_audio.done",
             "response.output_audio_transcript.done",
             "response.content_part.done",
-            "response.output_item.done",
             "conversation.item.done",
+            "response.output_item.done",
             "response.done",
             "rate_limits.updated",
         ]
@@ -666,6 +666,12 @@ async fn gemini_takes_answers_to_pending_calls_and_goes_on() {
     say(&mut ws, json!({"realtimeInput": {"text": "weather?"}})).await;
     let call = event(&mut ws).await["toolCall"]["functionCalls"][0].clone();
     assert_eq!(call["args"], json!({"city": "Paris"}));
+    // The turn of the call ends at once.
+    assert_eq!(
+        event(&mut ws).await["serverContent"]["generationComplete"],
+        true
+    );
+    assert_eq!(event(&mut ws).await["serverContent"]["turnComplete"], true);
     let answer = json!({"id": call["id"], "name": "weather", "response": {"c": 20}});
     say(
         &mut ws,
@@ -700,7 +706,10 @@ async fn gemini_speech_interrupts_a_turn_and_cancels_its_calls() {
     });
     say(&mut ws, json!({"realtimeInput": {"text": "weather?"}})).await;
     let id = event(&mut ws).await["toolCall"]["functionCalls"][0]["id"].clone();
+    let ended = [event(&mut ws).await, event(&mut ws).await];
+    assert_eq!(ended[1]["serverContent"]["turnComplete"], true);
     fake.user_speaks();
+    let start = json!({"voiceActivity": {"type": "ACTIVITY_START"}});
     assert_eq!(
         event(&mut ws).await,
         json!({"serverContent": {"interrupted": true}})
@@ -709,20 +718,28 @@ async fn gemini_speech_interrupts_a_turn_and_cancels_its_calls() {
         event(&mut ws).await,
         json!({"toolCallCancellation": {"ids": [id]}})
     );
-    // A held turn is interrupted, and nothing else is.
+    assert_eq!(event(&mut ws).await, start);
+    // A held turn is interrupted, and ended; nothing else is.
     fake.answer(Turn {
         audio: Some(vec![0; 10]),
         held: true,
         ..Turn::default()
     });
     fake.user_stops();
+    assert_eq!(
+        event(&mut ws).await,
+        json!({"voiceActivity": {"type": "ACTIVITY_END"}})
+    );
     assert!(event(&mut ws).await["serverContent"]["modelTurn"].is_object());
     fake.user_speaks();
     assert_eq!(
         event(&mut ws).await,
         json!({"serverContent": {"interrupted": true}})
     );
+    assert_eq!(event(&mut ws).await, start);
+    assert_eq!(event(&mut ws).await["serverContent"]["turnComplete"], true);
     fake.user_speaks();
+    assert_eq!(event(&mut ws).await, start);
     fake.go_away();
     assert_eq!(event(&mut ws).await, json!({"goAway": {"timeLeft": "10s"}}));
     // Activity is the client's once detection is off. A fake serves one

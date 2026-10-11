@@ -665,13 +665,14 @@ impl Response {
         self.done(item("completed", arguments), out);
     }
 
-    /// `item` done: told of, and listed among its items.
+    /// `item` done: told of, the conversation's first, as OpenAI does, and
+    /// listed among its items.
     fn done(&mut self, item: Value, out: &mut Vec<Value>) {
+        out.push(json!({"type": "conversation.item.done", "item": item}));
         out.push(
             json!({"type": "response.output_item.done", "response_id": self.id,
             "output_index": self.output.len(), "item": item}),
         );
-        out.push(json!({"type": "conversation.item.done", "item": item}));
         self.output.push(item);
     }
 }

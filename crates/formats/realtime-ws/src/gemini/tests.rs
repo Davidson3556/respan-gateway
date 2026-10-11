@@ -238,7 +238,7 @@ fn every_server_message_is_written_back_as_it_came() {
         json!({"serverContent": {"outputTranscription": {"text": "Noon."}}}),
         json!({"serverContent": {"generationComplete": true}}),
         json!({"serverContent": {"turnComplete": true}, "usageMetadata": usage}),
-        json!({"voiceActivity": {"voiceActivityType": "ACTIVITY_START"}}),
+        json!({"voiceActivity": {"type": "ACTIVITY_START", "audioOffset": "0.760s"}}),
         json!({"serverContent": {"modelTurn": {"parts": [{"text": "Once"}]}}}),
         json!({"serverContent": {"interrupted": true}}),
         json!({"serverContent": {"turnComplete": true}}),
@@ -252,6 +252,12 @@ fn every_server_message_is_written_back_as_it_came() {
         json!({"serverContent": {"interrupted": true}}),
         json!({"goAway": {"timeLeft": "10s"}}),
         json!({"sessionResumptionUpdate": {"newHandle": "h2", "resumable": true}}),
+        // A barge-in: the interruption, then the voice activity that made it.
+        json!({"serverContent": {"modelTurn": {"parts": [{"text": "Twice"}]}}}),
+        json!({"serverContent": {"interrupted": true}}),
+        json!({"voiceActivity": {"type": "ACTIVITY_START", "audioOffset": "8s"}}),
+        json!({"serverContent": {"turnComplete": true}}),
+        json!({"voiceActivity": {"type": "ACTIVITY_END", "audioOffset": "9.500s"}}),
     ];
     let events = outputs(&applied, &messages);
     let statuses: Vec<&Status> = events
@@ -267,7 +273,8 @@ fn every_server_message_is_written_back_as_it_came() {
             &Status::Completed,
             &Status::Interrupted,
             &Status::Completed,
-            &Status::Failed
+            &Status::Failed,
+            &Status::Interrupted
         ]
     );
     let used = events.iter().find_map(|e| match e {
@@ -283,14 +290,25 @@ fn every_server_message_is_written_back_as_it_came() {
         (used.input_audio_tokens, used.output_audio_tokens),
         (30, 12)
     );
-    let started = events
+    let started: Vec<Option<u64>> = events
         .iter()
-        .filter(|e| matches!(e, Output::SpeechStarted { .. }))
-        .count();
+        .filter_map(|e| match e {
+            Output::SpeechStarted { at_ms, .. } => Some(*at_ms),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        started, 2,
-        "the voice activity, and the interruption after no response"
+        started,
+        [Some(760), None, None],
+        "the voice activity, the interruption after no response, and the barge-in once"
     );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Output::SpeechStopped {
+            at_ms: Some(9_500),
+            ..
+        }
+    )));
     let mut written = heard(&events).expect("written");
     // The turn of a part and its end is written as two messages, saying the same.
     let ended = written.remove(14);

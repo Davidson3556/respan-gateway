@@ -243,6 +243,7 @@ fn tools_json(tools: &[Tool], refuse: fn(&str) -> Fault) -> Result<Value, Fault>
         }
         if !t.parameters.is_null() {
             v["parameters"] = t.parameters.clone();
+            lowercase_types(&mut v["parameters"]);
         }
         merge(
             &mut v,
@@ -251,6 +252,43 @@ fn tools_json(tools: &[Tool], refuse: fn(&str) -> Fault) -> Result<Value, Fault>
         Ok(v)
     };
     tools.iter().map(tool).collect()
+}
+
+/// `schema` with the types JSON Schema names in lower case so named, as
+/// OpenAI takes them: Gemini's schemas name them in upper case, `OBJECT`.
+fn lowercase_types(schema: &mut Value) {
+    const UPPER: &[&str] = &[
+        "STRING", "NUMBER", "INTEGER", "BOOLEAN", "ARRAY", "OBJECT", "NULL",
+    ];
+    let Some(fields) = schema.as_object_mut() else {
+        return;
+    };
+    for (key, value) in fields.iter_mut() {
+        match (key.as_str(), value) {
+            ("type", Value::String(t)) if UPPER.contains(&t.as_str()) => {
+                *t = t.to_ascii_lowercase();
+            }
+            ("type", Value::Array(types)) => {
+                for t in types {
+                    if let Value::String(t) = t
+                        && UPPER.contains(&t.as_str())
+                    {
+                        *t = t.to_ascii_lowercase();
+                    }
+                }
+            }
+            ("properties" | "$defs" | "definitions", Value::Object(schemas)) => {
+                schemas.values_mut().for_each(lowercase_types);
+            }
+            ("items" | "additionalProperties" | "not", schema @ Value::Object(_)) => {
+                lowercase_types(schema);
+            }
+            ("anyOf" | "oneOf" | "allOf" | "prefixItems" | "items", Value::Array(schemas)) => {
+                schemas.iter_mut().for_each(lowercase_types);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn tool_choice(v: &Value) -> Option<ToolChoice> {

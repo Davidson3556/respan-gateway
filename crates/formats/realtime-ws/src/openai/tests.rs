@@ -177,6 +177,26 @@ fn a_session_of_nothing_but_its_model_is_no_frame() {
 }
 
 #[test]
+fn a_tools_schema_names_its_types_as_openai_takes_them() {
+    let gemini = json!({"type": "OBJECT", "properties": {
+        "city": {"type": "STRING"},
+        "type": {"type": ["INTEGER", "NULL"]},
+        "days": {"type": "ARRAY", "items": {"type": "OBJECT",
+            "properties": {"at": {"anyOf": [{"type": "NUMBER"}, {"type": "BOOLEAN"}]}}}}}});
+    let mut session = Session::default();
+    session.tools = Some(vec![respan_gateway_realtime::Tool::new("weather", gemini)]);
+    let written = sent(&[Input::Session(session)]).expect("written");
+    assert_eq!(
+        written[0]["session"]["tools"][0]["parameters"],
+        json!({"type": "object", "properties": {
+            "city": {"type": "string"},
+            "type": {"type": ["integer", "null"]},
+            "days": {"type": "array", "items": {"type": "object",
+                "properties": {"at": {"anyOf": [{"type": "number"}, {"type": "boolean"}]}}}}}})
+    );
+}
+
+#[test]
 fn another_formats_input_is_dropped_where_it_cannot_change_the_answer() {
     let gemini = |v: Value| {
         Some(NativeFields::new(
@@ -385,14 +405,14 @@ fn a_response_of_another_format_is_told_of_as_openai_does() {
             "response.output_audio.done",
             "response.output_audio_transcript.done",
             "response.content_part.done",
-            "response.output_item.done",
             "conversation.item.done",
+            "response.output_item.done",
             "response.output_item.added",
             "conversation.item.added",
             "response.function_call_arguments.delta",
             "response.function_call_arguments.done",
-            "response.output_item.done",
             "conversation.item.done",
+            "response.output_item.done",
             "response.done",
         ]
     );

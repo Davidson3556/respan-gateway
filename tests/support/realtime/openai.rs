@@ -6,7 +6,8 @@
 //! - an event the GA API has no client event of (a beta one included), and
 //!   a session field it has none of (`modalities`, `voice`, ...);
 //! - a `session.update` without `session.type`, or one that changes the
-//!   model;
+//!   model; a transcription without its model, and a tool whose schema
+//!   names a type JSON Schema has not, such as Gemini's `OBJECT`;
 //! - PCM input or output at a rate but 24 kHz;
 //! - audio that is not base64, or not whole samples of the session's input
 //!   format; a commit of less than 100 ms of it;
@@ -204,6 +205,21 @@ fn merge(target: &mut Value, patch: &Value) {
     }
 }
 
+/// A type a schema names that JSON Schema has not, such as Gemini's
+/// `OBJECT`.
+fn upper_type(schema: &Value) -> Option<String> {
+    match schema {
+        Value::Object(fields) => fields.iter().find_map(|(key, value)| match value {
+            Value::String(t) if key == "type" && t.chars().any(|c| c.is_ascii_uppercase()) => {
+                Some(t.clone())
+            }
+            value => upper_type(value),
+        }),
+        Value::Array(values) => values.iter().find_map(upper_type),
+        _ => None,
+    }
+}
+
 /// A refusal: the API's `error` event's `code` and `message`.
 type Refusal = (&'static str, String);
 
@@ -327,6 +343,24 @@ impl Session {
                 return Err((
                     "invalid_value",
                     format!("Invalid audio.{side}.format: only a 24kHz sample rate is supported"),
+                ));
+            }
+        }
+        let transcription = &patch["audio"]["input"]["transcription"];
+        if transcription.is_object() && transcription.get("model").is_none() {
+            return Err((
+                "missing_required_parameter",
+                "Missing required parameter: 'session.audio.input.transcription.model'.".to_owned(),
+            ));
+        }
+        for tool in patch["tools"].as_array().into_iter().flatten() {
+            if let Some(t) = upper_type(&tool["parameters"]) {
+                let name = tool["name"].as_str().unwrap_or_default();
+                return Err((
+                    "invalid_function_parameters",
+                    format!(
+                        "Invalid schema for function '{name}': '{t}' is not valid under any of the given schemas."
+                    ),
                 ));
             }
         }
@@ -651,13 +685,13 @@ impl Session {
             if let Some(kept) = self.items.iter_mut().find(|i| i["id"] == item_id) {
                 *kept = done.clone();
             }
+            self.emit(json!({"type": "conversation.item.done", "item": done}))
+                .await;
             self.emit(
                 json!({"type": "response.output_item.done", "response_id": id,
                 "output_index": 0, "item": done}),
             )
             .await;
-            self.emit(json!({"type": "conversation.item.done", "item": done}))
-                .await;
             output.push(done);
         }
         if let (true, Some(call)) = (completed, &turn.tool_call) {
@@ -719,13 +753,13 @@ impl Session {
         .await;
         let done = item("completed", &arguments);
         self.items.push(done.clone());
+        self.emit(json!({"type": "conversation.item.done", "item": done}))
+            .await;
         self.emit(
             json!({"type": "response.output_item.done", "response_id": response,
             "output_index": index, "item": done}),
         )
         .await;
-        self.emit(json!({"type": "conversation.item.done", "item": done}))
-            .await;
         done
     }
 }

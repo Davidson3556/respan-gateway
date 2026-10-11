@@ -13,12 +13,15 @@
 //!   and `audioStreamEnd` with it off;
 //! - a function response naming no pending call.
 //!
-//! A turn ends with `turnComplete` in a complete `clientContent`, with
-//! `realtimeInput.text`, with `activityEnd`, or, with automatic detection
-//! on, at [`Fake::user_stops`]; a tool's answer continues it.
-//! [`Fake::user_speaks`] in a held [`Turn`] interrupts it: `interrupted`,
-//! then `toolCallCancellation` for its pending calls. Transcripts are sent
-//! only if the setup asks for them. [`Fake::go_away`] sends `goAway`.
+//! The model answers a complete `clientContent`, `realtimeInput.text`,
+//! `activityEnd`, or, with automatic detection on, [`Fake::user_stops`]
+//! (`voiceActivity` `ACTIVITY_END`, after what it heard), and each turn
+//! ends with `turnComplete` and its usage. A turn that calls a tool ends at
+//! once, and the tool's answer is the next. [`Fake::user_speaks`]
+//! (`voiceActivity` `ACTIVITY_START`) in a held [`Turn`] interrupts it:
+//! `interrupted`, `toolCallCancellation` for its pending calls, then the
+//! activity, then its `turnComplete`. Transcripts are sent only if the
+//! setup asks for them. [`Fake::go_away`] sends `goAway`.
 
 use std::collections::HashSet;
 
@@ -115,7 +118,7 @@ async fn run(connection: Connection) -> Connection {
             }
             Event::Command(Command::Stops) => {
                 if session.automatic() && session.setup.is_some() {
-                    session.respond().await;
+                    session.respond(true).await;
                 }
                 Ok(())
             }
@@ -162,7 +165,7 @@ impl Session {
             (_, None) => Err("the first message must be setup".into()),
             ("clientContent", _) => {
                 if body["turnComplete"] == true {
-                    self.respond().await;
+                    self.respond(false).await;
                 }
                 Ok(())
             }
@@ -212,10 +215,11 @@ impl Session {
             return Err("audioStreamEnd needs automatic activity detection enabled".into());
         }
         if fields.contains_key("activityStart") {
-            self.interrupt().await;
+            let cut = self.interrupt().await;
+            self.complete(cut).await;
         }
         if fields.contains_key("text") || fields.contains_key("activityEnd") {
-            self.respond().await;
+            self.respond(false).await;
         }
         Ok(())
     }
@@ -231,22 +235,28 @@ impl Session {
             }
         }
         if self.pending.is_empty() {
-            self.respond().await;
+            self.respond(false).await;
         }
         Ok(())
     }
 
-    /// Voice detection hears speech over a held turn: it is interrupted.
+    /// Voice detection hears speech: a held turn is interrupted, and the
+    /// activity told of, before the turn's end.
     async fn speaks(&mut self) {
-        if self.automatic() {
-            self.interrupt().await;
+        if self.automatic() && self.setup.is_some() {
+            let cut = self.interrupt().await;
+            self.send(json!({"voiceActivity": {"type": "ACTIVITY_START"}}))
+                .await;
+            self.complete(cut).await;
         }
     }
 
-    /// The turn being answered is cut, and its pending calls cancelled.
-    async fn interrupt(&mut self) {
-        if self.held.take().is_none() && self.pending.is_empty() {
-            return;
+    /// The turn being answered is cut, and its pending calls cancelled;
+    /// the turn cut, if one was.
+    async fn interrupt(&mut self) -> Option<Turn> {
+        let cut = self.held.take();
+        if cut.is_none() && self.pending.is_empty() {
+            return None;
         }
         self.send(json!({"serverContent": {"interrupted": true}}))
             .await;
@@ -256,13 +266,29 @@ impl Session {
             self.send(json!({"toolCallCancellation": {"ids": ids}}))
                 .await;
         }
+        cut
     }
 
-    /// The model answers with the next turn.
-    async fn respond(&mut self) {
+    /// The end of a turn, if one was cut: the API ends it still.
+    async fn complete(&mut self, cut: Option<Turn>) {
+        if let Some(turn) = cut {
+            let done = json!({"serverContent": {"turnComplete": true},
+                "usageMetadata": usage(turn.usage)});
+            self.send(done).await;
+        }
+    }
+
+    /// The model answers with the next turn: after what it heard of the
+    /// user, and the end of the user's activity if voice detection
+    /// `ended` it.
+    async fn respond(&mut self, ended: bool) {
         let turn = self.connection.turn();
         if let (true, Some(heard)) = (self.transcribes("inputAudioTranscription"), &turn.heard) {
             self.send(json!({"serverContent": {"inputTranscription": {"text": heard}}}))
+                .await;
+        }
+        if ended {
+            self.send(json!({"voiceActivity": {"type": "ACTIVITY_END"}}))
                 .await;
         }
         let setup = self.setup.clone().unwrap_or_default();
@@ -294,7 +320,11 @@ impl Session {
             let call = json!({"id": id, "name": call.name, "args": call.arguments});
             self.send(json!({"toolCall": {"functionCalls": [call]}}))
                 .await;
-            // The turn goes on once the call is answered.
+            // The turn ends at once; its answer is the next.
+            self.send(json!({"serverContent": {"generationComplete": true}}))
+                .await;
+            let done = json!({"serverContent": {"turnComplete": true}, "usageMetadata": usage(turn.usage)});
+            self.send(done).await;
             return;
         }
         if turn.held {

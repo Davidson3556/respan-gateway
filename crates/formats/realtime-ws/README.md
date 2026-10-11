@@ -39,7 +39,8 @@ padded).
 field closes the session 1007), `clientContent` turns, `realtimeInput`
 audio and text, `activityEnd`, `toolResponse`; the server's
 `setupComplete`, model turns of audio and text, transcripts, `toolCall`,
-`interrupted`, `voiceActivity`, `turnComplete` and `usageMetadata`. A
+`interrupted`, `voiceActivity` (its `type` and `audioOffset`),
+`turnComplete` and `usageMetadata` (each turn's own counts). A
 message that says several things is several events: what it says beyond
 them stays on the first its client writes, so it is written back as it
 came, unless its events are written as several messages, such as a turn
@@ -73,7 +74,9 @@ What one spec has and the other has not is emulated, dropped or refused:
   changes nothing is acknowledged, one that changes anything closes the
   session 1008 (Gemini fixes its setup); `response.cancel` ends the
   response at once and drops the rest of its turn; with manual turns the
-  user's audio opens an activity and its commit ends it.
+  user's audio opens an activity and its commit ends it. The usage of a
+  response that ended in calls or an interruption, which Gemini reports
+  after, at its turn's end, is in the next `response.done`.
   `conversation.item.truncate` is dropped, as Gemini keeps only what it
   sent; so are ids, tracing, noise reduction, transcription settings and
   VAD tuning. A message is taken only as the user's text answered at once;
@@ -81,7 +84,10 @@ What one spec has and the other has not is emulated, dropped or refused:
   tool choice other than `auto` and `create_response: false` are refused.
 - To OpenAI: Gemini's client routes by `?model=` on its URL (OpenAI takes
   its model at connect), and its `activityStart` while the model speaks is
-  `response.cancel`; context compression, VAD sensitivities and
+  `response.cancel`; its tools' schemas name their types as JSON Schema
+  does (`object` for `OBJECT`); a response that calls tools, or is
+  interrupted, ends its turn with `turnComplete`, as the Live API's do;
+  context compression, VAD sensitivities and
   `audioStreamEnd` are dropped; sampling, resumption, proactivity, Google
   Search, non-blocking functions and video are refused. An OpenAI `error`
   closes a Gemini client, which knows a refusal only as a close.
