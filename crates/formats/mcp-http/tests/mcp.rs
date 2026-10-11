@@ -21,7 +21,9 @@ use respan_gateway_http::{
     strip_origin_headers,
 };
 use respan_gateway_mcp::{Input, Output};
-use respan_gateway_mcp_http::{Owner, SESSION, StdioTransport, StreamableHttp};
+#[cfg(unix)]
+use respan_gateway_mcp_http::StdioTransport;
+use respan_gateway_mcp_http::{Owner, SESSION, StreamableHttp};
 use serde_json::{Value, json};
 
 use respan_gateway_http::Relay;
@@ -893,6 +895,7 @@ const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
 const LIST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
 
 /// A new session's id, started with `headers`.
+#[cfg_attr(not(unix), allow(dead_code))]
 async fn init(gw: &Gateway, headers: &[(&str, &str)]) -> String {
     let (status, headers, body, _) = send(gw, request(Method::POST, INIT, headers)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -900,6 +903,7 @@ async fn init(gw: &Gateway, headers: &[(&str, &str)]) -> String {
 }
 
 /// The status of a `POST` of `tools/list` in `session`.
+#[cfg_attr(not(unix), allow(dead_code))]
 async fn list(gw: &Gateway, session: &str) -> StatusCode {
     let (status, ..) = send(gw, request(Method::POST, LIST, &[(SESSION, session)])).await;
     status
@@ -1067,6 +1071,7 @@ echo '{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse"}}'; ex
 }
 
 /// Moves the caller's key into an [`Owner`], as an auth plugin would.
+#[cfg_attr(not(unix), allow(dead_code))]
 struct Authenticates;
 
 #[async_trait]
@@ -1268,6 +1273,7 @@ async fn a_session_whose_initialize_is_never_answered_idles_out() {
 }
 
 /// Whether the process `pid` is still running.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn running(pid: &Value) -> bool {
     let probe = std::process::Command::new("sh")
         .args(["-c", &format!("kill -0 {pid} 2>/dev/null")])
@@ -1907,6 +1913,7 @@ async fn an_open_get_stream_keeps_its_session_from_idling() {
 
 /// Opens `session`'s `GET` stream and returns what it says, until `until`
 /// is in it or 3 s pass, while `then` runs.
+#[cfg_attr(not(unix), allow(dead_code))]
 async fn heard(gw: &Gateway, session: &str, until: &str, then: impl Future) -> String {
     let (listen, _) = serve(gw, request(Method::GET, "", &[(SESSION, session)])).await;
     then.await;

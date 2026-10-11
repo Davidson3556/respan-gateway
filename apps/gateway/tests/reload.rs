@@ -296,6 +296,7 @@ async fn a_request_in_flight_finishes_on_the_old_config_across_a_reload() {
 
 /// An OpenAI-shaped server whose streams send two events and then stall for
 /// a minute: the base URL.
+#[cfg_attr(not(unix), allow(dead_code))]
 async fn stalled() -> String {
     let event = |content: &str| {
         let delta = json!({"role": "assistant", "content": content});
