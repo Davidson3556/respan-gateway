@@ -157,7 +157,7 @@ every key is one (single-user setups just work); once any entry does, only
 those keys reach it and the others get `403` there (`admin: false` always
 excludes a key). `tools` limits the agent tools (`server__tool` globs, as
 `agent.allow`) a key's requests are offered, within the global `allow` and
-`deny`; the `/mcp` aggregate endpoint is not yet limited by it.
+`deny`, on the `/mcp` aggregate as for the agent.
 
 **Admin config** (needs an admin key, like the rest of `/ui/api/`):
 `GET /ui/api/config` shows the config file as on disk with every secret

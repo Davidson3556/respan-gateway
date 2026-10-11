@@ -659,6 +659,58 @@ async fn one_endpoint_fronts_every_server() {
 }
 
 #[tokio::test]
+async fn a_client_keys_tools_limit_what_the_aggregate_lists_and_calls() {
+    let alpha = Fake::start("alpha", false, None).await;
+    let beta = Fake::start("beta", false, None).await;
+    let config = format!(
+        "client_keys:\n  - {{ name: wide, key: {KEY} }}\n  - {{ name: narrow, key: {OTHER}, tools: ['beta__*'] }}\nmcp:\n  alpha: {{ url: '{}' }}\n  beta: {{ url: '{}' }}\nmcp_aggregate: {{}}\n",
+        alpha.url(),
+        beta.url()
+    );
+    let gw = Gateway::start(&config).await;
+
+    let names = |a: &Answer, id: u64| -> Vec<String> {
+        let tools = a.result(id)["tools"].as_array().unwrap();
+        tools
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let as_key = |key: &'static str, session: String, id: u64, method: &'static str, params| {
+        let gw = &gw;
+        async move {
+            let body = request(id, method, params);
+            call(gw, "POST", Some(&session), Some(body), Some(key)).await
+        }
+    };
+
+    let (wide, _) = open(&gw, KEY).await;
+    let (narrow, _) = open(&gw, OTHER).await;
+
+    let all = as_key(KEY, wide.clone(), 2, "tools/list", json!({})).await;
+    assert_eq!(
+        names(&all, 2),
+        ["alpha__echo", "alpha__secret", "beta__echo", "beta__secret"]
+    );
+    let some = as_key(OTHER, narrow.clone(), 2, "tools/list", json!({})).await;
+    assert_eq!(names(&some, 2), ["beta__echo", "beta__secret"]);
+
+    // A tool outside the scope is refused, as one that is denied.
+    let echo = |server: &str| json!({"name": format!("{server}__echo"), "arguments": {}});
+    let refused = as_key(OTHER, narrow.clone(), 3, "tools/call", echo("alpha")).await;
+    assert!(
+        refused.response(3).get("error").is_some(),
+        "{:?}",
+        refused.messages
+    );
+    assert!(alpha.params("tools/call").is_empty());
+    let allowed = as_key(OTHER, narrow, 4, "tools/call", echo("beta")).await;
+    assert!(allowed.response(4).get("result").is_some());
+    let wide_call = as_key(KEY, wide, 5, "tools/call", echo("alpha")).await;
+    assert!(wide_call.response(5).get("result").is_some());
+}
+
+#[tokio::test]
 async fn a_reload_ends_the_old_builds_sessions_with_the_servers() {
     let alpha = Fake::start("alpha", false, None).await;
     let beta = Fake::start("beta", false, None).await;

@@ -56,7 +56,7 @@ use respan_gateway_mcp::{Input, Output};
 use respan_gateway_mcp_http::Owner;
 use serde::Deserialize;
 
-use crate::agent::{Filter, PROTOCOL};
+use crate::agent::{Filter, PROTOCOL, ToolScope};
 use crate::mcp::{FORMAT, McpServer};
 use run::Run;
 use session::Inner;
@@ -174,11 +174,13 @@ impl Plugin for Aggregate {
         }
         let input = cx.input::<Input>()?.clone();
         let owner = cx.extensions().get::<Owner>().map(|Owner(id)| id.clone());
+        let scope = cx.extensions().get::<ToolScope>().cloned();
         let calls = self.0.servers.iter().map(|s| (s.clone(), cx.call(s)));
         let run = Run {
             inner: self.0.clone(),
             calls: Arc::new(calls.collect()),
             owner,
+            scope,
         };
         let outputs = run.handle(input).await?;
         Ok(Some(Response::stream(outputs)))

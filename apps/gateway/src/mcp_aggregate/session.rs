@@ -125,6 +125,7 @@ impl Plugin for Closing {
             inner: self.0.clone(),
             calls: Arc::new(calls.collect()),
             owner: None,
+            scope: None,
         };
         run.end_all().await;
         Ok(Some(Response::stream(

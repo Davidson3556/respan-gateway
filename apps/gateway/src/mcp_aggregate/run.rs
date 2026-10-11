@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use super::rewrite::{by_name, by_uri, merge_capabilities, reply, told};
 use super::session::{Inner, Opened, Session, lock, session_id};
 use super::{IDLE, Outputs, SESSIONS, VERSIONS};
-use crate::agent::message;
+use crate::agent::{ToolScope, message};
 
 type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
 
@@ -28,6 +28,8 @@ pub(super) struct Run {
     /// A call to each server, to make copies of.
     pub(super) calls: Arc<HashMap<String, Call>>,
     pub(super) owner: Option<String>,
+    /// The tools the client key limits its requests to, if it does.
+    pub(super) scope: Option<ToolScope>,
 }
 
 impl Run {
@@ -268,5 +270,14 @@ impl Run {
                 )
             })),
         }
+    }
+}
+
+impl Run {
+    /// Whether the client may be offered, and may call, the tool `name`
+    /// (`{server}__{tool}`): within `allow` and `deny` and its key's scope.
+    pub(super) fn offers(&self, name: &str) -> bool {
+        let scoped = self.scope.as_ref().is_none_or(|s| s.offers(name));
+        scoped && self.inner.filter.offers(name)
     }
 }

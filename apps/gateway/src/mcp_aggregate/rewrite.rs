@@ -4,17 +4,17 @@
 use respan_gateway_mcp::{Message, Outcome, Output, RpcError};
 use serde_json::{Map, Value, json};
 
-use super::session::Inner;
+use super::run::Run;
 use super::{SCHEME, SEP};
 
 /// that server knows it by, put in `params`.
-pub(super) fn by_name(tool: bool) -> impl Fn(&Inner, &mut Value) -> Result<String, String> {
-    move |inner, params| {
+pub(super) fn by_name(tool: bool) -> impl Fn(&Run, &mut Value) -> Result<String, String> {
+    move |run, params| {
         let unknown =
             |name: &str| format!("unknown {} '{name}'", if tool { "tool" } else { "prompt" });
         let name = params["name"].as_str().unwrap_or_default().to_owned();
-        let (server, own) = split(&inner.servers, &name).ok_or_else(|| unknown(&name))?;
-        if tool && !inner.filter.offers(&name) {
+        let (server, own) = split(&run.inner.servers, &name).ok_or_else(|| unknown(&name))?;
+        if tool && !run.offers(&name) {
             return Err(unknown(&name));
         }
         let (server, own) = (server.to_owned(), own.to_owned());
@@ -24,9 +24,9 @@ pub(super) fn by_name(tool: bool) -> impl Fn(&Inner, &mut Value) -> Result<Strin
 }
 
 /// The server a resource's URI names, and its own URI, put in `params`.
-pub(super) fn by_uri(inner: &Inner, params: &mut Value) -> Result<String, String> {
+pub(super) fn by_uri(run: &Run, params: &mut Value) -> Result<String, String> {
     let uri = params["uri"].as_str().unwrap_or_default().to_owned();
-    let (server, own) = unprefix(&inner.servers, &uri)
+    let (server, own) = unprefix(&run.inner.servers, &uri)
         .ok_or_else(|| format!("unknown resource '{uri}': it is `{SCHEME}<server>/<uri>`"))?;
     let (server, own) = (server.to_owned(), own.to_owned());
     params["uri"] = json!(own);

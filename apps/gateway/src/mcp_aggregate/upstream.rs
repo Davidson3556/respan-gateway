@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 
 use super::rewrite::{passed, prefix_field, reply};
 use super::run::Run;
-use super::session::{Inner, Opened, Session};
+use super::session::{Opened, Session};
 use super::{Outputs, SEP};
 use crate::agent::{PROTOCOL, answer, message};
 
@@ -91,7 +91,7 @@ impl Run {
         match field {
             "tools" | "prompts" => {
                 let name = format!("{server}{SEP}{}", item["name"].as_str()?);
-                if field == "tools" && !self.inner.filter.offers(&name) {
+                if field == "tools" && !self.offers(&name) {
                     return None;
                 }
                 item["name"] = json!(name);
@@ -112,10 +112,10 @@ impl Run {
         id: Value,
         method: &str,
         mut params: Value,
-        route: impl Fn(&Inner, &mut Value) -> Result<String, String>,
+        route: impl Fn(&Run, &mut Value) -> Result<String, String>,
     ) -> Outputs {
         let (session, method) = (session.clone(), method.to_owned());
-        let server = match route(&self.inner, &mut params) {
+        let server = match route(&self, &mut params) {
             Ok(server) => server,
             Err(why) => {
                 let output = reply(&id, Err((-32602, why)));
