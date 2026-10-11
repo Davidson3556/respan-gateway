@@ -286,7 +286,10 @@ impl Native {
     /// A gateway from the YAML file at `path`.
     #[staticmethod]
     fn from_file(path: &str) -> PyResult<Self> {
-        Self::new(Config::load(path), std::fs::read_to_string(path).ok().as_deref())
+        Self::new(
+            Config::load(path),
+            std::fs::read_to_string(path).ok().as_deref(),
+        )
     }
 
     /// A gateway as the binary starts with no arguments: `./gateway.yaml`
