@@ -9,7 +9,7 @@ mod http_support;
 
 use std::sync::{Arc, Mutex};
 
-use respan_gateway_conversation::Input;
+use respan_gateway_conversation::{Input, Output};
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, async_trait};
@@ -39,6 +39,19 @@ pub struct Vendor {
 
 impl Vendor {
     pub fn new(plugin: &'static dyn Plugin, content_type: &'static str, body: String) -> Self {
+        Self::speaking(OpenAiChat, plugin, content_type, body)
+    }
+
+    /// As [`Vendor::new`], its provider speaking `format`.
+    pub fn speaking<F>(
+        format: F,
+        plugin: &'static dyn Plugin,
+        content_type: &'static str,
+        body: String,
+    ) -> Self
+    where
+        F: respan_gateway_core::Format<respan_gateway_http::ProviderIo, Output, Input>,
+    {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let seen = sent.clone();
         let answer = move |request: http::Request<Body>| {
@@ -56,7 +69,7 @@ impl Vendor {
         };
         let transport = respan_gateway_http::connect(answer, http_support::LIMIT);
         let gateway = Gateway::new()
-            .provider::<Input, _, _>("p", OpenAiChat, transport)
+            .provider::<Input, _, _>("p", format, transport)
             .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
             .and_then(|g| g.client::<Input, _, _>(AnthropicMessages))
             .and_then(|g| g.target("p"))
