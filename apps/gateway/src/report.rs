@@ -113,7 +113,8 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
 /// with its key. No key, and no URL, is named.
 pub fn online(probes: &[Probe]) -> String {
     let width = probes.iter().map(|p| p.provider.len()).max().unwrap_or(0);
-    let mut lines = vec!["online (one call to each provider, with its key)".to_owned()];
+    let mut lines =
+        vec!["online (one call to each provider and MCP server, with its key)".to_owned()];
     for p in probes {
         let (state, note) = match &p.reach {
             Reach::Reachable => ("reachable", String::new()),
@@ -128,7 +129,7 @@ pub fn online(probes: &[Probe]) -> String {
         lines.push(format!("  {provider:<width$}  {state:<12}  {ms} ms{note}"));
     }
     if probes.is_empty() {
-        lines.push("  no provider lists its models".to_owned());
+        lines.push("  no provider lists its models, and no MCP server is set".to_owned());
     }
     lines.join("\n")
 }

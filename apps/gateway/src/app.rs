@@ -589,7 +589,8 @@ impl App {
     pub async fn probe(&self) -> (String, bool) {
         let built = self.shared.current();
         let models = Models::new(&built.plan.upstreams, built.plan.routes.clone());
-        let probes: Vec<Probe> = models.probe().await;
+        let (providers, servers) = tokio::join!(models.probe(), mcp::probe(&built.plan.mcp));
+        let probes: Vec<Probe> = providers.into_iter().chain(servers).collect();
         (report::online(&probes), report::all_reachable(&probes))
     }
 }

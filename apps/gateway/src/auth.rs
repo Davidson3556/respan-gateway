@@ -8,18 +8,20 @@
 //! has none of its own.
 
 use std::collections::HashSet;
+use std::hash::{BuildHasher, RandomState};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use respan_gateway_core::{Fault, Plugin, ProviderContext, async_trait};
+use respan_gateway_core::{Extensions, Fault, Plugin, ProviderContext, async_trait};
 use respan_gateway_http::http::header::{
     AUTHORIZATION, HOST, HeaderName, ORIGIN, SEC_WEBSOCKET_PROTOCOL, UPGRADE,
 };
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential};
+use respan_gateway_mcp_http::Owner;
 
 const X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
 const X_GOOG_API_KEY: HeaderName = HeaderName::from_static("x-goog-api-key");
@@ -62,6 +64,15 @@ impl Plugin for ClientCredentials {
 
 #[derive(Debug, Default)]
 pub struct ClientKeys(Vec<String>);
+
+/// An opaque id of a client key: a keyed hash, different for every process,
+/// never the key. The gateway hands it on as the call's [`Owner`], for
+/// whatever must tell clients apart, such as whose an MCP session is.
+fn client_id(key: &str) -> Owner {
+    static SALT: OnceLock<RandomState> = OnceLock::new();
+    let hash = SALT.get_or_init(RandomState::new).hash_one(key.trim());
+    Owner(format!("{hash:016x}"))
+}
 
 /// What a request's headers say to the client keys.
 #[derive(Debug, PartialEq, Eq)]
@@ -112,6 +123,19 @@ impl ClientKeys {
         }
     }
 
+    /// The id of the client key `headers` present, if any.
+    fn identify(&self, headers: &HeaderMap) -> Option<Owner> {
+        let bearer = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
+        let bearer = bearer
+            .and_then(|v| v.split_once(' '))
+            .map(|(_, token)| token);
+        let others = [X_API_KEY, X_GOOG_API_KEY]
+            .into_iter()
+            .filter_map(|name| headers.get(name)?.to_str().ok());
+        let mut presented = bearer.into_iter().chain(others);
+        presented.find(|key| self.is_key(key)).map(client_id)
+    }
+
     pub fn allows(&self, headers: &HeaderMap) -> bool {
         self.presented(headers) != Presented::Refused
     }
@@ -149,6 +173,14 @@ pub async fn consume(
         Presented::Refused => unauthorized(),
         Presented::Open => next.run(req).await,
         Presented::Valid(holders) => {
+            if let Some(owner) = keys.identify(req.headers()) {
+                // The gateway's own extensions ride in the request's.
+                let mut calls = req.extensions_mut().remove::<Extensions>();
+                let calls = calls.get_or_insert_with(Extensions::new);
+                calls.insert(owner);
+                let calls = std::mem::take(calls);
+                req.extensions_mut().insert(calls);
+            }
             for name in holders {
                 req.headers_mut().remove(name);
             }
@@ -306,6 +338,20 @@ mod tests {
         );
         assert_eq!(presented(&[("authorization", "k1")]), Presented::Refused);
         assert_eq!(presented(&[]), Presented::Refused);
+    }
+
+    #[test]
+    fn a_client_key_has_an_id_that_is_not_the_key() {
+        let keys = ClientKeys(vec!["k1".into(), "k2".into()]);
+        let id = |pairs: &[(&'static str, &str)]| keys.identify(&headers(pairs));
+        let one = id(&[("authorization", "Bearer k1")]);
+        assert_eq!(one, id(&[("x-api-key", "k1")]));
+        assert_ne!(one, id(&[("x-api-key", "k2")]));
+        assert!(one.is_some_and(|Owner(id)| !id.contains("k1")));
+        assert_eq!(id(&[("authorization", "Bearer sk-provider")]), None);
+        // The gateway's key is the one named, not the client's own.
+        let both = [("authorization", "Bearer sk-provider"), ("x-api-key", "k2")];
+        assert_eq!(id(&both), id(&[("x-api-key", "k2")]));
     }
 
     #[test]

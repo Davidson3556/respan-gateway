@@ -18,6 +18,7 @@ use respan_gateway_realtime_ws::{
 };
 use respan_gateway_ws::{Limits, WsTransport};
 
+use crate::mcp::SessionOwners;
 use crate::presets::origin;
 
 /// The kinds of traffic this binary carries, as the admin API and routing
@@ -252,7 +253,7 @@ const VIDEOS: &[&str] = &[
 pub fn formats(limit: usize, sessions: Limits) -> Vec<KnownFormat> {
     let http = move |provider: &str, base_url: &str, auth| -> Result<_, Fault> {
         let client = HttpTransport::new(base_url)?.with_headers(auth)?;
-        Ok(explained(client, provider, base_url, limit))
+        Ok(explained(client, provider, base_url, limit, None))
     };
     let google = move |provider: &str, base_url: &str, auth| -> Result<_, Fault> {
         let client = HttpTransport::new(base_url)?
@@ -263,6 +264,7 @@ pub fn formats(limit: usize, sessions: Limits) -> Vec<KnownFormat> {
             provider,
             base_url,
             limit,
+            None,
         ))
     };
     let chat = || Model::of(conversation::Input::model, conversation::Input::set_model);
@@ -426,6 +428,7 @@ pub(crate) fn explained(
     provider: &str,
     base_url: &str,
     limit: usize,
+    owners: Option<Arc<SessionOwners>>,
 ) -> impl Fn(Extensions) -> ProviderIo + Send + Sync + use<> {
     let client = Arc::new(client);
     let host = origin(base_url)
@@ -434,9 +437,13 @@ pub(crate) fn explained(
     let who: Arc<str> = format!("provider '{provider}' at {host}").into();
     respan_gateway_http::connect(
         move |call| {
-            let (client, who) = (client.clone(), who.clone());
+            let (client, who, owners) = (client.clone(), who.clone(), owners.clone());
             async move {
-                client.send(call).await.map_err(|fault| {
+                let sent = match &owners {
+                    Some(owners) => owners.send(call, |call| client.send(call)).await,
+                    None => client.send(call).await,
+                };
+                sent.map_err(|fault| {
                     let Some(e) = fault.cause::<reqwest::Error>() else {
                         return fault;
                     };

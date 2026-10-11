@@ -614,3 +614,127 @@ async fn bad_mcp_config_is_refused_at_start() {
         "{out}"
     );
 }
+
+const KEY_2: &str = "gw-key-2";
+
+#[tokio::test]
+async fn an_http_session_belongs_to_the_client_key_that_opened_it() {
+    let up = FakeMcp::start(false).await;
+    let gw = Gateway::start(&format!(
+        "client_keys: [{KEY}, {KEY_2}]\nmcp:\n  github: {{ url: '{}/mcp' }}\n",
+        up.base
+    ))
+    .await;
+    let path = "/mcp/github";
+    let one = bearer(KEY);
+    let (one, two) = ([("authorization", one.as_str())], [("x-api-key", KEY_2)]);
+    let (session, _) = open(&gw, path, &one).await;
+
+    let list = || Some(request(2, "tools/list", json!({})));
+    // The other key names the session: as if it were not there, and the
+    // server is not asked.
+    let before = up.requests().len();
+    let theirs = call(&gw, path, "POST", Some(&session), list(), &two).await;
+    assert_eq!(theirs.status, 404, "{:?}", theirs.messages);
+    assert_eq!(theirs.messages[0]["error"]["code"], -32003);
+    let ended = call(&gw, path, "DELETE", Some(&session), None, &two).await;
+    assert_eq!(ended.status, 404);
+    let stream = call(&gw, path, "GET", Some(&session), None, &two).await;
+    assert_eq!(stream.status, 404);
+    assert_eq!(up.requests().len(), before, "the server was reached");
+
+    // Its own key still uses it, and a session id nobody was given is
+    // unknown to everyone.
+    let mine = call(&gw, path, "POST", Some(&session), list(), &one).await;
+    assert_eq!(mine.status, 200);
+    let made_up = call(&gw, path, "POST", Some("s-other"), list(), &one).await;
+    assert_eq!(made_up.status, 404);
+
+    // Only the owner ends it; then it is gone for everyone.
+    let ended = call(&gw, path, "DELETE", Some(&session), None, &one).await;
+    assert_eq!(ended.status, 204);
+    let gone = call(&gw, path, "POST", Some(&session), list(), &one).await;
+    assert_eq!(gone.status, 404);
+}
+
+#[tokio::test]
+async fn a_stdio_session_belongs_to_the_client_key_that_opened_it() {
+    let script = serde_json::to_string(STDIO_SERVER).unwrap();
+    let gw = Gateway::start(&format!(
+        "client_keys: [{KEY}, {KEY_2}]\nmcp:\n  files: {{ command: [python3, -c, {script}] }}\n"
+    ))
+    .await;
+    let path = "/mcp/files";
+    let (one, two) = ([("x-api-key", KEY)], [("x-api-key", KEY_2)]);
+    let (session, init) = open(&gw, path, &one).await;
+    let child = pid(&init);
+
+    let list = || Some(request(2, "tools/list", json!({})));
+    let theirs = call(&gw, path, "POST", Some(&session), list(), &two).await;
+    assert_eq!(theirs.status, 404, "{:?}", theirs.messages);
+    let ended = call(&gw, path, "DELETE", Some(&session), None, &two).await;
+    assert_eq!(ended.status, 404);
+    assert!(alive(child), "another key ended the session");
+    let mine = call(&gw, path, "POST", Some(&session), list(), &one).await;
+    assert_eq!(mine.status, 200);
+
+    // The other key has sessions of its own, apart.
+    let (other, init) = open(&gw, path, &two).await;
+    assert_ne!(pid(&init), child);
+    let back = call(&gw, path, "POST", Some(&other), list(), &one).await;
+    assert_eq!(back.status, 404);
+    let own = call(&gw, path, "POST", Some(&other), list(), &two).await;
+    assert_eq!(own.status, 200);
+}
+
+#[tokio::test]
+async fn check_online_probes_each_mcp_server_without_naming_keys() {
+    let up = FakeMcp::start(true).await;
+    let down = support::closed_port().await;
+    let script = serde_json::to_string(STDIO_SERVER).unwrap();
+    let pidfile = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("probe-{}.pid", std::process::id()));
+    let wrapper = "echo $$ > \"$0\"; exec python3 -c \"$1\"";
+    let wrapper = serde_json::to_string(wrapper).unwrap();
+    let pidfile_text = serde_json::to_string(pidfile.to_str().unwrap()).unwrap();
+    let config = support::write_config(&format!(
+        "mcp:
+  good: {{ url: '{base}/mcp', key: {UPSTREAM_KEY} }}
+  stale: {{ url: '{base}/mcp', key: sk-wrong-key }}
+  gone: {{ url: '{down}/mcp', key: {UPSTREAM_KEY} }}
+  child: {{ command: [sh, -c, {wrapper}, {pidfile_text}, {script}] }}
+  quits: {{ command: [sh, -c, 'exit 0'] }}
+",
+        base = up.base
+    ));
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
+        .args(["check", "--online", "--config", config.to_str().unwrap()])
+        .output()
+        .await
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stdout}");
+    let online = stdout.split("online (").nth(1).unwrap();
+    let state = |name: &str| {
+        let line = online.lines().find(|l| l.trim_start().starts_with(name));
+        line.unwrap_or_else(|| panic!("{online}")).to_owned()
+    };
+    assert!(state("mcp/good ").contains(" reachable "), "{online}");
+    assert!(state("mcp/stale").contains("unauthorized"), "{online}");
+    assert!(state("mcp/stale").contains("answered 401"), "{online}");
+    assert!(state("mcp/gone ").contains("unreachable"), "{online}");
+    assert!(state("mcp/child").contains(" reachable "), "{online}");
+    assert!(state("mcp/quits").contains("unreachable"), "{online}");
+    for secret in [UPSTREAM_KEY, "sk-wrong-key"] {
+        assert!(!format!("{stdout}{stderr}").contains(secret));
+    }
+    assert!(!online.contains("127.0.0.1"), "{online}");
+
+    // The server saw an `initialize` and then the session ended; the
+    // child was stopped.
+    let methods: Vec<_> = up.requests().iter().map(|r| r.0.clone()).collect();
+    assert_eq!(methods.iter().filter(|m| *m == "DELETE").count(), 1);
+    let child = std::fs::read_to_string(&pidfile).unwrap();
+    gone(child.trim().parse().unwrap()).await;
+}

@@ -176,6 +176,13 @@ format the router was not given keeps its target.
   Core defines no kinds or `Format` implementations.
   Plugins and whole-body conversation encoders share the conversation crate's ordered
   `Assembled` fold instead of maintaining separate reply representations.
+- MCP sessions belong to the client that opened them. After the client key
+  checks out, the binary puts an `Owner` (a keyed hash of the key, never the
+  key) in the call's extensions. `StdioTransport` keys its sessions by it; for
+  an HTTP server the binary remembers which owner each `Mcp-Session-Id` was
+  given to and answers another owner 404, as for an unknown session. Without
+  client keys there is no owner and one caller class. `check --online` probes
+  each server with an `initialize` (HTTP: then `DELETE`; stdio: spawn, stop).
 - Applications own policy choices, configuration, prices, billing stores and
   durable jobs. The examples demonstrate those choices without making them
   supported public APIs.

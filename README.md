@@ -92,7 +92,7 @@ respan-gateway [serve]          serve ./gateway.yaml, or the providers in the en
 respan-gateway init             write a commented gateway.yaml (-p groq enables a vendor;
                                 --client-key generates a client key and prints it once)
 respan-gateway check            what a config serves; exit 1 on a problem
-respan-gateway check --online   ... and call each provider with its key
+respan-gateway check --online   ... and call each provider and MCP server with its key
 respan-gateway models           every provider's models, with their kind
 respan-gateway proxy --anthropic|--openai
                                 sit in front of Claude Code or Codex, relaying a vendor's
@@ -165,8 +165,12 @@ minutes, a crash (that session's calls fail and the client starts a new
 session, so a fresh child), or the gateway stopping. Each MCP request is in
 the request log as kind `mcp`, with its method and tool (`tools/call echo`)
 in place of a model and the server as its provider; the Providers page and
-`GET /ui/api/mcp` list the servers, and `check` prints them. Name `mcp` in
-`formats:` if you list formats.
+`GET /ui/api/mcp` list the servers, and `check` prints them (`check --online`
+also asks each to `initialize`, ends the session, and says reachable,
+unauthorized or unreachable; a stdio server is started and stopped for it).
+With `client_keys`, a session belongs to the key that opened it: another key
+naming its `Mcp-Session-Id` gets 404. Name `mcp` in `formats:` if you list
+formats.
 
 ## What it speaks
 

@@ -13,21 +13,29 @@
 //! At shutdown the children are killed with the runtime.
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
+use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::{
-    ClientContext, Extensions, Fault, Gateway, Plugin, Response, async_trait,
+    ClientContext, ErrorCode, Extensions, Fault, Gateway, Plugin, Response, async_trait,
 };
-use respan_gateway_http::http::HeaderMap;
-use respan_gateway_http::{HttpTransport, ProviderIo, Wire, framing};
-use respan_gateway_mcp::{Input, Output};
-use respan_gateway_mcp_http::{StdioTransport, StreamableHttp};
+use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
+use respan_gateway_http::reqwest;
+use respan_gateway_http::{Body, Completion, HttpTransport, ProviderIo, Status, Wire, framing};
+use respan_gateway_mcp::{Input, Output, RpcCode};
+use respan_gateway_mcp_http::{Owner, SESSION, StdioTransport, StreamableHttp};
 use respan_gateway_plugins::Model;
 use serde::Deserialize;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::time::timeout;
 
 use crate::compose::{auth_headers, secret, valid_provider_name};
 use crate::config::Auth;
-use crate::formats::{KnownFormat, explained, kind};
+use crate::formats::{KnownFormat, explained, kind, unreachable};
+use crate::models::{Probe, Reach};
 use crate::presets::origin;
 
 /// The format's name, as the request log shows it.
@@ -229,6 +237,136 @@ fn on_path(program: &str) -> bool {
     std::env::split_paths(&path).any(|dir| dir.join(program).is_file())
 }
 
+/// How long a server has to answer a probe's `initialize`.
+const PROBE: Duration = Duration::from_secs(5);
+
+/// The `initialize` a probe sends: a client that only looks.
+fn hello() -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "respan-gateway-check", "version": env!("CARGO_PKG_VERSION")}
+        }
+    })
+    .to_string()
+}
+
+/// `check --online` for MCP servers: each is asked to `initialize`, as a
+/// client would, and the session it opens is ended; a stdio server is
+/// started for it and stopped. No key and no URL is in the result.
+pub async fn probe(servers: &[McpServer]) -> Vec<Probe> {
+    join_all(servers.iter().map(|s| async move {
+        let started = Instant::now();
+        let reach = match timeout(PROBE, probe_one(s)).await {
+            Ok(reach) => reach,
+            Err(_) => Reach::Unreachable("it did not answer `initialize` in time".to_owned()),
+        };
+        Probe {
+            provider: format!("mcp/{}", s.name),
+            reach,
+            took: started.elapsed(),
+        }
+    }))
+    .await
+}
+
+async fn probe_one(server: &McpServer) -> Reach {
+    match &server.transport {
+        Transport::Http { url, auth, .. } => probe_http(url, auth).await,
+        Transport::Stdio { command, env, cwd } => probe_stdio(command, env, cwd.as_deref()).await,
+    }
+}
+
+async fn probe_http(url: &str, auth: &HeaderMap) -> Reach {
+    let client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => return Reach::Unreachable(unreachable(&e)),
+    };
+    let asked = client
+        .post(url)
+        .headers(auth.clone())
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json")
+        .body(hello())
+        .send()
+        .await;
+    let resp = match asked {
+        Ok(resp) => resp,
+        Err(e) => return Reach::Unreachable(unreachable(&e)),
+    };
+    let status = resp.status();
+    if matches!(status.as_u16(), 401 | 403) {
+        return Reach::Unauthorized(status.as_u16());
+    }
+    if !status.is_success() {
+        return Reach::Unreachable(format!("it answered {status} to `initialize`"));
+    }
+    if let Some(session) = resp.headers().get("mcp-session-id") {
+        // Courtesy: the session is not left to idle out. Its answer is not
+        // the probe's.
+        let _ = client
+            .delete(url)
+            .headers(auth.clone())
+            .header("mcp-session-id", session)
+            .send()
+            .await;
+    }
+    Reach::Reachable
+}
+
+async fn probe_stdio(command: &[String], env: &[(String, String)], cwd: Option<&Path>) -> Reach {
+    let Some((program, args)) = command.split_first() else {
+        return Reach::Unreachable("`command` is empty".to_owned());
+    };
+    let mut child = tokio::process::Command::new(program);
+    child
+        .args(args)
+        .env_clear()
+        .envs(env.iter().cloned())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    if let Some(path) = std::env::var_os("PATH") {
+        child.env("PATH", path);
+    }
+    if let Some(dir) = cwd {
+        child.current_dir(dir);
+    }
+    let Ok(mut child) = child.spawn() else {
+        return Reach::Unreachable("the program could not be started".to_owned());
+    };
+    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        return Reach::Unreachable("the program has no stdio".to_owned());
+    };
+    let line = format!("{}\n", hello());
+    let wrote = stdin.write_all(line.as_bytes()).await;
+    let wrote = match wrote {
+        Ok(()) => stdin.flush().await,
+        Err(e) => Err(e),
+    };
+    let mut answer = String::new();
+    let read = match wrote {
+        Ok(()) => BufReader::new(stdout).read_line(&mut answer).await,
+        Err(e) => Err(e),
+    };
+    // Stopped as a session's end stops it: stdin closed, then killed.
+    drop(stdin);
+    let _ = child.kill().await;
+    let answered = serde_json::from_str::<serde_json::Value>(&answer)
+        .ok()
+        .is_some_and(|m| m.get("result").is_some());
+    match (read, answered) {
+        (Ok(n), true) if n > 0 => Reach::Reachable,
+        (Ok(0) | Err(_), _) => Reach::Unreachable("the program exited before answering".to_owned()),
+        _ => Reach::Unreachable("it did not answer `initialize` with a result".to_owned()),
+    }
+}
+
 /// The MCP format: clients of every server in `servers`, and the servers
 /// themselves as providers, registered when it is served. `limit` caps what
 /// the gateway holds of one HTTP answer.
@@ -262,12 +400,13 @@ fn register(
 ) -> Result<Gateway, Fault> {
     for s in servers {
         let name = s.name.clone();
+        let owners = Arc::new(SessionOwners::default());
         gateway = match &s.transport {
             Transport::Http {
                 origin, path, auth, ..
             } => {
                 let transport = HttpTransport::new(origin)?.with_headers(auth.clone())?;
-                let io = explained(transport, &s.name, origin, limit);
+                let io = explained(transport, &s.name, origin, limit, Some(owners.clone()));
                 gateway.provider::<Input, Output, _>(name, StreamableHttp::new(path), io)?
             }
             Transport::Stdio { command, env, cwd } => {
@@ -292,6 +431,77 @@ fn register(
         };
     }
     gateway.client::<Input, Output, _>(client.clone())
+}
+
+/// The most sessions of one HTTP server whose owners are remembered; the
+/// oldest is forgotten past it, and its client starts a new session.
+const OWNED: usize = 4096;
+
+/// Whose each session of one HTTP server is. The server holds the session;
+/// the gateway remembers which client it gave the id to, by the call's
+/// [`Owner`], so another client naming that id is told there is none (404),
+/// as the stdio transport does for its own. A call with no owner (no client
+/// keys) is not tracked. Sessions are forgotten at a reload or restart.
+#[derive(Debug, Default)]
+pub struct SessionOwners(Mutex<IndexMap<String, String>>);
+
+impl SessionOwners {
+    fn table(&self) -> std::sync::MutexGuard<'_, IndexMap<String, String>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sends `call` with `send` if its session is its owner's, and notes
+    /// the session the answer starts or ends.
+    pub async fn send<F>(
+        &self,
+        call: http::Request<Body>,
+        send: impl FnOnce(http::Request<Body>) -> F,
+    ) -> Result<(http::Response<Body>, Option<Completion>), Fault>
+    where
+        F: Future<Output = Result<(http::Response<Body>, Option<Completion>), Fault>>,
+    {
+        let owner = call
+            .extensions()
+            .get::<Extensions>()
+            .and_then(|e| e.get::<Owner>())
+            .map(|Owner(id)| id.clone());
+        let Some(owner) = owner else {
+            return send(call).await;
+        };
+        let session = call
+            .headers()
+            .get(SESSION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        if let Some(id) = &session
+            && self.table().get(id) != Some(&owner)
+        {
+            let fault = Fault::new("no such session");
+            let fault = fault
+                .with(ErrorCode("no_session".into()))
+                .with(RpcCode(-32003));
+            return Err(fault.with(Status(StatusCode::NOT_FOUND)));
+        }
+        let ends = call.method() == Method::DELETE;
+        let (resp, completion) = send(call).await?;
+        match (
+            &session,
+            resp.headers().get(SESSION).and_then(|v| v.to_str().ok()),
+        ) {
+            (None, Some(id)) if resp.status().is_success() => {
+                let mut table = self.table();
+                if table.len() >= OWNED {
+                    table.shift_remove_index(0);
+                }
+                table.insert(id.to_owned(), owner);
+            }
+            (Some(id), _) if ends && resp.status().is_success() => {
+                self.table().shift_remove(id);
+            }
+            _ => {}
+        }
+        Ok((resp, completion))
+    }
 }
 
 /// What a request does, for the request log in place of a model: its
