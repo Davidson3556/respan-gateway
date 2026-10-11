@@ -34,7 +34,7 @@ function KeyCard({ stored }: { stored: string | null }) {
   };
 
   return (
-    <Card className="shadow-none">
+    <Card>
       <form onSubmit={save} className="grid gap-6">
         <CardHeader>
           <CardTitle className="text-base">Gateway key</CardTitle>
@@ -96,7 +96,7 @@ function KeyCard({ stored }: { stored: string | null }) {
 function ThemeCard() {
   const { theme, setTheme } = useTheme();
   return (
-    <Card className="shadow-none">
+    <Card>
       <CardHeader>
         <CardTitle className="text-base">Appearance</CardTitle>
         <CardDescription>System follows your operating system's setting.</CardDescription>
@@ -135,7 +135,7 @@ function AboutCard() {
     ["Started", formatDateTime(data.started_at)],
   ];
   return (
-    <Card className="shadow-none">
+    <Card>
       <CardHeader>
         <CardTitle className="text-base">About this gateway</CardTitle>
       </CardHeader>

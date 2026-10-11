@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useModelChoice } from "@/hooks/use-model-choice";
 import { postJson } from "@/lib/api";
 import { cosineSimilarity } from "@/lib/embeddings";
+import { SimilarityMeter, VectorStrip } from "./embedding-visuals";
 import { MediaLayout } from "./media-form";
 import { ModelPicker } from "./model-picker";
 import { RequestError } from "./request-error";
@@ -36,6 +37,7 @@ export function EmbeddingsTab() {
 
   const [first, second] = embed.data ?? [];
   const texts = [a.trim(), b.trim()];
+  const score = first && second ? cosineSimilarity(first, second) : 0;
 
   return (
     <MediaLayout
@@ -75,18 +77,20 @@ export function EmbeddingsTab() {
         <Skeleton className="h-40 rounded-xl" />
       ) : first && second ? (
         <div className="grid gap-4">
-          <Card className="gap-1 p-6 shadow-none">
-            <p className="text-sm text-muted-foreground">Cosine similarity</p>
-            <p className="font-mono text-3xl font-semibold tabular-nums">
-              {cosineSimilarity(first, second).toFixed(4)}
-            </p>
+          <Card className="gap-4 p-6">
+            <div>
+              <p className="text-sm text-muted-foreground">Cosine similarity</p>
+              <p className="font-mono text-3xl font-semibold tabular-nums">{score.toFixed(4)}</p>
+            </div>
+            <SimilarityMeter score={score} />
           </Card>
           <div className="grid gap-4 sm:grid-cols-2">
             {[first, second].map((vector, i) => (
-              <Card key={i} className="gap-2 p-4 shadow-none">
+              <Card key={i} className="gap-2 p-4">
                 <p className="text-sm font-medium">Text {i === 0 ? "A" : "B"}</p>
                 <p className="truncate text-xs text-muted-foreground">{texts[i]}</p>
                 <p className="text-xs text-muted-foreground">{vector.length} dimensions</p>
+                <VectorStrip vector={vector} />
                 <p className="font-mono text-xs break-words">
                   [{vector.slice(0, SHOWN).map((v) => v.toFixed(4)).join(", ")}
                   {vector.length > SHOWN ? ", …" : ""}]

@@ -45,7 +45,7 @@ function Progress({ job }: { job: VideoJob }) {
   const pct = Math.max(2, Math.min(100, job.progress ?? 0));
   const label = job.status === "queued" ? "Queued" : "Rendering";
   return (
-    <Card className="gap-3 p-6 shadow-none">
+    <Card className="gap-3 p-6">
       <div className="flex justify-between text-sm">
         <span className="font-medium">{label}…</span>
         <span className="text-muted-foreground tabular">{job.progress ?? 0}%</span>
@@ -119,7 +119,7 @@ export function VideoTab() {
       ) : current?.status === "failed" ? (
         <RequestError error={new Error(current.error?.message ?? "The job failed")} what="video" />
       ) : url ? (
-        <Card className="gap-3 overflow-hidden p-0 shadow-none">
+        <Card className="gap-3 overflow-hidden p-0">
           <video src={url} controls autoPlay loop className="w-full bg-black" aria-label="Generated video" />
           <div className="flex items-center justify-between px-4 pb-3 text-xs text-muted-foreground">
             <span className="font-mono">{current?.id}</span>

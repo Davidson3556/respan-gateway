@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useMemo } from "react";
 import { api, type RequestRecord } from "@/lib/api";
 import { queryKeys } from "@/hooks/queries";
+import { bucketByMinute, type Bucket } from "@/lib/series";
 
 /** How fresh the request list is: streamed, polled, or not yet known. */
 export type LiveMode = "connecting" | "live" | "polling";
@@ -62,16 +63,8 @@ export function useRequests() {
   });
 }
 
-/** Requests started per minute over the last `minutes`, oldest first. */
-export function useRequestsPerMinute(minutes: number, now: number): number[] {
+/** Per-minute traffic over the last `minutes`, oldest first. */
+export function useTraffic(minutes: number, now: number): Bucket[] {
   const { data } = useRequests();
-  return useMemo(() => {
-    const buckets = new Array<number>(minutes).fill(0);
-    const end = Math.floor(now / 60_000);
-    for (const r of data ?? []) {
-      const age = end - Math.floor(new Date(r.started_at).getTime() / 60_000);
-      if (age >= 0 && age < minutes) buckets[minutes - 1 - age] += 1;
-    }
-    return buckets;
-  }, [data, minutes, now]);
+  return useMemo(() => bucketByMinute(data ?? [], minutes, now), [data, minutes, now]);
 }

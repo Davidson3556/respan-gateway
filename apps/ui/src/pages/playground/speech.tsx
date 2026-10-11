@@ -68,7 +68,7 @@ export function SpeechTab() {
       ) : speak.isPending ? (
         <Skeleton className="h-24 rounded-xl" />
       ) : url ? (
-        <Card className="gap-4 p-6 shadow-none">
+        <Card className="gap-4 p-6">
           <audio controls autoPlay src={url} className="w-full" aria-label="Generated speech" />
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span className="capitalize">

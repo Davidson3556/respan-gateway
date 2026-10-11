@@ -115,7 +115,7 @@ export function RequestsPage() {
       ) : data?.length === 0 ? (
         <NoRequests />
       ) : (
-        <Card className="gap-0 overflow-hidden py-0 shadow-none">
+        <Card className="gap-0 overflow-hidden py-0">
           <div className="flex flex-wrap items-center gap-2 border-b p-3">
             <div className="relative min-w-48 flex-1 sm:max-w-xs">
               <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
