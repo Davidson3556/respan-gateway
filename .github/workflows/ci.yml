@@ -10,10 +10,42 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/ui/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: apps/ui/dist
+          retention-days: 1
+
+  # The binary embeds apps/ui/dist, so the Rust checks run against the real UI.
   check:
+    needs: ui
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: apps/ui/dist
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -22,6 +54,18 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features
       - run: cargo test --workspace --all-targets --all-features
       - run: cargo test --workspace --doc --all-features
+
+  # validation/ is outside the workspace and its tests are opt-in; compile it.
+  validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: validation
+      - run: cargo check --tests --bins
+        working-directory: validation
 
   msrv:
     runs-on: ubuntu-latest

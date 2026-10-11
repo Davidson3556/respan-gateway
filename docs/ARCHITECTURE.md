@@ -54,10 +54,11 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/formats/media-http/` | Format | OpenAI's media endpoints as compatible vendors serve them, and Veo's as a provider | Media, conversation-http, HTTP |
 | `crates/formats/realtime-ws/` | Format | OpenAI Realtime and Gemini Live, translated both ways (audio converted, the other's scaffolding emulated), and Responses over WebSocket, sharing their session's handshake | Realtime, HTTP, WS |
 | `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
-| `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins | Core, the formats |
+| `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins | Core, the conversation, media and realtime formats, and the conversation and realtime kinds (for quirk plugins) |
 | `crates/serve/` | Hosting | One Axum router for a gateway: plain HTTP and WebSocket upgrades, body and session limits, graceful stop | Core, HTTP, WS |
 | `crates/plugins/` | Plugins | The router (`Routes`, `Routing`), attempts, fallback, races and backoff | Core |
-| `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | All of the above |
+| `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | The kinds, wires, formats, providers and plugins above, except MCP |
+| `apps/ui/` | Web UI | React and shadcn/ui admin UI (providers, routes, live requests), built by `pnpm build` to `apps/ui/dist` and embedded in the binary by `apps/gateway/build.rs`; a placeholder page stands in when it is not built | None (talks to the admin API) |
 | `python/` | Python package | PyO3 extension hosting the `apps/gateway` library in-process, plus httpx transports and SDK clients | `apps/gateway` |
 | `examples/` | Examples | Application policies and runnable integrations of public APIs | Libraries needed by each example |
 
@@ -66,11 +67,9 @@ can cross these boundaries to exercise a complete request.
 
 ```mermaid
 flowchart LR
+    core --> kinds["conversation · media · realtime · mcp"]
     core --> http
     core --> plugins
-    core --> conversation
-    core --> realtime
-    core --> mcp
     conversation --> media
     conversation --> realtime
     http --> ws
@@ -85,10 +84,17 @@ flowchart LR
     conversation-http --> providers
     media-http --> providers
     realtime-ws --> providers
+    http --> serve
+    ws --> serve
     providers --> gateway
-    mcp-http --> gateway
     plugins --> gateway
+    serve --> gateway
 ```
+
+Core is a dependency of every crate, and `conversation` also of
+`conversation-http`, `media-http`, `realtime-ws` and `providers`; those
+edges are left out above. The binary does not depend on `mcp` or `mcp-http`
+yet.
 
 The workspace manifest centralizes local dependency paths and common package
 settings. Crate names and `cargo run -p respan-gateway` remain independent of
@@ -193,7 +199,7 @@ See the [core guide](../crates/core/README.md),
 
 Unit tests remain beside private implementation details. Integration suites
 live in the owning crate's `tests/` directory; larger suites use topic modules.
-Shared source-only fixtures live in [`tests/support/`](../tests/support/README.md).
+Shared source-only test helpers live in [`tests/support/`](../tests/support/README.md).
 The gateway application owns tests that start its executable.
 
 Examples retain their topic directories. Their included test modules live in

@@ -1,0 +1,76 @@
+name: release
+
+# Tag vX.Y.Z to build the binary for each target, with the web UI embedded,
+# and attach it to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/ui/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: apps/ui/dist
+
+  build:
+    needs: ui
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: apps/ui/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release -p respan-gateway --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          name=respan-gateway-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/respan-gateway LICENSE-MIT LICENSE-APACHE "$name"/
+          tar czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: respan-gateway-*.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          merge-multiple: true
+      - run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes respan-gateway-*.tar.gz
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}

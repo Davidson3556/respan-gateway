@@ -186,8 +186,8 @@ impl Message {
 pub enum Role {
     /// Instructions for the model.
     System,
-    /// Instructions for the model with a developer's authority, as OpenAI
-    /// defines them; a format that has no such role writes them as system.
+    /// Instructions for the model with a developer's authority; a format that has no
+    /// such role writes them as system.
     Developer,
     /// The person or program using the model.
     User,
