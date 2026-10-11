@@ -5,6 +5,7 @@ import {
   ArrowRight,
   ArrowUpFromLine,
   Clock,
+  DollarSign,
   Loader,
 } from "lucide-react";
 import { Link } from "react-router";
@@ -19,14 +20,20 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Skeleton } from "@/components/ui/skeleton";
 import { useOverview, useProviders } from "@/hooks/queries";
 import { useRequests } from "@/hooks/use-live-requests";
-import { formatCount, formatMs, formatPercent, formatUptime } from "@/lib/format";
+import { formatCost, formatCount, formatMs, formatPercent, formatUptime } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { describeError } from "@/lib/query-client";
 
 function Stats() {
   const { data } = useOverview();
   const t = data?.totals;
   return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+    <div
+      className={cn(
+        "grid grid-cols-2 gap-3 md:grid-cols-3",
+        t?.cost_usd !== undefined ? "xl:grid-cols-7" : "xl:grid-cols-6",
+      )}
+    >
       <StatCard label="Requests" icon={Activity} value={t && formatCount(t.requests)} hint="since start" />
       <StatCard
         label="Error rate"
@@ -36,6 +43,9 @@ function Stats() {
       />
       <StatCard label="Tokens in" icon={ArrowDownToLine} value={t && formatCount(t.input_tokens)} hint="prompt" />
       <StatCard label="Tokens out" icon={ArrowUpFromLine} value={t && formatCount(t.output_tokens)} hint="completion" />
+      {t?.cost_usd !== undefined && (
+        <StatCard label="Cost" icon={DollarSign} value={formatCost(t.cost_usd)} hint="since start" />
+      )}
       <StatCard label="In flight" icon={Loader} value={t && formatCount(t.in_flight)} hint="right now" />
       <StatCard
         label="Uptime"

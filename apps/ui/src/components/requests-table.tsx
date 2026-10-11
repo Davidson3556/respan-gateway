@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/table";
 import { useNow } from "@/hooks/use-now";
 import type { RequestRecord } from "@/lib/api";
-import { formatAgo, formatClock, formatCount, formatMs } from "@/lib/format";
+import { formatAgo, formatClock, formatCost, formatCount, formatMs } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 function Tokens({ record }: { record: RequestRecord }) {
@@ -44,6 +44,8 @@ export function RequestsTable({
   const now = useNow(5000);
   const open = (id: string) => navigate(`/requests/${encodeURIComponent(id)}`);
   const hideOnCompact = compact ? "hidden" : "hidden md:table-cell";
+  // A cost column only where the gateway prices anything.
+  const priced = requests.some((r) => r.cost_usd !== undefined);
 
   return (
     <Table>
@@ -55,14 +57,15 @@ export function RequestsTable({
           <TableHead className="hidden sm:table-cell">Provider</TableHead>
           <TableHead>Status</TableHead>
           <TableHead className="text-right">Latency</TableHead>
-          <TableHead className={cn("pr-4 text-right", hideOnCompact)}>Tokens in → out</TableHead>
+          <TableHead className={cn("text-right", !priced && "pr-4", hideOnCompact)}>Tokens in → out</TableHead>
+          {priced && <TableHead className={cn("pr-4 text-right", hideOnCompact)}>Cost</TableHead>}
         </TableRow>
       </TableHeader>
       <TableBody>
         {loading
           ? Array.from({ length: compact ? 5 : 10 }, (_, i) => (
               <TableRow key={i} className="hover:bg-transparent">
-                <TableCell colSpan={7} className="px-4">
+                <TableCell colSpan={priced ? 8 : 7} className="px-4">
                   <Skeleton className="h-5 w-full" />
                 </TableCell>
               </TableRow>
@@ -108,9 +111,18 @@ export function RequestsTable({
                 <TableCell className="text-right text-xs tabular">
                   {formatMs(r.duration_ms)}
                 </TableCell>
-                <TableCell className={cn("pr-4 text-right text-xs", hideOnCompact)}>
+                <TableCell className={cn("text-right text-xs", !priced && "pr-4", hideOnCompact)}>
                   <Tokens record={r} />
                 </TableCell>
+                {priced && (
+                  <TableCell className={cn("pr-4 text-right text-xs tabular", hideOnCompact)}>
+                    {r.cost_usd === undefined ? (
+                      <span className="text-muted-foreground">—</span>
+                    ) : (
+                      formatCost(r.cost_usd)
+                    )}
+                  </TableCell>
+                )}
               </TableRow>
             ))}
       </TableBody>

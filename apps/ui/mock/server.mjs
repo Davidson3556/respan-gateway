@@ -280,13 +280,33 @@ function begin({ path, format, kind, model, provider, stream, at = new Date() })
   return record;
 }
 
+// What `prices:` would configure: US dollars per million tokens, in and out.
+// Models without a price (llama, deepseek) carry no cost.
+const prices = {
+  "gpt-4o-mini": [0.15, 0.6],
+  "gpt-4.1": [2, 8],
+  "claude-sonnet-4-5": [3, 15],
+  "claude-haiku-4-5": [1, 5],
+  "gemini-2.5-flash": [0.3, 2.5],
+};
+
+/** Cost and cached tokens for a finished call, as the gateway adds them. */
+function priced(record, usage) {
+  const price = prices[record.model];
+  if (!usage || !price) return { usage };
+  const cached = record.provider === "gemini" ? 0 : Math.floor(usage.input_tokens * 0.4);
+  const input = usage.input_tokens - cached;
+  const cost = (input * price[0] + cached * price[0] * 0.1 + usage.output_tokens * price[1]) / 1e6;
+  return { usage: cached ? { ...usage, cached_input_tokens: cached } : usage, cost_usd: cost };
+}
+
 function finish(record, { status, duration, usage = null, error = null, steps }) {
   Object.assign(record, {
+    ...priced(record, usage),
     ...(steps ? { steps } : {}),
     status,
     duration_ms: duration,
     ttfb_ms: Math.round(duration * (0.15 + Math.random() * 0.3)),
-    usage,
     error,
   });
   broadcast(record);
@@ -370,6 +390,7 @@ function totals() {
     in_flight: records.length - done.length,
     input_tokens: done.reduce((n, r) => n + (r.usage?.input_tokens ?? 0), 0),
     output_tokens: done.reduce((n, r) => n + (r.usage?.output_tokens ?? 0), 0),
+    cost_usd: done.reduce((n, r) => n + (r.cost_usd ?? 0), 0),
   };
 }
 
@@ -1015,6 +1036,29 @@ const routesTable = {
       clients.delete(res);
     });
   },
+  "GET /ui/api/requests/export": (req, res) => {
+    const q = new URL(req.url, "http://x").searchParams;
+    const outcome = (r) => (r.status === null ? "pending" : r.status >= 400 || r.error ? "error" : "ok");
+    const rows = records
+      .filter(
+        (r) =>
+          (!q.get("kind") || r.kind === q.get("kind")) &&
+          (!q.get("status") || outcome(r) === q.get("status")) &&
+          (!q.get("provider") || r.provider === q.get("provider")) &&
+          (!q.get("model") || (r.model ?? "").toLowerCase().includes(q.get("model").toLowerCase())) &&
+          (!q.get("since") || r.started_at >= new Date(q.get("since")).toISOString()),
+      )
+      .reverse();
+    if (q.get("format") === "csv") {
+      const cols = ["id", "started_at", "method", "path", "format", "kind", "model", "provider", "status", "duration_ms", "input_tokens", "output_tokens", "cost_usd", "error"];
+      const cell = (v) => (/[",\n]/.test(String(v ?? "")) ? `"${String(v).replace(/"/g, '""')}"` : (v ?? ""));
+      const line = (r) => cols.map((c) => cell(c.endsWith("_tokens") ? r.usage?.[c] : r[c])).join(",");
+      res.writeHead(200, { "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="requests.csv"' });
+      return res.end([cols.join(","), ...rows.map(line)].join("\n") + "\n");
+    }
+    res.writeHead(200, { "content-type": "application/x-ndjson", "content-disposition": 'attachment; filename="requests.jsonl"' });
+    res.end(rows.map((r) => JSON.stringify(r) + "\n").join(""));
+  },
   "GET /v1/models": (_req, res) => json(res, 200, { object: "list", data: models }),
   "POST /v1/chat/completions": chat,
   "POST /v1/messages": (req, res) => chat(req, res, "anthropic-messages"),
@@ -1088,7 +1132,7 @@ const server = createServer((req, res) => {
       json(res, 500, { error: { message: String(err), type: "mock_error" } }),
     );
   }
-  const route = path.startsWith("/ui/api/requests/") ? null : routesTable[`${req.method} ${path}`];
+  const route = path.startsWith("/ui/api/requests/") && path !== "/ui/api/requests/export" ? null : routesTable[`${req.method} ${path}`];
   if (route) {
     return Promise.resolve(route(req, res)).catch((err) => {
       console.error(err);
@@ -1100,7 +1144,7 @@ const server = createServer((req, res) => {
       json(res, 500, { error: { message: String(err), type: "mock_error" } }),
     );
   }
-  if (req.method === "GET" && path.startsWith("/ui/api/requests/")) {
+  if (req.method === "GET" && path.startsWith("/ui/api/requests/") && path !== "/ui/api/requests/export") {
     const id = decodeURIComponent(path.slice("/ui/api/requests/".length));
     const record = records.find((r) => r.id === id);
     return record ? json(res, 200, record) : notFound(res, "Request evicted or unknown");

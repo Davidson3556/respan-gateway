@@ -18,7 +18,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { queryKeys, useOverview } from "@/hooks/queries";
 import { ApiError, api, type RequestRecord } from "@/lib/api";
-import { formatCount, formatDateTime, formatMs, formatPercent } from "@/lib/format";
+import { formatCost, formatCount, formatDateTime, formatMs, formatPercent } from "@/lib/format";
 import { reproduceCurl, timingOf, tokensPerSecond } from "@/lib/requests";
 
 function useRequestRecord(id: string) {
@@ -121,6 +121,10 @@ function Usage({ record }: { record: RequestRecord }) {
     <div className="grid grid-cols-[repeat(2,minmax(0,1fr))] gap-2 sm:grid-cols-[repeat(3,minmax(0,1fr))]">
       <Stat label="Input tokens" value={formatCount(usage.input_tokens)} />
       <Stat label="Output tokens" value={formatCount(usage.output_tokens)} />
+      {usage.cached_input_tokens !== undefined && (
+        <Stat label="Cached input" value={formatCount(usage.cached_input_tokens)} hint="of the input tokens" />
+      )}
+      {record.cost_usd !== undefined && <Stat label="Cost" value={formatCost(record.cost_usd)} />}
       {usage.seconds !== undefined && <Stat label="Audio billed" value={`${usage.seconds} s`} />}
       {speed !== null && <Stat label="Output speed" value={`${Math.round(speed)} tok/s`} hint="after first byte" />}
     </div>

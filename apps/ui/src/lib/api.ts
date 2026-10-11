@@ -19,6 +19,8 @@ export interface Totals {
   in_flight: number;
   input_tokens: number;
   output_tokens: number;
+  /** Total cost in US dollars; present when `prices:` is configured. */
+  cost_usd?: number;
 }
 
 export interface Overview {
@@ -95,6 +97,8 @@ export interface Routes {
 export interface Usage {
   input_tokens: number;
   output_tokens: number;
+  /** Input tokens the provider served from its cache, when it says. */
+  cached_input_tokens?: number;
   /** Seconds of audio billed, as a transcription's provider may report instead of tokens. */
   seconds?: number;
 }
@@ -135,6 +139,8 @@ export interface RequestRecord {
   ttfb_ms: number | null;
   stream: boolean;
   usage: Usage | null;
+  /** What it cost in US dollars; absent when the model is unpriced. */
+  cost_usd?: number;
   /** The agent loop's steps, in order; absent without the loop. */
   steps?: AgentStep[];
   error: string | null;

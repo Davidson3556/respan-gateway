@@ -66,3 +66,10 @@ export function formatDateTime(iso: string): string {
     timeStyle: "medium",
   });
 }
+
+/** US dollars: "$0.0042" for small sums, "$12.40" from a dollar up. */
+export function formatCost(usd: number): string {
+  if (usd === 0) return "$0.00";
+  if (usd < 0.0001) return "<$0.0001";
+  return `$${usd < 1 ? usd.toFixed(4) : usd.toFixed(2)}`;
+}

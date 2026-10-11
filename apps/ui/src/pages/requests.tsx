@@ -1,6 +1,7 @@
 import { SearchX } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Outlet, useParams, useSearchParams } from "react-router";
+import { ExportMenu } from "@/components/export-menu";
 import { EmptyState } from "@/components/empty-state";
 import { NoRequests } from "@/components/no-requests";
 import { PageHeader } from "@/components/page-header";
@@ -65,6 +66,7 @@ export function RequestsPage() {
             ? "Updating live as requests start and finish."
             : "The most recent requests through the gateway."
         }
+        actions={<ExportMenu filter={filter} />}
       />
 
       {isError && !data ? (
