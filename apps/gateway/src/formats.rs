@@ -12,7 +12,9 @@ use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo, reqwest};
 use respan_gateway_media::{embedding, image, speech, transcription, video};
 use respan_gateway_plugins::{Kind, Model};
 use respan_gateway_providers::{ALL, Auth, Base, Format as Spoken};
-use respan_gateway_realtime_ws::JsonEvents;
+use respan_gateway_realtime as realtime;
+use respan_gateway_realtime_ws::{GeminiLive, OpenAiRealtime, ResponsesWs};
+use respan_gateway_ws::WsTransport;
 
 use crate::presets::origin;
 
@@ -27,6 +29,12 @@ pub mod kind {
     };
     pub const REALTIME: Kind = Kind {
         label: "realtime",
+        translates: false,
+    };
+    /// Responses over WebSocket: a session of many requests and replies,
+    /// which no other format speaks.
+    pub const RESPONSES: Kind = Kind {
+        label: "responses",
         translates: false,
     };
     pub const PASSTHROUGH: Kind = Kind {
@@ -288,7 +296,27 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
             Spoken::GeminiVeo(f) => {
                 KnownFormat::provider_only(kind::VIDEO, f, google).job_ids("veo_")
             }
-            Spoken::JsonEvents(f) => session(f, speaks.base),
+            Spoken::OpenAiRealtime(f) => session(
+                kind::REALTIME,
+                f,
+                OpenAiRealtime::PATH,
+                speaks.base,
+                |f, base| f.transport(base),
+            ),
+            Spoken::GeminiLive(f) => session(
+                kind::REALTIME,
+                f,
+                GeminiLive::PATH,
+                speaks.base,
+                |f, base| f.transport(base),
+            ),
+            Spoken::ResponsesWs(f) => session(
+                kind::RESPONSES,
+                f,
+                ResponsesWs::PATH,
+                speaks.base,
+                |f, base| f.transport(base),
+            ),
         };
         known.push(format.key(speaks.auth).base(speaks.base));
     }
@@ -304,20 +332,34 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
     known
 }
 
-/// A session of JSON events, its clients sending to its path: after `/v1`,
-/// as an SDK adds it to the gateway's base URL, unless it sits at the
-/// origin.
-fn session(format: JsonEvents, base: Base) -> KnownFormat {
+/// A session `format` of `kind`, its clients sending to its `path`: after
+/// `/v1`, as an SDK adds it to the gateway's base URL, unless it sits at the
+/// origin. Its providers are reached by `transport`.
+fn session<F>(
+    kind: Kind,
+    format: F,
+    path: &str,
+    base: Base,
+    transport: fn(&F, &str) -> Result<WsTransport, Fault>,
+) -> KnownFormat
+where
+    F: Clone
+        + Send
+        + Sync
+        + 'static
+        + Format<ClientIo, realtime::Input, realtime::Output>
+        + Format<ProviderIo, realtime::Output, realtime::Input>,
+{
     let endpoint = match base {
-        Base::Origin => format!("GET {} (WebSocket)", format.path()),
-        _ => format!("GET /v1{} (WebSocket)", format.path()),
+        Base::Origin => format!("GET {path} (WebSocket)"),
+        _ => format!("GET /v1{path} (WebSocket)"),
     };
     KnownFormat::of(
-        kind::REALTIME,
+        kind,
         &[&endpoint],
         format.clone(),
         move |_: &str, base_url: &str, auth| {
-            Ok(format.transport(base_url)?.with_headers(auth)?.connect())
+            Ok(transport(&format, base_url)?.with_headers(auth)?.connect())
         },
     )
     .websocket()

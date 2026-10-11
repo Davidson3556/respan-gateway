@@ -18,7 +18,7 @@ departing from a spec it speaks, and its file handles it:
   every other plugin's hooks, so each of theirs sees the kind's events.
 
 What a spec itself says, such as OpenAI Realtime's subprotocol, is its
-format's (`JsonEvents::OPENAI_REALTIME`), not a quirk. Each quirk is
+format's (`OpenAiRealtime`), not a quirk. Each quirk is
 described in `quirks`, which the table below, the admin UI and
 `respan-gateway check` show, and tested in [`tests/<vendor>.rs`](tests) by a
 test named for it (a test checks).

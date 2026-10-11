@@ -591,7 +591,7 @@ async fn tap(
 mod hooks;
 pub use hooks::{Calls, Outcomes};
 use respan_gateway_realtime::Input;
-use respan_gateway_realtime_ws::JsonEvents;
+use respan_gateway_realtime_ws::OpenAiRealtime;
 use respan_gateway_ws::{Limits, WsTransport};
 
 /// A gateway that relays every session to the provider at `base` in format
@@ -612,8 +612,8 @@ pub fn relay(base: &str) -> (Gateway, Outcomes, Calls) {
 }
 
 /// How a test's sessions reach the provider: relayed unread, as `Raw`
-/// with [`Relay::RAW`], or typed, as JSON events ([`JsonEvents`]) with no
-/// relay.
+/// with [`Relay::RAW`], or typed, as OpenAI Realtime's events
+/// ([`OpenAiRealtime`]) with no relay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Via {
     Relay,
@@ -633,12 +633,11 @@ impl Via {
             }
             Via::Typed => {
                 let (ends, calls) = (Outcomes::default(), Calls::default());
-                let events = JsonEvents::new("realtime", "/v1/realtime");
                 let transport = WsTransport::new(base).unwrap();
                 let gateway = Gateway::new()
-                    .client::<Input, _, _>(events.clone())
+                    .client::<Input, _, _>(OpenAiRealtime)
                     .unwrap()
-                    .provider::<Input, _, _>("p", events, transport.connect())
+                    .provider::<Input, _, _>("p", OpenAiRealtime, transport.connect())
                     .unwrap()
                     .plugin(ends.clone())
                     .plugin(calls.clone())

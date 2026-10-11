@@ -8,7 +8,7 @@ mod support;
 use respan_gateway_core::Gateway;
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
 use respan_gateway_realtime::Input;
-use respan_gateway_realtime_ws::JsonEvents;
+use respan_gateway_realtime_ws::OpenAiRealtime;
 use respan_gateway_ws::WsTransport;
 use support::*;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -89,17 +89,15 @@ async fn a_key_offered_as_the_only_subprotocol_is_never_echoed() {
     assert!(upgrade.headers.get("sec-websocket-protocol").is_none());
 }
 
-/// A typed gateway whose JSON events speak the subprotocol `realtime`.
+/// A typed gateway of OpenAI Realtime, which speaks the subprotocol
+/// `realtime`.
 fn speaking(probe: &Probe) -> Gateway {
-    let events = JsonEvents::new("realtime", "/v1/realtime")
-        .protocol("realtime")
-        .unwrap();
     Gateway::new()
-        .client::<Input, _, _>(events.clone())
+        .client::<Input, _, _>(OpenAiRealtime)
         .unwrap()
         .provider::<Input, _, _>(
             "p",
-            events,
+            OpenAiRealtime,
             WsTransport::new(probe.base()).unwrap().connect(),
         )
         .unwrap()

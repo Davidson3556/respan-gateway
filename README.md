@@ -239,7 +239,7 @@ the gateway, and the binary chooses what to compose. See the
 | `crates/wires/ws/` | The WebSocket wire: sessions at both edges, close codes and limits, and optional Axum hosting. |
 | `crates/formats/conversation-http/` | The conversation kind over HTTP: OpenAI Chat and Anthropic Messages, sharing the `Schema` trait. |
 | `crates/formats/media-http/` | The media kinds over HTTP: OpenAI Images, Audio Transcriptions, Speech, Embeddings and Videos, and Google's Veo as a provider. |
-| `crates/formats/realtime-ws/` | The realtime kind over WebSocket: `JsonEvents`, and the specs OpenAI Realtime, Responses over WebSocket and Gemini Live. |
+| `crates/formats/realtime-ws/` | The realtime kind over WebSocket: OpenAI Realtime, Gemini Live, and Responses over WebSocket. |
 | `crates/formats/mcp-http/` | MCP over HTTP: streamable HTTP, and a stdio server as a transport. |
 | `crates/providers/` | Every vendor, a file each: base URL, key, models, the formats it speaks, its quirks (data and a plugin), and a table of them. |
 | `crates/plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |

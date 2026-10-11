@@ -4,6 +4,7 @@
 export type Kind =
   | "chat"
   | "realtime"
+  | "responses"
   | "image"
   | "transcription"
   | "speech"

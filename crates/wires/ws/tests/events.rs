@@ -1,4 +1,4 @@
-//! Plugins over a session's events: `JsonEvents` writes unedited events
+//! Plugins over a session's events: `OpenAiRealtime` writes unedited events
 //! as they said, lets filters edit, drop and count them in either direction,
 //! and a failing filter closes the client with its code. The events are
 //! mockllm's OpenAI Realtime; the gateway knows none of their names.
@@ -20,17 +20,13 @@ use respan_gateway_core::{
 };
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_realtime::{Input, Output};
-use respan_gateway_realtime_ws::JsonEvents;
+use respan_gateway_realtime_ws::OpenAiRealtime;
 use respan_gateway_ws::{CloseCode, WsTransport};
 use serde_json::{Value, json};
 use support::*;
 
 const PATH: &str = "/v1/realtime?model=gpt-realtime";
 const KEY: &[(&str, &str)] = &[("authorization", "Bearer sk-test")];
-
-fn events() -> JsonEvents {
-    JsonEvents::new("realtime", "/v1/realtime")
-}
 
 fn kind(text: &str) -> String {
     let v: Value = serde_json::from_str(text).unwrap();
@@ -41,13 +37,18 @@ fn is_done(text: &str) -> bool {
     kind(text) == "response.done"
 }
 
-/// A gateway relaying JSON events to `base`, recorders first, then `plugins`.
+/// A gateway relaying OpenAI Realtime's events to `base`, recorders first,
+/// then `plugins`.
 fn gateway_of(base: &str, plugins: Vec<Arc<dyn Plugin>>) -> (Gateway, Outcomes, Calls) {
     let (ends, calls) = (Outcomes::default(), Calls::default());
     let mut gateway = Gateway::new()
-        .client::<Input, _, _>(events())
+        .client::<Input, _, _>(OpenAiRealtime)
         .unwrap()
-        .provider::<Input, _, _>("p", events(), WsTransport::new(base).unwrap().connect())
+        .provider::<Input, _, _>(
+            "p",
+            OpenAiRealtime,
+            WsTransport::new(base).unwrap().connect(),
+        )
         .unwrap()
         .plugin(ends.clone())
         .plugin(calls.clone());
@@ -344,11 +345,10 @@ async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
     use futures::{SinkExt, StreamExt, TryStreamExt, stream};
     use respan_gateway_core::{EventStream, Extensions, Format};
     use respan_gateway_http::{Body, ProviderIo};
-    let format = events();
     let factory = respan_gateway_http::connect(
         |call| async move {
             assert_eq!(call.method(), "GET");
-            assert_eq!(call.uri().path(), "/v1/realtime");
+            assert_eq!(call.uri().path(), "/realtime");
             assert_eq!(call.headers()["upgrade"], "websocket");
             let frames: Vec<Bytes> = call.into_body().try_collect().await?;
             assert_eq!(frames, [Bytes::from_static(br#"{"type":"x","n":1}"#)]);
@@ -360,20 +360,20 @@ async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
         },
         LIMIT,
     );
-    let (_, mut refusal) = <JsonEvents as Format<ProviderIo, Output, Input>>::bind(
-        &format,
+    let (_, mut refusal) = <OpenAiRealtime as Format<ProviderIo, Output, Input>>::bind(
+        &OpenAiRealtime,
         factory(Extensions::new()),
     )
     .unwrap();
-    let mut finite = EventStream::single(Input::native("realtime", json!({"type":"x"})));
+    let mut finite = EventStream::single(Input::native("openai-realtime", json!({"type":"x"})));
     assert!(matches!(refusal.prepare(&mut finite), Err(fault) if fault.is::<Config>()));
-    let (opening, mut write) = <JsonEvents as Format<ProviderIo, Output, Input>>::bind(
-        &format,
+    let (opening, mut write) = <OpenAiRealtime as Format<ProviderIo, Output, Input>>::bind(
+        &OpenAiRealtime,
         factory(Extensions::new()),
     )
     .unwrap();
     let mut input = EventStream::stream(stream::iter([Ok(Input::native(
-        "realtime",
+        "openai-realtime",
         json!({"type":"x", "n":1}),
     ))]));
     write.prepare(&mut input).unwrap();

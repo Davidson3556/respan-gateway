@@ -501,14 +501,17 @@ async fn a_provider_silent_through_a_ping_is_truncated() {
     // Not reading, it answers no ping.
     probe.reading.store(false, Ordering::SeqCst);
     let (ends, calls) = (Outcomes::default(), Calls::default());
-    let events = respan_gateway_realtime_ws::JsonEvents::new("realtime", PATH);
     let transport = respan_gateway_ws::WsTransport::new(probe.base())
         .unwrap()
         .with_limits(pinging());
     let gateway = Gateway::new()
-        .client::<Input, _, _>(events.clone())
+        .client::<Input, _, _>(respan_gateway_realtime_ws::OpenAiRealtime)
         .unwrap()
-        .provider::<Input, _, _>("p", events, transport.connect())
+        .provider::<Input, _, _>(
+            "p",
+            respan_gateway_realtime_ws::OpenAiRealtime,
+            transport.connect(),
+        )
         .unwrap()
         .plugin(ends.clone())
         .plugin(calls.clone())

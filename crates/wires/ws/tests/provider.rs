@@ -14,7 +14,7 @@ use respan_gateway_http::http::{self, StatusCode, header};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Body, ProviderError};
 use respan_gateway_realtime::Input;
-use respan_gateway_realtime_ws::JsonEvents;
+use respan_gateway_realtime_ws::OpenAiRealtime;
 use respan_gateway_ws::{Limits, WsTransport};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
@@ -67,7 +67,7 @@ async fn fragmented_unicode_with_interleaved_ping_and_no_selected_subprotocol() 
                 max_message,
                 ..Limits::default()
             });
-        let request = http::Request::get("/events")
+        let request = http::Request::get("/realtime")
             .header(header::SEC_WEBSOCKET_PROTOCOL, "optional")
             .body(Body::stream(stream::pending()))
             .expect("request");
@@ -101,7 +101,7 @@ async fn fragmented_unicode_with_interleaved_ping_and_no_selected_subprotocol() 
     }
 }
 
-/// A server that reads one handshake, to `GET /events`, and writes
+/// A server that reads one handshake, to `GET /realtime`, and writes
 /// `head` then `body`, then holds the connection until the test ends.
 fn answering(head: String, body: Vec<u8>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local handshake server");
@@ -121,7 +121,7 @@ fn answering(head: String, body: Vec<u8>) -> SocketAddr {
             );
             headers.extend_from_slice(&chunk[..n]);
         }
-        assert!(String::from_utf8_lossy(&headers).contains("GET /events HTTP/1.1"));
+        assert!(String::from_utf8_lossy(&headers).contains("GET /realtime HTTP/1.1"));
         let _ = socket.write_all(head.as_bytes());
         let _ = socket.write_all(&body);
         // Hold the connection open: its end is the test's.
@@ -173,17 +173,16 @@ async fn session_through(
     }
 
     let ended = Ended::default();
-    let format = JsonEvents::new("json-ws", "/events");
     let limit = transport.limits().max_message;
     let gateway = Gateway::new()
-        .provider::<Input, _, _>("ws", format.clone(), transport.connect())
-        .and_then(|g| g.client::<Input, _, _>(format))
+        .provider::<Input, _, _>("ws", OpenAiRealtime, transport.connect())
+        .and_then(|g| g.client::<Input, _, _>(OpenAiRealtime))
         .map(|g| g.plugin(ended.clone()))
         .and_then(|g| g.target("ws"))
         .expect("gateway");
     let dropped = Arc::new(AtomicBool::new(false));
     let request = http::Request::builder()
-        .uri("/events")
+        .uri("/realtime")
         .header(header::UPGRADE, "websocket")
         .header(header::CONNECTION, "upgrade")
         .body(StreamBody::new(NeverUpload(dropped.clone())))
@@ -262,7 +261,7 @@ async fn an_incomplete_refusal_body_fails_at_the_handshake_deadline() {
     let transport = WsTransport::new(format!("ws://{address}"))
         .expect("transport")
         .with_handshake_timeout(deadline);
-    let request = http::Request::get("/events")
+    let request = http::Request::get("/realtime")
         .body(Body::full(Bytes::new()))
         .expect("request");
     let start = Instant::now();

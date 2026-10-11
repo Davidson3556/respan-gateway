@@ -5,7 +5,7 @@ use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_media_http::openai::{
     OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
 };
-use respan_gateway_realtime_ws::JsonEvents;
+use respan_gateway_realtime_ws::{OpenAiRealtime, ResponsesWs};
 
 use crate::{Format, Provider, Speaks};
 
@@ -31,8 +31,8 @@ pub const PROVIDER: Provider = Provider {
     example_model: "gpt-4o-mini",
     formats: &[
         Speaks::new(Format::OpenAiChat(OpenAiChat)),
-        Speaks::new(Format::JsonEvents(JsonEvents::OPENAI_REALTIME)),
-        Speaks::new(Format::JsonEvents(JsonEvents::RESPONSES_WS)),
+        Speaks::new(Format::OpenAiRealtime(OpenAiRealtime)),
+        Speaks::new(Format::ResponsesWs(ResponsesWs)),
         Speaks::new(Format::OpenAiImages(OpenAiImages)),
         Speaks::new(Format::OpenAiTranscriptions(OpenAiTranscriptions)),
         Speaks::new(Format::OpenAiSpeech(OpenAiSpeech)),

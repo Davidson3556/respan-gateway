@@ -19,7 +19,7 @@ use respan_gateway_core::{
 mod ledger;
 use ledger::MemoryLedger;
 use respan_gateway_realtime::{Input, Output};
-use respan_gateway_realtime_ws::JsonEvents;
+use respan_gateway_realtime_ws::ResponsesWs;
 use respan_gateway_ws::WsTransport;
 use serde_json::json;
 use std::sync::Arc;
@@ -118,8 +118,8 @@ impl Plugin for Sessions {
 }
 fn gateway(transport: WsTransport, sessions: Sessions) -> Result<Gateway, Fault> {
     Gateway::new()
-        .client::<Input, _, _>(JsonEvents::RESPONSES_WS)?
-        .provider::<Input, _, _>("responses", JsonEvents::RESPONSES_WS, transport.connect())?
+        .client::<Input, _, _>(ResponsesWs)?
+        .provider::<Input, _, _>("responses", ResponsesWs, transport.connect())?
         .plugin(sessions)
         .target("responses")
 }
@@ -137,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut headers = respan_gateway_http::http::HeaderMap::new();
     headers.insert("authorization", format!("Bearer {key}").parse()?);
     let gw = gateway(
-        JsonEvents::RESPONSES_WS
+        ResponsesWs
             .transport("wss://api.openai.com/v1")?
             .with_headers(headers)?,
         sessions,

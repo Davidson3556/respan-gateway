@@ -4,7 +4,7 @@
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_media_http::openai::{OpenAiEmbeddings, OpenAiImages};
-use respan_gateway_realtime_ws::JsonEvents;
+use respan_gateway_realtime_ws::GeminiLive;
 
 use crate::{Base, Format, Provider, Quirk, Speaks};
 
@@ -21,7 +21,7 @@ pub const PROVIDER: Provider = Provider {
     example_model: "gemini-2.5-flash",
     formats: &[
         Speaks::new(Format::OpenAiChat(OpenAiChat)),
-        Speaks::new(Format::JsonEvents(JsonEvents::GEMINI_LIVE))
+        Speaks::new(Format::GeminiLive(GeminiLive))
             .key_in(KEY)
             .at(Base::Origin),
         Speaks::new(Format::OpenAiImages(OpenAiImages)),

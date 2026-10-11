@@ -43,7 +43,7 @@
 //!   session's end is recorded once.
 //!
 //! The integration (`respan-gateway-ws`) carries the session: `WsTransport` to the
-//! provider, `serve` for the client, `JsonEvents` as the format, one JSON
+//! provider, `serve` for the client, `OpenAiRealtime` as the format, one JSON
 //! event per text frame. Everything about Realtime's events is here, none in
 //! the integration.
 //!
@@ -85,7 +85,7 @@ use respan_gateway_http::{Credential, Status};
 mod ledger;
 use ledger::{Amount, HoldId, Ledger, MemoryLedger};
 use respan_gateway_realtime::{Input, Output};
-use respan_gateway_realtime_ws::JsonEvents;
+use respan_gateway_realtime_ws::OpenAiRealtime;
 use respan_gateway_ws::{CloseCode, WsTransport};
 use serde_json::{Value, json};
 use text::{Placeholders, Rewrite};
@@ -878,10 +878,10 @@ fn gateway_with_audio(
     allow_audio: bool,
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
-        .client::<Input, _, _>(JsonEvents::OPENAI_REALTIME)?
+        .client::<Input, _, _>(OpenAiRealtime)?
         .provider::<Input, _, _>(
             "openai",
-            JsonEvents::OPENAI_REALTIME,
+            OpenAiRealtime,
             WsTransport::new(provider)?.connect(),
         )?
         .target("openai")?

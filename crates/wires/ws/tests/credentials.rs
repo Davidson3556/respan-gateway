@@ -11,7 +11,7 @@ use respan_gateway_core::{
 use respan_gateway_http::CallHeaders;
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
 use respan_gateway_realtime::Input;
-use respan_gateway_realtime_ws::JsonEvents;
+use respan_gateway_realtime_ws::{OpenAiRealtime, ResponsesWs};
 use respan_gateway_ws::WsTransport;
 use support::*;
 
@@ -121,13 +121,13 @@ async fn a_translated_call_carries_none_of_the_clients_keys() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(|event: &mut Input| {
                 if let Input::Native(event) = event {
-                    event.format = "another-name".into();
+                    event.format = ResponsesWs::NAME.into();
                 }
                 Ok(())
             })?;
             cx.filter(|event: &mut respan_gateway_realtime::Output| {
                 if let respan_gateway_realtime::Output::Native(event) = event {
-                    event.format = "one-name".into();
+                    event.format = OpenAiRealtime::NAME.into();
                 }
                 Ok(())
             })?;
@@ -135,14 +135,12 @@ async fn a_translated_call_carries_none_of_the_clients_keys() {
         }
     }
     let probe = Probe::start().await;
-    let client_side = JsonEvents::new("one-name", "/v1/realtime");
-    let provider_side = JsonEvents::new("another-name", "/other");
     let gateway = Gateway::new()
-        .client::<Input, _, _>(client_side)
+        .client::<Input, _, _>(OpenAiRealtime)
         .unwrap()
         .provider::<Input, _, _>(
             "p",
-            provider_side,
+            ResponsesWs,
             WsTransport::new(probe.base()).unwrap().connect(),
         )
         .unwrap()
@@ -158,7 +156,7 @@ async fn a_translated_call_carries_none_of_the_clients_keys() {
     assert_eq!(heard_text(&mut ws).await, r#"{"hi":2}"#);
     eventually("the provider read it", || probe.texts().len() == 1).await;
     assert_eq!(probe.texts(), [r#"{"hello":1}"#]);
-    assert_eq!(up.uri, "/other");
+    assert_eq!(up.uri, "/responses");
     for name in [
         "authorization",
         "x-api-key",

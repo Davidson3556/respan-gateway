@@ -18,7 +18,7 @@ use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_media_http::openai::{
     OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
 };
-use respan_gateway_realtime_ws::JsonEvents;
+use respan_gateway_realtime_ws::{GeminiLive, OpenAiRealtime, ResponsesWs};
 
 mod chat;
 
@@ -188,8 +188,12 @@ pub enum Format {
     OpenAiVideos(OpenAiVideos),
     /// Google's Veo.
     GeminiVeo(GeminiVeo),
-    /// A WebSocket session of JSON events.
-    JsonEvents(JsonEvents),
+    /// OpenAI Realtime.
+    OpenAiRealtime(OpenAiRealtime),
+    /// Gemini Live.
+    GeminiLive(GeminiLive),
+    /// OpenAI's Responses over WebSocket.
+    ResponsesWs(ResponsesWs),
 }
 
 impl Format {
@@ -204,7 +208,9 @@ impl Format {
             Format::OpenAiEmbeddings(_) => OpenAiEmbeddings::NAME,
             Format::OpenAiVideos(_) => OpenAiVideos::NAME,
             Format::GeminiVeo(_) => GeminiVeo::NAME,
-            Format::JsonEvents(f) => f.name(),
+            Format::OpenAiRealtime(_) => OpenAiRealtime::NAME,
+            Format::GeminiLive(_) => GeminiLive::NAME,
+            Format::ResponsesWs(_) => ResponsesWs::NAME,
         }
     }
 }

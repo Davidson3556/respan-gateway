@@ -49,7 +49,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`); optional Axum hosting | Core, HTTP |
 | `crates/formats/conversation-http/` | Format | The HTTP binding (`Schema`), OpenAI Chat and Anthropic Messages | Conversation, HTTP |
 | `crates/formats/media-http/` | Format | OpenAI's media endpoints as compatible vendors serve them, and Veo's as a provider | Media, conversation-http, HTTP |
-| `crates/formats/realtime-ws/` | Format | `JsonEvents` and its specs (OpenAI Realtime, Responses over WebSocket, Gemini Live) | Realtime, HTTP, WS |
+| `crates/formats/realtime-ws/` | Format | OpenAI Realtime, Gemini Live, and Responses over WebSocket, sharing their session's handshake | Realtime, HTTP, WS |
 | `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
 | `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins | Core, the formats |
 | `crates/plugins/` | Plugins | The router (`Routes`, `Routing`), attempts, fallback, races and backoff | Core |

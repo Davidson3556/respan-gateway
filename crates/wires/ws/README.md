@@ -4,11 +4,12 @@ WebSocket sessions on the gateway, as neutral building blocks. A WebSocket is
 an HTTP Upgrade exchange on the HTTP wire: the call's head is the upgrade
 request, the answer's head is the `101`, and the two bodies are streams of
 frames, **one body item per text frame**. This crate is a wire: it knows
-no kind and reads no provider's events. The realtime kind's format over it,
-`JsonEvents`, is
+no kind and reads no provider's events. The realtime kind's formats over
+it, one per spec (OpenAI Realtime, Gemini Live, and Responses over
+WebSocket), are
 [`respan-gateway-realtime-ws`](../../formats/realtime-ws/README.md)'s, and
-the vendors' sessions (OpenAI Realtime, Responses over WebSocket, Gemini
-Live) are [`respan-gateway-providers`](../../providers/README.md)'s.
+the vendors that speak them
+[`respan-gateway-providers`](../../providers/README.md)'s.
 
 ## API
 
@@ -68,7 +69,7 @@ wire works with the transport and the adapter: the tests relay through
 
 - **Text messages by default.** A provider's binary frame is a fault unless
   `with_binary_text(true)` enables UTF-8 normalization, as
-  `JsonEvents::GEMINI_LIVE.transport(..)` does for Gemini Live's JSON in
+  `GeminiLive.transport(..)` does for Gemini Live's JSON in
   binary frames. A client's binary frame is `bad_request`, closed 1003.
   Ping and pong are answered by each hop's library and never reach a
   plugin.
