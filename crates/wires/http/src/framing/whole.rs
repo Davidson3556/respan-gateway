@@ -48,7 +48,7 @@ pub(crate) fn over(limit: usize) -> Fault {
 /// written at once through `write`, which returns their bytes or `Err`. A
 /// failure writes nothing: it is the format's error writer's to write
 /// ([`ClientIo::bind`](crate::ClientIo::bind)). For a stream, written output
-/// by output, see [`each`](crate::formats::each).
+/// by output, see [`each`](crate::framing::each).
 pub fn collect<T, W, B>(write: W) -> Box<dyn Encoder<T>>
 where
     T: Clone + Send + 'static,

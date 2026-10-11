@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::{ClientIo, ProviderIo, formats};
+use respan_gateway_http::{ClientIo, ProviderIo, framing};
 use respan_gateway_realtime::{AudioFormat, Input, Modality, Output, Session};
 use respan_gateway_ws::WsTransport;
 
@@ -98,7 +98,7 @@ impl Format<ClientIo, Input, Output> for GeminiLive {
         let mut client = input::Client::new(answering.clone());
         let read = move |raw: Bytes, out: &mut Vec<Input>| client.read(raw, out);
         let mut client = output::Client::new(answering);
-        let write = formats::each_message(move |event: &Output, out: &mut Vec<Bytes>| {
+        let write = framing::each_message(move |event: &Output, out: &mut Vec<Bytes>| {
             client.write(event, out)
         });
         Ok(SPEC.client(io, Box::new(read), write))
@@ -120,7 +120,7 @@ impl Format<ProviderIo, Output, Input> for GeminiLive {
         opened.output_audio = Some(AudioFormat::pcm16(24_000));
         let _ = say.unbounded_send(Output::Opened(opened));
         let mut provider = input::Provider::new(shared.clone(), say);
-        let write = formats::each_message(move |event: &Input, out: &mut Vec<Bytes>| {
+        let write = framing::each_message(move |event: &Input, out: &mut Vec<Bytes>| {
             provider.write(event, out)
         });
         let mut provider = output::Provider::new(shared);

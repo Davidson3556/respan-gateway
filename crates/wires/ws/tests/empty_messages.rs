@@ -4,7 +4,7 @@
 use futures::{SinkExt, StreamExt};
 use respan_gateway_core::Gateway;
 use respan_gateway_http::{
-    formats::opaque::{Input, Passthrough},
+    framing::passthrough::{Input, Passthrough},
     relay::Relay,
 };
 use respan_gateway_ws::WsTransport;

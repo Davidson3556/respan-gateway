@@ -8,7 +8,7 @@ use super::{
 use respan_gateway_conversation::Usage;
 use respan_gateway_core::{BadRequest, Connection, EventStream, Fault, Format, Upstream};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::{path_ends_with, whole};
+use respan_gateway_http::framing::{path_ends_with, whole};
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
 use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo};
 use respan_gateway_media::embedding::{Embedding, Input, Item, Output, Start};

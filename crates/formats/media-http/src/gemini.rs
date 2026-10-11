@@ -11,7 +11,7 @@ use respan_gateway_core::{
     BadRequest, Connection, ErrorCode, EventStream, Fault, Format, Upstream,
 };
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::whole;
+use respan_gateway_http::framing::whole;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderValue, Method, Uri, request::Parts as RequestHead};
 use respan_gateway_http::{Body, Encoder, ProviderIo};

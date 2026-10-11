@@ -35,7 +35,7 @@ async fn preparation_failure(opening: Opening, panic: bool) {
         |_| EventStream::single(String::new()),
         move |reply| {
             let head = respan_gateway_http::http::Response::new(()).into_parts().0;
-            let encoder = h::formats::each(|_: &u8| Ok(Bytes::new()));
+            let encoder = h::framing::each(|_: &u8| Ok(Bytes::new()));
             let _sink = match opening {
                 Opening::Delayed | Opening::Empty => reply.write(head, encoder),
                 Opening::Immediate => reply.open(head, Bytes::from_static(b"premature"), encoder),
@@ -117,7 +117,7 @@ async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
             move |reply| {
                 drop(answer);
                 let head = respan_gateway_http::http::Response::new(()).into_parts().0;
-                Ok(reply.write(head, h::formats::each(|_: &u8| Ok(Bytes::new()))))
+                Ok(reply.write(head, h::framing::each(|_: &u8| Ok(Bytes::new()))))
             },
             |fault, _, _| Bytes::from(fault.message().to_owned()),
         );
@@ -143,7 +143,7 @@ async fn a_response_prepared_before_its_request_was_read_fails() {
         |_| EventStream::single(String::new()),
         |reply| {
             let head = reply.head();
-            Ok(reply.write(head, h::formats::each(|_: &u8| Ok(Bytes::new()))))
+            Ok(reply.write(head, h::framing::each(|_: &u8| Ok(Bytes::new()))))
         },
         h::plain,
     );

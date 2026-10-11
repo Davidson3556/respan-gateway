@@ -29,7 +29,7 @@ async fn open(
         |reply| {
             Ok(reply.write(
                 Response::new(()).into_parts().0,
-                h::formats::each(|_: &()| Ok(Bytes::new())),
+                h::framing::each(|_: &()| Ok(Bytes::new())),
             ))
         },
         h::plain,

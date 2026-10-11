@@ -23,9 +23,9 @@ use respan_gateway_core::{
     Response,
 };
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::formats::opaque;
-use respan_gateway_http::formats::whole;
-use respan_gateway_http::formats::{self as formats, default_content_type, sse};
+use respan_gateway_http::framing::passthrough;
+use respan_gateway_http::framing::whole;
+use respan_gateway_http::framing::{self, default_content_type, sse};
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{
@@ -47,7 +47,7 @@ fn matches_post(io: &ClientIo, path: &str) -> bool {
     let mut head = respan_gateway_http::http::Request::new(()).into_parts().0;
     head.method = io.request().method().clone();
     head.uri = io.request().uri().clone();
-    formats::posts_to(&head, path)
+    framing::posts_to(&head, path)
 }
 
 /// A gateway serving `format`: `providers`, `plugins` in order, `target`.
@@ -281,7 +281,7 @@ impl JevFormat {
 
     fn prepare(&self, head: &mut RequestHead) -> Result<Box<dyn Encoder<Jev>>, Fault> {
         head.method = http::Method::POST;
-        formats::set_path(head, "/complete")?;
+        framing::set_path(head, "/complete")?;
         head.headers
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(Box::new(Prompts(*self)))
@@ -294,7 +294,7 @@ impl JevFormat {
                 out.push(Answer::default());
                 return Ok(());
             }
-            let v = formats::json(&raw);
+            let v = framing::json(&raw);
             if let Some(message) = v.as_ref().and_then(|v| v["error"]["message"].as_str()) {
                 return Err(Upstream::fault(message).with(
                     respan_gateway_http::ProviderError::new(
@@ -371,7 +371,7 @@ fn words(fault: Fault) -> Fault {
     let Some(error) = fault.get::<respan_gateway_http::ProviderError>().cloned() else {
         return fault;
     };
-    let Some(v) = formats::json(error.response.body()) else {
+    let Some(v) = framing::json(error.response.body()) else {
         return fault;
     };
     let said = &v["error"];
@@ -656,7 +656,7 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
 async fn a_format_of_no_kind_is_served_like_any_other() {
     assert!(
         providers([])
-            .and_then(|gw| gw.client::<opaque::Input<Anywhere>, _, _>(Anywhere))
+            .and_then(|gw| gw.client::<passthrough::Input<Anywhere>, _, _>(Anywhere))
             .is_ok()
     );
 }
@@ -862,7 +862,7 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     #[derive(Clone)]
     struct Opaque;
 
-    impl Format<ClientIo, opaque::Input<Opaque>, opaque::Output<Opaque>> for Opaque {
+    impl Format<ClientIo, passthrough::Input<Opaque>, passthrough::Output<Opaque>> for Opaque {
         fn name(&self) -> &str {
             "opaque"
         }
@@ -872,30 +872,32 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
         fn bind(
             &self,
             io: ClientIo,
-        ) -> Result<Connection<opaque::Input<Opaque>, opaque::Output<Opaque>>, Fault> {
+        ) -> Result<Connection<passthrough::Input<Opaque>, passthrough::Output<Opaque>>, Fault>
+        {
             Ok(io.bind(
-                opaque::read_request,
-                opaque::write_response,
+                passthrough::read_request,
+                passthrough::write_response,
                 respan_gateway_http::plain,
             ))
         }
     }
-    impl Format<ProviderIo, opaque::Output<Opaque>, opaque::Input<Opaque>> for Opaque {
+    impl Format<ProviderIo, passthrough::Output<Opaque>, passthrough::Input<Opaque>> for Opaque {
         fn name(&self) -> &str {
             "opaque"
         }
         fn bind(
             &self,
             io: ProviderIo,
-        ) -> Result<Connection<opaque::Output<Opaque>, opaque::Input<Opaque>>, Fault> {
+        ) -> Result<Connection<passthrough::Output<Opaque>, passthrough::Input<Opaque>>, Fault>
+        {
             Ok(io.bind(
                 |head, input| {
-                    let encoder = opaque::write_request(head, input)?;
+                    let encoder = passthrough::write_request(head, input)?;
                     head.method = http::Method::POST;
-                    formats::set_path(head, "/")?;
+                    framing::set_path(head, "/")?;
                     Ok(encoder)
                 },
-                opaque::read_response,
+                passthrough::read_response,
                 |answer| respan_gateway_http::provider_fault("opaque", answer),
             ))
         }
@@ -1469,7 +1471,7 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
 #[derive(Clone)]
 struct Anywhere;
 
-impl Format<ClientIo, opaque::Input<Anywhere>, opaque::Output<Anywhere>> for Anywhere {
+impl Format<ClientIo, passthrough::Input<Anywhere>, passthrough::Output<Anywhere>> for Anywhere {
     fn name(&self) -> &str {
         "anywhere"
     }
@@ -1479,30 +1481,32 @@ impl Format<ClientIo, opaque::Input<Anywhere>, opaque::Output<Anywhere>> for Any
     fn bind(
         &self,
         io: ClientIo,
-    ) -> Result<Connection<opaque::Input<Anywhere>, opaque::Output<Anywhere>>, Fault> {
+    ) -> Result<Connection<passthrough::Input<Anywhere>, passthrough::Output<Anywhere>>, Fault>
+    {
         Ok(io.bind(
-            opaque::read_request,
-            opaque::write_response,
+            passthrough::read_request,
+            passthrough::write_response,
             respan_gateway_http::plain,
         ))
     }
 }
-impl Format<ProviderIo, opaque::Output<Anywhere>, opaque::Input<Anywhere>> for Anywhere {
+impl Format<ProviderIo, passthrough::Output<Anywhere>, passthrough::Input<Anywhere>> for Anywhere {
     fn name(&self) -> &str {
         "anywhere"
     }
     fn bind(
         &self,
         io: ProviderIo,
-    ) -> Result<Connection<opaque::Output<Anywhere>, opaque::Input<Anywhere>>, Fault> {
+    ) -> Result<Connection<passthrough::Output<Anywhere>, passthrough::Input<Anywhere>>, Fault>
+    {
         Ok(io.bind(
             |head, input| {
-                let encoder = opaque::write_request(head, input)?;
+                let encoder = passthrough::write_request(head, input)?;
                 head.method = http::Method::POST;
-                formats::set_path(head, "/")?;
+                framing::set_path(head, "/")?;
                 Ok(encoder)
             },
-            opaque::read_response,
+            passthrough::read_response,
             |answer| respan_gateway_http::provider_fault("anywhere", answer),
         ))
     }
@@ -1529,12 +1533,12 @@ impl Plugin for NoteFormat {
 async fn the_first_format_served_that_accepts_a_request_serves_it() {
     let serving_by = |gw: Gateway, anywhere_first: bool| match anywhere_first {
         true => gw
-            .client::<opaque::Input<Anywhere>, _, _>(Anywhere)?
+            .client::<passthrough::Input<Anywhere>, _, _>(Anywhere)?
             .client::<Jev, _, _>(V1),
         false => gw
             .client::<Jev, _, _>(V1)?
             .client::<Jev, _, _>(V2)?
-            .client::<opaque::Input<Anywhere>, _, _>(Anywhere),
+            .client::<passthrough::Input<Anywhere>, _, _>(Anywhere),
     };
     let served = async |anywhere_first: bool| {
         let note = NoteFormat::default();
@@ -1652,7 +1656,7 @@ async fn a_plugin_for_one_kind_lets_other_traffic_pass_when_it_says_so() {
     .and_then(|gw| {
         let gw = gw
             .client::<Jev, _, _>(V2)?
-            .client::<opaque::Input<Anywhere>, _, _>(Anywhere)?;
+            .client::<passthrough::Input<Anywhere>, _, _>(Anywhere)?;
         Ok(gw.plugin(ToHeader).plugin(PoliteJev))
     })
     .unwrap_or_else(|e| panic!("{e}"));
@@ -1793,7 +1797,7 @@ async fn traffic_of_no_kind_is_a_kind_of_its_own() {
             let jev = cx.is_kind::<Jev>();
             assert_eq!(other.is_some_and(|c| c == "internal"), !jev);
             let kinds = (
-                cx.is_kind::<opaque::Input<Anywhere>>(),
+                cx.is_kind::<passthrough::Input<Anywhere>>(),
                 cx.is_kind::<Jev>(),
                 cx.is_kind::<Answer>(),
             );
@@ -1810,7 +1814,7 @@ async fn traffic_of_no_kind_is_a_kind_of_its_own() {
         .and_then(|gw| {
             Ok(gw
                 .client::<Jev, _, _>(V1)?
-                .client::<opaque::Input<Anywhere>, _, _>(Anywhere)?
+                .client::<passthrough::Input<Anywhere>, _, _>(Anywhere)?
                 .plugin(kinds.clone()))
         })
         .unwrap_or_else(|e| panic!("{e}"));
@@ -1874,7 +1878,7 @@ async fn until_content_returns_a_response_of_no_kind_at_its_first_bytes_or_its_f
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut response = cx.call("any").await?;
             response
-                .buffer_until(|_: &opaque::Output<Anywhere>| true)
+                .buffer_until(|_: &passthrough::Output<Anywhere>| true)
                 .await?;
             Ok(Some(response))
         }

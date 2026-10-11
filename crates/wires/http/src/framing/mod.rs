@@ -1,10 +1,10 @@
 #![warn(missing_docs)]
-//! Reusable HTTP-aware wire-format helpers. Concrete vendor formats live with
-//! their kind (`respan-gateway-conversation`, with how they read a vendor's
-//! error body), and fault facts in `respan-gateway-core`. Traffic of no kind relays through
-//! [`opaque`].
+//! Framing that formats build on: server-sent events ([`sse`]), whole
+//! bodies ([`whole`]), an encoder per event, and path helpers. The formats
+//! themselves are the `respan-gateway-*-http` crates'; traffic of no kind
+//! relays through [`passthrough`].
 
-pub mod opaque;
+pub mod passthrough;
 pub mod sse;
 pub mod whole;
 

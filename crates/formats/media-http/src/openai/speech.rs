@@ -10,7 +10,7 @@ use super::{
 use respan_gateway_conversation::Usage;
 use respan_gateway_core::{Connection, EventStream, Fault, Format, NativeValue, Truncated};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::formats::{self, path_ends_with, sse};
+use respan_gateway_http::framing::{self, path_ends_with, sse};
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
 use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo};
 use respan_gateway_media::speech::{Input, Output};
@@ -129,7 +129,7 @@ fn read_response(response: http::Response<Body>) -> EventStream<Output> {
             },
         );
     }
-    formats::parse(
+    framing::parse(
         body,
         (),
         |(), bytes, out| {
@@ -177,7 +177,7 @@ fn response_encoder(
     }
     let format = asked.get("response_format").and_then(Value::as_str);
     super::content_type(head, audio_type(format.unwrap_or("mp3")));
-    formats::each(|event: &Output| match event {
+    framing::each(|event: &Output| match event {
         Output::Audio(bytes) => Ok(bytes.clone()),
         Output::Native(n) if &*n.format != NAME => Err(foreign(NAME, n)),
         // Raw audio has no place for anything else.

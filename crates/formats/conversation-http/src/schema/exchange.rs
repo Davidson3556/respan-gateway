@@ -12,8 +12,8 @@ use respan_gateway_conversation::Usage;
 use respan_gateway_conversation::{Assembled, Input, Output};
 use respan_gateway_core::{BadRequest, EventStream, Fault, Upstream};
 use respan_gateway_http::bytes::{BufMut, Bytes, BytesMut};
-use respan_gateway_http::formats::sse::{self, content_type, event_data, is_stream};
-use respan_gateway_http::formats::{self, whole};
+use respan_gateway_http::framing::sse::{self, content_type, event_data, is_stream};
+use respan_gateway_http::framing::{self, whole};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{
     Body, Encoder, RawReply, Wire, bodiless, http::request::Parts as RequestHead,
@@ -46,7 +46,7 @@ pub(crate) fn post<C: Schema>(
         )));
     }
     head.method = http::Method::POST;
-    formats::set_path(head, C::PATH)?;
+    framing::set_path(head, C::PATH)?;
     head.headers
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     for (name, value) in C::HEADERS {
@@ -148,7 +148,7 @@ pub(crate) fn read_response<C: Schema>(
     }
     if is_stream(&head) {
         let parser = OutputParser::new(schema.decoder(), true, body.limit());
-        return formats::parse(
+        return framing::parse(
             body,
             parser,
             |parser, bytes, out| parser.push(bytes, out),

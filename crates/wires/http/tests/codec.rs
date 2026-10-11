@@ -89,7 +89,7 @@ impl Format<ClientIo, In, Out> for Msg {
                         Ok(out.remove(0))
                     })
                 } else {
-                    respan_gateway_http::formats::parse(
+                    respan_gateway_http::framing::parse(
                         body,
                         Numbering(0),
                         |state, bytes, out| state.decode(bytes, out),
@@ -123,7 +123,7 @@ impl Format<ProviderIo, Out, In> for Msg {
                     Some(value) => format!("/msg/{}", value.1),
                     None => "/msg".to_owned(),
                 };
-                respan_gateway_http::formats::set_path(head, &path)?;
+                respan_gateway_http::framing::set_path(head, &path)?;
                 Ok(Box::new(Numbered(0)) as Box<dyn Encoder<In>>)
             },
             |response, _| {

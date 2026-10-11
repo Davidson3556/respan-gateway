@@ -109,7 +109,7 @@ impl http_body::Body for Pump {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::formats::opaque::Passthrough;
+    use crate::framing::passthrough::Passthrough;
     use respan_gateway_core::{EventStream, Format, Upstream};
 
     /// A reply prepared before handling ends is kept, however it ended.

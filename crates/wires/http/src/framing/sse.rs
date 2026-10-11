@@ -53,7 +53,7 @@ impl Parser {
     pub fn push(&mut self, bytes: Bytes) -> Result<Vec<Bytes>, Fault> {
         let events = self.split(&bytes, false);
         match self.limit.filter(|&limit| self.buf.len() > limit) {
-            Some(limit) => Err(crate::formats::whole::over(limit)),
+            Some(limit) => Err(crate::framing::whole::over(limit)),
             None => Ok(events),
         }
     }
@@ -133,7 +133,7 @@ where
     E: FnOnce(&mut S, Result<(), Fault>, &mut Vec<T>) -> Result<(), Fault> + Send + 'static,
 {
     let parser = Parser::new(body.limit());
-    crate::formats::parse(
+    crate::framing::parse(
         body,
         (parser, state, event),
         |(parser, state, event), bytes, out| {
@@ -268,7 +268,7 @@ mod tests {
             Some(serde_json::json!({"a": 2}))
         );
         assert_eq!(
-            crate::formats::json(b"{\"b\":3}"),
+            crate::framing::json(b"{\"b\":3}"),
             Some(serde_json::json!({"b": 3}))
         );
     }

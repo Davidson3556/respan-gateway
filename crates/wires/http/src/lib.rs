@@ -30,7 +30,7 @@ extern crate self as respan_gateway_http;
 
 #[cfg(feature = "axum")]
 pub mod axum;
-pub mod formats;
+pub mod framing;
 /// Explicit raw relay of a client's request, head and errors, as a plugin.
 pub mod relay;
 

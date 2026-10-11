@@ -41,7 +41,7 @@ use respan_gateway_conversation::{
 };
 use respan_gateway_core::{BadRequest, Connection, Fault, Format, NativeValue};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::formats::sse::{event, event_json};
+use respan_gateway_http::framing::sse::{event, event_json};
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo, http};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;

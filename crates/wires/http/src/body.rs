@@ -44,7 +44,7 @@ impl Body {
 
     /// The most bytes a reader may hold of it at once: of a provider's
     /// answer, its transport's limit ([`connect`](crate::connect)), which
-    /// the readers of [`formats`](crate::formats) keep a whole body, or one
+    /// the readers of [`formats`](crate::framing) keep a whole body, or one
     /// event, to. `None` for a body no binding read, already in memory.
     pub fn limit(&self) -> Option<usize> {
         self.limit

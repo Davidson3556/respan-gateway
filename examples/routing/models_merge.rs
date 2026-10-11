@@ -1,7 +1,7 @@
 //! Use case 4, one request, many upstream calls: `GET /v1/models` is answered
 //! by asking every configured provider and merging their lists into one.
 //!
-//! The endpoint is its own format, `Models`, built on `formats::opaque`:
+//! The endpoint is its own format, `Models`, built on `framing::passthrough`:
 //! its values are the bytes of the request and of each answer, which is all
 //! a plugin that never reads a chat needs. Its `MergeModels` plugin answers
 //! in `on_client`: it makes a call to each provider (a relay of the client's
@@ -26,9 +26,9 @@ use respan_gateway_core::{
     ClientContext, Connection, Fault, Format, Gateway, Plugin, Response, async_trait,
 };
 use respan_gateway_http::HttpTransport;
-use respan_gateway_http::formats;
-use respan_gateway_http::formats::opaque;
-use respan_gateway_http::formats::whole;
+use respan_gateway_http::framing;
+use respan_gateway_http::framing::passthrough;
+use respan_gateway_http::framing::whole;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{self as h, ClientIo, ProviderIo};
 #[allow(dead_code)]
@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 #[derive(Clone)]
 struct Models;
 
-impl Format<ClientIo, opaque::Input<Models>, opaque::Output<Models>> for Models {
+impl Format<ClientIo, passthrough::Input<Models>, passthrough::Output<Models>> for Models {
     fn name(&self) -> &str {
         "models"
     }
@@ -55,14 +55,14 @@ impl Format<ClientIo, opaque::Input<Models>, opaque::Output<Models>> for Models 
     fn bind(
         &self,
         io: ClientIo,
-    ) -> Result<Connection<opaque::Input<Models>, opaque::Output<Models>>, Fault> {
+    ) -> Result<Connection<passthrough::Input<Models>, passthrough::Output<Models>>, Fault> {
         Ok(io.bind(
-            opaque::read_request,
+            passthrough::read_request,
             |reply| {
                 // A merged list has no provider's head to borrow a content type from.
                 let mut head = reply.head();
-                formats::default_content_type(&mut head, "application/json");
-                let write = |one: &[opaque::Output<Models>]| {
+                framing::default_content_type(&mut head, "application/json");
+                let write = |one: &[passthrough::Output<Models>]| {
                     Ok(one
                         .iter()
                         .flat_map(|g| g.0.body().to_vec())
@@ -71,7 +71,7 @@ impl Format<ClientIo, opaque::Input<Models>, opaque::Output<Models>> for Models 
                 Ok(reply.write(head, whole::collect(write)))
             },
             |fault, _, head| {
-                formats::default_content_type(head, "application/json");
+                framing::default_content_type(head, "application/json");
                 json!({ "error": { "message": fault.message() } })
                     .to_string()
                     .into()
@@ -80,7 +80,7 @@ impl Format<ClientIo, opaque::Input<Models>, opaque::Output<Models>> for Models 
     }
 }
 
-impl Format<ProviderIo, opaque::Output<Models>, opaque::Input<Models>> for Models {
+impl Format<ProviderIo, passthrough::Output<Models>, passthrough::Input<Models>> for Models {
     fn name(&self) -> &str {
         "models"
     }
@@ -88,12 +88,12 @@ impl Format<ProviderIo, opaque::Output<Models>, opaque::Input<Models>> for Model
     fn bind(
         &self,
         io: ProviderIo,
-    ) -> Result<Connection<opaque::Output<Models>, opaque::Input<Models>>, Fault> {
-        Ok(
-            io.bind(opaque::write_request, opaque::read_response, |answer| {
-                h::provider_fault("models", answer)
-            }),
-        )
+    ) -> Result<Connection<passthrough::Output<Models>, passthrough::Input<Models>>, Fault> {
+        Ok(io.bind(
+            passthrough::write_request,
+            passthrough::read_response,
+            |answer| h::provider_fault("models", answer),
+        ))
     }
 }
 
@@ -103,13 +103,13 @@ struct MergeModels(Vec<&'static str>);
 #[async_trait]
 impl Plugin for MergeModels {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if !cx.is_kind::<opaque::Input<Models>>() {
+        if !cx.is_kind::<passthrough::Input<Models>>() {
             return Ok(None);
         }
         let calls: Vec<_> = self.0.iter().map(|p| cx.call(*p)).collect();
         let lists: Vec<Result<Vec<Value>, Fault>> =
             join_all(calls.into_iter().map(|call| async move {
-                let frames: Vec<opaque::Output<Models>> =
+                let frames: Vec<passthrough::Output<Models>> =
                     call.await?.outputs().try_collect().await?;
                 let bytes: Vec<u8> = frames.iter().flat_map(|f| f.0.body().to_vec()).collect();
                 let mut list: Value = serde_json::from_slice(&bytes)
@@ -137,7 +137,7 @@ impl Plugin for MergeModels {
         }
         let merged = json!({ "object": "list", "data": data }).to_string();
         Ok(Some(Response::stream(stream::iter([Ok(
-            opaque::Output::<Models>::new(merged),
+            passthrough::Output::<Models>::new(merged),
         )]))))
     }
 }
@@ -235,11 +235,14 @@ fn key(value: &'static str) -> HeaderMap {
 
 fn gateway(a: &LocalModels, b: &LocalModels) -> Result<Gateway, Fault> {
     let providers = [("a", a, "Bearer key-a"), ("b", b, "Bearer key-b")];
-    let mut gateway = Gateway::new().client::<opaque::Input<Models>, _, _>(Models)?;
+    let mut gateway = Gateway::new().client::<passthrough::Input<Models>, _, _>(Models)?;
     for (name, server, token) in providers {
         let transport = HttpTransport::new(&server.url)?.with_headers(key(token))?;
-        gateway =
-            gateway.provider::<opaque::Input<Models>, _, _>(name, Models, transport.connect())?;
+        gateway = gateway.provider::<passthrough::Input<Models>, _, _>(
+            name,
+            Models,
+            transport.connect(),
+        )?;
     }
     Ok(gateway.plugin(MergeModels(
         providers.iter().map(|(name, ..)| *name).collect(),

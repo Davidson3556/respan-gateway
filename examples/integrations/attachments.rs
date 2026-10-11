@@ -59,7 +59,7 @@ use respan_gateway_examples::store::{
 };
 use respan_gateway_http::HttpTransport;
 use respan_gateway_http::Status;
-use respan_gateway_http::formats::opaque;
+use respan_gateway_http::framing::passthrough;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential, Wire, retryable};
 use respan_gateway_plugins::routing::{Backoff, Until, first_success};
@@ -330,7 +330,7 @@ impl PdfToText {
                 .fold(call, |call, key| call.with_extension(key));
             async move {
                 let mut bytes = Vec::new();
-                let mut chunks = call.await?.outputs::<opaque::Output<Rest>>();
+                let mut chunks = call.await?.outputs::<passthrough::Output<Rest>>();
                 while let Some(chunk) = chunks.try_next().await? {
                     if chunk.0.body().len() > limit.saturating_sub(bytes.len()) {
                         return Err(too_large());

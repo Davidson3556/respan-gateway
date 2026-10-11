@@ -7,7 +7,7 @@
 
 use respan_gateway_core::{Details, ErrorCode, Fault, RetryAfter, Upstream};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::sse::{Parser, event_json};
+use respan_gateway_http::framing::sse::{Parser, event_json};
 use respan_gateway_http::http::{self, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{ProviderError, Status, provider_fault};
 use serde_json::Value;

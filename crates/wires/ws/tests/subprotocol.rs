@@ -23,9 +23,9 @@ fn keyed(probe: &Probe) -> Gateway {
         .with_headers(own)
         .unwrap();
     Gateway::new()
-        .client::<respan_gateway_http::formats::opaque::Input<Raw>, _, _>(Raw)
+        .client::<respan_gateway_http::framing::passthrough::Input<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<respan_gateway_http::formats::opaque::Input<Raw>, _, _>(
+        .provider::<respan_gateway_http::framing::passthrough::Input<Raw>, _, _>(
             "p",
             Raw,
             transport.connect(),

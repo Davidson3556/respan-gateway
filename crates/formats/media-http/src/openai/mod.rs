@@ -41,7 +41,7 @@ use respan_gateway_core::{
     BadRequest, Connection, Details, ErrorCode, Fault, NativeFields, NativeValue, Upstream,
 };
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::{self, path_ends_with, sse};
+use respan_gateway_http::framing::{self, path_ends_with, sse};
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{
     self, HeaderMap, HeaderValue, StatusCode, request::Parts as RequestHead,
@@ -474,7 +474,7 @@ where
 
 /// Set a call's path and content type.
 fn post_to(head: &mut RequestHead, path: &str, content_type: &str) -> Result<(), Fault> {
-    formats::set_path(head, path)?;
+    framing::set_path(head, path)?;
     let content_type = HeaderValue::from_str(content_type)
         .map_err(|e| Fault::internal("a content type is no header").with_source(e))?;
     head.headers.insert(CONTENT_TYPE, content_type);

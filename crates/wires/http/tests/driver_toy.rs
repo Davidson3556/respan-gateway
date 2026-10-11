@@ -76,7 +76,7 @@ impl respan_gateway_core::Format<ClientIo, In, Out> for Toy {
                             .ok_or_else(|| BadRequest::fault("empty input"))
                     })
                 } else {
-                    respan_gateway_http::formats::parse(
+                    respan_gateway_http::framing::parse(
                         request.into_body(),
                         ReqDec,
                         ReqDec::decode,
@@ -125,7 +125,7 @@ impl respan_gateway_core::Format<ProviderIo, Out, In> for Toy {
                     done: false,
                     status: answer.status().as_u16(),
                 };
-                respan_gateway_http::formats::parse(
+                respan_gateway_http::framing::parse(
                     answer.into_body(),
                     decoder,
                     RespDec::decode,

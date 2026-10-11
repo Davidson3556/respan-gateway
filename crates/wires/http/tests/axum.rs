@@ -404,15 +404,15 @@ fn exchange(
 // which the transport puts back when it has no keys of its own.
 #[tokio::test]
 async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
-    use respan_gateway_http::formats::opaque;
-    use respan_gateway_http::formats::opaque::Passthrough;
+    use respan_gateway_http::framing::passthrough;
+    use respan_gateway_http::framing::passthrough::Passthrough;
     use respan_gateway_http::http_body_util::BodyExt;
     let head = call_head("/v1/chat?key=k&beta=1", &CLIENT);
     let before = head.headers.clone();
     let gateway = Gateway::new()
-        .client::<opaque::Input<Passthrough>, _, _>(Passthrough)
+        .client::<passthrough::Input<Passthrough>, _, _>(Passthrough)
         .expect("valid test setup")
-        .provider::<opaque::Input<Passthrough>, _, _>(
+        .provider::<passthrough::Input<Passthrough>, _, _>(
             "relay",
             Passthrough,
             respan_gateway_http::connect(
@@ -726,7 +726,7 @@ impl Plugin for L6Ends {
 /// complete, so each request and call ends `ok`, never `abandoned`.
 async fn l6_bodiless(with_304: bool) {
     use axum::routing::get;
-    use respan_gateway_http::formats::opaque::Passthrough;
+    use respan_gateway_http::framing::passthrough::Passthrough;
     let big = "x".repeat(1 << 20);
     let provider = spawn(
         Router::new()
@@ -746,12 +746,12 @@ async fn l6_bodiless(with_304: bool) {
     .await;
     let ends = L6Ends::default();
     let gateway = Gateway::new()
-        .provider::<respan_gateway_http::formats::opaque::Input<
-            respan_gateway_http::formats::opaque::Passthrough,
+        .provider::<respan_gateway_http::framing::passthrough::Input<
+            respan_gateway_http::framing::passthrough::Passthrough,
         >, _, _>("any", Passthrough, http(provider.clone()).connect())
         .and_then(|g| {
-            g.client::<respan_gateway_http::formats::opaque::Input<
-                respan_gateway_http::formats::opaque::Passthrough,
+            g.client::<respan_gateway_http::framing::passthrough::Input<
+                respan_gateway_http::framing::passthrough::Passthrough,
             >, _, _>(Passthrough)
         })
         .map(|g| g.plugin(ends.clone()))

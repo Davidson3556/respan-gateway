@@ -3,14 +3,14 @@
 //! so the encoder writes what a plugin changed in the path, and a plugin can
 //! make a call of its own to any path under the API's prefix:
 //! `cx.call("files").with_input(Ask::get("/v1/files/f1/content"))`. Its output
-//! is the answer's bytes, an [`opaque::Output`]. Used by `attachments.rs` (a files
+//! is the answer's bytes, an [`passthrough::Output`]. Used by `attachments.rs` (a files
 //! endpoint) and `jobs_background.rs` (Responses). Calls take one finite
 //! [`Ask`] (or relay an already complete raw body); live input streams have
 //! no method or path to put in the request head and are rejected before dialing.
 
 use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::{each, opaque, set_path};
+use respan_gateway_http::framing::{each, passthrough, set_path};
 use respan_gateway_http::http::{Method, request::Parts as RequestHead};
 use respan_gateway_http::{self as h, ClientIo, Encoder, ProviderIo};
 
@@ -66,7 +66,7 @@ fn request(head: &mut RequestHead, ask: Option<&Ask>) -> Result<Box<dyn Encoder<
     Ok(each(|ask: &Ask| Ok(ask.body.clone())))
 }
 
-impl Format<ClientIo, Ask, opaque::Output<Rest>> for Rest {
+impl Format<ClientIo, Ask, passthrough::Output<Rest>> for Rest {
     fn name(&self) -> &str {
         self.name
     }
@@ -75,7 +75,7 @@ impl Format<ClientIo, Ask, opaque::Output<Rest>> for Rest {
         io.request().uri().path().starts_with(self.prefix)
     }
 
-    fn bind(&self, io: ClientIo) -> Result<Connection<Ask, opaque::Output<Rest>>, Fault> {
+    fn bind(&self, io: ClientIo) -> Result<Connection<Ask, passthrough::Output<Rest>>, Fault> {
         Ok(io.bind(
             |request| {
                 h::messages(request, |head, body| {
@@ -87,20 +87,20 @@ impl Format<ClientIo, Ask, opaque::Output<Rest>> for Rest {
                     })
                 })
             },
-            opaque::write_response,
+            passthrough::write_response,
             h::plain,
         ))
     }
 }
 
-impl Format<ProviderIo, opaque::Output<Rest>, Ask> for Rest {
+impl Format<ProviderIo, passthrough::Output<Rest>, Ask> for Rest {
     fn name(&self) -> &str {
         self.name
     }
 
-    fn bind(&self, io: ProviderIo) -> Result<Connection<opaque::Output<Rest>, Ask>, Fault> {
+    fn bind(&self, io: ProviderIo) -> Result<Connection<passthrough::Output<Rest>, Ask>, Fault> {
         let name = self.name;
-        Ok(io.bind(request, opaque::read_response, move |answer| {
+        Ok(io.bind(request, passthrough::read_response, move |answer| {
             h::provider_fault(name, answer)
         }))
     }

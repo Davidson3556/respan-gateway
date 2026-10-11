@@ -21,7 +21,7 @@ use respan_gateway_core::{
     async_trait,
 };
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::{self as formats, whole};
+use respan_gateway_http::framing::{self, whole};
 use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{self as h, ClientIo, ProviderIo};
@@ -67,7 +67,7 @@ impl Format<ClientIo, EmbedRequest, Embeddings> for OpenAiEmbeddings {
 
     fn matches(&self, io: &ClientIo) -> bool {
         io.request().method() == Method::POST
-            && formats::clean_path(io.request().uri().path()).ends_with("/embeddings")
+            && framing::clean_path(io.request().uri().path()).ends_with("/embeddings")
     }
 
     fn bind(&self, io: ClientIo) -> Result<Connection<EmbedRequest, Embeddings>, Fault> {
@@ -75,7 +75,7 @@ impl Format<ClientIo, EmbedRequest, Embeddings> for OpenAiEmbeddings {
             |request| h::messages(request, |_, raw| read_request(raw)),
             |reply| {
                 let mut head = reply.head();
-                formats::default_content_type(&mut head, "application/json");
+                framing::default_content_type(&mut head, "application/json");
                 Ok(reply.write(head, whole::collect(write_embeddings)))
             },
             error,
@@ -97,10 +97,10 @@ impl Format<ProviderIo, Embeddings, EmbedRequest> for OpenAiEmbeddings {
                     )));
                 }
                 head.method = Method::POST;
-                formats::set_path(head, "/embeddings")?;
+                framing::set_path(head, "/embeddings")?;
                 head.headers
                     .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                Ok(formats::each(write_request))
+                Ok(framing::each(write_request))
             },
             |response, _| {
                 whole::read(response.into_body(), |raw, out| {
@@ -171,7 +171,7 @@ fn read_embeddings(raw: Bytes) -> Result<Embeddings, Fault> {
 
 /// The fault as this protocol's error body: the format's error writer.
 fn error(fault: &Fault, _: &h::http::Request<Bytes>, head: &mut ResponseHead) -> Bytes {
-    formats::default_content_type(head, "application/json");
+    framing::default_content_type(head, "application/json");
     Bytes::from(json!({ "error": { "message": fault.message() } }).to_string())
 }
 

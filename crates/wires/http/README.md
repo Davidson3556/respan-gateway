@@ -29,7 +29,7 @@ succeeds by HTTP's rule, a 2xx or an asked-for 101, unless the format says
 otherwise (`ProviderIo::with_success`). There is no additional HTTP format trait
 or implementation macro.
 
-The `formats::opaque` module owns the `Input<F>` / `Output<F>` passthrough
+The `framing::passthrough` module owns the `Input<F>` / `Output<F>` passthrough
 pair, its four functions, and the `Passthrough` format.
 
 ## A small format
@@ -39,7 +39,7 @@ This format sends UTF-8 questions to `POST /echo` and receives byte answers:
 ```rust
 use respan_gateway_http as h;
 use h::bytes::Bytes;
-use h::formats::{self, whole};
+use h::framing::{self, whole};
 use h::http::{Method, Uri};
 use respan_gateway_core::{BadRequest, Connection, Fault, Format, Result};
 
@@ -62,7 +62,7 @@ impl Format<h::ClientIo, String, Vec<u8>> for Echo {
             }),
             |reply| {
                 let head = reply.head();
-                Ok(reply.write(head, formats::each(|answer: &Vec<u8>| {
+                Ok(reply.write(head, framing::each(|answer: &Vec<u8>| {
                     Ok(Bytes::copy_from_slice(answer))
                 })))
             },
@@ -80,7 +80,7 @@ impl Format<h::ProviderIo, Vec<u8>, String> for Echo {
                 question.ok_or_else(|| Fault::config("echo takes one question"))?;
                 head.method = Method::POST;
                 head.uri = Uri::from_static("/echo");
-                Ok(formats::each(|question: &String| Ok(Bytes::from(question.clone()))))
+                Ok(framing::each(|question: &String| Ok(Bytes::from(question.clone()))))
             },
             |response, _sent| whole::read(response.into_body(), |bytes, out| {
                 out.push(bytes.to_vec());
@@ -93,7 +93,7 @@ impl Format<h::ProviderIo, Vec<u8>, String> for Echo {
 
 // The same encoder primitive works synchronously without a connection/runtime.
 let bytes = h::encode_all(
-    formats::each(|value: &String| Ok(Bytes::from(value.clone()))),
+    framing::each(|value: &String| Ok(Bytes::from(value.clone()))),
     &["hello".to_owned()],
 )?;
 assert_eq!(bytes, Bytes::from_static(b"hello"));
@@ -103,11 +103,11 @@ assert_eq!(bytes, Bytes::from_static(b"hello"));
 For stateful output, implement the small `Encoder<T>` interface: `encode` writes
 one value and `end` writes final success or error framing. A live body's
 encoder may write zero or more messages of a value, a frame each, with
-`encode_messages` (`formats::each_message`); the next value is taken only once
+`encode_messages` (`framing::each_message`); the next value is taken only once
 they are read. It performs no I/O, chooses no headers and does not control when
-a response opens. Simple formats can use functions such as `formats::each`;
+a response opens. Simple formats can use functions such as `framing::each`;
 stateful SSE formats keep their own encoding state. Response decoders return event streams, with whole-body
-(`whole::read`), SSE (`sse::read`) and generic frame (`formats::parse`)
+(`whole::read`), SSE (`sse::read`) and generic frame (`framing::parse`)
 helpers.
 
 ## Bodies and preparation

@@ -8,7 +8,7 @@ use respan_gateway_core::futures::stream;
 use respan_gateway_core::{BadRequest, Fault, Upstream};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::sse;
+use respan_gateway_http::framing::sse;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
 use respan_gateway_mcp::Message;

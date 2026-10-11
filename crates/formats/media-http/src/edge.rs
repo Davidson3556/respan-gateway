@@ -3,7 +3,7 @@
 use respan_gateway_conversation_http::read_provider_error;
 use respan_gateway_core::{BadRequest, Connection, EventStream, Fault, NativeFields};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats;
+use respan_gateway_http::framing;
 use respan_gateway_http::http::{self, request::Parts as RequestHead};
 use respan_gateway_http::{Body, Encoder, ProviderIo};
 use respan_gateway_media::video;
@@ -40,12 +40,12 @@ where
 
 /// The encoder of a call whose body is `body`.
 pub(crate) fn sends<I: 'static>(body: Bytes) -> Box<dyn Encoder<I>> {
-    formats::each(move |_: &I| Ok(body.clone()))
+    framing::each(move |_: &I| Ok(body.clone()))
 }
 
 /// The content of a video, chunk by chunk as it comes.
 pub(crate) fn content(body: Body) -> EventStream<video::Output> {
-    formats::parse(
+    framing::parse(
         body,
         (),
         |(), bytes, out| {

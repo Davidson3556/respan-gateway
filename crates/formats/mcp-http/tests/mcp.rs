@@ -115,7 +115,7 @@ async fn send(
 fn messages(body: &str) -> Vec<Value> {
     let each = body.split_inclusive("\n\n");
     let all = each
-        .filter_map(respan_gateway_http::formats::json)
+        .filter_map(respan_gateway_http::framing::json)
         .flat_map(|v| match v {
             Value::Array(all) => all,
             one => vec![one],

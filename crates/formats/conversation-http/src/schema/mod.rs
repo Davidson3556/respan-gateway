@@ -1,7 +1,7 @@
 //! The conversation kind's binding to HTTP, which its formats share. A
 //! vendor supplies its [`Schema`]: its names and its JSON, both ways; the
 //! HTTP around it, on either edge, is the trait's provided methods. Wire
-//! helpers live in [`respan_gateway_http::formats`].
+//! helpers live in [`respan_gateway_http::framing`].
 //!
 //! Each format decodes a request into an [`Input`], keeping the fields the
 //! kind has no place for in its `native`, and writes a request from the
@@ -124,7 +124,7 @@ pub trait Schema: Copy + Send + Sync + 'static {
     /// ending in [`Schema::PATH`].
     fn accepts<B>(&self, request: &http::Request<B>) -> bool {
         request.method() == http::Method::POST
-            && respan_gateway_http::formats::path_ends_with(request.uri(), Self::PATH)
+            && respan_gateway_http::framing::path_ends_with(request.uri(), Self::PATH)
     }
 
     /// Read a request lazily: the decoder of a client's request.

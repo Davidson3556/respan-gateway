@@ -8,7 +8,7 @@ mod tests;
 
 use respan_gateway_core::{BadRequest, Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::{ClientIo, ProviderIo, Wire, formats};
+use respan_gateway_http::{ClientIo, ProviderIo, Wire, framing};
 use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::WsTransport;
 
@@ -73,7 +73,7 @@ impl Format<ClientIo, Input, Output> for OpenAiRealtime {
         let mut client = input::Client::new(model);
         let read = move |raw: Bytes, out: &mut Vec<Input>| client.read(raw, out);
         let mut client = output::Client::default();
-        let write = formats::each_message(move |event: &Output, out: &mut Vec<Bytes>| {
+        let write = framing::each_message(move |event: &Output, out: &mut Vec<Bytes>| {
             client.write(event, out)
         });
         Ok(SPEC.client(io, Box::new(read), write))
@@ -96,7 +96,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiRealtime {
         })?;
         let query = Some(format!("model={model}"));
         let mut provider = input::Provider::new(model);
-        let write = formats::each_message(move |event: &Input, out: &mut Vec<Bytes>| {
+        let write = framing::each_message(move |event: &Input, out: &mut Vec<Bytes>| {
             provider.write(event, out)
         });
         let mut provider = output::Provider::default();

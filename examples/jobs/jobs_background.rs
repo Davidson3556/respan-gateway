@@ -48,7 +48,7 @@ use respan_gateway_examples::store::{
     sql,
 };
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::formats::opaque;
+use respan_gateway_http::framing::passthrough;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode, Uri};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Body, Credential, HttpTransport, Wire, built_wrong};
@@ -159,7 +159,7 @@ INSERT OR IGNORE INTO job_counters VALUES('id',0);
 
 /// A response the plugin answers itself.
 fn answer(body: impl Into<Bytes>) -> Option<Response> {
-    let body = opaque::Output::<Rest>::new(body.into());
+    let body = passthrough::Output::<Rest>::new(body.into());
     Some(Response::stream(stream::iter([Ok(body)])))
 }
 
@@ -199,14 +199,14 @@ impl Jobs {
         remember: bool,
     ) -> Result<(), Fault> {
         let (jobs, home) = (self.clone(), (tenant(cx), deployment));
-        cx.wrap(move |events: EventStream<opaque::Output<Rest>>| {
+        cx.wrap(move |events: EventStream<passthrough::Output<Rest>>| {
             stream::once(async move {
                 let (head, body) = events.try_fold((None, BytesMut::new()), |(head, mut bytes), chunk| async move {
                     let (next, body) = chunk.0.into_parts();
                     bytes.extend_from_slice(&body); Ok((head.or(Some(next)), bytes))
                 }).await?;
                 let Some(head) = head else { return Ok(None); };
-                let mut got = opaque::Output::from_http(http::Response::from_parts(head, body.freeze()));
+                let mut got = passthrough::Output::from_http(http::Response::from_parts(head, body.freeze()));
                 let native = jobs.show(&mut got, &id, home).await?;
                 if remember && let Some(native) = native {
                     jobs.db(move |tx| {
@@ -333,7 +333,7 @@ impl Jobs {
     /// the signed id for the `previous_response_id` it echoes, of the same home.
     async fn show(
         &self,
-        got: &mut opaque::Output<Rest>,
+        got: &mut passthrough::Output<Rest>,
         id: &str,
         home: Home,
     ) -> Result<Option<String>, Fault> {
@@ -569,7 +569,7 @@ impl Plugin for Jobs {
                 .await?
                 .ok_or_else(|| Fault::internal("bad job id"))?;
             let output = job.output.clone();
-            cx.filter(move |got: &mut opaque::Output<Rest>| {
+            cx.filter(move |got: &mut passthrough::Output<Rest>| {
                 lock(&output).extend_from_slice(got.0.body());
                 Ok(())
             })?;

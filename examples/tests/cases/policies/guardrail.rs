@@ -1,42 +1,50 @@
 use super::*;
 use respan_gateway_conversation::{Message, Role};
 use respan_gateway_core::{Connection, Format};
-use respan_gateway_http::formats::opaque;
+use respan_gateway_http::framing::passthrough;
 use respan_gateway_http::{self as h, ClientIo, ProviderIo};
 
 /// OpenAI's Responses API, relayed byte for byte: traffic of no kind.
 #[derive(Clone)]
 struct Responses;
 
-impl Format<ClientIo, opaque::Input<Responses>, opaque::Output<Responses>> for Responses {
+impl Format<ClientIo, passthrough::Input<Responses>, passthrough::Output<Responses>> for Responses {
     fn name(&self) -> &str {
         "responses"
     }
     fn matches(&self, io: &ClientIo) -> bool {
         io.request().method() == h::http::Method::POST
-            && h::formats::clean_path(io.request().uri().path()).ends_with("/responses")
+            && h::framing::clean_path(io.request().uri().path()).ends_with("/responses")
     }
     fn bind(
         &self,
         io: ClientIo,
-    ) -> Result<Connection<opaque::Input<Responses>, opaque::Output<Responses>>, Fault> {
-        Ok(io.bind(opaque::read_request, opaque::write_response, h::plain))
+    ) -> Result<Connection<passthrough::Input<Responses>, passthrough::Output<Responses>>, Fault>
+    {
+        Ok(io.bind(
+            passthrough::read_request,
+            passthrough::write_response,
+            h::plain,
+        ))
     }
 }
 
-impl Format<ProviderIo, opaque::Output<Responses>, opaque::Input<Responses>> for Responses {
+impl Format<ProviderIo, passthrough::Output<Responses>, passthrough::Input<Responses>>
+    for Responses
+{
     fn name(&self) -> &str {
         "responses"
     }
     fn bind(
         &self,
         io: ProviderIo,
-    ) -> Result<Connection<opaque::Output<Responses>, opaque::Input<Responses>>, Fault> {
-        Ok(
-            io.bind(opaque::write_request, opaque::read_response, |answer| {
-                h::provider_fault("responses", answer)
-            }),
-        )
+    ) -> Result<Connection<passthrough::Output<Responses>, passthrough::Input<Responses>>, Fault>
+    {
+        Ok(io.bind(
+            passthrough::write_request,
+            passthrough::read_response,
+            |answer| h::provider_fault("responses", answer),
+        ))
     }
 }
 
@@ -50,8 +58,8 @@ fn gateway_with_responses(
     + 'static,
 ) -> Result<Gateway, Fault> {
     gateway(transport.clone())?
-        .provider::<opaque::Input<Responses>, _, _>("responses", Responses, transport)?
-        .client::<opaque::Input<Responses>, _, _>(Responses)
+        .provider::<passthrough::Input<Responses>, _, _>("responses", Responses, transport)?
+        .client::<passthrough::Input<Responses>, _, _>(Responses)
 }
 
 #[tokio::test]

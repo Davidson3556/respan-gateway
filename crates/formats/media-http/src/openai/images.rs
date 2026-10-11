@@ -14,7 +14,7 @@ use respan_gateway_core::{
     BadRequest, Connection, EventStream, Fault, Format, NativeFields, NativeValue, Truncated,
 };
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::formats::{path_ends_with, sse, whole};
+use respan_gateway_http::framing::{path_ends_with, sse, whole};
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
 use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo};
 use respan_gateway_media::image::{Image, Input, Output, Partial, Start};

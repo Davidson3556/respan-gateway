@@ -208,7 +208,7 @@ async fn send(
     let body = String::from_utf8_lossy(&body?).into_owned();
     let first = body
         .split_inclusive("\n\n")
-        .filter_map(respan_gateway_http::formats::json)
+        .filter_map(respan_gateway_http::framing::json)
         .find(|message| {
             id.is_some_and(|id| message["id"] == id) && message.get("method").is_none()
         });

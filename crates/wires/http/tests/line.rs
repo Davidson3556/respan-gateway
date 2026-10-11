@@ -74,7 +74,7 @@ impl respan_gateway_core::Format<respan_gateway_http::ClientIo, LIn, LOut> for L
                 if reply.request().method() == http::Method::GET {
                     Ok(reply.open(
                         head,
-                        Bytes::from(respan_gateway_http::formats::sse::comment("open")),
+                        Bytes::from(respan_gateway_http::framing::sse::comment("open")),
                         Box::new(LineEncoder(None)),
                     ))
                 } else {
@@ -105,7 +105,7 @@ fn line_outputs(
     if bodiless(request.method(), response.status()) {
         return EventStream::empty();
     }
-    respan_gateway_http::formats::parse(
+    respan_gateway_http::framing::parse(
         response.into_body(),
         LineDecoder::default(),
         |state, bytes, out| state.decode(bytes, out),
@@ -118,7 +118,7 @@ fn line_outputs(
 
 /// A call as Line writes it: at `/line`, each input as its text.
 fn line_call(head: &mut RequestHead, _: Option<&LIn>) -> Result<Box<dyn Encoder<LIn>>, Fault> {
-    respan_gateway_http::formats::set_path(head, "/line")?;
+    respan_gateway_http::framing::set_path(head, "/line")?;
     Ok(Box::new(Lines))
 }
 
@@ -1326,7 +1326,7 @@ impl respan_gateway_core::Format<respan_gateway_http::ProviderIo, LOut, LIn> for
                 let model = input.map_or("none", |input| input.0.as_str());
                 let model = model.replace(' ', "%20");
                 head.method = http::Method::POST;
-                respan_gateway_http::formats::set_path(head, &format!("/models/{model}"))?;
+                respan_gateway_http::framing::set_path(head, &format!("/models/{model}"))?;
                 Ok(Box::new(Untranslatable) as Box<dyn Encoder<LIn>>)
             },
             line_outputs,

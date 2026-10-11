@@ -45,7 +45,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/kinds/media/` | Kind | A kind per media operation (images, transcription, speech, embeddings, video jobs) over the conversation kind's media and usage | Core, conversation |
 | `crates/kinds/realtime/` | Kind | A live session's events both ways: configuration, audio, messages, responses, barge-in and tool calls, over the conversation kind's messages, tools and usage | Core, conversation |
 | `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes | Core |
-| `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the opaque format; optional Reqwest transport and Axum hosting | Core |
+| `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the passthrough format; optional Reqwest transport and Axum hosting | Core |
 | `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`); optional Axum hosting | Core, HTTP |
 | `crates/formats/conversation-http/` | Format | The HTTP binding (`Schema`), OpenAI Chat and Anthropic Messages | Conversation, HTTP |
 | `crates/formats/media-http/` | Format | OpenAI's media endpoints as compatible vendors serve them, and Veo's as a provider | Media, conversation-http, HTTP |
@@ -148,7 +148,7 @@ format the router was not given keeps its target.
   and their quirks are the providers crate's.
 - Every kind is an `Input` in and an `Output` out, in the crate that owns
   it: `conversation`, `media` (a module per operation), `realtime`, and `mcp` (envelopes around its typed
-  JSON-RPC `Message`). HTTP's passthrough (`formats::opaque`,
+  JSON-RPC `Message`). HTTP's passthrough (`framing::passthrough`,
   `Input<F>` / `Output<F>`) is the one kind that is its own wire.
   Core defines no kinds or `Format` implementations.
   Plugins and whole-body conversation encoders share the conversation crate's ordered

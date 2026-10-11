@@ -32,7 +32,7 @@ impl Format<h::ClientIo, String, Bytes> for Text {
             },
             |reply| {
                 let head = reply.head();
-                Ok(reply.write(head, h::formats::each(|value: &Bytes| Ok(value.clone()))))
+                Ok(reply.write(head, h::framing::each(|value: &Bytes| Ok(value.clone()))))
             },
             h::plain,
         ))
@@ -45,12 +45,12 @@ impl Format<h::ProviderIo, Bytes, String> for Text {
     fn bind(&self, io: h::ProviderIo) -> Result<Connection<Bytes, String>, Fault> {
         Ok(io.bind(
             |_, _: Option<&String>| {
-                Ok(h::formats::each(|value: &String| {
+                Ok(h::framing::each(|value: &String| {
                     Ok(Bytes::from(value.clone()))
                 }))
             },
             |response, _| {
-                h::formats::whole::read(response.into_body(), |bytes, out| {
+                h::framing::whole::read(response.into_body(), |bytes, out| {
                     out.push(bytes);
                     Ok(())
                 })

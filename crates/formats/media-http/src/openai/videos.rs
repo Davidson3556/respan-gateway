@@ -14,7 +14,7 @@ use respan_gateway_core::{
     BadRequest, Connection, ErrorCode, EventStream, Fault, Format, Upstream,
 };
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::{self, forwarded_path, whole};
+use respan_gateway_http::framing::{self, forwarded_path, whole};
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{
     self, HeaderValue, Method, Uri, request::Parts as RequestHead, response::Parts as ResponseHead,
@@ -419,7 +419,7 @@ fn response_encoder(
             _ => "application/octet-stream",
         },
     );
-    formats::each(|event: &Output| match event {
+    framing::each(|event: &Output| match event {
         Output::Content(bytes) => Ok(bytes.clone()),
         Output::Native(n) if &*n.format != NAME => Err(foreign(NAME, n)),
         // The content's bytes have no place for anything else.

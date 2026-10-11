@@ -17,7 +17,7 @@ async fn a_live_upload_keeps_feeding_a_retained_reader_without_completion() {
         LIMIT,
     );
     let (read, mut sink) = connect(Extensions::default()).bind(
-        |_, _: Option<&u8>| Ok(h::formats::each(|value: &u8| Ok(Bytes::from(vec![*value])))),
+        |_, _: Option<&u8>| Ok(h::framing::each(|value: &u8| Ok(Bytes::from(vec![*value])))),
         |response, _| EventStream::stream(response.into_body().map_ok(|bytes| bytes[0])),
         |answer| h::provider_fault("echo", answer),
     );

@@ -81,15 +81,15 @@ pub fn read_request<F: 'static>(request: http::Request<Body>) -> EventStream<Inp
 /// one input with its safe forwarded path ([`forwarded_path`]); live input
 /// keeps the given head.
 ///
-/// [`forwarded_path`]: crate::formats::forwarded_path
+/// [`forwarded_path`]: crate::framing::forwarded_path
 pub fn write_request<F: 'static>(
     head: &mut RequestHead,
     input: Option<&Input<F>>,
 ) -> Result<Box<dyn Encoder<Input<F>>>, Fault> {
     if let Some(input) = input {
         *head = input.0.clone().into_parts().0;
-        let path = crate::formats::forwarded_path(head.uri.path());
-        crate::formats::set_path(head, &path)?;
+        let path = crate::framing::forwarded_path(head.uri.path());
+        crate::framing::set_path(head, &path)?;
     }
     Ok(Box::new(Writes))
 }
@@ -230,7 +230,7 @@ impl Format<ClientIo, Input<Self>, Output<Self>> for Passthrough {
             .as_str()
             .bytes()
             .any(|b| b.is_ascii_lowercase())
-            && crate::formats::reads_one_way(io.request().uri().path())
+            && crate::framing::reads_one_way(io.request().uri().path())
     }
     fn bind(&self, io: ClientIo) -> Result<Connection<Input<Self>, Output<Self>>, Fault> {
         Ok(io.bind(read_request, write_response, crate::plain))

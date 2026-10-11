@@ -31,7 +31,7 @@ use respan_gateway_core::{
     Upstream,
 };
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::formats::{self as formats, sse, whole};
+use respan_gateway_http::framing::{self, sse, whole};
 use respan_gateway_http::http::header::{ACCEPT, CONTENT_TYPE};
 use respan_gateway_http::http::request::Parts as RequestHead;
 use respan_gateway_http::http::response::Parts as ResponseHead;
@@ -86,7 +86,7 @@ impl Format<ClientIo, Input, Output> for StreamableHttp {
     fn matches(&self, io: &ClientIo) -> bool {
         let head = io.request();
         [Method::POST, Method::GET, Method::DELETE].contains(head.method())
-            && formats::clean_path(head.uri().path()) == formats::clean_path(self.path)
+            && framing::clean_path(head.uri().path()) == framing::clean_path(self.path)
     }
 
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
@@ -96,7 +96,7 @@ impl Format<ClientIo, Input, Output> for StreamableHttp {
             |request| h::messages(request, decode),
             move |reply| Ok(answer(reply, &started)),
             move |fault, request, head| {
-                formats::default_content_type(head, JSON);
+                framing::default_content_type(head, JSON);
                 match refused.get() {
                     Some(answered) => lock(answered).refusal(fault),
                     None => Answered::of(request.body()).refusal(fault),
@@ -175,7 +175,7 @@ impl Format<ProviderIo, Output, Input> for StreamableHttp {
             move |head, input: Option<&Input>| {
                 let streamed = "a call in mcp carries one body, not streamed inputs";
                 call_head(head, input.ok_or_else(|| Fault::config(streamed))?, path)?;
-                Ok(formats::each(|input: &Input| match input.method {
+                Ok(framing::each(|input: &Input| match input.method {
                     Method::POST if input.messages.is_empty() => Err(Fault::config(
                         "a POST to an MCP server carries at least one message",
                     )),
@@ -195,8 +195,8 @@ impl Format<ProviderIo, Output, Input> for StreamableHttp {
 fn call_head(head: &mut RequestHead, input: &Input, path: &str) -> Result<(), Fault> {
     head.method = input.method.clone();
     match &input.query {
-        Some(query) => formats::set_path(head, &format!("{path}?{query}"))?,
-        None => formats::set_path(head, path)?,
+        Some(query) => framing::set_path(head, &format!("{path}?{query}"))?,
+        None => framing::set_path(head, path)?,
     }
     // MCP: a client lists both in its `Accept`.
     let both = HeaderValue::from_static("application/json, text/event-stream");

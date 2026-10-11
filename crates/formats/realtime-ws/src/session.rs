@@ -6,7 +6,7 @@ use respan_gateway_core::futures::stream::{self, PollNext};
 use respan_gateway_core::futures::{StreamExt, future};
 use respan_gateway_core::{BadRequest, Connection, EventStream, Fault, NativeValue, Upstream};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats;
+use respan_gateway_http::framing;
 use respan_gateway_http::http::header::{CONTENT_TYPE, SEC_WEBSOCKET_PROTOCOL, UPGRADE};
 use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri};
@@ -51,7 +51,7 @@ impl Spec {
         head.method() == Method::GET
             && h::header_tokens(head.headers(), UPGRADE)
                 .any(|v| v.eq_ignore_ascii_case("websocket"))
-            && formats::path_ends_with(head.uri(), self.path)
+            && framing::path_ends_with(head.uri(), self.path)
     }
 
     /// A transport to its provider at `base_url`, taking binary text if the
@@ -155,7 +155,7 @@ pub(crate) fn model_at(uri: &Uri) -> Option<String> {
 
 /// The events of a session's frames, each read by `read`.
 fn frames<T: Send + 'static>(body: h::Body, read: Read<T>) -> EventStream<T> {
-    formats::parse(body, read, |read, raw, out| read(raw, out), |_, end, _| end)
+    framing::parse(body, read, |read, raw, out| read(raw, out), |_, end, _| end)
 }
 
 /// The events of `frames`, with what was `said` first whenever there is
@@ -208,7 +208,7 @@ pub(crate) fn native_client(name: &'static str) -> (Read<Input>, Box<dyn Encoder
         out.push(Input::native(name, json));
         Ok(())
     };
-    let write = formats::each(move |event: &Output| match event {
+    let write = framing::each(move |event: &Output| match event {
         Output::Native(native) => written(name, Some(native)),
         _ => written(name, None),
     });
@@ -219,7 +219,7 @@ pub(crate) fn native_client(name: &'static str) -> (Read<Input>, Box<dyn Encoder
 /// `Input::Native` of `name` written, and each frame one `Output::Native`. A
 /// frame that is not JSON is the provider's fault, `upstream`.
 pub(crate) fn native_provider(name: &'static str) -> (Box<dyn Encoder<Input>>, Read<Output>) {
-    let write = formats::each(move |event: &Input| match event {
+    let write = framing::each(move |event: &Input| match event {
         Input::Native(native) => written(name, Some(native)),
         _ => written(name, None),
     });

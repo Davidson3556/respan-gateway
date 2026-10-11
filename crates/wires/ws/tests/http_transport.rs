@@ -5,7 +5,7 @@
 use respan_gateway_core::Gateway;
 use respan_gateway_http::{
     HttpTransport,
-    formats::opaque::{Input, Passthrough},
+    framing::passthrough::{Input, Passthrough},
     relay::Relay,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

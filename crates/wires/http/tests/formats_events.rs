@@ -30,7 +30,7 @@ use respan_gateway_core::{
 };
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::opaque;
+use respan_gateway_http::framing::passthrough;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{Body, ClientIo, HttpTransport, ProviderIo, connect};
 use serde_json::json;
@@ -39,7 +39,7 @@ use support::{Metered, with_plugins};
 /// A protocol the gateway relays unread: a kind of its own.
 struct Raw;
 
-impl Format<ClientIo, opaque::Input<Raw>, opaque::Output<Raw>> for Raw {
+impl Format<ClientIo, passthrough::Input<Raw>, passthrough::Output<Raw>> for Raw {
     fn name(&self) -> &str {
         "raw"
     }
@@ -49,27 +49,27 @@ impl Format<ClientIo, opaque::Input<Raw>, opaque::Output<Raw>> for Raw {
     fn bind(
         &self,
         io: ClientIo,
-    ) -> Result<Connection<opaque::Input<Raw>, opaque::Output<Raw>>, Fault> {
+    ) -> Result<Connection<passthrough::Input<Raw>, passthrough::Output<Raw>>, Fault> {
         Ok(io.bind(
-            opaque::read_request,
-            opaque::write_response,
+            passthrough::read_request,
+            passthrough::write_response,
             respan_gateway_http::plain,
         ))
     }
 }
-impl Format<ProviderIo, opaque::Output<Raw>, opaque::Input<Raw>> for Raw {
+impl Format<ProviderIo, passthrough::Output<Raw>, passthrough::Input<Raw>> for Raw {
     fn name(&self) -> &str {
         "raw"
     }
     fn bind(
         &self,
         io: ProviderIo,
-    ) -> Result<Connection<opaque::Output<Raw>, opaque::Input<Raw>>, Fault> {
-        Ok(
-            io.bind(opaque::write_request, opaque::read_response, |answer| {
-                respan_gateway_http::provider_fault("raw", answer)
-            }),
-        )
+    ) -> Result<Connection<passthrough::Output<Raw>, passthrough::Input<Raw>>, Fault> {
+        Ok(io.bind(
+            passthrough::write_request,
+            passthrough::read_response,
+            |answer| respan_gateway_http::provider_fault("raw", answer),
+        ))
     }
 }
 

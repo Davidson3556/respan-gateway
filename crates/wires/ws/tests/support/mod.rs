@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use respan_gateway_core::{Connection, Fault, Format, Gateway};
-use respan_gateway_http::formats::opaque;
+use respan_gateway_http::framing::passthrough;
 use respan_gateway_http::http::header::UPGRADE;
 use respan_gateway_http::http::{HeaderMap, Method};
 use respan_gateway_http::{self as h, ClientIo, ProviderIo};
@@ -32,7 +32,7 @@ pub const PATIENCE: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub struct Raw;
 
-impl Format<ClientIo, opaque::Input<Raw>, opaque::Output<Raw>> for Raw {
+impl Format<ClientIo, passthrough::Input<Raw>, passthrough::Output<Raw>> for Raw {
     fn name(&self) -> &str {
         "raw"
     }
@@ -42,26 +42,26 @@ impl Format<ClientIo, opaque::Input<Raw>, opaque::Output<Raw>> for Raw {
     fn bind(
         &self,
         io: ClientIo,
-    ) -> Result<Connection<opaque::Input<Raw>, opaque::Output<Raw>>, Fault> {
+    ) -> Result<Connection<passthrough::Input<Raw>, passthrough::Output<Raw>>, Fault> {
         Ok(io.bind(
-            opaque::read_request::<Raw>,
-            opaque::write_response::<Raw>,
+            passthrough::read_request::<Raw>,
+            passthrough::write_response::<Raw>,
             h::plain,
         ))
     }
 }
 
-impl Format<ProviderIo, opaque::Output<Raw>, opaque::Input<Raw>> for Raw {
+impl Format<ProviderIo, passthrough::Output<Raw>, passthrough::Input<Raw>> for Raw {
     fn name(&self) -> &str {
         "raw"
     }
     fn bind(
         &self,
         io: ProviderIo,
-    ) -> Result<Connection<opaque::Output<Raw>, opaque::Input<Raw>>, Fault> {
+    ) -> Result<Connection<passthrough::Output<Raw>, passthrough::Input<Raw>>, Fault> {
         Ok(io.bind(
-            opaque::write_request::<Raw>,
-            opaque::read_response::<Raw>,
+            passthrough::write_request::<Raw>,
+            passthrough::read_response::<Raw>,
             |answer| h::provider_fault("raw", answer),
         ))
     }
@@ -600,9 +600,9 @@ pub fn relay(base: &str) -> (Gateway, Outcomes, Calls) {
     let (ends, calls) = (Outcomes::default(), Calls::default());
     let transport = WsTransport::new(base).unwrap();
     let gateway = Gateway::new()
-        .client::<opaque::Input<Raw>, _, _>(Raw)
+        .client::<passthrough::Input<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<opaque::Input<Raw>, _, _>("p", Raw, transport.connect())
+        .provider::<passthrough::Input<Raw>, _, _>("p", Raw, transport.connect())
         .unwrap()
         .plugin(ends.clone())
         .plugin(calls.clone())

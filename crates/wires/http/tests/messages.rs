@@ -10,13 +10,13 @@ use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::{FutureExt, SinkExt, StreamExt, stream};
 use respan_gateway_core::{EventSink, EventStream, Extensions, Fault};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::{Body, ClientIo, Encoder, Framing, formats, http};
+use respan_gateway_http::{Body, ClientIo, Encoder, Framing, framing, http};
 
 const LIMIT: usize = 1 << 20;
 
 /// Value `n` as `n` messages: `n.0`, `n.1`, ….
 fn messages() -> Box<dyn Encoder<usize>> {
-    formats::each_message(|n: &usize, out| {
+    framing::each_message(|n: &usize, out| {
         out.extend((0..*n).map(|i| Bytes::from(format!("{n}.{i}"))));
         Ok(())
     })
@@ -104,7 +104,7 @@ async fn a_providers_live_call_frames_each_message() {
 /// encoder's failure discards what it wrote of the value.
 #[test]
 fn messages_concatenate_and_a_failure_discards_them() {
-    let mut encoder = formats::each_message(|n: &usize, out| {
+    let mut encoder = framing::each_message(|n: &usize, out| {
         out.push(Bytes::from("partial"));
         if *n == 0 {
             return Err(Fault::internal("no"));
@@ -118,7 +118,7 @@ fn messages_concatenate_and_a_failure_discards_them() {
     let mut out = vec![Bytes::from("kept")];
     assert!(encoder.encode_messages(&0, &mut out).is_err());
     assert_eq!(out, [Bytes::from("kept")]);
-    let mut plain = formats::each(|n: &usize| Ok(Bytes::from(n.to_string())));
+    let mut plain = framing::each(|n: &usize| Ok(Bytes::from(n.to_string())));
     plain.encode_messages(&7, &mut out).unwrap();
     assert_eq!(out, [Bytes::from("kept"), Bytes::from("7")]);
 }

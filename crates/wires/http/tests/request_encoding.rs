@@ -56,7 +56,7 @@ fn writer(fail_encode: bool, fail_end: bool) -> Writes {
 
 /// A body read and discarded, keeping its wire failure.
 fn nothing(body: Body) -> EventStream<u8> {
-    h::formats::parse(body, (), |_, _, _| Ok(()), |_, wire, _| wire)
+    h::framing::parse(body, (), |_, _, _| Ok(()), |_, wire, _| wire)
 }
 
 /// Where a transport keeps the request it was sent.
@@ -99,7 +99,7 @@ async fn default_request_decodes_encodes_and_finalizes_one_initial_body() {
         |request| h::messages(request, |_, _| -> Result<u8, Fault> { Ok(b'r') }),
         |reply| {
             let head = reply.head();
-            Ok(reply.write(head, h::formats::each(|_: &u8| Ok(Bytes::new()))))
+            Ok(reply.write(head, h::framing::each(|_: &u8| Ok(Bytes::new()))))
         },
         h::plain,
     );
@@ -264,7 +264,7 @@ async fn transport_failure_ends_the_call() {
         LIMIT,
     );
     let (_read, mut sink) = send(Extensions::new()).bind(
-        |_, _| Ok(h::formats::each(|v: &u8| Ok(Bytes::copy_from_slice(&[*v])))),
+        |_, _| Ok(h::framing::each(|v: &u8| Ok(Bytes::copy_from_slice(&[*v])))),
         |response, _| nothing(response.into_body()),
         |_| Fault::new("refused"),
     );
@@ -341,7 +341,7 @@ async fn authoritative_completion_releases_an_unconsumed_encoded_frame() {
         LIMIT,
     );
     let (_read, mut sink) = send(Extensions::new()).bind(
-        |_, _| Ok(h::formats::each(|v: &u8| Ok(Bytes::copy_from_slice(&[*v])))),
+        |_, _| Ok(h::framing::each(|v: &u8| Ok(Bytes::copy_from_slice(&[*v])))),
         |response, _| nothing(response.into_body()),
         |_| Fault::new("refused"),
     );
@@ -384,9 +384,9 @@ async fn a_late_error_in_a_success_fails_the_opened_answer() {
         LIMIT,
     );
     let (read, mut sink) = send(Extensions::new()).bind(
-        |_, _| Ok(h::formats::each(|_: &u8| Ok(Bytes::new()))),
+        |_, _| Ok(h::framing::each(|_: &u8| Ok(Bytes::new()))),
         |response, _| {
-            h::formats::parse::<u8, _, _, _>(
+            h::framing::parse::<u8, _, _, _>(
                 response.into_body(),
                 (),
                 |_, _, _| Ok(()),
@@ -434,7 +434,7 @@ async fn empty_error_frames_yield_even_though_the_byte_cap_is_not_reached() {
         LIMIT,
     );
     let (_read, mut sink) = send(Extensions::new()).bind(
-        |_, _| Ok(h::formats::each(|_: &u8| Ok(Bytes::new()))),
+        |_, _| Ok(h::framing::each(|_: &u8| Ok(Bytes::new()))),
         |response, _| nothing(response.into_body()),
         |answer| h::provider_fault("test", answer),
     );
@@ -453,7 +453,7 @@ async fn ignored_incoming_frames_cannot_spin_in_one_poll() {
         seen.fetch_add(1, Ordering::SeqCst);
         Ok(Bytes::new())
     }));
-    let mut read = h::formats::parse::<u8, _, _, _>(body, (), |_, _, _| Ok(()), |_, wire, _| wire);
+    let mut read = h::framing::parse::<u8, _, _, _>(body, (), |_, _, _| Ok(()), |_, wire, _| wire);
     assert!(read.next().now_or_never().is_none());
     assert_eq!(count.load(Ordering::SeqCst), 128);
 }
@@ -481,7 +481,7 @@ async fn a_refused_answer_is_read_whole_into_the_error_readers_fault() {
     let (read, mut sink) = send(Extensions::new())
         .with_success(|answer, _| answer.status == h::http::StatusCode::SWITCHING_PROTOCOLS)
         .bind(
-            |_, _| Ok(h::formats::each(|_: &u8| Ok(Bytes::new()))),
+            |_, _| Ok(h::framing::each(|_: &u8| Ok(Bytes::new()))),
             |_, _| -> EventStream<u8> { panic!("a refusal reached the decoder") },
             |answer| h::provider_fault("strict", answer),
         );
@@ -522,10 +522,10 @@ async fn a_passthrough_refuses_a_101_no_one_asked_for() {
         },
         LIMIT,
     );
-    let (read, mut sink) = h::formats::opaque::Passthrough
+    let (read, mut sink) = h::framing::passthrough::Passthrough
         .bind(send(Extensions::new()))
         .expect("bound");
-    let input = h::formats::opaque::Input::new("x");
+    let input = h::framing::passthrough::Input::new("x");
     sink.prepare(&mut EventStream::single(input))
         .expect("expected value");
     let (_, output) = future::join(sink.close(), read).await;

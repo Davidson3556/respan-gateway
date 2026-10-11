@@ -3,7 +3,7 @@
 use super::reader::observed;
 use super::upload::{self, Upload};
 
-use crate::formats::whole;
+use crate::framing::whole;
 use crate::{Body, Completion, Encoder, encode_all};
 use bytes::Bytes;
 use futures::channel::oneshot;

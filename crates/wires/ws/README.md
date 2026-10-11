@@ -44,7 +44,7 @@ the vendors that speak them
 
 Both edges pump a session with the same code. Any other format on the HTTP
 wire works with the transport and the adapter: the tests relay through
-`formats::opaque` too.
+`framing::passthrough` too.
 
 ## The transport
 

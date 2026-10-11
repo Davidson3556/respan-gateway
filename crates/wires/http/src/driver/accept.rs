@@ -71,7 +71,7 @@ pub enum Framing {
 /// ```
 /// Binding consumes it, preventing a second binding:
 /// ```compile_fail
-/// use respan_gateway_http::{self as h, formats::opaque::Passthrough};
+/// use respan_gateway_http::{self as h, framing::passthrough::Passthrough};
 /// use respan_gateway_core::Format;
 /// let request = h::http::Request::new(h::Body::default());
 /// let (incoming, _) = h::ClientIo::accept(request, h::Framing::Whole, 1024);
