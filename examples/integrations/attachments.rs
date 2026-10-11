@@ -649,6 +649,39 @@ fn gateway_claude(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fa
 /// An Anthropic model's answer.
 const CLAUDE_OK: &str = r#"{"id":"m","type":"message","role":"assistant","model":"c","content":[{"type":"text","text":"Revenue is up."}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
 
+/// A one-page PDF saying "Quarterly revenue is up.", as base64.
+fn report_pdf() -> String {
+    let text = "BT /F1 12 Tf 10 100 Td (Quarterly revenue is up.) Tj ET";
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] \
+         /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+            .to_owned(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        format!("<< /Length {} >>\nstream\n{text}\nendstream", text.len()),
+    ];
+    let mut pdf = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.push_str(&format!("{} 0 obj\n{object}\nendobj\n", i + 1));
+    }
+    let xref = pdf.len();
+    pdf.push_str(&format!(
+        "xref\n0 {}\n0000000000 65535 f \n",
+        objects.len() + 1
+    ));
+    for offset in offsets {
+        pdf.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    let size = objects.len() + 1;
+    pdf.push_str(&format!(
+        "trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    ));
+    STANDARD.encode(pdf)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
     // The fallback reads PDFs in OpenAI's format, then in Anthropic's.
@@ -668,10 +701,7 @@ async fn main() -> Result<(), Fault> {
         } else {
             gateway(&fixture, pdfs)?
         };
-        let request = REQUEST.replace(
-            "JVBERi0xLjcKJcfsj6IKMSAwIG9iago=",
-            include_str!("../fixtures/report.pdf.b64"),
-        );
+        let request = REQUEST.replace("JVBERi0xLjcKJcfsj6IKMSAwIG9iago=", &report_pdf());
         let status = send(&gw, "acme", &request).await;
         for sent in fixture
             .text
