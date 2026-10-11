@@ -158,7 +158,7 @@ impl Routes {
     }
 }
 
-type Read = dyn Fn(&ClientContext) -> Option<String> + Send + Sync;
+type Read = dyn Fn(&ClientContext) -> Result<Option<String>, Fault> + Send + Sync;
 type Write = dyn Fn(&mut ClientContext, String) -> Result<(), Fault> + Send + Sync;
 
 /// How a format's requests name their model.
@@ -176,13 +176,15 @@ impl std::fmt::Debug for Model {
 
 impl Model {
     /// The model of inputs of type `I`, read by `read` and rewritten by
-    /// `write`, such as `Model::of(Input::model, Input::set_model)`.
+    /// `write`, such as `Model::of(Input::model, Input::set_model)`. A
+    /// request whose input is not an `I` is refused when routed, not
+    /// routed to the default.
     pub fn of<I: Clone + Send + Sync + 'static>(
         read: fn(&I) -> Option<&str>,
         write: fn(&mut I, String),
     ) -> Self {
         Self {
-            read: Arc::new(move |cx| cx.input::<I>().ok().and_then(read).map(str::to_owned)),
+            read: Arc::new(move |cx| Ok(read(cx.input::<I>()?).map(str::to_owned))),
             write: Arc::new(move |cx, model| {
                 cx.filter(move |input: &mut I| {
                     write(input, model.clone());
@@ -200,7 +202,7 @@ impl Model {
         write: impl Fn(&mut ClientContext, String) -> Result<(), Fault> + Send + Sync + 'static,
     ) -> Self {
         Self {
-            read: Arc::new(read),
+            read: Arc::new(move |cx| Ok(read(cx))),
             write: Arc::new(write),
         }
     }
@@ -208,19 +210,24 @@ impl Model {
     /// For requests that name no model.
     pub fn none() -> Self {
         Self {
-            read: Arc::new(|_| None),
+            read: Arc::new(|_| Ok(None)),
             write: Arc::new(|_, _| Ok(())),
         }
     }
 
     /// The model `cx`'s request asks for, if any.
     pub fn read(&self, cx: &ClientContext) -> Option<String> {
-        (self.read)(cx)
+        (self.read)(cx).ok().flatten()
     }
 }
 
 /// The plugin that targets each request of a format it routes by
-/// [`Routes`]. A request of another format keeps its target.
+/// [`Routes`]. A request of another format keeps its target, and so does
+/// one a plugin before it targeted; a gateway with a default target
+/// ([`Gateway::target`]) tells it with [`Routing::over`], else that
+/// default would pass for a plugin's choice.
+///
+/// [`Gateway::target`]: respan_gateway_core::Gateway::target
 ///
 /// ```
 /// use std::sync::Arc;
@@ -247,6 +254,7 @@ impl Model {
 pub struct Routing {
     routes: Arc<Routes>,
     formats: HashMap<String, (Kind, Model)>,
+    default: Option<String>,
 }
 
 impl Routing {
@@ -255,7 +263,15 @@ impl Routing {
         Self {
             routes,
             formats: HashMap::new(),
+            default: None,
         }
+    }
+
+    /// Tells it `provider` is the gateway's default target, not a
+    /// plugin's choice.
+    pub fn over(mut self, provider: impl Into<String>) -> Self {
+        self.default = Some(provider.into());
+        self
     }
 
     /// Routes the requests of format `name`, of `kind`, by their `model`.
@@ -271,14 +287,16 @@ impl Plugin for Routing {
         let Some((kind, model)) = self.formats.get(cx.format()) else {
             return Ok(None);
         };
-        let asked = model.read(cx);
+        let asked = (model.read)(cx)?;
         let Some(route) = self.routes.route(*kind, cx.format(), asked.as_deref()) else {
             return Err(Fault::not_found(format!(
                 "no provider serves {} requests; add one to the config",
                 kind.label
             )));
         };
-        cx.set_target(route.internal);
+        if cx.target().is_none() || cx.target() == self.default.as_deref() {
+            cx.set_target(route.internal);
+        }
         if let Some(sent) = route.model {
             (model.write)(cx, sent)?;
         }

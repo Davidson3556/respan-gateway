@@ -32,6 +32,11 @@ let routing = Routing::new(Arc::new(routes))
     .format("openai-chat", CHAT, Model::of(Input::model, Input::set_model));
 ```
 
+Plugins compose in registration order: `Routing` keeps a target a plugin
+before it set. A gateway's own default target is not a plugin's choice;
+tell `Routing` of it with `.over(provider)`. A request whose input is not
+the type its `Model::of` reads is refused, not sent to the default.
+
 The public `routing` module contains transport-neutral attempt orchestration: sequential retry and
 fallback, a staggered race, and each attempt's role. Each answer is read
 `Until` a stopping point before it is judged: its `Head`, a plugin-chosen
