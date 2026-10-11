@@ -1,0 +1,146 @@
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { json, renderApp, serve } from "@/test/render";
+import { ChatTab } from "./chat";
+import { EmbeddingsTab } from "./embeddings";
+import { ImageTab } from "./image";
+import { SpeechTab } from "./speech";
+import { TranscribeTab } from "./transcribe";
+
+const models = () => json({ object: "list", data: [] });
+const sse = (...chunks: unknown[]) =>
+  new Response(
+    [...chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`), "data: [DONE]\n\n"].join(""),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+const sentJson = (calls: { key: string; init: RequestInit }[], key: string) =>
+  JSON.parse(String(calls.find((c) => c.key === key)?.init.body));
+
+beforeEach(() => {
+  URL.createObjectURL = vi.fn(() => "blob:media");
+  URL.revokeObjectURL = vi.fn();
+});
+
+describe("ChatTab", () => {
+  it("streams a reply into the conversation with its usage", async () => {
+    const calls = serve({
+      "GET /v1/models": models,
+      "POST /v1/chat/completions": () =>
+        sse(
+          { choices: [{ delta: { content: "Hello " } }] },
+          { choices: [{ delta: { content: "there" }, finish_reason: "stop" }] },
+          { choices: [], usage: { prompt_tokens: 7, completion_tokens: 2 } },
+        ),
+    });
+    renderApp(<ChatTab />);
+    await userEvent.type(screen.getByLabelText("Message"), "Hi{Enter}");
+    expect(await screen.findByText("Hello there")).toBeInTheDocument();
+    expect(await screen.findByText(/7 → 2 tokens/)).toBeInTheDocument();
+    expect(screen.getByText("Hi")).toBeInTheDocument();
+    expect(sentJson(calls, "POST /v1/chat/completions")).toMatchObject({
+      model: "gpt-4o-mini",
+      stream: true,
+      messages: [{ role: "user", content: "Hi" }],
+    });
+  });
+
+  it("shows a stream that fails midway as an error under the partial reply", async () => {
+    serve({
+      "GET /v1/models": models,
+      "POST /v1/chat/completions": () =>
+        sse({ choices: [{ delta: { content: "Par" } }] }, { error: { message: "upstream broke" } }),
+    });
+    renderApp(<ChatTab />);
+    await userEvent.type(screen.getByLabelText("Message"), "Hi{Enter}");
+    expect(await screen.findByRole("alert")).toHaveTextContent("upstream broke");
+  });
+});
+
+describe("ImageTab", () => {
+  it("sends the prompt and shows each returned image", async () => {
+    const calls = serve({
+      "GET /v1/models": models,
+      "POST /v1/images/generations": () =>
+        json({ data: [{ b64_json: "AAAA", revised_prompt: "A lighthouse, softer" }] }),
+    });
+    renderApp(<ImageTab />);
+    await userEvent.type(screen.getByLabelText("Prompt"), "A lighthouse");
+    await userEvent.click(screen.getByRole("button", { name: "Generate" }));
+    const image = await screen.findByRole("img", { name: "A lighthouse, softer" });
+    expect(image).toHaveAttribute("src", "data:image/png;base64,AAAA");
+    expect(sentJson(calls, "POST /v1/images/generations")).toMatchObject({
+      model: "gpt-image-1",
+      prompt: "A lighthouse",
+      size: "1024x1024",
+      n: 1,
+    });
+  });
+});
+
+describe("TranscribeTab", () => {
+  it("uploads the chosen audio as multipart and shows the transcript", async () => {
+    const calls = serve({
+      "GET /v1/models": models,
+      "POST /v1/audio/transcriptions": () => json({ text: "hello world" }),
+    });
+    renderApp(<TranscribeTab />);
+    const file = new File(["RIFF"], "clip.wav", { type: "audio/wav" });
+    await userEvent.upload(document.querySelector<HTMLInputElement>("#transcribe-file")!, file);
+    await userEvent.click(screen.getByRole("button", { name: "Transcribe" }));
+    expect(await screen.findByText("hello world")).toBeInTheDocument();
+    const form = calls.find((c) => c.key === "POST /v1/audio/transcriptions")?.init.body;
+    expect(form).toBeInstanceOf(FormData);
+    expect((form as FormData).get("model")).toBe("whisper-1");
+    expect((form as FormData).get("response_format")).toBe("json");
+    expect(((form as FormData).get("file") as File).name).toBe("clip.wav");
+  });
+});
+
+describe("SpeechTab", () => {
+  it("sends the text and offers the audio it gets back", async () => {
+    const calls = serve({
+      "GET /v1/models": models,
+      "POST /v1/audio/speech": () =>
+        new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "audio/mpeg" } }),
+    });
+    renderApp(<SpeechTab />);
+    await userEvent.type(screen.getByLabelText("Text"), "Hello from the gateway.");
+    await userEvent.click(screen.getByRole("button", { name: "Speak" }));
+    expect(await screen.findByText("gpt-4o-mini-tts · mp3")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Generated speech")).toBeInTheDocument());
+    expect(sentJson(calls, "POST /v1/audio/speech")).toEqual({
+      model: "gpt-4o-mini-tts",
+      input: "Hello from the gateway.",
+      voice: "alloy",
+      response_format: "mp3",
+    });
+  });
+});
+
+describe("EmbeddingsTab", () => {
+  it("embeds both texts and scores how alike they are", async () => {
+    const calls = serve({
+      "GET /v1/models": models,
+      "POST /v1/embeddings": () =>
+        json({
+          data: [
+            { index: 1, embedding: [0, 1] },
+            { index: 0, embedding: [1, 1] },
+          ],
+        }),
+    });
+    renderApp(<EmbeddingsTab />);
+    await userEvent.type(screen.getByLabelText("Text A"), "a cat");
+    await userEvent.type(screen.getByLabelText("Text B"), "a kitten");
+    await userEvent.click(screen.getByRole("button", { name: "Embed" }));
+    // [1,1] against [0,1] after sorting by index: cos = 1/sqrt(2).
+    expect(await screen.findByText("0.7071")).toBeInTheDocument();
+    expect(screen.getAllByText("2 dimensions")).toHaveLength(2);
+    expect(sentJson(calls, "POST /v1/embeddings")).toEqual({
+      model: "text-embedding-3-small",
+      input: ["a cat", "a kitten"],
+      encoding_format: "float",
+    });
+  });
+});

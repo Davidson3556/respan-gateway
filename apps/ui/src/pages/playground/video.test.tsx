@@ -1,0 +1,117 @@
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { json, renderApp, serve, type Handler } from "@/test/render";
+import { VideoTab } from "./video";
+
+const models = () => json({ object: "list", data: [] });
+const poll = (...steps: Handler[]) => {
+  let n = 0;
+  return (req: Parameters<Handler>[0]) => steps[Math.min(n++, steps.length - 1)](req);
+};
+const job = (status: string, extra: object = {}) => () => json({ id: "v_1", status, ...extra });
+const mp4 = () =>
+  new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "video/mp4" } });
+
+/** Moves the polling clock; only intervals are faked, so requests settle on their own. */
+const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+const polls = (calls: { key: string }[]) => calls.filter((c) => c.key === "GET /v1/videos/v_1");
+
+/** Types a prompt and presses Create. */
+function create() {
+  renderApp(<VideoTab />);
+  fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "a paper boat" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create video" }));
+}
+
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  URL.createObjectURL = vi.fn(() => "blob:video");
+  URL.revokeObjectURL = vi.fn();
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("VideoTab", () => {
+  it("creates a job, follows it every 2 s, and plays the file once completed", async () => {
+    const calls = serve({
+      "GET /v1/models": models,
+      "POST /v1/videos": job("queued"),
+      "GET /v1/videos/v_1": poll(job("in_progress", { progress: 40 }), job("completed")),
+      "GET /v1/videos/v_1/content": mp4,
+    });
+    create();
+    const bar = await screen.findByRole("progressbar", { name: "Video progress" });
+    await waitFor(() => expect(bar).toHaveAttribute("aria-valuenow", "40"));
+    expect(JSON.parse(String(calls.find((c) => c.key === "POST /v1/videos")?.init.body))).toEqual({
+      model: "sora-2",
+      prompt: "a paper boat",
+      seconds: "4",
+    });
+    expect(polls(calls)).toHaveLength(1);
+    await advance(2000);
+    expect(await screen.findByLabelText("Generated video")).toHaveAttribute("src", "blob:video");
+    // Done: no more polling.
+    await advance(10_000);
+    expect(polls(calls)).toHaveLength(2);
+    expect(calls.filter((c) => c.key.endsWith("/content"))).toHaveLength(1);
+  });
+
+  it("reports a failed job with the provider's message, and stops polling", async () => {
+    const calls = serve({
+      "GET /v1/models": models,
+      "POST /v1/videos": job("queued"),
+      "GET /v1/videos/v_1": job("failed", { error: { message: "content policy" } }),
+    });
+    create();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("The video couldn't be made");
+    expect(alert).toHaveTextContent("content policy");
+    await advance(10_000);
+    expect(polls(calls)).toHaveLength(1);
+    expect(calls.some((c) => c.key.endsWith("/content"))).toBe(false);
+  });
+
+  it("says it lost the job when polling fails, and stops asking", async () => {
+    const calls = serve({
+      "GET /v1/models": models,
+      "POST /v1/videos": job("queued"),
+      "GET /v1/videos/v_1": () => json({ error: { message: "no such job" } }, 404),
+    });
+    create();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Lost track of the job");
+    expect(alert).toHaveTextContent("no such job");
+    await advance(10_000);
+    expect(polls(calls)).toHaveLength(1);
+  });
+
+  it("offers a retry of the download when a finished video's file fails", async () => {
+    let attempts = 0;
+    const calls = serve({
+      "GET /v1/models": models,
+      "POST /v1/videos": job("queued"),
+      "GET /v1/videos/v_1": job("completed"),
+      "GET /v1/videos/v_1/content": () =>
+        ++attempts === 1 ? json({ error: { message: "storage down" } }, 502) : mp4(),
+    });
+    create();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("The video is ready, but its file wouldn't download");
+    expect(alert).toHaveTextContent("storage down");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByLabelText("Generated video")).toBeInTheDocument();
+    // Only the file was asked for again, not a new job.
+    expect(calls.filter((c) => c.key === "POST /v1/videos")).toHaveLength(1);
+    expect(calls.filter((c) => c.key.endsWith("/content"))).toHaveLength(2);
+  });
+
+  it("points at the providers page when no provider serves video", async () => {
+    serve({
+      "GET /v1/models": models,
+      "POST /v1/videos": () => json({ error: { message: "no provider for sora-2" } }, 404),
+    });
+    create();
+    expect(await screen.findByText("No provider serves video yet")).toBeInTheDocument();
+  });
+});
