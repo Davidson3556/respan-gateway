@@ -1,0 +1,134 @@
+//! The aggregate's state: its sessions with clients, and each of theirs
+//! with a server, and what ends them when a reload retires the build.
+
+use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+use indexmap::IndexMap;
+use respan_gateway_core::futures::stream;
+use respan_gateway_core::{
+    ClientContext, Extensions, Fault, Gateway, Plugin, Response, async_trait,
+};
+use respan_gateway_http::http::{self, Method};
+use respan_gateway_http::{Body, Framing};
+use respan_gateway_mcp::Output;
+use serde_json::Value;
+
+use super::{ROOT, Run};
+use crate::agent::Filter;
+
+/// How long ending the sessions may take.
+const CLOSING: Duration = Duration::from_secs(10);
+
+pub(super) struct Inner {
+    /// The servers, in the order lists show them.
+    pub(super) servers: Vec<String>,
+    pub(super) filter: Filter,
+    pub(super) sessions: Mutex<IndexMap<String, Arc<Session>>>,
+    /// The next JSON-RPC id of the gateway's own requests.
+    pub(super) next_id: AtomicU64,
+}
+
+/// One client's session.
+pub(super) struct Session {
+    pub(super) owner: Option<String>,
+    /// The session with each server: none until opened, and again once the
+    /// server lost it.
+    pub(super) upstream: HashMap<String, tokio::sync::Mutex<Option<Opened>>>,
+    pub(super) touched: Mutex<Instant>,
+}
+
+/// A session with a server.
+#[derive(Debug, Clone)]
+pub(super) struct Opened {
+    pub(super) id: Option<String>,
+    pub(super) protocol: String,
+    pub(super) capabilities: Value,
+}
+
+pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Session {
+    /// The session with `server`, if it is open.
+    pub(super) async fn opened(&self, server: &str) -> Option<Opened> {
+        self.upstream.get(server)?.lock().await.clone()
+    }
+
+    /// Drops the session with `server` if it is still `opened`.
+    pub(super) async fn forget(&self, server: &str, opened: &Opened) {
+        if let Some(slot) = self.upstream.get(server) {
+            let mut slot = slot.lock().await;
+            if slot.as_ref().map(|o| &o.id) == Some(&opened.id) {
+                *slot = None;
+            }
+        }
+    }
+}
+
+/// A session id: 128 random bits as hex, visible ASCII as MCP requires.
+pub(super) fn session_id() -> Result<String, Fault> {
+    let mut bits = [0u8; 16];
+    getrandom::fill(&mut bits)
+        .map_err(|e| Fault::internal("no secure random source").with_source(e))?;
+    Ok(bits.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Marks the request that ends a retired aggregate's sessions.
+#[derive(Debug, Clone, Copy)]
+struct Close;
+
+/// Ends the sessions the aggregate kept, with clients and with servers.
+#[derive(Clone)]
+pub struct Closer(pub(super) Arc<Inner>);
+
+impl Closer {
+    /// The plugin that does it for the request [`close`](Self::close) makes.
+    /// Register it first, so nothing else sees that request.
+    pub fn plugin(&self) -> impl Plugin + use<> {
+        Closing(self.0.clone())
+    }
+
+    /// Ends every session, through `gateway`: the one the aggregate was built
+    /// into, once its requests are done. A session that does not end is the
+    /// server's to time out.
+    pub async fn close(&self, gateway: &Gateway) {
+        let mut request = http::Request::new(Body::full(Vec::<u8>::new()));
+        *request.method_mut() = Method::DELETE;
+        *request.uri_mut() = http::Uri::from_static(ROOT);
+        let mut marks = Extensions::new();
+        marks.insert(Close);
+        request.extensions_mut().insert(marks);
+        let sent = respan_gateway_http::handle(gateway, request, Framing::Whole, 1 << 20);
+        let work = async {
+            let (response, done) = sent.await;
+            let body = respan_gateway_http::http_body_util::BodyExt::collect(response.into_body());
+            let _ = tokio::join!(body, done);
+        };
+        let _ = tokio::time::timeout(CLOSING, work).await;
+    }
+}
+
+struct Closing(Arc<Inner>);
+
+#[async_trait]
+impl Plugin for Closing {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        if cx.extensions().get::<Close>().is_none() {
+            return Ok(None);
+        }
+        let calls = self.0.servers.iter().map(|s| (s.clone(), cx.call(s)));
+        let run = Run {
+            inner: self.0.clone(),
+            calls: Arc::new(calls.collect()),
+            owner: None,
+        };
+        run.end_all().await;
+        Ok(Some(Response::stream(
+            stream::empty::<Result<Output, Fault>>(),
+        )))
+    }
+}

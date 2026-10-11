@@ -43,6 +43,8 @@ pub(super) struct Built {
     pub(super) local: Option<Arc<LocalOnly>>,
     /// Ends the agent's sessions with its tool servers.
     pub(super) closer: Option<agent::Closer>,
+    /// Ends the aggregate's sessions with its servers.
+    pub(super) aggregate: Option<mcp_aggregate::Closer>,
 }
 
 impl Built {
@@ -74,7 +76,7 @@ impl Built {
             let serving = plan.serves(mcp::FORMAT);
             agent::check(agent, &plan.mcp, serving)?;
         }
-        let (gateway, closer) =
+        let (gateway, closer, aggregate) =
             with_plugins(gateway, &config, aggregate, &plan, &formats, &process.log);
         let keys = ClientKeys::new(plan.keys.clone());
         let relay = relay(
@@ -103,6 +105,7 @@ impl Built {
             router,
             local,
             closer,
+            aggregate,
         })
     }
 
@@ -139,6 +142,14 @@ fn routing(plan: &Plan, formats: &[KnownFormat]) -> Routing {
         })
 }
 
+/// The gateway with the binary's plugins, and what ends the sessions of the
+/// agent and of the aggregate.
+type Plugins = (
+    Gateway,
+    Option<agent::Closer>,
+    Option<mcp_aggregate::Closer>,
+);
+
 /// The gateway with the binary's plugins: the request log, routing, video
 /// jobs, whose credentials go where, and last the vendors' quirks.
 fn with_plugins(
@@ -148,7 +159,7 @@ fn with_plugins(
     plan: &Plan,
     formats: &[KnownFormat],
     log: &Arc<RequestLog>,
-) -> (Gateway, Option<agent::Closer>) {
+) -> Plugins {
     let names: HashMap<String, String> = plan
         .upstreams
         .iter()
@@ -177,13 +188,22 @@ fn with_plugins(
         Some((_, closer)) => gateway.plugin(closer.plugin()),
         None => gateway,
     };
+    let aggregate = match (&config.mcp_aggregate, aggregate) {
+        (Some(config), Some(servers)) => Some(Aggregate::new(config, servers)),
+        _ => None,
+    };
+    let aggregate_closer = aggregate.as_ref().map(Aggregate::closer);
+    let gateway = match &aggregate_closer {
+        Some(closer) => gateway.plugin(closer.plugin()),
+        None => gateway,
+    };
     let gateway = gateway
         .plugin(Recorder::new(log.clone(), formats, names))
         .plugin(routing(plan, formats));
     // `/mcp` answers itself; `/mcp/{name}` is routed to its server.
-    let gateway = match (&config.mcp_aggregate, aggregate) {
-        (Some(config), Some(servers)) => gateway.plugin(Aggregate::new(config, servers)),
-        _ => gateway,
+    let gateway = match aggregate {
+        Some(aggregate) => gateway.plugin(aggregate),
+        None => gateway,
     };
     let gateway = gateway
         .plugin(McpRoute)
@@ -205,7 +225,11 @@ fn with_plugins(
     if let Some((agent, _)) = agent {
         gateway = gateway.plugin(agent.observe(requests::steps(log.clone())));
     }
-    (with_quirks(gateway, &plan.upstreams), closer)
+    (
+        with_quirks(gateway, &plan.upstreams),
+        closer,
+        aggregate_closer,
+    )
 }
 
 /// The router of the formats served: a WebSocket upgrade is a session if a

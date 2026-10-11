@@ -659,6 +659,50 @@ async fn one_endpoint_fronts_every_server() {
 }
 
 #[tokio::test]
+async fn a_reload_ends_the_old_builds_sessions_with_the_servers() {
+    let alpha = Fake::start("alpha", false, None).await;
+    let beta = Fake::start("beta", false, None).await;
+    let config = aggregate_config(&alpha, &beta, "mcp_aggregate: {}\n");
+    let path = support::write_config(&format!("listen: 127.0.0.1:0\n{config}"));
+    let gw = Gateway::run(&["--config", path.to_str().unwrap()]).await;
+
+    let (session, _) = open(&gw, KEY).await;
+    for fake in [&alpha, &beta] {
+        assert!(!fake.sent().iter().any(|s| s.method == "DELETE"));
+    }
+
+    let reloaded = client()
+        .post(gw.url("/ui/api/reload"))
+        .header("authorization", format!("Bearer {KEY}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reloaded.status(), 200);
+
+    // The servers' sessions end, without a word from the client.
+    for _ in 0..200 {
+        if [&alpha, &beta]
+            .iter()
+            .all(|f| f.sent().iter().any(|s| s.method == "DELETE"))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    for fake in [&alpha, &beta] {
+        let ended = fake.sent().into_iter().find(|s| s.method == "DELETE");
+        let ended = ended.expect("the session was deleted");
+        assert!(ended.session.is_some());
+    }
+
+    // The new build has no such session; the client opens another.
+    let gone = ask(&gw, &session, 2, "ping", json!({})).await;
+    assert_eq!(gone.status, 404);
+    let (again, _) = open(&gw, KEY).await;
+    assert_ne!(again, session);
+}
+
+#[tokio::test]
 async fn the_aggregate_names_a_subset_and_refuses_what_it_cannot_front() {
     let alpha = Fake::start("alpha", false, None).await;
     let beta = Fake::start("beta", false, None).await;
