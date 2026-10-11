@@ -50,7 +50,6 @@ use respan_gateway_conversation::{
     ToolChoice, Usage,
 };
 use respan_gateway_core::futures::StreamExt;
-use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::futures::stream::{self, BoxStream};
 use respan_gateway_core::{
     Call, ClientContext, ErrorCode, Fault, NativeFields, NativeValue, Plugin, Response, Upstream,
@@ -163,6 +162,8 @@ struct Limits {
     timeout: Duration,
     tool_timeout: Duration,
     max_result: usize,
+    parallel: usize,
+    max_results: usize,
 }
 
 /// The plugin: see the [module](self). Register it after the plugins that
@@ -185,7 +186,8 @@ impl std::fmt::Debug for Agent {
 
 impl Agent {
     /// An agent running `tools` for every chat request that has a target:
-    /// 8 steps, 5 minutes, 60 seconds a tool, 64 KiB an answer.
+    /// 8 steps, 5 minutes, 60 seconds a tool, 64 KiB an answer, 4 calls at
+    /// once, 256 KiB of answers in all.
     pub fn new(tools: impl Tools) -> Self {
         Self {
             tools: Arc::new(tools),
@@ -194,6 +196,8 @@ impl Agent {
                 timeout: Duration::from_secs(300),
                 tool_timeout: Duration::from_secs(60),
                 max_result: 64 << 10,
+                parallel: 4,
+                max_results: 256 << 10,
             },
             scope: None,
             observe: None,
@@ -230,6 +234,24 @@ impl Agent {
     #[must_use]
     pub fn max_result(mut self, bytes: usize) -> Self {
         self.limits.max_result = bytes;
+        self
+    }
+
+    /// At most `calls` tool calls of one step run at once (at least 1); the
+    /// rest wait their turn. The answers keep the order asked.
+    #[must_use]
+    pub fn parallel(mut self, calls: usize) -> Self {
+        self.limits.parallel = calls.max(1);
+        self
+    }
+
+    /// The most bytes of tool answers the model sees in one request, over
+    /// all its steps; once spent, a call is answered that its result was
+    /// left out. Tool output is untrusted model input, and this bounds how
+    /// much of it one request can pile into the conversation.
+    #[must_use]
+    pub fn max_results(mut self, bytes: usize) -> Self {
+        self.limits.max_results = bytes;
         self
     }
 
@@ -307,6 +329,7 @@ impl Plugin for Agent {
             steps: 0,
             next_block: 0,
             usage: Usage::default(),
+            budget: self.limits.max_results,
             phase: Phase::Open,
         };
         let events = stream::unfold(run, advance).flat_map(stream::iter);
@@ -332,6 +355,8 @@ struct Run {
     next_block: u32,
     /// The usage of the steps that ended.
     usage: Usage,
+    /// The bytes of tool answers the request may still add.
+    budget: usize,
     phase: Phase,
 }
 
@@ -567,7 +592,8 @@ impl Run {
             return Err(limit("agent_max_steps", message));
         }
         let ran = Instant::now();
-        let results = run_tools(&self.toolbox, self.limits, self.deadline, &calls).await;
+        let mut results = run_tools(&self.toolbox, self.limits, self.deadline, calls).await;
+        spend(&mut self.budget, &mut results);
         let mut said = replay(&reading.said);
         let mut assistant = Message::new(Role::Assistant, said.remove(0));
         assistant.content.append(&mut said);
@@ -713,39 +739,59 @@ async fn run_tools(
     toolbox: &Arc<dyn Toolbox>,
     limits: Limits,
     deadline: Instant,
-    calls: &[(String, String, String)],
+    calls: Vec<(String, String, String)>,
 ) -> Vec<(String, Outcome, ToolReport)> {
-    let each = calls.iter().map(|(id, name, arguments)| async move {
-        let started = Instant::now();
-        let left = deadline.saturating_duration_since(started);
-        let allowed = limits.tool_timeout.min(left);
-        let parsed = match arguments.trim() {
-            "" => Ok(Value::Object(Default::default())),
-            text => serde_json::from_str::<Value>(text),
-        };
-        let outcome = match parsed {
-            Err(e) => Outcome::error(format!("the arguments are not valid JSON: {e}")),
-            Ok(arguments) => match timeout(allowed, toolbox.call(name, arguments)).await {
-                Ok(outcome) => outcome,
-                Err(_) => Outcome::error(format!(
-                    "the tool did not answer within {} s",
-                    allowed.as_secs().max(1)
-                )),
-            },
-        };
-        let outcome = Outcome {
-            text: cut(outcome.text, limits.max_result),
-            ..outcome
-        };
-        let report = ToolReport {
-            name: name.clone(),
-            took: started.elapsed(),
-            is_error: outcome.is_error,
-            bytes: outcome.text.len(),
-        };
-        (id.clone(), outcome, report)
+    let each = calls.into_iter().map(|(id, name, arguments)| {
+        let toolbox = toolbox.clone();
+        async move {
+            let started = Instant::now();
+            let left = deadline.saturating_duration_since(started);
+            let allowed = limits.tool_timeout.min(left);
+            let parsed = match arguments.trim() {
+                "" => Ok(Value::Object(Default::default())),
+                text => serde_json::from_str::<Value>(text),
+            };
+            let outcome = match parsed {
+                Err(e) => Outcome::error(format!("the arguments are not valid JSON: {e}")),
+                Ok(arguments) => match timeout(allowed, toolbox.call(&name, arguments)).await {
+                    Ok(outcome) => outcome,
+                    Err(_) => Outcome::error(format!(
+                        "the tool did not answer within {} s",
+                        allowed.as_secs().max(1)
+                    )),
+                },
+            };
+            let outcome = Outcome {
+                text: cut(outcome.text, limits.max_result),
+                ..outcome
+            };
+            let report = ToolReport {
+                name,
+                took: started.elapsed(),
+                is_error: outcome.is_error,
+                bytes: outcome.text.len(),
+            };
+            (id, outcome, report)
+        }
     });
-    join_all(each).await
+    stream::iter(each)
+        .buffered(limits.parallel.max(1))
+        .collect()
+        .await
+}
+
+/// What a request has left for tool answers: each of `results`, in order,
+/// is cut to what is left of `budget`, which it then takes from.
+fn spend(budget: &mut usize, results: &mut [(String, Outcome, ToolReport)]) {
+    for (_, outcome, report) in results {
+        let text = std::mem::take(&mut outcome.text);
+        outcome.text = match *budget {
+            0 => "[left out: the tool answers of this request reached their limit]".to_owned(),
+            left => cut(text, left),
+        };
+        report.bytes = outcome.text.len();
+        *budget = budget.saturating_sub(outcome.text.len());
+    }
 }
 
 /// `text` of at most `max` bytes, saying what was cut off.
@@ -774,5 +820,30 @@ mod tests {
         assert_eq!(cut("abc".into(), 3), "abc");
         assert_eq!(cut("aéb".into(), 2), "a\n[cut: 3 more bytes]");
         assert_eq!(cut("abcdef".into(), 4), "abcd\n[cut: 2 more bytes]");
+    }
+
+    #[test]
+    fn answers_share_a_budget() {
+        let result = |text: &str| {
+            let report = ToolReport {
+                name: "t".into(),
+                took: Duration::ZERO,
+                is_error: false,
+                bytes: text.len(),
+            };
+            ("id".to_owned(), Outcome::ok(text), report)
+        };
+        let mut results = vec![result("aaaa"), result("bbbb"), result("cccc")];
+        let mut budget = 6;
+        spend(&mut budget, &mut results);
+        assert_eq!(results[0].1.text, "aaaa");
+        assert!(
+            results[1].1.text.starts_with("bb\n[cut"),
+            "{}",
+            results[1].1.text
+        );
+        assert!(results[2].1.text.contains("left out"));
+        assert_eq!(results[1].2.bytes, results[1].1.text.len());
+        assert_eq!(budget, 0);
     }
 }

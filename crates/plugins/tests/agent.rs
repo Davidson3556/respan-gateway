@@ -856,3 +856,53 @@ async fn redacted_thinking_goes_back_whole() {
     assert!(text.contains("redacted_thinking"), "{text}");
     assert!(text.contains("Done."), "{text}");
 }
+
+fn read_n(n: usize) -> Vec<Value> {
+    (0..n)
+        .map(|i| call(&format!("call_{i}"), "files__read", json!({"path": i})))
+        .collect()
+}
+
+#[tokio::test]
+async fn at_most_parallel_calls_of_a_step_run_at_once() {
+    let fake = Fake::new().slow(Duration::from_millis(50));
+    let rig = Rig::with(fake, |a| a.parallel(2)).await;
+    rig.openai.answer(calls(read_n(5), (1, 1)));
+    rig.openai.answer(says("done", (1, 1)));
+    let (status, _) = rig.chat(ask_gpt()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rig.fake.calls().len(), 5);
+    assert_eq!(rig.fake.peak.load(Ordering::SeqCst), 2);
+    // The answers keep the order asked.
+    let sent = rig.openai.requests();
+    let ids: Vec<&str> = sent[1].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| m["tool_call_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["call_0", "call_1", "call_2", "call_3", "call_4"]);
+}
+
+#[tokio::test]
+async fn the_answers_of_one_request_share_a_budget() {
+    let fake = Fake::new().answering("files__read", Outcome::ok("x".repeat(100)));
+    let rig = Rig::with(fake, |a| a.max_results(150)).await;
+    rig.openai.answer(calls(read_n(3), (1, 1)));
+    rig.openai.answer(says("done", (1, 1)));
+    let (status, _) = rig.chat(ask_gpt()).await;
+    assert_eq!(status, StatusCode::OK);
+    let sent = rig.openai.requests();
+    let tools: Vec<String> = sent[1].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| m["content"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(tools[0], "x".repeat(100));
+    assert!(tools[1].starts_with(&"x".repeat(50)), "{}", tools[1]);
+    assert!(tools[1].contains("[cut: 50 more bytes]"), "{}", tools[1]);
+    assert!(tools[2].contains("left out"), "{}", tools[2]);
+}

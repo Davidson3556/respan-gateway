@@ -71,7 +71,8 @@ provider, as a plugin over the conversation kind. A `Tools` runner opens a
 `Toolbox` per request (`list` the tools to offer, `call` one by name with
 JSON arguments, answering an `Outcome` whose failure the model reads). The
 agent adds the tools to the request, calls the target, and while the reply
-calls only those tools runs them in parallel and calls again; the client gets
+calls only those tools runs them (at most `parallel` at once, 4 by default,
+and their answers within `max_results` bytes in all) and calls again; the client gets
 one reply with the usage summed. It stops at a reply with no such call, at a
 call of a client's own tool (returned to the client; the gateway's calls in it
 are left out), at `max_steps` (the last call forbids tools) and at `timeout`.
