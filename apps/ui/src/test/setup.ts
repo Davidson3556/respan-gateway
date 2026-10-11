@@ -9,6 +9,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// cmdk measures and scrolls its list.
+window.ResizeObserver = class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
+Element.prototype.scrollIntoView = () => {};
+
 // jsdom lacks matchMedia, which the theme and sidebar use.
 Object.defineProperty(window, "matchMedia", {
   writable: true,

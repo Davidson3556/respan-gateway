@@ -34,7 +34,7 @@ const steps: { title: string; body: ReactNode; example: string }[] = [
 
 function Explainer() {
   return (
-    <Card className="shadow-none">
+    <Card>
       <CardHeader>
         <CardTitle className="text-base">How routing works</CardTitle>
         <CardDescription>
@@ -86,7 +86,7 @@ export function RoutesPage() {
       />
       <Explainer />
 
-      <Card className="gap-4 pb-0 shadow-none">
+      <Card className="gap-4 pb-0">
         <CardHeader>
           <CardTitle className="text-base">Served formats</CardTitle>
           <CardDescription>Tried in order; each recognises its own requests.</CardDescription>
@@ -130,7 +130,7 @@ export function RoutesPage() {
       </Card>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card className="gap-4 shadow-none">
+        <Card className="gap-4">
           <CardHeader>
             <CardTitle className="text-base">Model prefix routes</CardTitle>
             <CardDescription>First match wins.</CardDescription>
@@ -157,7 +157,7 @@ export function RoutesPage() {
           )}
         </Card>
 
-        <Card className="gap-4 shadow-none">
+        <Card className="gap-4">
           <CardHeader>
             <CardTitle className="text-base">Defaults</CardTitle>
             <CardDescription>Where requests go when nothing else matches.</CardDescription>

@@ -49,8 +49,8 @@ export function RequestsTable({
     <Table>
       <TableHeader>
         <TableRow className="hover:bg-transparent">
-          <TableHead className="w-28 pl-4">Time</TableHead>
-          <TableHead>Model</TableHead>
+          <TableHead className={"hidden w-28 pl-4 sm:table-cell"}>Time</TableHead>
+          <TableHead className="pl-4 sm:pl-3">Model</TableHead>
           <TableHead className={hideOnCompact}>Kind</TableHead>
           <TableHead className="hidden sm:table-cell">Provider</TableHead>
           <TableHead>Status</TableHead>
@@ -82,12 +82,12 @@ export function RequestsTable({
                   }
                 }}
               >
-                <TableCell className="pl-4 font-mono text-xs text-muted-foreground tabular">
+                <TableCell className={"hidden pl-4 font-mono text-xs text-muted-foreground tabular sm:table-cell"}>
                   <span title={formatClock(r.started_at)}>
                     {compact ? formatAgo(r.started_at, now) : formatClock(r.started_at)}
                   </span>
                 </TableCell>
-                <TableCell className="max-w-40 sm:max-w-56">
+                <TableCell className={"max-w-44 pl-4 sm:max-w-56 sm:pl-3"}>
                   <div className="truncate font-medium">{r.model ?? r.path}</div>
                   {!compact && (
                     <div className="truncate font-mono text-[11px] text-muted-foreground">

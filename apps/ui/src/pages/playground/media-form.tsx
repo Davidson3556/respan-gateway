@@ -28,7 +28,7 @@ export function MediaLayout({
   };
   return (
     <div className="grid gap-4 lg:grid-cols-[22rem_1fr]">
-      <Card className="h-fit p-4 shadow-none">
+      <Card className="h-fit p-4">
         <form onSubmit={submit} className="grid gap-5">
           {fields}
           <Button type="submit" disabled={pending || disabled}>

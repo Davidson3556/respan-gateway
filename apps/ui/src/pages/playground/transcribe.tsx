@@ -141,13 +141,13 @@ export function TranscribeTab() {
       {transcribe.isError ? (
         <RequestError error={transcribe.error} what="transcription" />
       ) : transcribe.isPending ? (
-        <Card className="gap-3 p-6 shadow-none">
+        <Card className="gap-3 p-6">
           <Skeleton className="h-4 w-full" />
           <Skeleton className="h-4 w-11/12" />
           <Skeleton className="h-4 w-2/3" />
         </Card>
       ) : transcribe.data !== undefined ? (
-        <Card className="relative p-6 pr-12 shadow-none">
+        <Card className="relative p-6 pr-12">
           <p className="text-sm leading-relaxed whitespace-pre-wrap">
             {transcribe.data || <span className="text-muted-foreground">No speech detected.</span>}
           </p>

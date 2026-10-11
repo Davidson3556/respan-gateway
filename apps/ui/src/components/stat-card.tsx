@@ -16,7 +16,7 @@ export function StatCard({
   icon: LucideIcon;
 }) {
   return (
-    <Card className="gap-0 px-4 py-4 shadow-none">
+    <Card className="gap-0 px-4 py-4">
       <div className="flex items-center justify-between text-muted-foreground">
         <span className="text-xs font-medium">{label}</span>
         <Icon className="size-3.5" aria-hidden="true" />

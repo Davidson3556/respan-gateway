@@ -4,6 +4,7 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useLiveMode, type LiveMode } from "@/hooks/use-live-requests";
 import { cn } from "@/lib/utils";
+import { CommandPalette } from "./command-palette";
 import { ThemeToggle } from "./theme-toggle";
 
 const titles: [prefix: string, title: string][] = [
@@ -58,6 +59,7 @@ export function SiteHeader() {
       <Separator orientation="vertical" className="mx-1 data-[orientation=vertical]:h-4" />
       <span className="text-sm font-medium">{title}</span>
       <div className="ml-auto flex items-center gap-2">
+        <CommandPalette />
         <LiveIndicator />
         <ThemeToggle />
       </div>

@@ -1,12 +1,3 @@
-import {
-  Activity,
-  FlaskConical,
-  LayoutDashboard,
-  Route,
-  Server,
-  Settings,
-  type LucideIcon,
-} from "lucide-react";
 import { NavLink, useLocation } from "react-router";
 import {
   Sidebar,
@@ -23,25 +14,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { useOverview } from "@/hooks/queries";
-
-interface NavItem {
-  to: string;
-  label: string;
-  icon: LucideIcon;
-}
-
-const monitor: NavItem[] = [
-  { to: "/", label: "Overview", icon: LayoutDashboard },
-  { to: "/requests", label: "Requests", icon: Activity },
-];
-
-const build: NavItem[] = [
-  { to: "/playground", label: "Playground", icon: FlaskConical },
-  { to: "/providers", label: "Providers", icon: Server },
-  { to: "/routes", label: "Routes", icon: Route },
-];
-
-const footer: NavItem[] = [{ to: "/settings", label: "Settings", icon: Settings }];
+import { build, monitor, settings, type NavItem } from "./nav";
 
 function NavMenu({ items }: { items: NavItem[] }) {
   const { pathname } = useLocation();
@@ -114,7 +87,7 @@ export function AppSidebar() {
         <NavGroup label="Build" items={build} />
       </SidebarContent>
       <SidebarFooter>
-        <NavMenu items={footer} />
+        <NavMenu items={[settings]} />
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>

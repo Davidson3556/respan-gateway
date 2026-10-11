@@ -1,5 +1,6 @@
-import { ArrowUp, Eraser, MessageSquare, Square } from "lucide-react";
+import { ArrowUp, Eraser, MessageSquare, Sparkles, Square } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { CopyButton } from "@/components/copy-button";
 import { EmptyState } from "@/components/empty-state";
 import { Markdown } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
@@ -11,6 +12,8 @@ import { streamChat, type ChatMessage, type ChatStats } from "@/lib/chat";
 import { formatCount, formatMs } from "@/lib/format";
 import { ModelPicker } from "./model-picker";
 import { RequestError } from "./request-error";
+
+const suggestions = ["Explain how an API gateway works", "Write a haiku about latency", "Summarise HTTP/3 in three bullets"];
 
 interface Turn {
   role: "user" | "assistant";
@@ -28,36 +31,49 @@ function Stats({ stats }: { stats: ChatStats }) {
     `${formatMs(stats.totalMs)} total`,
     stats.finishReason && stats.finishReason !== "stop" && `finish: ${stats.finishReason}`,
   ].filter(Boolean);
-  return <p className="mt-2 text-xs text-muted-foreground tabular">{parts.join(" · ")}</p>;
+  return <p className="text-xs text-muted-foreground tabular">{parts.join(" · ")}</p>;
 }
 
 function Message({ turn, streaming }: { turn: Turn; streaming: boolean }) {
   if (turn.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm whitespace-pre-wrap text-primary-foreground">
+        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 text-sm whitespace-pre-wrap text-secondary-foreground">
           {turn.content}
         </div>
       </div>
     );
   }
   return (
-    <div className="max-w-[92%]">
-      {turn.content ? (
-        <Markdown source={turn.content} />
-      ) : (
-        streaming && <span className="text-sm text-muted-foreground">Thinking…</span>
-      )}
-      {streaming && (
-        <span className="ml-0.5 inline-block h-4 w-1.5 translate-y-0.5 animate-pulse rounded-sm bg-brand" />
-      )}
-      {turn.error !== undefined && (
-        <div className="mt-2">
-          <RequestError error={turn.error} what="chat" />
-        </div>
-      )}
-      {turn.stats && <Stats stats={turn.stats} />}
-      {turn.stopped && <p className="mt-2 text-xs text-muted-foreground">Stopped</p>}
+    <div className="flex gap-3">
+      <span
+        aria-hidden="true"
+        className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand"
+      >
+        <Sparkles className="size-3.5" />
+      </span>
+      <div className="min-w-0 max-w-[92%] flex-1">
+        {turn.content ? (
+          <Markdown source={turn.content} />
+        ) : (
+          streaming && <span className="text-sm text-muted-foreground">Thinking…</span>
+        )}
+        {streaming && (
+          <span className="ml-0.5 inline-block h-4 w-1.5 translate-y-0.5 animate-pulse rounded-sm bg-brand" />
+        )}
+        {turn.error !== undefined && (
+          <div className="mt-2">
+            <RequestError error={turn.error} what="chat" />
+          </div>
+        )}
+        {turn.stats && (
+          <div className="mt-2 flex items-center gap-1">
+            <Stats stats={turn.stats} />
+            <CopyButton value={turn.content} label="Copy reply" className="size-6" />
+          </div>
+        )}
+        {turn.stopped && <p className="mt-2 text-xs text-muted-foreground">Stopped</p>}
+      </div>
     </div>
   );
 }
@@ -117,7 +133,7 @@ export function ChatTab() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-[18rem_1fr]">
-      <Card className="h-fit gap-5 p-4 shadow-none">
+      <Card className="h-fit gap-5 p-4">
         <ModelPicker id="chat-model" choice={choice} />
         <div className="grid gap-2">
           <Label htmlFor="chat-system">System prompt</Label>
@@ -139,7 +155,7 @@ export function ChatTab() {
         </Button>
       </Card>
 
-      <Card className="flex min-h-[32rem] flex-col gap-0 overflow-hidden py-0 shadow-none">
+      <Card className="flex h-[calc(100dvh-17rem)] min-h-[28rem] flex-col gap-0 overflow-hidden py-0">
         <div className="flex-1 overflow-y-auto p-4 sm:p-6">
           {/* Announce completion only; per-token updates would be read out one by one. */}
           <p role="status" className="sr-only">
@@ -151,6 +167,13 @@ export function ChatTab() {
                 Messages go through the gateway's <code>/v1/chat/completions</code>, streamed, so
                 you'll see routing, translation and usage exactly as a client would.
               </p>
+              <div className="flex flex-wrap justify-center gap-2">
+                {suggestions.map((text) => (
+                  <Button key={text} variant="outline" size="sm" onClick={() => setInput(text)}>
+                    {text}
+                  </Button>
+                ))}
+              </div>
             </EmptyState>
           ) : (
             <div className="grid gap-6">
@@ -169,7 +192,7 @@ export function ChatTab() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
               placeholder={`Message ${choice.model}…`}
-              className="max-h-48 min-h-14 resize-none border-0 pr-14 shadow-none focus-visible:ring-0 dark:bg-transparent"
+              className="max-h-48 min-h-14 resize-none border-0 pr-14 focus-visible:ring-0 dark:bg-transparent"
             />
             {streaming ? (
               <Button

@@ -11,18 +11,15 @@ import { Link } from "react-router";
 import { NoRequests } from "@/components/no-requests";
 import { PageHeader } from "@/components/page-header";
 import { RequestsTable } from "@/components/requests-table";
-import { Sparkline } from "@/components/sparkline";
 import { StatCard } from "@/components/stat-card";
+import { TrafficChart } from "@/components/traffic-chart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useOverview, useProviders } from "@/hooks/queries";
-import { useRequests, useRequestsPerMinute } from "@/hooks/use-live-requests";
-import { useNow } from "@/hooks/use-now";
+import { useRequests } from "@/hooks/use-live-requests";
 import { formatCount, formatMs, formatPercent, formatUptime } from "@/lib/format";
-
-const WINDOW_MINUTES = 30;
 
 function Stats() {
   const { data } = useOverview();
@@ -49,50 +46,10 @@ function Stats() {
   );
 }
 
-function Throughput() {
-  const now = useNow(10_000);
-  const perMinute = useRequestsPerMinute(WINDOW_MINUTES, now);
-  const { isPending } = useRequests();
-  const total = perMinute.reduce((a, b) => a + b, 0);
-  const current = perMinute.at(-1) ?? 0;
-  const peak = Math.max(...perMinute);
-  return (
-    <Card className="shadow-none lg:col-span-2">
-      <CardHeader>
-        <CardDescription>Requests per minute · last {WINDOW_MINUTES} min</CardDescription>
-        <CardTitle className="flex items-baseline gap-2 text-3xl font-semibold tabular">
-          {isPending ? <Skeleton className="h-9 w-16" /> : current}
-          <span className="text-sm font-normal text-muted-foreground">this minute</span>
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="h-28">
-          {isPending ? (
-            <Skeleton className="h-full w-full" />
-          ) : (
-            <Sparkline
-              values={perMinute}
-              height={112}
-              label={`Requests per minute over the last ${WINDOW_MINUTES} minutes; ${total} in total`}
-            />
-          )}
-        </div>
-        <div className="mt-3 flex justify-between text-xs text-muted-foreground tabular">
-          <span>{WINDOW_MINUTES} min ago</span>
-          <span>
-            {total} total · peak {peak}/min
-          </span>
-          <span>now</span>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function ProvidersSummary() {
   const { data, isPending } = useProviders();
   return (
-    <Card className="gap-4 shadow-none">
+    <Card className="gap-4">
       <CardHeader className="flex flex-row items-center justify-between">
         <div className="grid gap-1.5">
           <CardTitle className="text-base">Providers</CardTitle>
@@ -139,7 +96,7 @@ function RecentRequests() {
   const { data, isPending } = useRequests();
   if (data?.length === 0) return <NoRequests />;
   return (
-    <Card className="gap-0 overflow-hidden py-0 shadow-none">
+    <Card className="gap-0 overflow-hidden py-0">
       <div className="flex items-center justify-between border-b px-4 py-3">
         <h2 className="text-sm font-semibold">Recent requests</h2>
         <Button variant="ghost" size="sm" asChild>
@@ -172,7 +129,7 @@ export function OverviewPage() {
       />
       <Stats />
       <div className="grid gap-4 lg:grid-cols-3">
-        <Throughput />
+        <TrafficChart className="lg:col-span-2" />
         <ProvidersSummary />
       </div>
       <RecentRequests />
