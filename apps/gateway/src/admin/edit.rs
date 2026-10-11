@@ -35,19 +35,22 @@ fn error(status: StatusCode, kind: &str, message: &str, at: Option<(u64, u64)>) 
 
 // --- which values are secrets ------------------------------------------
 
-/// Whether `value`, at `path` in the config, is a secret: a client key, a
-/// provider's or MCP server's key (also inside `auth`), an MCP server's
-/// environment value or program argument (not the program), and an MCP
-/// URL that holds credentials. An `env:NAME` reference is no secret; it is
+/// Whether `value`, at `path` in the config, is a secret: a client key
+/// (the entry, or a named entry's `key`), a provider's or MCP server's key
+/// (also inside `auth`), an MCP server's OAuth client secret and refresh
+/// token, environment value or program argument (not the program), and an
+/// MCP URL that holds credentials. An `env:NAME` reference is no secret; it is
 /// shown as written.
 fn is_secret(path: &[String], value: &Value) -> bool {
     let path: Vec<&str> = path.iter().map(String::as_str).collect();
     match path.as_slice() {
-        ["client_keys", _]
+        ["client_keys", _] => value.is_string(),
+        ["client_keys", _, "key"]
         | ["providers", _, "key"]
         | ["providers", _, "auth", "key"]
         | ["mcp", _, "key"]
         | ["mcp", _, "auth", "key"]
+        | ["mcp", _, "oauth", "client_secret" | "refresh_token"]
         | ["mcp", _, "env", _] => !value.is_null(),
         ["mcp", _, "command", i] => *i != "0" && !value.is_null(),
         ["mcp", _, "url"] => value
@@ -512,7 +515,7 @@ mod tests {
     }
 
     const FULL: &str = "
-client_keys: [gw-secret, env:GATEWAY_KEY]
+client_keys: [gw-secret, env:GATEWAY_KEY, { name: app, key: named-secret }]
 providers:
   a: { vendor: openai, key: sk-live-1 }
   b: { formats: openai-chat, base_url: 'http://b.test', auth: { type: bearer, key: sk-live-2 } }
@@ -524,6 +527,9 @@ mcp:
   h: { url: 'https://h.test/mcp/', key: tok-3 }
   t: { url: 'https://t.test/mcp/abcdef0123456789abcdef0123' }
   q: { url: 'https://q.test/mcp?token=zzz', auth: { type: header, name: x-k, key: tok-4 } }
+  o:
+    url: 'https://o.test/mcp'
+    oauth: { token_url: 'https://o.test/token', client_id: cid, client_secret: oauth-secret, refresh_token: oauth-refresh }
 ";
 
     #[test]
@@ -539,6 +545,9 @@ mcp:
             "tok-4",
             "zzz",
             "abcdef0123",
+            "named-secret",
+            "oauth-secret",
+            "oauth-refresh",
         ] {
             assert!(!shown.contains(secret), "{secret} in {shown}");
         }
@@ -549,10 +558,13 @@ mcp:
             "https://h.test/mcp/",
             "npx",
             "http://b.test",
+            "name: app",
+            "client_id: cid",
+            "https://o.test/token",
         ] {
             assert!(shown.contains(kept), "{kept} missing in {shown}");
         }
-        assert_eq!(shown.matches(PLACEHOLDER).count(), 12, "{shown}");
+        assert_eq!(shown.matches(PLACEHOLDER).count(), 15, "{shown}");
     }
 
     #[test]
@@ -561,7 +573,7 @@ mcp:
         edited["providers"]["a"]["vendor"] = "anthropic".into();
         edited["providers"]["b"]["key"] = "sk-new".into();
         let restored = restore(&mut edited, Some(&yaml(FULL))).expect("restored");
-        assert_eq!(restored, 12);
+        assert_eq!(restored, 15);
         let mut want = yaml(FULL);
         want["providers"]["a"]["vendor"] = "anthropic".into();
         want["providers"]["b"]["key"] = "sk-new".into();
