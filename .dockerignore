@@ -1,0 +1,7 @@
+target
+validation/target
+**/node_modules
+apps/ui/dist
+.git
+.claude
+python/.venv
