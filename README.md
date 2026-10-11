@@ -22,6 +22,20 @@ everything else built as modules on one public API.
 Current contracts and package boundaries:
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+## Install
+
+- **Release binary**: each `v*` tag has `respan-gateway` for Linux (x86_64,
+  aarch64) and macOS (aarch64), with the web UI built in, on the
+  repository's GitHub releases page.
+- **Docker**: `docker build -t respan-gateway .`, then
+  `docker run -p 127.0.0.1:8080:8080 -e OPENAI_API_KEY respan-gateway`. The image
+  listens on `0.0.0.0:8080`, so set `keys` (below).
+- **Python**: `pip install respan-gateway` ([`python/`](python/README.md)).
+- **From source**: `cd apps/ui && pnpm install && pnpm build`, then
+  `cargo build --release -p respan-gateway`. Without the first step the
+  binary builds and serves a page that says the UI is missing; the admin
+  API works either way.
+
 ## Try it
 
 No config file is needed: every vendor whose key is in the environment
@@ -29,7 +43,7 @@ becomes a provider.
 
 ```bash
 export OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-ant-...
-cargo run -p respan-gateway
+respan-gateway                  # or, from a checkout: cargo run -p respan-gateway
 ```
 
 It prints where it listens, the providers it found, what it serves and a
@@ -70,7 +84,11 @@ curl localhost:8080/v1/videos -d '{"model":"veo-3.0-generate-001","prompt":"a pa
 with its `kind`,
 `GET /healthz` answers `ok`, and the web UI at
 [localhost:8080/ui/](http://localhost:8080/ui/) shows providers, routes and
-each request live; each finished request is also one line on stderr.
+each request live; each finished request is also one line on stderr. The UI
+reads a read-only admin API, `GET /ui/api/overview`, `providers`, `routes`,
+`requests` (and `requests/{id}`) and `events` (a live stream), which
+needs a gateway key when `keys` is set. `ui: false` turns off the UI and
+the admin API together.
 
 Vendor presets: `openai`, `anthropic`, `gemini` (`GEMINI_API_KEY` or
 `GOOGLE_API_KEY`), `groq`, `deepseek`, `openrouter`, `xai`, `mistral`,
@@ -92,7 +110,11 @@ cargo run -p respan-gateway            # reads ./gateway.yaml when there is one
 
 `keys: [env:GATEWAY_KEY]` makes every request carry a gateway key
 (`Authorization: Bearer`, `x-api-key` or `x-goog-api-key`), which is never
-sent on. Without keys, the gateway refuses (403) a browser's
+sent on. A provider with its own key (a `key`, an `auth`, or a preset's key
+in the environment) always uses that. A provider with none receives the
+client's own credential headers, but only when the client speaks that
+provider's format (an Anthropic client's `x-api-key` to an Anthropic
+provider), never across a translation. Without keys, the gateway refuses (403) a browser's
 cross-origin request (an `Origin` other than its own, or
 `Sec-Fetch-Site: cross-site`) and, unless it listens on every address, a
 `Host` other than `localhost`, `127.0.0.1`, `[::1]`, its listen address or
@@ -199,7 +221,9 @@ the provider edge own them
   one input of its own (`with_input`). HTTP plugins opt into raw requests
   with `SendRaw(Wire)`, choose heads with `ProviderHead` and `ClientHead`,
   and opt into raw errors with `RawReply`. Credentials remain separate and
-  must be copied explicitly. The binary's `proxy` mode registers this policy.
+  must be copied explicitly. The binary copies a client's credentials to a
+  keyless provider of the client's own format, and its `proxy` mode relays
+  every request raw with them.
 - **Response**: what a call, or `Response::stream`, gives back: read
   (`outputs`), held (`buffer_until`, `until_end`) or sent. Holding borrows the
   response mutably; buffered events, errors and call ownership remain available
@@ -214,17 +238,17 @@ tests, and a 10-minute plugin really takes 10 minutes. Each use case becomes a
 test when its milestone lands. The kernel is already treated as RC-like; M2
 closes remaining contract gaps rather than reopening its design.
 
-| Milestone | Delivers |
-|---|---|
-| M1 Relay kernel | Plugin chain, byte-for-byte relay, response edits, kinds, OpenAI and Anthropic, text translation both ways, model router, HTTP adapter, YAML config, `check` (done) |
-| M2 Plugin API | Calls of their own input, async stream filters, unread bodies; API fixes before the freeze |
-| M3 Formats | Gemini, Responses |
-| M4 Plugins and examples | Fallback, hedge, limits, memo, application billing |
-| M5 Translation | Tool calls, images and reasoning across formats |
-| M6 Hard cases | Realtime relay and bridges, jobs, PII rewriting, admission |
-| M7 0.1 release | Docs, examples, benchmarks |
-| M8 MCP gateway | `mcp` kind, relay, aggregation, per-key access |
-| M9 Agent loop | Gateway-run MCP tools inside chat and Responses requests |
+| Milestone | Delivers | Status |
+|---|---|---|
+| M1 Relay kernel | Plugin chain, byte-for-byte relay, response edits, kinds, OpenAI and Anthropic, text translation both ways, model router, HTTP adapter, YAML config, `check` | done |
+| M2 Plugin API | Calls of their own input, async stream filters, unread bodies; API fixes before the freeze | done |
+| M3 Formats | Gemini Live and Responses over WebSocket, OpenAI's media endpoints, Veo. Not yet Gemini `generateContent` or Responses over HTTP (those relay through `passthrough`) | partial |
+| M4 Plugins and examples | Fallback, hedge, limits, memo, application billing | done, as [examples](examples/README.md) |
+| M5 Translation | Tools, images and reasoning between OpenAI Chat and Anthropic Messages | done |
+| M6 Hard cases | Realtime relay and OpenAI Realtime / Gemini Live translation, video jobs, PII rewriting and admission (examples) | done |
+| M7 0.1 release | Docs, examples, benchmarks; release binaries and a Dockerfile exist | open |
+| M8 MCP gateway | The `mcp` kind and streamable HTTP / stdio formats exist; no relay, aggregation or per-key access in the binary | partial |
+| M9 Agent loop | Gateway-run MCP tools inside chat and Responses requests | open |
 
 ## Structure
 
@@ -249,6 +273,7 @@ the gateway, and the binary chooses what to compose. See the
 | `crates/providers/` | Every vendor, a file each: base URL, key, models, the formats it speaks, its quirks (data and a plugin), and a table of them. |
 | `crates/plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |
 | `apps/gateway/` | The binary and its library (`respan_gateway`): configuration (YAML, vendor presets, or none, from the environment), routing (by model within each kind, video jobs by id), client keys, `/v1/models`, the request log, the web UI and its admin API; `serve`, `check`, `init` and `proxy`. |
+| `apps/ui/` | The web UI: React and shadcn/ui, built with `pnpm build` to `apps/ui/dist`, which `apps/gateway/build.rs` embeds in the binary. |
 | `tests/support/` | Private source-only helpers shared by integration tests; not a public crate. |
 | `examples/` | Runnable, tested integrations of the [use cases](examples/README.md). |
 | `validation/` | Separate opt-in live-provider and external-tool checks, excluded from workspace tests. |
@@ -288,6 +313,10 @@ for standard HTTP structure or byte buffers.
 ## Development
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+Checks by area: Rust as in `CONTRIBUTING.md`; the UI with
+`cd apps/ui && pnpm install && pnpm lint && pnpm typecheck && pnpm test && pnpm build`;
+Python with `cd python && maturin develop && pytest`.
 
 ### End-to-end tests
 

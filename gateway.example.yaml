@@ -15,7 +15,7 @@ listen: 127.0.0.1:8080
 # keys: [env:GATEWAY_KEY]
 
 # Print one line per finished request to stderr; serve the web UI and its
-# admin API at /ui/ (and redirect / there).
+# admin API at /ui/ (and redirect / there). `ui: false` turns off both.
 # log: true
 # ui: true
 
@@ -61,8 +61,10 @@ providers:
 # anthropic-messages; x-goog-api-key for gemini-live and gemini-veo), or any
 # one header with `auth`. A vendor's quirks, such as Groq's usage under
 # `x_groq` or vLLM's `reasoning_content`, come with `vendor:`; a provider of
-# a format alone has none. A provider with no key sends none of the
-# client's: only `proxy` relays clients' keys.
+# a format alone has none. A provider with no key (no `key`, no `auth`, and
+# no preset key in the environment) passes on the client's own credential
+# headers, but only when the client speaks that provider's format; no key
+# crosses a translation. A provider with a key always uses its own.
 #   compatible:
 #     format: openai-chat
 #     base_url: https://llm.example.com/v1
@@ -97,10 +99,12 @@ providers:
 
 # Sessions over WebSocket, as their SDKs reach them: openai-realtime
 # (clients at .../v1/realtime), responses-ws (an upgrade to .../v1/responses)
-# and gemini-live. Each WebSocket upgrade is a session, sent to the one
-# provider of its format, as nothing translates a session's events; the
-# openai and gemini presets include theirs. body_limit is HTTP's; a
-# session's message may be 16 MiB.
+# and gemini-live. Each WebSocket upgrade is a session. A realtime session
+# (openai-realtime or gemini-live) goes to the provider of the model in its
+# URL's `?model=` and is translated if that provider speaks the other API;
+# a responses-ws session goes to the one provider of its format. The openai
+# and gemini presets include theirs. body_limit is HTTP's; a session's
+# message may be 16 MiB.
 #   realtime:
 #     format: openai-realtime
 #     base_url: wss://api.openai.com/v1
@@ -137,7 +141,5 @@ providers:
 #       - { prefix: llama, provider: groq }
 
 # The default provider of each kind it serves, for requests nothing else
-# routes; unset, the first provider serving the kind. Translation is text
-# only: a request with tools is refused unless it goes to a provider of its
-# own format.
+# routes; unset, the first provider serving the kind.
 # target: openai
