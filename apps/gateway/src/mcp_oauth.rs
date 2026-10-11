@@ -39,7 +39,7 @@ const DEFAULT_LIFETIME: Duration = Duration::from_secs(3600);
 const MAX_LIFETIME: Duration = Duration::from_secs(24 * 3600);
 
 /// `oauth:` of an `mcp:` server.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthConfig {
     /// The token endpoint, `https://auth.example.com/oauth/token`.
@@ -54,6 +54,14 @@ pub struct OAuthConfig {
     /// A refresh token, literal or `env:NAME`: with it the gateway uses the
     /// refresh token grant, else client credentials.
     pub refresh_token: Option<String>,
+}
+
+impl std::fmt::Debug for OAuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthConfig")
+            .field("token_url", &crate::redact::url(&self.token_url))
+            .finish_non_exhaustive()
+    }
 }
 
 /// A server's token source.
@@ -91,6 +99,18 @@ impl OAuth {
             .map_err(|_| bad("`token_url` is not a URL"))?;
         if !matches!(token_url.scheme(), "http" | "https") || token_url.fragment().is_some() {
             return Err(bad("`token_url` is an http(s) URL with no fragment"));
+        }
+        let host = token_url.host_str().unwrap_or_default();
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        if token_url.scheme() == "http" && !loopback {
+            return Err(bad(
+                "`token_url` must be https: the client secret would be sent in clear \
+                 (plain http is for localhost only)",
+            ));
         }
         let read = |what: &str, value: &str| {
             let value = secret(&format!("{owner}: oauth {what}"), value)?;
@@ -292,22 +312,26 @@ mod tests {
         let ok = "client_id: i\nclient_secret: s\n";
         assert!(said(&format!("token_url: nope\n{ok}")).contains("not a URL"));
         assert!(said(&format!("token_url: 'ftp://a.test/t'\n{ok}")).contains("http(s)"));
+        assert!(said(&format!("token_url: 'http://a.test/t'\n{ok}")).contains("https"));
+        for local in ["localhost:1", "127.0.0.1:1", "[::1]:1"] {
+            assert_eq!(said(&format!("token_url: 'http://{local}/t'\n{ok}")), "");
+        }
         assert!(
-            said("token_url: 'http://a.test/t'\nclient_id: ''\nclient_secret: s")
+            said("token_url: 'https://a.test/t'\nclient_id: ''\nclient_secret: s")
                 .contains("client_id")
         );
         assert!(
             said(
-                "token_url: 'http://a.test/t'\nclient_id: i\nclient_secret: 'env:NO_SUCH_OAUTH_X'"
+                "token_url: 'https://a.test/t'\nclient_id: i\nclient_secret: 'env:NO_SUCH_OAUTH_X'"
             )
             .contains("NO_SUCH_OAUTH_X")
         );
         assert!(
             said(&format!(
-                "token_url: 'http://a.test/t'\n{ok}scopes: ['a b']"
+                "token_url: 'https://a.test/t'\n{ok}scopes: ['a b']"
             ))
             .contains("scope")
         );
-        assert!(said(&format!("token_url: 'http://a.test/t'\n{ok}extra: 1")).contains("extra"));
+        assert!(said(&format!("token_url: 'https://a.test/t'\n{ok}extra: 1")).contains("extra"));
     }
 }

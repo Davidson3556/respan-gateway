@@ -24,7 +24,10 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
 
     let mut providers = Vec::new();
     for u in &plan.upstreams {
-        let base_url = u.entries.first().map_or("", |e| e.base_url.as_str());
+        let base_url = u
+            .entries
+            .first()
+            .map_or(String::new(), |e| crate::redact::url(&e.base_url));
         providers.push(format!("{} at {base_url}", u.name));
         if let Some(vendor) = u.preset {
             providers.push(format!("  vendor  {}", vendor.id));

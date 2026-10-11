@@ -443,3 +443,18 @@ async fn requests_carry_the_name_of_their_client_key() {
     assert_eq!(row[column], "key-2");
     assert!(lines.next().is_none());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_history_file_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let file = scratch("private.jsonl");
+    let up = FakeOpenAi::start().await;
+    up.answer(Answer::text("hello"));
+    let yaml = config(&up, &format!("request_history_file: '{}'", file.display()));
+    let gw = Gateway::start(&yaml).await;
+    assert_eq!(chat(&gw, "gpt-4o").await, 200);
+    lines_in(&file, 1).await;
+    let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+}

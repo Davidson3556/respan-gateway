@@ -54,6 +54,17 @@ pub struct Admin {
 }
 
 impl Admin {
+    /// Where the config comes from (`file`, `environment`, `proxy` or
+    /// `inline`) and, for a file, its path as given.
+    fn source_and_path(&self) -> (&'static str, Option<String>) {
+        match &self.source {
+            Source::File(path) => ("file", Some(path.display().to_string())),
+            Source::Environment => ("environment", None),
+            Source::Proxy => ("proxy", None),
+            Source::Inline => ("inline", None),
+        }
+    }
+
     pub(crate) fn new(
         process: Arc<Process>,
         config: &Config,
@@ -75,7 +86,7 @@ impl Admin {
                         .collect::<Vec<_>>(),
                     "formats": formats,
                     "kinds": kinds,
-                    "base_url": u.entries.first().map_or("", |e| e.base_url.as_str()),
+                    "base_url": u.entries.first().map_or(String::new(), |e| crate::redact::url(&e.base_url)),
                     "credentials": if u.own_key { "gateway" } else { "client" },
                 })
             })
@@ -146,7 +157,7 @@ pub fn router(admin: Arc<Admin>, keys: Arc<ClientKeys>) -> Router {
         .route("/ui/api/config", get(edit::show).put(edit::save))
         .route("/ui/api/config/validate", post(edit::validate))
         .route("/ui/api/{*rest}", get(not_found))
-        .route_layer(from_fn_with_state(keys, auth::require))
+        .route_layer(from_fn_with_state(keys, auth::require_admin))
         .with_state(admin);
     Router::new()
         .route("/", get(|| async { Redirect::to("/ui/") }))
@@ -157,6 +168,24 @@ pub fn router(admin: Arc<Admin>, keys: Arc<ClientKeys>) -> Router {
             get(|Path(path): Path<String>| async move { asset(&path) }),
         )
         .merge(api)
+}
+
+/// `reloaded_at` and `restart_required`, as a reload and a save answer.
+fn reloaded_json(
+    process: &Process,
+    reloaded: &crate::app::Reloaded,
+) -> serde_json::Map<String, Value> {
+    let at = *process
+        .reloaded_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Value::Object(map) = json!({
+        "reloaded_at": at.map(rfc3339),
+        "restart_required": reloaded.restart_required,
+    }) else {
+        unreachable!("an object literal")
+    };
+    map
 }
 
 /// `POST /ui/api/reload`: reads the config source again and swaps the new
@@ -175,17 +204,7 @@ pub fn router(admin: Arc<Admin>, keys: Arc<ClientKeys>) -> Router {
 async fn reload(State(admin): State<Arc<Admin>>) -> Response {
     let process = admin.process.clone();
     match process.reload() {
-        Ok(reloaded) => {
-            let at = *process
-                .reloaded_at
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            Json(json!({
-                "reloaded_at": at.map(rfc3339),
-                "restart_required": reloaded.restart_required,
-            }))
-            .into_response()
-        }
+        Ok(reloaded) => Json(reloaded_json(&process, &reloaded)).into_response(),
         Err(e @ ReloadError::Unavailable) => {
             auth::error(StatusCode::CONFLICT, "reload_unavailable", &e.to_string())
         }
@@ -213,12 +232,7 @@ async fn reload(State(admin): State<Arc<Admin>>) -> Response {
 /// }
 /// ```
 async fn overview(State(admin): State<Arc<Admin>>) -> Json<Value> {
-    let (source, path) = match &admin.source {
-        Source::File(path) => ("file", Some(path.display().to_string())),
-        Source::Environment => ("environment", None),
-        Source::Proxy => ("proxy", None),
-        Source::Inline => ("inline", None),
-    };
+    let (source, path) = admin.source_and_path();
     let process = &admin.process;
     let reloaded_at = *process
         .reloaded_at

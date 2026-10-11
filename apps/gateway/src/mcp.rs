@@ -49,7 +49,7 @@ const SESSIONS: usize = 32;
 
 /// One MCP server, as `gateway.yaml` writes it under `mcp:`: `url` or
 /// `command`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpConfig {
     /// A streamable-HTTP server's endpoint, such as
@@ -75,6 +75,15 @@ pub struct McpConfig {
     pub cwd: Option<PathBuf>,
 }
 
+// Its key, auth, OAuth, arguments and environment are secrets: not printed.
+impl std::fmt::Debug for McpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpConfig")
+            .field("forward_auth", &self.forward_auth)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A checked server.
 #[derive(Debug, Clone)]
 pub struct McpServer {
@@ -89,7 +98,7 @@ pub struct McpServer {
     pub oauth: Option<Arc<OAuth>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Transport {
     Http {
         /// As configured.
@@ -106,6 +115,17 @@ pub enum Transport {
         env: Vec<(String, String)>,
         cwd: Option<PathBuf>,
     },
+}
+
+// What it reaches and runs are not printed beyond `target`: a URL, an
+// argument, the environment and the headers can hold tokens.
+impl std::fmt::Debug for Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http { origin, .. } => write!(f, "Http({origin})"),
+            Self::Stdio { program, .. } => write!(f, "Stdio({})", program.display()),
+        }
+    }
 }
 
 impl McpServer {

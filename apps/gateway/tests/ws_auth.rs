@@ -111,3 +111,45 @@ async fn a_browser_presents_the_gateway_key_as_a_query_parameter() {
     );
     never_saw_the_key(&openai);
 }
+
+#[tokio::test]
+async fn a_browsers_session_is_logged_under_its_keys_name() {
+    let (openai, gemini) = (
+        realtime::openai::start().await,
+        realtime::gemini::start().await,
+    );
+    let http = |ws: String| ws.replace("ws://", "http://");
+    let gw = Gateway::start(&format!(
+        "client_keys: [{{ name: web, key: gw-key }}]
+providers:
+  openai: {{ vendor: openai, base_url: '{}', key: sk-provider }}
+formats: [openai-realtime]
+",
+        http(openai.base_url()),
+    ))
+    .await;
+    let _ = gemini;
+    let path = "/v1/realtime?model=gpt-realtime";
+    let offer = "realtime, openai-insecure-api-key.gw-key";
+    assert_eq!(
+        upgrade(&gw, path, offer).await,
+        Ok(Some("realtime".to_owned()))
+    );
+    let client = support::client();
+    for _ in 0..200 {
+        let resp = client
+            .get(gw.url("/ui/api/requests"))
+            .bearer_auth("gw-key")
+            .send()
+            .await
+            .unwrap();
+        let log = support::json(&resp.text().await.unwrap());
+        let sessions = log["requests"].as_array().unwrap();
+        if let Some(found) = sessions.iter().find(|r| r["path"] == "/v1/realtime") {
+            assert_eq!(found["client"], "web", "{found}");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("no realtime request logged");
+}

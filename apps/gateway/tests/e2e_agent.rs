@@ -564,6 +564,46 @@ async fn allow_and_deny_pick_the_tools_the_model_is_offered_and_can_call() {
 }
 
 #[tokio::test]
+async fn a_client_keys_tools_limit_what_its_requests_are_offered() {
+    let up = FakeMcp::start().await;
+    let openai = FakeOpenAi::start().await;
+    let yaml = format!(
+        "client_keys:\n  - {{ name: wide, key: {KEY} }}\n  - {{ name: narrow, key: gw-key-2, tools: ['files__read'] }}\n  - {{ name: none, key: gw-key-3, tools: ['other__*'] }}\nproviders:\n  openai: {{ formats: openai-chat, base_url: '{}', key: sk-gw-openai }}\n{}agent:\n  servers: [files]\n",
+        openai.base_url(),
+        http_server(&up)
+    );
+    let gw = Gateway::start(&yaml).await;
+    let tools_for = |key: &'static str| {
+        let (gw, openai) = (&gw, &openai);
+        async move {
+            openai.answer(Answer::text("ok"));
+            let before = openai.requests().len();
+            let resp = client()
+                .post(gw.url("/v1/chat/completions"))
+                .header("authorization", format!("Bearer {key}"))
+                .header("content-type", "application/json")
+                .body(hello().to_string())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            let sent = openai.requests();
+            let tools = sent[before].body["tools"].clone();
+            let names: Vec<String> = tools
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|t| t["function"]["name"].as_str().unwrap().to_owned())
+                .collect();
+            names
+        }
+    };
+    assert_eq!(tools_for(KEY).await, ["files__read", "files__boom"]);
+    assert_eq!(tools_for("gw-key-2").await, ["files__read"]);
+    assert!(tools_for("gw-key-3").await.is_empty());
+}
+
+#[tokio::test]
 async fn check_lists_the_offered_tools_only_online() {
     let up = FakeMcp::start().await;
     let yaml = format!(

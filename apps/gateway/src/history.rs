@@ -83,7 +83,12 @@ fn write_lines(path: &Path, max: usize, queue: &Receiver<String>) {
 }
 
 fn open(path: &Path) -> std::io::Result<(File, usize)> {
-    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    // Client names, models, paths and errors: the owner's to read.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(path)?;
     let size = file.metadata()?.len();
     Ok((file, usize::try_from(size).unwrap_or(usize::MAX)))
 }
