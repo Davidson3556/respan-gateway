@@ -20,7 +20,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
 use respan_gateway::{App, Config};
 use tokio::runtime::Runtime;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use tower::ServiceExt;
 
@@ -332,18 +332,23 @@ impl Native {
                 let addr = listener.local_addr().map_err(gateway_error)?;
                 let banner = app.banner(addr);
                 let (stop, stopped) = oneshot::channel::<()>();
+                let (ended_tx, ended) = watch::channel(false);
                 let task = tokio::spawn(async move {
-                    app.serve(listener, async {
-                        // A dropped sender is not a stop.
-                        if stopped.await.is_err() {
-                            std::future::pending::<()>().await;
-                        }
-                    })
-                    .await
+                    let served = app
+                        .serve(listener, async {
+                            // A dropped sender is not a stop.
+                            if stopped.await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        })
+                        .await;
+                    ended_tx.send_replace(true);
+                    served
                 });
                 Ok(Server {
                     url: format!("http://{addr}"),
                     banner,
+                    ended,
                     stop: Mutex::new(Some(stop)),
                     task: Mutex::new(Some(task)),
                 })
@@ -474,6 +479,7 @@ struct Server {
     /// What the binary prints on start: providers, endpoints, the UI.
     #[pyo3(get)]
     banner: String,
+    ended: watch::Receiver<bool>,
     stop: Mutex<Option<oneshot::Sender<()>>>,
     task: Mutex<Option<JoinHandle<std::io::Result<()>>>>,
 }
@@ -496,6 +502,36 @@ impl Server {
         py.detach(|| runtime().block_on(task))
             .map_err(gateway_error)?
             .map_err(gateway_error)
+    }
+
+    /// `stop` without blocking: calls `done(None, error)` from another
+    /// thread once the server has ended.
+    fn stop_async(&self, done: Py<PyAny>) -> Pending {
+        self.signal();
+        let task = self.task.lock().ok().and_then(|mut t| t.take());
+        start(
+            async move {
+                let Some(task) = task else { return Ok(()) };
+                let served = task.await.map_err(|e| Failure::Error(e.to_string()))?;
+                served.map_err(|e| Failure::Error(e.to_string()))
+            },
+            done,
+            |py, ()| Ok(py.None()),
+        )
+    }
+
+    /// Blocks (GIL released, Ctrl-C delivered) until the server has ended.
+    fn wait(&self, py: Python<'_>) -> PyResult<()> {
+        let mut ended = self.ended.clone();
+        wait(py, async move {
+            // The sender lives in the serving task, so a closed channel is an end too.
+            let _ = ended.wait_for(|ended| *ended).await;
+            Ok(())
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Server(url={:?})", self.url)
     }
 
     fn __enter__(slf: Py<Self>) -> Py<Self> {

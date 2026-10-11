@@ -2,27 +2,43 @@
 
     import respan_gateway as rg
 
-    gw = rg.Gateway(config={...})   # or rg.Gateway() to use OPENAI_API_KEY etc.
-    client = gw.openai()            # an openai.OpenAI that talks to gw directly
+    with rg.Gateway(config={...}) as gw:   # or rg.Gateway() to use OPENAI_API_KEY etc.
+        client = gw.openai()               # an openai.OpenAI that talks to gw directly
+        client.chat.completions.create(model="gpt-4o-mini", messages=[...])
+        client.images.generate(model="gpt-image-1", prompt="a red fox")
+        print(gw.models())
+
+HTTP error statuses are responses (and the SDKs' own exceptions); a failure to
+run a request or start a server is a `GatewayError`, a timeout a
+`GatewayTimeout`, an invalid configuration a `ConfigError`.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
-import time
-from typing import Any, AsyncIterator, Iterator, Mapping, Optional, Union
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterator, List, Mapping, Optional, Union, cast
 
 import httpx
 
 from . import _native
-from ._native import ConfigError, GatewayError, Server, __version__
+from ._native import ConfigError, GatewayError, GatewayTimeout, __version__
+from ._server import Server
 from ._transport import transports
+from .config import GatewayConfig
+
+if TYPE_CHECKING:
+    import anthropic as _anthropic
+    import openai as _openai
 
 __all__ = [
     "ConfigError",
     "Gateway",
+    "GatewayConfig",
     "GatewayError",
+    "GatewayTimeout",
     "Server",
     "__version__",
 ]
@@ -35,72 +51,139 @@ _BASE = "http://respan-gateway"
 class Gateway:
     """A configured gateway.
 
-    `config` is a mapping, or a YAML string, in the format of
-    `gateway.example.yaml`. Without it, the gateway is configured as the
-    binary is with no arguments: from `./gateway.yaml` if that file exists,
-    else from the environment: every vendor whose key is set (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
-    ...), with `RESPAN_<VENDOR>_BASE_URL` to point one elsewhere.
+    `config` is a mapping (see `GatewayConfig`), or a YAML string, in the
+    format of `gateway.example.yaml`. Without it, the gateway is configured as
+    the binary is with no arguments: from `./gateway.yaml` if that file
+    exists, else from the environment: every vendor whose key is set
+    (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, ...), with
+    `RESPAN_<VENDOR>_BASE_URL` to point one elsewhere.
+
+    Use it as a context manager (`with` or `async with`) to stop the servers
+    it started and close the clients it handed out.
 
     Raises `ConfigError` (a `ValueError`) if the configuration is invalid.
     """
 
-    def __init__(self, config: Union[Mapping[str, Any], str, None] = None) -> None:
+    def __init__(self, config: Union[GatewayConfig, Mapping[str, Any], str, None] = None) -> None:
         if config is None:
-            self._native = _native.Native.discover()
+            native, self._source = _native.Native.discover(), "discovered"
         elif isinstance(config, str):
-            self._native = _native.Native.from_yaml(config)
+            native, self._source = _native.Native.from_yaml(config), "yaml"
         else:
             # JSON is YAML.
-            self._native = _native.Native.from_yaml(json.dumps(config))
+            native, self._source = _native.Native.from_yaml(json.dumps(config)), "dict"
+        self._setup(native)
+
+    def _setup(self, native: _native.Native) -> None:
+        self._native = native
+        self._servers: List[Server] = []
+        self._clients: List[Any] = []  # httpx clients handed to SDKs
+        self._sync: Optional[httpx.Client] = None
+        self._async: Optional[httpx.AsyncClient] = None
 
     @classmethod
     def from_file(cls, path: Union[str, "os.PathLike[str]"]) -> "Gateway":
         """A gateway from the YAML file at `path`."""
         gateway = cls.__new__(cls)
-        gateway._native = _native.Native.from_file(os.fspath(path))
+        gateway._source = os.fspath(path)
+        gateway._setup(_native.Native.from_file(os.fspath(path)))
         return gateway
+
+    def __repr__(self) -> str:
+        try:
+            providers = ", ".join(p["name"] for p in self.providers())
+        except Exception:  # a repr must not raise (e.g. `ui: false`)
+            providers = "?"
+        return f"Gateway(source={self._source!r}, providers=[{providers}])"
+
+    # -- lifecycle -----------------------------------------------------------
+
+    def close(self) -> None:
+        """Stops the servers started through `serve()` and closes the sync clients handed out."""
+        servers, self._servers = self._servers, []
+        for server in servers:
+            server.stop()
+        clients = [c for c in (*self._clients, self._sync) if c is not None and not hasattr(c, "aclose")]
+        self._clients = [c for c in self._clients if c not in clients]
+        self._sync = None
+        for client in clients:
+            client.close()
+
+    async def aclose(self) -> None:
+        """`close` for asyncio, which also closes the async clients."""
+        servers, self._servers = self._servers, []
+        for server in servers:
+            await server.astop()
+        clients = [c for c in (*self._clients, self._async) if c is not None and hasattr(c, "aclose")]
+        self._clients = [c for c in self._clients if c not in clients]
+        self._async = None
+        for client in clients:
+            await client.aclose()
+        self.close()
+
+    def __enter__(self) -> "Gateway":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    async def __aenter__(self) -> "Gateway":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.aclose()
+
+    # -- clients -------------------------------------------------------------
 
     def transport(self) -> httpx.BaseTransport:
         """An httpx transport that sends requests to this gateway in-process."""
-        return transports(httpx)[0](self._native)
+        return cast(httpx.BaseTransport, transports(httpx)[0](self._native))
 
     def async_transport(self) -> httpx.AsyncBaseTransport:
         """An httpx async transport that sends requests to this gateway in-process."""
-        return transports(httpx)[1](self._native)
+        return cast(httpx.AsyncBaseTransport, transports(httpx)[1](self._native))
 
-    def openai(self, *, api_key: Optional[str] = None, asynchronous: bool = False, **kwargs: Any) -> Any:
-        """An `openai.OpenAI` (or `AsyncOpenAI`) client wired to this gateway.
+    def openai(self, *, api_key: Optional[str] = None, **kwargs: Any) -> "_openai.OpenAI":
+        """An `openai.OpenAI` client wired to this gateway: chat, images,
+        audio, embeddings and videos as far as the config serves them.
 
         `api_key` is one of the config's client `keys` if it sets any;
         otherwise a placeholder, which reaches a provider only if the gateway
         holds no key of its own for it. Other keyword arguments go to the
         client.
         """
-        try:
-            import openai
-        except ImportError:
-            raise ImportError("gw.openai() needs the openai package: pip install openai") from None
-        if asynchronous:
-            http = httpx.AsyncClient(transport=self.async_transport())
-            return openai.AsyncOpenAI(base_url=_BASE + "/v1", api_key=api_key or "unused", http_client=http, **kwargs)
+        openai = _import("openai")
         http = httpx.Client(transport=self.transport())
-        return openai.OpenAI(base_url=_BASE + "/v1", api_key=api_key or "unused", http_client=http, **kwargs)
+        self._clients.append(http)
+        made = openai.OpenAI(base_url=_BASE + "/v1", api_key=api_key or "unused", http_client=http, **kwargs)
+        return cast("_openai.OpenAI", made)
 
-    def anthropic(self, *, api_key: Optional[str] = None, asynchronous: bool = False, **kwargs: Any) -> Any:
-        """An `anthropic.Anthropic` (or `AsyncAnthropic`) client wired to this gateway.
+    def openai_async(self, *, api_key: Optional[str] = None, **kwargs: Any) -> "_openai.AsyncOpenAI":
+        """`openai()` for asyncio: an `openai.AsyncOpenAI`."""
+        openai = _import("openai")
+        http = httpx.AsyncClient(transport=self.async_transport())
+        self._clients.append(http)
+        made = openai.AsyncOpenAI(base_url=_BASE + "/v1", api_key=api_key or "unused", http_client=http, **kwargs)
+        return cast("_openai.AsyncOpenAI", made)
 
-        `api_key` is as in `openai()`.
-        """
-        try:
-            import anthropic
-        except ImportError:
-            raise ImportError("gw.anthropic() needs the anthropic package: pip install anthropic") from None
+    def anthropic(self, *, api_key: Optional[str] = None, **kwargs: Any) -> "_anthropic.Anthropic":
+        """An `anthropic.Anthropic` client wired to this gateway; `api_key` is as in `openai()`."""
+        return cast("_anthropic.Anthropic", self._anthropic(False, api_key, kwargs))
+
+    def anthropic_async(self, *, api_key: Optional[str] = None, **kwargs: Any) -> "_anthropic.AsyncAnthropic":
+        """`anthropic()` for asyncio: an `anthropic.AsyncAnthropic`."""
+        return cast("_anthropic.AsyncAnthropic", self._anthropic(True, api_key, kwargs))
+
+    def _anthropic(self, asynchronous: bool, api_key: Optional[str], kwargs: Dict[str, Any]) -> Any:
+        anthropic = _import("anthropic")
 
         def build(http: Any) -> Any:
             transport = transports(http)[1 if asynchronous else 0](self._native)
             client = (http.AsyncClient if asynchronous else http.Client)(transport=transport)
             cls = anthropic.AsyncAnthropic if asynchronous else anthropic.Anthropic
-            return cls(base_url=_BASE, api_key=api_key or "unused", http_client=client, **kwargs)
+            made = cls(base_url=_BASE, api_key=api_key or "unused", http_client=client, **kwargs)
+            self._clients.append(client)
+            return made
 
         try:
             return build(httpx)
@@ -112,52 +195,144 @@ class Gateway:
                 raise TypeError("the anthropic package does not accept an httpx client") from None
             return build(httpx2)
 
+    # -- raw requests --------------------------------------------------------
+
+    def _client(self) -> httpx.Client:
+        if self._sync is None:
+            self._sync = httpx.Client(base_url=_BASE, transport=self.transport(), timeout=None)
+        return self._sync
+
+    def _aclient(self) -> httpx.AsyncClient:
+        if self._async is None:
+            self._async = httpx.AsyncClient(base_url=_BASE, transport=self.async_transport(), timeout=None)
+        return self._async
+
     def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Sends one request and reads the whole response.
 
         `kwargs` are those of `httpx.Client.request` (`json`, `content`,
-        `headers`, `params`, `timeout`...). An HTTP error status is a response,
-        not an exception. There is no timeout unless you pass one: it bounds
-        the wait for the response (the provider call).
+        `files`, `headers`, `params`, `timeout`...). An HTTP error status is a
+        response, not an exception. There is no timeout unless you pass one:
+        it bounds the wait for the response (the provider call), and raises
+        `httpx.ReadTimeout`.
         """
-        with httpx.Client(base_url=_BASE, transport=self.transport(), timeout=None) as client:
-            return client.request(method, path, **kwargs)
+        return self._client().request(method, path, **kwargs)
 
     async def arequest(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """`request` for asyncio."""
-        async with httpx.AsyncClient(base_url=_BASE, transport=self.async_transport(), timeout=None) as client:
-            return await client.request(method, path, **kwargs)
+        return await self._aclient().request(method, path, **kwargs)
 
     def stream(self, method: str, path: str, **kwargs: Any) -> Iterator[bytes]:
         """Sends one request and yields the response body as it arrives."""
-        with httpx.Client(base_url=_BASE, transport=self.transport(), timeout=None) as client:
-            with client.stream(method, path, **kwargs) as response:
-                yield from response.iter_raw()
+        with self._client().stream(method, path, **kwargs) as response:
+            yield from response.iter_raw()
 
     async def astream(self, method: str, path: str, **kwargs: Any) -> AsyncIterator[bytes]:
         """`stream` for asyncio."""
-        async with httpx.AsyncClient(base_url=_BASE, transport=self.async_transport(), timeout=None) as client:
-            async with client.stream(method, path, **kwargs) as response:
-                async for chunk in response.aiter_raw():
-                    yield chunk
+        async with self._aclient().stream(method, path, **kwargs) as response:
+            async for chunk in response.aiter_raw():
+                yield chunk
+
+    # -- what the gateway knows ----------------------------------------------
+
+    def models(self, kind: Optional[str] = None) -> List[Dict[str, Any]]:
+        """The models every provider lists, merged, as `/v1/models` does.
+
+        Each is a dict with `id` (as clients name it), `owned_by` (the
+        provider) and `kind` (`chat`, `embedding`, `image`, `transcription`,
+        `speech`, `video` or `realtime`); `kind` filters them. This asks
+        every provider, so it takes as long as the slowest.
+        """
+        return _models(self.request("GET", "/v1/models"), kind)
+
+    async def amodels(self, kind: Optional[str] = None) -> List[Dict[str, Any]]:
+        """`models` for asyncio."""
+        return _models(await self.arequest("GET", "/v1/models"), kind)
+
+    def providers(self) -> List[Dict[str, Any]]:
+        """The configured providers with their formats and request counts.
+
+        Like `requests()`, this is the web UI's admin API, off with `ui: false`.
+        """
+        return _items(self.request("GET", "/ui/api/providers"), "providers")
+
+    async def aproviders(self) -> List[Dict[str, Any]]:
+        """`providers` for asyncio."""
+        return _items(await self.arequest("GET", "/ui/api/providers"), "providers")
+
+    def requests(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """The last `limit` requests the gateway served, newest first, as the web UI lists them.
+
+        The log is in memory and off with `log: false`; the admin API is off with `ui: false`.
+        """
+        return _items(self.request("GET", "/ui/api/requests", params={"limit": limit}), "requests")
+
+    async def arequests(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """`requests` for asyncio."""
+        return _items(await self.arequest("GET", "/ui/api/requests", params={"limit": limit}), "requests")
+
+    # -- servers -------------------------------------------------------------
 
     def serve(self, host: str = "127.0.0.1", port: int = 0) -> Server:
         """Serves this gateway on a real socket in the background.
 
         Returns a `Server` (`.url`, `.stop()`), also a context manager that
-        stops on exit. The server keeps running until stopped or the process
-        exits, even if you drop the returned `Server` (so a bare
-        `gw.serve(port=8080)` serves). `port=0` picks a free port. Without client `keys` in
-        the config, anyone who reaches it spends your keys: keep it local.
+        stops on exit. The server keeps running until stopped, the gateway is
+        closed or the process exits, even if you drop the returned `Server`
+        (so a bare `gw.serve(port=8080)` serves). `port=0` picks a free port.
+        Without client `keys` in the config, anyone who reaches it spends
+        your keys: keep it local.
+
+        Besides the HTTP APIs it serves WebSocket sessions (OpenAI Realtime,
+        Gemini Live) when the config has a provider for them: connect any
+        WebSocket client to `server.url` with `http` replaced by `ws`.
         """
-        return self._native.serve(host, port)
+        server = Server(self._native.serve(host, port))
+        self._servers.append(server)
+        return server
+
+    @contextlib.asynccontextmanager
+    async def aserve(self, host: str = "127.0.0.1", port: int = 0) -> AsyncIterator[Server]:
+        """`async with gw.aserve() as server:` serves for the block, then stops."""
+        server = await asyncio.to_thread(self.serve, host, port)
+        try:
+            yield server
+        finally:
+            await server.astop()
 
     def serve_forever(self, host: str = "127.0.0.1", port: int = 8080) -> None:
-        """Serves until interrupted (Ctrl-C)."""
+        """Serves until interrupted (Ctrl-C), printing the banner as the binary does.
+
+        Unlike `serve()`, the port defaults to 8080: this is the foreground
+        server.
+        """
         with self.serve(host, port) as server:
             print(server.banner, flush=True)
             try:
-                while True:
-                    time.sleep(0.2)  # wakes to deliver KeyboardInterrupt
+                server.wait()
             except KeyboardInterrupt:
                 pass
+
+
+def _import(name: str) -> Any:
+    try:
+        return __import__(name)
+    except ImportError:
+        raise ImportError(f"this needs the {name} package: pip install {name}") from None
+
+
+def _items(response: httpx.Response, key: str) -> List[Dict[str, Any]]:
+    """`response`'s JSON list at `key`; an error status is a `GatewayError`."""
+    if response.status_code != 200:
+        try:
+            message = response.json()["error"]["message"]
+        except Exception:
+            message = response.text[:200]
+        hint = " (is `ui: false` set in the config?)" if response.url.path.startswith("/ui/") else ""
+        what = f"{response.request.method} {response.url.path} answered {response.status_code}"
+        raise GatewayError(f"{what}: {message}{hint}")
+    return cast(List[Dict[str, Any]], response.json()[key])
+
+
+def _models(response: httpx.Response, kind: Optional[str]) -> List[Dict[str, Any]]:
+    return [m for m in _items(response, "data") if kind in (None, m.get("kind"))]
