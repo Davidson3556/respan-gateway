@@ -13,6 +13,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useProviders, useRoutes } from "@/hooks/queries";
+import { describeError } from "@/lib/query-client";
 import type { Kind, ServedFormat } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -128,18 +129,37 @@ function Served({ serve }: { serve: ServedFormat[] }) {
 }
 
 export function RoutesPage() {
-  const { data, isPending } = useRoutes();
+  const { data, isPending, isError, error } = useRoutes();
   const providers = useProviders();
   const kinds: Kind[] = data
     ? [...new Set([...data.serve.map((s) => s.kind), ...data.defaults.map((d) => d.kind)])]
     : [];
 
+  const header = (
+    <PageHeader
+      title="Routes"
+      description="Which client formats the gateway serves, and where each model goes."
+    />
+  );
+
+  if (isError && !data) {
+    return (
+      <div className="grid grid-cols-1 gap-6">
+        {header}
+        <div
+          role="alert"
+          className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm"
+        >
+          <p className="font-medium">Couldn't load routes</p>
+          <p className="text-muted-foreground">{describeError(error)}</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="grid grid-cols-1 gap-6">
-      <PageHeader
-        title="Routes"
-        description="Which client formats the gateway serves, and where each model goes."
-      />
+      {header}
 
       {data && providers.data && kinds.length > 0 && (
         <RouteTester routes={data} providers={providers.data} kinds={kinds} />

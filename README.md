@@ -105,8 +105,14 @@ embeddings for `gemini`, `mistral`, `together`, `fireworks` and `ollama` too. To
 
 ```bash
 respan-gateway init     # a commented gateway.yaml from the keys found
+respan-gateway init -p groq   # also enable a vendor: its entry says `key: 'env:GROQ_API_KEY'`
+                        # and init says how to set it (`-p groq=KEY` writes a literal key,
+                        # to a file only you can read; prefer the env: reference)
 respan-gateway check    # what ./gateway.yaml (or -c FILE) does: providers, key sources,
                         # endpoints, routes, defaults, auth; exits 1 on any problem
+respan-gateway check --online   # ... and one call to each provider with its key: reachable,
+                        # unauthorized (it refused the key) or unreachable, with latency;
+                        # exits 1 unless all are reachable
 respan-gateway models   # every provider's models, with their kind
 respan-gateway          # serves ./gateway.yaml when there is one
 ```

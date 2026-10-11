@@ -20,6 +20,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useOverview, useProviders } from "@/hooks/queries";
 import { useRequests } from "@/hooks/use-live-requests";
 import { formatCount, formatMs, formatPercent, formatUptime } from "@/lib/format";
+import { describeError } from "@/lib/query-client";
 
 function Stats() {
   const { data } = useOverview();
@@ -111,9 +112,18 @@ function RecentRequests() {
 }
 
 export function OverviewPage() {
-  const { data } = useOverview();
+  const { data, isError, error } = useOverview();
   return (
     <div className="grid gap-6">
+      {isError && !data && (
+        <div
+          role="alert"
+          className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm"
+        >
+          <p className="font-medium">Couldn't load the overview</p>
+          <p className="text-muted-foreground">{describeError(error)}</p>
+        </div>
+      )}
       <PageHeader
         title="Overview"
         description={

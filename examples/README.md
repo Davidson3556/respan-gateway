@@ -25,6 +25,7 @@ and do not need credentials or make paid requests.
 | Policies | [admission](policies/admission.rs) | Weighted fair admission, deadlines and crash leases (use case 10). |
 | | [guardrail](policies/guardrail.rs) | Check every request and response against a term list (3). |
 | | [logging](policies/logging.rs) | Request logs and zero-retention tenants (11). |
+| | [media_caps](policies/media_caps.rs) | Image count and size caps, an audio upload cap and budget, and embedding tokens metered per key, over the media kinds (9). |
 | | [pii](policies/pii.rs) | Redaction and restoration across streaming text and tool calls (2). |
 | | [tenants](policies/tenants.rs) | Hot-reloaded tenant config and per-tenant keys (13). |
 | Routing | [batch_split](routing/batch_split.rs) | Bounded concurrent embedding chunks, retries and usage merge (4). |
