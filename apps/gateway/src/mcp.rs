@@ -35,6 +35,7 @@ use tokio::time::timeout;
 use crate::compose::{auth_headers, secret, valid_provider_name};
 use crate::config::Auth;
 use crate::formats::{KnownFormat, explained, kind, unreachable};
+use crate::mcp_oauth::{OAuth, OAuthConfig};
 use crate::models::{Probe, Reach};
 use crate::presets::origin;
 
@@ -58,6 +59,9 @@ pub struct McpConfig {
     pub key: Option<String>,
     /// Its credentials as one header, in place of `key`.
     pub auth: Option<Auth>,
+    /// The gateway's own OAuth client for the server: it gets a token from
+    /// a token endpoint, in place of `key`.
+    pub oauth: Option<OAuthConfig>,
     /// Send the client's own credentials to a server with no key of its own.
     #[serde(default)]
     pub forward_auth: bool,
@@ -81,6 +85,8 @@ pub struct McpServer {
     /// Where its key comes from, never the key.
     pub key_from: String,
     pub forward_auth: bool,
+    /// Its token source, if it has OAuth.
+    pub oauth: Option<Arc<OAuth>>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,10 +168,19 @@ fn server(name: &str, c: &McpConfig) -> Result<McpServer, Fault> {
         (None, None) => return Err(bad("needs a `url` (HTTP) or a `command` (stdio)")),
         _ => {}
     }
+    let mut oauth = None;
     let (transport, own_key, key_from) = match (&c.url, &c.command) {
         (Some(url), _) => {
             if !c.env.is_empty() || c.cwd.is_some() {
                 return Err(bad("`env` and `cwd` are for a `command`"));
+            }
+            if c.oauth.is_some() && (c.key.is_some() || c.auth.is_some()) {
+                return Err(bad("set `oauth`, or `key` or `auth`; only one"));
+            }
+            if c.oauth.is_some() && c.forward_auth {
+                return Err(bad(
+                    "`oauth` and `forward_auth` are both credentials; set one",
+                ));
             }
             let (auth, key_from) = match (&c.key, &c.auth) {
                 (Some(_), Some(_)) => return Err(bad("set `key` or `auth`, not both")),
@@ -178,6 +193,10 @@ fn server(name: &str, c: &McpConfig) -> Result<McpServer, Fault> {
                 }
                 (None, None) => (HeaderMap::new(), "client credentials".to_owned()),
             };
+            oauth = match &c.oauth {
+                Some(o) => Some(Arc::new(OAuth::new(&owner, o)?)),
+                None => None,
+            };
             // Parsed as the transport will: a bad URL fails here, not on a call.
             let url = url.trim();
             HttpTransport::new(origin(url)).map_err(|e| bad(e.message()))?;
@@ -187,7 +206,11 @@ fn server(name: &str, c: &McpConfig) -> Result<McpServer, Fault> {
             }
             let path = if path.is_empty() { "/" } else { path };
             let (origin, path) = (origin(url).to_owned(), path.to_owned());
-            let own = !auth.is_empty();
+            let own = !auth.is_empty() || oauth.is_some();
+            let key_from = match &oauth {
+                Some(o) => format!("oauth {} ({})", o.grant(), o.source),
+                None => key_from,
+            };
             let t = Transport::Http {
                 url: url.to_owned(),
                 origin,
@@ -197,8 +220,10 @@ fn server(name: &str, c: &McpConfig) -> Result<McpServer, Fault> {
             (t, own, key_from)
         }
         (_, Some(command)) => {
-            if c.key.is_some() || c.auth.is_some() || c.forward_auth {
-                return Err(bad("`key`, `auth` and `forward_auth` are for a `url`"));
+            if c.key.is_some() || c.auth.is_some() || c.forward_auth || c.oauth.is_some() {
+                return Err(bad(
+                    "`key`, `auth`, `oauth` and `forward_auth` are for a `url`",
+                ));
             }
             let Some(program) = command.first().filter(|p| !p.is_empty()) else {
                 return Err(bad("`command` is empty"));
@@ -236,6 +261,7 @@ fn server(name: &str, c: &McpConfig) -> Result<McpServer, Fault> {
         own_key,
         key_from,
         forward_auth: c.forward_auth,
+        oauth,
     })
 }
 
@@ -325,7 +351,7 @@ pub async fn probe(servers: &[McpServer]) -> Vec<Probe> {
 
 async fn probe_one(server: &McpServer) -> Reach {
     match &server.transport {
-        Transport::Http { url, auth, .. } => probe_http(url, auth).await,
+        Transport::Http { url, auth, .. } => probe_http(url, auth, server.oauth.as_deref()).await,
         Transport::Stdio {
             command,
             program,
@@ -335,7 +361,17 @@ async fn probe_one(server: &McpServer) -> Reach {
     }
 }
 
-async fn probe_http(url: &str, auth: &HeaderMap) -> Reach {
+async fn probe_http(url: &str, auth: &HeaderMap, oauth: Option<&OAuth>) -> Reach {
+    let mut auth = auth.clone();
+    if let Some(oauth) = oauth {
+        let sent = async { OAuth::header(&oauth.token(None).await?) }.await;
+        match sent {
+            Ok(value) => {
+                auth.insert(http::header::AUTHORIZATION, value);
+            }
+            Err(fault) => return Reach::Unreachable(fault.message().to_owned()),
+        }
+    }
     let client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -451,13 +487,21 @@ async fn probe_stdio(
 /// The MCP format: clients of every server in `servers`, and the servers
 /// themselves as providers, registered when it is served. `limit` caps what
 /// the gateway holds of one HTTP answer.
-pub fn known(servers: Vec<McpServer>, limit: usize) -> KnownFormat {
+pub fn known(servers: Vec<McpServer>, aggregate: bool, limit: usize) -> KnownFormat {
     let client = StreamableHttp::new(MOUNT).serving(servers.iter().map(|s| s.name.clone()));
-    let endpoints = [
+    let client = if aggregate {
+        client.with_root()
+    } else {
+        client
+    };
+    let mut endpoints = vec![
         format!("POST {MOUNT}/{{name}}"),
         format!("GET {MOUNT}/{{name}}"),
         format!("DELETE {MOUNT}/{{name}}"),
     ];
+    if aggregate {
+        endpoints.extend(["POST", "GET", "DELETE"].map(|m| format!("{m} {MOUNT} (all servers)")));
+    }
     let endpoints: Vec<&str> = endpoints.iter().map(String::as_str).collect();
     // Servers are not providers: nothing configures one under `providers:`.
     let not_a_provider =
@@ -481,7 +525,7 @@ fn register(
 ) -> Result<Gateway, Fault> {
     for s in servers {
         let name = s.name.clone();
-        let owners = Arc::new(SessionOwners::default());
+        let owners = Arc::new(SessionOwners::new(s.oauth.clone()));
         gateway = match &s.transport {
             Transport::Http {
                 origin, path, auth, ..
@@ -527,11 +571,23 @@ const OWNED: usize = 4096;
 /// as the stdio transport does for its own. A call with no owner (no client
 /// keys) is not tracked. Sessions are forgotten at a reload or restart.
 #[derive(Debug, Default)]
-pub struct SessionOwners(Mutex<IndexMap<String, String>>);
+pub struct SessionOwners {
+    owners: Mutex<IndexMap<String, String>>,
+    /// The server's token source, if it has OAuth.
+    oauth: Option<Arc<OAuth>>,
+}
 
 impl SessionOwners {
+    /// For a server with `oauth` as its credentials, if any.
+    pub fn new(oauth: Option<Arc<OAuth>>) -> Self {
+        Self {
+            owners: Mutex::default(),
+            oauth,
+        }
+    }
+
     fn table(&self) -> std::sync::MutexGuard<'_, IndexMap<String, String>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.owners.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Sends `call` with `send` if its session is its owner's, and notes
@@ -539,7 +595,7 @@ impl SessionOwners {
     pub async fn send<F>(
         &self,
         call: http::Request<Body>,
-        send: impl FnOnce(http::Request<Body>) -> F,
+        send: impl Fn(http::Request<Body>) -> F,
     ) -> Result<(http::Response<Body>, Option<Completion>), Fault>
     where
         F: Future<Output = Result<(http::Response<Body>, Option<Completion>), Fault>>,
@@ -550,7 +606,7 @@ impl SessionOwners {
             .and_then(|e| e.get::<Owner>())
             .map(|Owner(id)| id.clone());
         let Some(owner) = owner else {
-            return send(call).await;
+            return self.authorized(call, &send).await;
         };
         let session = call
             .headers()
@@ -567,7 +623,7 @@ impl SessionOwners {
             return Err(fault.with(Status(StatusCode::NOT_FOUND)));
         }
         let ends = call.method() == Method::DELETE;
-        let (resp, completion) = send(call).await?;
+        let (resp, completion) = self.authorized(call, &send).await?;
         match (
             &session,
             resp.headers().get(SESSION).and_then(|v| v.to_str().ok()),
@@ -585,6 +641,45 @@ impl SessionOwners {
             _ => {}
         }
         Ok((resp, completion))
+    }
+}
+
+impl SessionOwners {
+    /// Sends `call` with `send`, with the server's OAuth token if it has
+    /// one. A `401` drops the token, and the call is sent once more with a
+    /// new one, if its body is whole to send again.
+    async fn authorized<F>(
+        &self,
+        call: http::Request<Body>,
+        send: &impl Fn(http::Request<Body>) -> F,
+    ) -> Result<(http::Response<Body>, Option<Completion>), Fault>
+    where
+        F: Future<Output = Result<(http::Response<Body>, Option<Completion>), Fault>>,
+    {
+        let Some(oauth) = &self.oauth else {
+            return send(call).await;
+        };
+        let (parts, body) = call.into_parts();
+        let whole = body.full_bytes().cloned();
+        let with = |token: &str, body: Body| -> Result<http::Request<Body>, Fault> {
+            let mut call = http::Request::new(body);
+            *call.method_mut() = parts.method.clone();
+            *call.uri_mut() = parts.uri.clone();
+            *call.version_mut() = parts.version;
+            *call.headers_mut() = parts.headers.clone();
+            *call.extensions_mut() = parts.extensions.clone();
+            call.headers_mut()
+                .insert(http::header::AUTHORIZATION, OAuth::header(token)?);
+            Ok(call)
+        };
+        let token = oauth.token(None).await?;
+        let (resp, completion) = send(with(&token, body)?).await?;
+        let Some(bytes) = whole.filter(|_| resp.status() == StatusCode::UNAUTHORIZED) else {
+            return Ok((resp, completion));
+        };
+        drop((resp, completion));
+        let fresh = oauth.token(Some(&token)).await?;
+        send(with(&fresh, Body::full(bytes))?).await
     }
 }
 
