@@ -1,12 +1,18 @@
 import { useEffect, useRef, useState } from "react";
+import { useMicLevel } from "@/hooks/use-mic-level";
 
 export type RecorderState = "idle" | "recording" | "unsupported";
 
-/** Records microphone audio with MediaRecorder; `onDone` gets the clip as a File. */
+/**
+ * Records microphone audio with MediaRecorder; `onDone` gets the clip as a File.
+ * While recording, `level` follows the input volume from 0 to 1.
+ */
 export function useRecorder(onDone: (file: File) => void) {
   const supported = typeof window !== "undefined" && "MediaRecorder" in window;
   const [state, setState] = useState<RecorderState>(supported ? "idle" : "unsupported");
   const [seconds, setSeconds] = useState(0);
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const level = useMicLevel(stream);
   const recorder = useRef<MediaRecorder | null>(null);
   const starting = useRef(false);
   const unmounted = useRef(false);
@@ -39,22 +45,23 @@ export function useRecorder(onDone: (file: File) => void) {
   const start = async () => {
     if (starting.current || recorder.current) return;
     starting.current = true;
-    let stream: MediaStream;
+    let mic: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mic = await navigator.mediaDevices.getUserMedia({ audio: true });
     } finally {
       starting.current = false;
     }
     // Left the page while the permission prompt was open.
     if (unmounted.current) {
-      stream.getTracks().forEach((t) => t.stop());
+      mic.getTracks().forEach((t) => t.stop());
       return;
     }
-    const rec = new MediaRecorder(stream);
+    const rec = new MediaRecorder(mic);
     const chunks: Blob[] = [];
     rec.ondataavailable = (e) => chunks.push(e.data);
     rec.onstop = () => {
-      stream.getTracks().forEach((t) => t.stop());
+      mic.getTracks().forEach((t) => t.stop());
+      setStream(null);
       recorder.current = null;
       setState("idle");
       const type = rec.mimeType || "audio/webm";
@@ -63,11 +70,12 @@ export function useRecorder(onDone: (file: File) => void) {
     };
     recorder.current = rec;
     rec.start();
+    setStream(mic);
     setSeconds(0);
     setState("recording");
   };
 
   const stop = () => recorder.current?.stop();
 
-  return { state, seconds, start, stop };
+  return { state, seconds, level, start, stop };
 }

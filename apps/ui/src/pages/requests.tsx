@@ -1,58 +1,18 @@
-import { Search, SearchX, X } from "lucide-react";
+import { SearchX } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Outlet, useParams, useSearchParams } from "react-router";
 import { EmptyState } from "@/components/empty-state";
 import { NoRequests } from "@/components/no-requests";
 import { PageHeader } from "@/components/page-header";
+import { RequestFilters } from "@/components/request-filters";
 import { RequestsTable } from "@/components/requests-table";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { useLiveMode, useRequests } from "@/hooks/use-live-requests";
 import { describeError } from "@/lib/query-client";
-import { formatCount } from "@/lib/format";
-import { outcomeOf } from "@/lib/requests";
+import { ANY, distinct, filterRequests, outcomeOf, type RequestFilter } from "@/lib/requests";
 
-const ALL = "all";
 const PAGE = 100;
-
-function FilterSelect({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: { value: string; label: string }[];
-  onChange: (value: string) => void;
-}) {
-  return (
-    <Select value={value} onValueChange={onChange}>
-      <SelectTrigger size="sm" className="w-[9.5rem]" aria-label={label}>
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem value={ALL}>All {label.toLowerCase()}</SelectItem>
-        {options.map((o) => (
-          <SelectItem key={o.value} value={o.value}>
-            {o.label}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  );
-}
-
-const distinct = (values: (string | null)[]) =>
-  [...new Set(values.filter((v): v is string => !!v))].sort();
 
 export function RequestsPage() {
   const { data, isPending, isError, error } = useRequests();
@@ -60,41 +20,44 @@ export function RequestsPage() {
   const { id } = useParams();
   const [params, setParams] = useSearchParams();
   const [shown, setShown] = useState(PAGE);
-  const status = params.get("status") ?? ALL;
-  const kind = params.get("kind") ?? ALL;
-  const provider = params.get("provider") ?? ALL;
-  const q = params.get("q") ?? "";
-  const filtered = status !== ALL || kind !== ALL || provider !== ALL || q !== "";
+  // The filter lives in the URL, so a filtered view can be shared and survives a reload.
+  const filter: RequestFilter = {
+    status: params.get("status") ?? ANY,
+    kind: params.get("kind") ?? ANY,
+    provider: params.get("provider") ?? ANY,
+    model: params.get("model") ?? ANY,
+    q: params.get("q") ?? "",
+  };
 
-  const set = (name: string, value: string) =>
+  const set = (name: keyof RequestFilter, value: string) =>
     setParams(
       (prev) => {
         const next = new URLSearchParams(prev);
-        if (value && value !== ALL) next.set(name, value);
+        if (value && value !== ANY) next.set(name, value);
         else next.delete(name);
         return next;
       },
       { replace: true },
     );
 
-  const kinds = useMemo(() => distinct((data ?? []).map((r) => r.kind)), [data]);
-  const providers = useMemo(() => distinct((data ?? []).map((r) => r.provider)), [data]);
-
-  const rows = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    return (data ?? []).filter(
-      (r) =>
-        (status === ALL || outcomeOf(r) === status) &&
-        (kind === ALL || r.kind === kind) &&
-        (provider === ALL || r.provider === provider) &&
-        (!needle ||
-          (r.model ?? "").toLowerCase().includes(needle) ||
-          r.path.toLowerCase().includes(needle)),
-    );
-  }, [data, status, kind, provider, q]);
+  const all = useMemo(() => data ?? [], [data]);
+  const rows = filterRequests(all, filter);
+  const options = useMemo(
+    () => ({
+      kinds: distinct(all.map((r) => r.kind)),
+      providers: distinct(all.map((r) => r.provider)),
+      models: distinct(all.map((r) => r.model)),
+    }),
+    [all],
+  );
+  // How many each status pill would show, given the other filters.
+  const counts: Record<string, number> = { ok: 0, error: 0, pending: 0 };
+  const others = filterRequests(all, { ...filter, status: ANY });
+  for (const r of others) counts[outcomeOf(r)]++;
+  counts[ANY] = others.length;
 
   return (
-    <div className="grid gap-6">
+    <div className="grid grid-cols-1 gap-6">
       <PageHeader
         title="Requests"
         description={
@@ -116,48 +79,15 @@ export function RequestsPage() {
         <NoRequests />
       ) : (
         <Card className="gap-0 overflow-hidden py-0">
-          <div className="flex flex-wrap items-center gap-2 border-b p-3">
-            <div className="relative min-w-48 flex-1 sm:max-w-xs">
-              <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={q}
-                onChange={(e) => set("q", e.target.value)}
-                placeholder="Search model or path"
-                aria-label="Search model or path"
-                className="h-8 pl-8"
-              />
-            </div>
-            <FilterSelect
-              label="Statuses"
-              value={status}
-              onChange={(v) => set("status", v)}
-              options={[
-                { value: "ok", label: "Succeeded" },
-                { value: "error", label: "Failed" },
-                { value: "pending", label: "In flight" },
-              ]}
-            />
-            <FilterSelect
-              label="Kinds"
-              value={kind}
-              onChange={(v) => set("kind", v)}
-              options={kinds.map((k) => ({ value: k, label: k }))}
-            />
-            <FilterSelect
-              label="Providers"
-              value={provider}
-              onChange={(v) => set("provider", v)}
-              options={providers.map((p) => ({ value: p, label: p }))}
-            />
-            {filtered && (
-              <Button variant="ghost" size="sm" onClick={() => setParams({}, { replace: true })}>
-                <X /> Clear
-              </Button>
-            )}
-            <span className="ml-auto text-xs text-muted-foreground tabular">
-              {data && `${formatCount(rows.length)} of ${formatCount(data.length)}`}
-            </span>
-          </div>
+          <RequestFilters
+            filter={filter}
+            onChange={set}
+            onClear={() => setParams({}, { replace: true })}
+            counts={counts}
+            options={options}
+            shown={rows.length}
+            total={all.length}
+          />
           {!isPending && rows.length === 0 ? (
             <EmptyState icon={SearchX} title="No requests match" className="m-4">
               <p>Try a broader search or clear the filters.</p>

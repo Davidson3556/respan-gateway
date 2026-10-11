@@ -33,7 +33,7 @@ export function PlaygroundPage() {
   const tab = tabs.some((t) => t.value === requested) ? requested! : "chat";
 
   return (
-    <div className="grid gap-6">
+    <div className="grid grid-cols-1 gap-6">
       <PageHeader
         title="Playground"
         description="Try any model through the gateway. Every call here shows up under Requests."

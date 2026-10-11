@@ -1,11 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Provider, RequestRecord } from "@/lib/api";
 import { ProvidersPage } from "./providers";
 import { RequestsPage } from "./requests";
+import { RoutesPage } from "./routes";
 
 function serve(routes: Record<string, unknown>) {
   vi.stubGlobal(
@@ -98,5 +100,37 @@ describe("RequestsPage", () => {
     renderPage(<RequestsPage />);
     expect(await screen.findByText("Couldn't load requests")).toBeInTheDocument();
     expect(screen.queryByText("No requests match")).not.toBeInTheDocument();
+  });
+});
+
+describe("RoutesPage", () => {
+  it("tells where a typed model would go", async () => {
+    serve({
+      "/ui/api/providers": { providers: [provider] },
+      "/ui/api/routes": {
+        serve: [{ format: "anthropic-messages", kind: "chat", endpoints: ["POST /v1/messages"] }],
+        routes: [{ prefix: "claude", provider: "anthropic" }],
+        defaults: [{ kind: "chat", provider: "anthropic" }],
+      },
+    });
+    renderPage(<RoutesPage />);
+    await userEvent.type(await screen.findByLabelText("Model", { exact: true }), "claude-x");
+    expect(await screen.findByText("prefix claude*")).toBeInTheDocument();
+    expect(screen.getByText("POST")).toBeInTheDocument();
+  });
+});
+
+describe("RequestsPage filters", () => {
+  it("narrows the list by status pill and counts each", async () => {
+    serve({
+      "/ui/api/requests": {
+        requests: [record, { ...record, id: "r_2", model: "broken-model", status: 500 }],
+      },
+    });
+    renderPage(<RequestsPage />);
+    await screen.findByText("broken-model");
+    await userEvent.click(screen.getByRole("button", { name: /Failed\s*1/ }));
+    expect(screen.queryByText("claude-sonnet-4-5")).not.toBeInTheDocument();
+    expect(screen.getByText("broken-model")).toBeInTheDocument();
   });
 });

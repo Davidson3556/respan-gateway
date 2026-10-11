@@ -1,30 +1,27 @@
+import type { ComponentType } from "react";
 import { createBrowserRouter } from "react-router";
 import { AppLayout } from "@/components/layout/app-layout";
 import { NotFoundPage } from "@/pages/not-found";
-import { OverviewPage } from "@/pages/overview";
-import { ProvidersPage } from "@/pages/providers";
-import { RequestDetailSheet } from "@/pages/request-detail";
-import { RequestsPage } from "@/pages/requests";
-import { RoutesPage } from "@/pages/routes";
-import { SettingsPage } from "@/pages/settings";
+
+/** A route whose page loads on first visit, so the first load carries only the shell. */
+const page = <T extends Record<string, ComponentType>>(load: () => Promise<T>, name: keyof T) => ({
+  lazy: () => load().then((m) => ({ Component: m[name] })),
+});
 
 export const routes = [
   {
     element: <AppLayout />,
     children: [
-      { index: true, element: <OverviewPage /> },
+      { index: true, ...page(() => import("@/pages/overview"), "OverviewPage") },
       {
         path: "requests",
-        element: <RequestsPage />,
-        children: [{ path: ":id", element: <RequestDetailSheet /> }],
+        ...page(() => import("@/pages/requests"), "RequestsPage"),
+        children: [{ path: ":id", ...page(() => import("@/pages/request-detail"), "RequestDetailSheet") }],
       },
-      {
-        path: "playground",
-        lazy: () => import("@/pages/playground").then((m) => ({ Component: m.PlaygroundPage })),
-      },
-      { path: "providers", element: <ProvidersPage /> },
-      { path: "routes", element: <RoutesPage /> },
-      { path: "settings", element: <SettingsPage /> },
+      { path: "playground", ...page(() => import("@/pages/playground"), "PlaygroundPage") },
+      { path: "providers", ...page(() => import("@/pages/providers"), "ProvidersPage") },
+      { path: "routes", ...page(() => import("@/pages/routes"), "RoutesPage") },
+      { path: "settings", ...page(() => import("@/pages/settings"), "SettingsPage") },
       { path: "*", element: <NotFoundPage /> },
     ],
   },

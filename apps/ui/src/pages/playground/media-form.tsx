@@ -37,7 +37,9 @@ export function MediaLayout({
           </Button>
         </form>
       </Card>
-      <div className="min-w-0">{children}</div>
+      <div className="min-w-0" aria-live="polite">
+        {children}
+      </div>
     </div>
   );
 }
