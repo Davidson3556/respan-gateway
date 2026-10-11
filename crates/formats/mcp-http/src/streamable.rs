@@ -64,6 +64,8 @@ pub struct StreamableHttp {
     path: Arc<str>,
     /// If set, served at `path/{name}` for each of these names instead.
     servers: Option<Arc<[String]>>,
+    /// Whether `serving` also serves `path` itself.
+    root: bool,
 }
 
 impl StreamableHttp {
@@ -72,6 +74,7 @@ impl StreamableHttp {
         Self {
             path: path.as_ref().into(),
             servers: None,
+            root: false,
         }
     }
 
@@ -84,11 +87,20 @@ impl StreamableHttp {
         self
     }
 
+    /// Also served at `path` itself, beside the names of
+    /// [`serving`](Self::serving): one endpoint for a caller that answers
+    /// for all of them.
+    pub fn with_root(mut self) -> Self {
+        self.root = true;
+        self
+    }
+
     /// Whether it is served at `path`, as cleaned.
     fn serves(&self, path: &str) -> bool {
         let base = framing::clean_path(&self.path);
         match &self.servers {
             None => path == base,
+            Some(_) if self.root && path == base => true,
             Some(names) => path
                 .strip_prefix(base.trim_end_matches('/'))
                 .and_then(|rest| rest.strip_prefix('/'))

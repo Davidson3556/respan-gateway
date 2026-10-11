@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer};
 use crate::Error;
 use crate::logging::LogFormat;
 use crate::mcp::McpConfig;
+use crate::mcp_aggregate::AggregateConfig;
 use crate::presets;
 
 /// A gateway's configuration, as `gateway.yaml` writes it.
@@ -84,6 +85,9 @@ pub struct Config {
     /// if that lists formats.
     #[serde(default)]
     pub mcp: IndexMap<String, McpConfig>,
+    /// One MCP endpoint, `/mcp`, that fronts the `mcp:` servers as a single
+    /// server (tools and prompts as `{server}__{name}`); off if unset.
+    pub mcp_aggregate: Option<AggregateConfig>,
     /// Which web pages may call the gateway from a browser; none if unset.
     pub cors: Option<CorsConfig>,
     /// Compiled-in plugins, in the order listed.
@@ -122,6 +126,7 @@ impl Default for Config {
             providers: IndexMap::new(),
             formats: None,
             mcp: IndexMap::new(),
+            mcp_aggregate: None,
             plugins: Vec::new(),
             cors: None,
             agent: None,
