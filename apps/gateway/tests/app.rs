@@ -59,7 +59,7 @@ async fn with_no_config_every_vendor_with_a_key_in_the_environment_is_a_provider
     let banner = gw.stdout_until("try").await;
     assert!(banner.contains("config     environment"), "{banner}");
     assert!(
-        banner.contains("openai     openai-chat, openai-realtime, responses-ws"),
+        banner.contains("openai     openai-chat, openai-responses, openai-realtime, responses-ws"),
         "{banner}"
     );
     assert!(banner.contains("anthropic  anthropic-messages"), "{banner}");

@@ -262,6 +262,9 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
             Spoken::OpenAiChat(f) => {
                 KnownFormat::of(kind::CHAT, CHAT_COMPLETIONS, f, http).model(chat())
             }
+            Spoken::OpenAiResponses(f) => {
+                KnownFormat::of(kind::CHAT, &["POST /v1/responses"], f, http).model(chat())
+            }
             Spoken::AnthropicMessages(f) => {
                 KnownFormat::of(kind::CHAT, &["POST /v1/messages"], f, http).model(chat())
             }

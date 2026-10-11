@@ -343,3 +343,108 @@ default: anthropic
     assert!(!text.is_empty(), "{body}");
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
 }
+
+fn responses_config(serve: &str) -> String {
+    let base = model("OPENAI_BASE_URL", "https://api.openai.com/v1");
+    let base = serde_json::to_string(&base).unwrap();
+    format!(
+        "providers:\n  p:\n    formats: openai-responses\n    base_url: {base}\n    auth: {{ type: bearer, key: env:OPENAI_API_KEY }}\nformats: [{serve}]\ndefault: p\n"
+    )
+}
+
+#[tokio::test]
+#[ignore = "calls the real OpenAI API; needs OPENAI_API_KEY; run with --ignored"]
+async fn real_openai_responses_relay_whole_and_streamed() {
+    if !has("OPENAI_API_KEY") {
+        return;
+    }
+    let gw = Gateway::start(&responses_config("openai-responses")).await;
+    let request = |stream: bool| {
+        serde_json::json!({
+            "model": model("OPENAI_MODEL", "gpt-4o-mini"), "max_output_tokens": 16,
+            "stream": stream, "instructions": "Be brief.", "input": "Say ok.",
+        })
+        .to_string()
+    };
+
+    let resp = client()
+        .post(gw.url("/v1/responses"))
+        .body(request(false))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = resp.text().await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    let body = json(&body);
+    assert_eq!(body["object"], "response");
+    assert!(body["id"].as_str().unwrap().starts_with("resp_"), "{body}");
+    assert!(
+        body["output"][0]["content"][0]["text"].is_string(),
+        "{body}"
+    );
+    assert!(
+        body["usage"]["output_tokens"].as_u64().unwrap() > 0,
+        "{body}"
+    );
+
+    let resp = client()
+        .post(gw.url("/v1/responses"))
+        .body(request(true))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let (body, ended) = read_all(resp).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(ended, Ok(()));
+    let events: Vec<_> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .map(json)
+        .collect();
+    for (i, e) in events.iter().enumerate() {
+        assert_eq!(e["sequence_number"], i, "{body}");
+    }
+    assert_eq!(events[0]["type"], "response.created", "{body}");
+    let last = &events[events.len() - 1];
+    assert_eq!(last["type"], "response.completed", "{body}");
+    assert!(last["response"]["usage"]["total_tokens"].as_u64().unwrap() > 0);
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "response.output_text.delta")
+    );
+}
+
+#[tokio::test]
+#[ignore = "calls the real OpenAI API; needs OPENAI_API_KEY; run with --ignored"]
+async fn real_openai_chat_client_to_responses_provider() {
+    if !has("OPENAI_API_KEY") {
+        return;
+    }
+    let gw = Gateway::start(&responses_config("openai-chat")).await;
+    let request = serde_json::json!({
+        "model": model("OPENAI_MODEL", "gpt-4o-mini"), "max_completion_tokens": 16,
+        "messages": [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Say ok."}],
+    });
+    let resp = client()
+        .post(gw.url("/v1/chat/completions"))
+        .body(request.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = resp.text().await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    let body = json(&body);
+    assert_eq!(body["object"], "chat.completion");
+    assert!(
+        body["choices"][0]["message"]["content"].is_string(),
+        "{body}"
+    );
+    assert!(
+        body["usage"]["completion_tokens"].as_u64().unwrap() > 0,
+        "{body}"
+    );
+}

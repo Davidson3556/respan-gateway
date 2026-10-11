@@ -1,7 +1,8 @@
-//! OpenAI: Chat Completions, Realtime and Responses over WebSocket, and its
+//! OpenAI: Chat Completions, Responses, Realtime and Responses over WebSocket, and its
 //! media endpoints (images, transcriptions, speech, videos, embeddings).
 
 use respan_gateway_conversation_http::openai::OpenAiChat;
+use respan_gateway_conversation_http::responses::OpenAiResponses;
 use respan_gateway_core::{NativeFields, Plugin, ProviderContext, Result, async_trait};
 use respan_gateway_media_http::openai::{
     OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
@@ -38,6 +39,7 @@ pub const PROVIDER: Provider = Provider {
     example_model: "gpt-4o-mini",
     formats: &[
         Speaks::new(Format::OpenAiChat(OpenAiChat)),
+        Speaks::new(Format::OpenAiResponses(OpenAiResponses)),
         Speaks::new(Format::OpenAiRealtime(OpenAiRealtime)),
         Speaks::new(Format::ResponsesWs(ResponsesWs)),
         Speaks::new(Format::OpenAiImages(OpenAiImages)),

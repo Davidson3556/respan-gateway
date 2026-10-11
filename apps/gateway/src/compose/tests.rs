@@ -206,6 +206,11 @@ fn a_preset_is_every_format_of_its_vendor() {
         [
             entry("openai-chat", "openai", "https://api.openai.com/v1"),
             entry(
+                "openai-responses",
+                "openai:openai-responses",
+                "https://api.openai.com/v1"
+            ),
+            entry(
                 "openai-realtime",
                 "openai:openai-realtime",
                 "wss://api.openai.com/v1"
@@ -273,13 +278,14 @@ fn a_preset_is_every_format_of_its_vendor() {
     assert_eq!(header(1, 1, "x-goog-api-key").as_deref(), Some("AIza"));
     assert_eq!(header(1, 3, "x-goog-api-key").as_deref(), Some("AIza"));
     assert!(plan.upstreams.iter().all(|u| u.own_key));
-    // Served by default: the chat formats, each media and realtime client
+    // Served by default: the chat formats, each chat, media and realtime client
     // format, and Responses over WebSocket.
     assert_eq!(
         plan.serve,
         [
             "openai-chat",
             "anthropic-messages",
+            "openai-responses",
             "openai-realtime",
             "openai-images",
             "openai-transcriptions",
@@ -506,6 +512,42 @@ plugins: [{ models: [{ prefix: voice, provider: asr }, { prefix: voice-chat, pro
     assert_eq!(chat.as_deref(), Some("chat"));
 }
 
+#[tokio::test]
+async fn responses_are_served_by_default_natively_where_a_provider_speaks_them() {
+    let yaml = "providers:
+  a: { formats: [openai-chat, openai-responses], base_url: 'https://a.test/v1', auth: { type: bearer, key: sk-test } }
+  b: { formats: openai-chat, base_url: 'https://b.test/v1', auth: { type: bearer, key: sk-test } }
+plugins: [{ models: [{ prefix: gpt, provider: a }, { prefix: llama, provider: b }] }]
+";
+    let (gateway, a, b) = local(yaml).await;
+    let send = |path: &'static str, body: serde_json::Value| {
+        let gateway = gateway.clone();
+        async move {
+            let (response, _) = serve(&gateway, post(path, body.to_string())).await;
+            let (status, _, body) = read_whole(response).await;
+            gateway.idle().await;
+            (status, body.unwrap_or_default())
+        }
+    };
+    // A provider that speaks Responses gets the client's own format.
+    let responses = |model: &str| serde_json::json!({ "model": model, "input": "hi" });
+    let (status, body) = send("/v1/responses", responses("gpt-4o-mini")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(a.requests()[0].path, "/v1/responses");
+    assert!(String::from_utf8_lossy(&body).contains("\"object\":\"response\""));
+    // A chat client of the same provider keeps its own.
+    let chat = serde_json::json!({ "model": "gpt-4o-mini", "messages": [{ "role": "user", "content": "hi" }] });
+    assert_eq!(send("/v1/chat/completions", chat).await.0, StatusCode::OK);
+    assert_eq!(a.requests()[1].path, "/v1/chat/completions");
+    // One that speaks only chat is translated to.
+    let (status, body) = send("/v1/responses", responses("llama-3")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(b.requests()[0].path, "/v1/chat/completions");
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    assert_eq!(v["object"], "response");
+    assert_eq!(v["output"][0]["content"][0]["text"], "b");
+}
+
 #[test]
 fn a_format_served_after_passthrough_is_refused() {
     let yaml = "formats: [passthrough, openai-chat]";
@@ -523,7 +565,7 @@ fn an_unknown_format_names_the_compiled_in_ones() {
     assert_eq!(
         resolve(yaml).err().as_deref(),
         Some(
-            "formats: unknown format 'nope'; compiled-in formats: [openai-chat, openai-realtime, responses-ws, openai-images, openai-transcriptions, openai-speech, openai-videos, openai-embeddings, anthropic-messages, gemini-live, gemini-veo, passthrough]"
+            "formats: unknown format 'nope'; compiled-in formats: [openai-chat, openai-responses, openai-realtime, responses-ws, openai-images, openai-transcriptions, openai-speech, openai-videos, openai-embeddings, anthropic-messages, gemini-live, gemini-veo, passthrough]"
         )
     );
 }

@@ -118,7 +118,7 @@ providers:
 #     auth: { type: header, name: x-goog-api-key, key: env:GEMINI_API_KEY }
 
 # To relay a vendor's other endpoints too (Anthropic's count_tokens, OpenAI's
-# /v1/responses for Codex), add a provider of format `passthrough` at the
+# GET /v1/responses/{id}), add a provider of format `passthrough` at the
 # vendor's origin (no /v1) and serve `passthrough` last: it takes every
 # request no format before it accepts, unread, byte for byte:
 #   providers:
@@ -130,9 +130,10 @@ providers:
 #
 # The formats clients speak, tried in order; each recognises its own
 # requests: openai-chat a POST to .../chat/completions, anthropic-messages a
-# POST to .../v1/messages. Anything else is a 404. Unset: openai-chat,
-# anthropic-messages, the OpenAI format of each media kind some provider
-# speaks, and every session format some provider speaks.
+# POST to .../v1/messages, openai-responses a POST to .../responses.
+# Anything else is a 404. Unset: openai-chat, anthropic-messages, the other
+# chat formats, the OpenAI format of each media kind some provider speaks,
+# and every session format some provider speaks.
 # formats: [openai-chat, anthropic-messages]
 
 # Compiled-in plugins, run on every request in the order listed; a plugin

@@ -13,6 +13,7 @@
 use respan_gateway_conversation_http::Schema;
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
+use respan_gateway_conversation_http::responses::OpenAiResponses;
 use respan_gateway_core::Plugin;
 use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_media_http::openai::{
@@ -174,6 +175,8 @@ pub enum Base {
 pub enum Format {
     /// OpenAI Chat Completions.
     OpenAiChat(OpenAiChat),
+    /// OpenAI Responses.
+    OpenAiResponses(OpenAiResponses),
     /// Anthropic Messages.
     AnthropicMessages(AnthropicMessages),
     /// OpenAI Images.
@@ -201,6 +204,7 @@ impl Format {
     pub fn name(&self) -> &str {
         match self {
             Format::OpenAiChat(_) => OpenAiChat::NAME,
+            Format::OpenAiResponses(_) => OpenAiResponses::NAME,
             Format::AnthropicMessages(_) => AnthropicMessages::NAME,
             Format::OpenAiImages(_) => OpenAiImages::NAME,
             Format::OpenAiTranscriptions(_) => OpenAiTranscriptions::NAME,
