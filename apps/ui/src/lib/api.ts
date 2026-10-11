@@ -10,6 +10,7 @@ export type Kind =
   | "speech"
   | "embedding"
   | "video"
+  | "mcp"
   | "passthrough";
 
 export interface Totals {
@@ -48,6 +49,23 @@ export interface Provider {
   base_url: string;
   credentials: "gateway" | "client";
   quirks: Quirk[];
+  requests: number;
+  errors: number;
+  avg_latency_ms: number | null;
+}
+
+/** An MCP server the gateway fronts, served to clients at `endpoint`. */
+export interface McpServer {
+  name: string;
+  transport: "http" | "stdio";
+  /** The server's URL, or the command a stdio server runs. */
+  target: string;
+  /** Where clients reach it, such as `/mcp/github`. */
+  endpoint: string;
+  /** Whose credentials reach it: the gateway's, the client's, or none. */
+  credentials: "gateway" | "client" | "none";
+  /** `idle` before a request, `failing` if every one failed, else `ok`. */
+  status: "idle" | "ok" | "failing";
   requests: number;
   errors: number;
   avg_latency_ms: number | null;
@@ -204,6 +222,8 @@ export const api = {
   overview: (signal?: AbortSignal) => getJson<Overview>("/ui/api/overview", signal),
   providers: (signal?: AbortSignal) =>
     getJson<{ providers: Provider[] }>("/ui/api/providers", signal).then((r) => r.providers),
+  mcp: (signal?: AbortSignal) =>
+    getJson<{ servers: McpServer[] }>("/ui/api/mcp", signal).then((r) => r.servers),
   routes: (signal?: AbortSignal) => getJson<Routes>("/ui/api/routes", signal),
   requests: (limit: number, signal?: AbortSignal) =>
     getJson<{ requests: RequestRecord[] }>(`/ui/api/requests?limit=${limit}`, signal).then(

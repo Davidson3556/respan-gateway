@@ -35,6 +35,18 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
     }
     row(&mut lines, "providers", providers);
 
+    if !plan.mcp.is_empty() {
+        let servers = plan.mcp.iter().map(|s| {
+            let (name, kind, at) = (&s.name, s.transport_label(), s.endpoint());
+            vec![
+                format!("{name} at {at} ({kind})"),
+                format!("  target  {}", s.target()),
+                format!("  key     {}", s.key_from),
+            ]
+        });
+        row(&mut lines, "mcp", servers.flatten().collect());
+    }
+
     let mut endpoints: Vec<String> = plan
         .serve
         .iter()

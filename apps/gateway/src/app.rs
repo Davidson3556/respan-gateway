@@ -28,6 +28,7 @@ use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{KnownFormat, formats, kind};
 use crate::jobs::VideoJobs;
 use crate::logging::Level;
+use crate::mcp::{self, McpRoute};
 use crate::models::{self, Models, Probe};
 use crate::quirks::with_quirks;
 use crate::report;
@@ -89,8 +90,14 @@ impl App {
     /// runtime; serving does.
     pub fn new(config: Config) -> Result<App, Error> {
         let limit = config.body_limit.unwrap_or(BODY_LIMIT);
-        let formats = formats(limit);
-        let (gateway, plan) = compose(&config, &formats)?;
+        let mut formats = formats(limit);
+        let providers: Vec<&str> = config.providers.keys().map(String::as_str).collect();
+        let mcp = mcp::servers(&config.mcp, &providers)?;
+        if !mcp.is_empty() {
+            formats.push(mcp::known(mcp.clone(), limit));
+        }
+        let (gateway, mut plan) = compose(&config, &formats)?;
+        plan.mcp = mcp;
         let log = RequestLog::new(config.log);
         let gateway = with_plugins(gateway, &config, &plan, &formats, &log);
         let keys = ClientKeys::new(plan.keys.clone());
@@ -221,9 +228,20 @@ impl App {
             format!("{:<width$}  {}", u.name, formats.join(", "))
         });
         let providers: Vec<String> = providers.collect();
-        match providers.is_empty() {
-            true => row("providers", vec!["none".to_owned()]),
-            false => row("providers", providers),
+        match (providers.is_empty(), self.plan.mcp.is_empty()) {
+            (true, true) => row("providers", vec!["none".to_owned()]),
+            (true, false) => {}
+            (false, _) => row("providers", providers),
+        }
+        let width = self.plan.mcp.iter().map(|s| s.name.len()).max();
+        let servers: Vec<String> = (self.plan.mcp.iter())
+            .map(|s| {
+                let (name, kind, at) = (&s.name, s.transport_label(), s.endpoint());
+                format!("{name:<w$}  {kind:<5}  {at}", w = width.unwrap_or_default())
+            })
+            .collect();
+        if !servers.is_empty() {
+            row("mcp", servers);
         }
         let mut endpoints: Vec<String> = self
             .plan
@@ -321,6 +339,7 @@ impl App {
 fn routing(plan: &Plan, formats: &[KnownFormat]) -> Routing {
     formats
         .iter()
+        .filter(|f| f.kind != kind::MCP)
         .fold(Routing::new(plan.routes.clone()), |routing, f| {
             routing.format(&f.name, f.kind, f.model.clone())
         })
@@ -343,6 +362,7 @@ fn with_plugins(
                 .iter()
                 .map(|e| (e.internal.clone(), u.name.clone()))
         })
+        .chain(plan.mcp.iter().map(|s| (s.name.clone(), s.name.clone())))
         .collect();
     // Veo serves a job's content only where the job says.
     let veo = plan.upstreams.iter().flat_map(|u| &u.entries);
@@ -351,6 +371,7 @@ fn with_plugins(
     let gateway = gateway
         .plugin(Recorder::new(log.clone(), formats, names))
         .plugin(routing(plan, formats))
+        .plugin(McpRoute)
         .plugin(VideoJobs::new(&plan.upstreams, formats))
         .plugin(locate);
     // A raw relay sends each client's credentials itself.
@@ -359,7 +380,10 @@ fn with_plugins(
         false => {
             let keyless = plan.upstreams.iter().filter(|u| !u.own_key);
             let keyless = keyless.flat_map(|u| u.entries.iter().map(|e| e.internal.clone()));
-            gateway.plugin(ClientCredentials::new(keyless.collect()))
+            // An MCP server gets a client's credentials only if it says so.
+            let forwarded = plan.mcp.iter().filter(|s| s.forward_auth);
+            let forwarded = forwarded.map(|s| s.name.clone());
+            gateway.plugin(ClientCredentials::new(keyless.chain(forwarded).collect()))
         }
     };
     with_quirks(gateway, &plan.upstreams)

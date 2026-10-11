@@ -138,6 +138,26 @@ const providers = [
   ),
 ];
 
+// MCP servers, as `mcp:` configures them and /ui/api/mcp lists them.
+const mcpServers = [
+  {
+    name: "github",
+    transport: "http",
+    target: "https://api.githubcopilot.com/mcp/",
+    endpoint: "/mcp/github",
+    credentials: "gateway",
+    labels: ["initialize", "tools/list", "tools/call search_repositories", "tools/call get_issue"],
+  },
+  {
+    name: "files",
+    transport: "stdio",
+    target: "npx -y @modelcontextprotocol/server-filesystem /data",
+    endpoint: "/mcp/files",
+    credentials: "none",
+    labels: ["initialize", "tools/list", "tools/call read_file", "tools/call list_directory"],
+  },
+];
+
 const routes = {
   serve: [
     { format: "openai-chat", kind: "chat", endpoints: ["POST /v1/chat/completions"] },
@@ -170,6 +190,11 @@ const routes = {
       endpoints: ["POST /v1/videos", "GET /v1/videos/{id}", "GET /v1/videos/{id}/content"],
     },
     { format: "openai-embeddings", kind: "embedding", endpoints: ["POST /v1/embeddings"] },
+    {
+      format: "mcp",
+      kind: "mcp",
+      endpoints: ["POST /mcp/{name}", "GET /mcp/{name}", "DELETE /mcp/{name}"],
+    },
   ],
   // As the router lists them: the `models` tables, then providers' claims.
   routes: [
@@ -227,7 +252,7 @@ function broadcast(record) {
   for (const res of clients) res.write(frame);
 }
 
-function begin({ path, format, kind, model, stream, at = new Date() }) {
+function begin({ path, format, kind, model, provider, stream, at = new Date() }) {
   const record = {
     id: `r_${String(++seq).padStart(6, "0")}`,
     started_at: at.toISOString(),
@@ -236,7 +261,7 @@ function begin({ path, format, kind, model, stream, at = new Date() }) {
     format,
     kind,
     model,
-    provider: model ? providerFor(model) : null,
+    provider: provider ?? (model ? providerFor(model) : null),
     status: null,
     duration_ms: null,
     ttfb_ms: null,
@@ -276,16 +301,22 @@ const traffic = [
   [1, { path: "/v1/audio/transcriptions", format: "openai-transcriptions", kind: "transcription" }],
   [1, { path: "/v1/audio/speech", format: "openai-speech", kind: "speech" }],
   [1, { path: "/v1/embeddings", format: "openai-embeddings", kind: "embedding" }],
+  ...mcpServers.map((s) => [
+    1,
+    { path: s.endpoint, format: "mcp", kind: "mcp", provider: s.name, labels: s.labels },
+  ]),
 ].flatMap(([weight, call]) => Array(weight).fill(call));
 
 function fakeTraffic(at) {
   const call = pick(traffic);
-  const model = pick(models.filter((m) => m.kind === call.kind)).id;
+  const model = call.labels ? pick(call.labels) : pick(models.filter((m) => m.kind === call.kind)).id;
   const chat = call.kind === "chat";
   const record = begin({ ...call, model, stream: chat && Math.random() < 0.6, at });
   const failed = Math.random() < 0.06;
   const [status, error] = failed ? pick(failures) : [200, null];
-  const usage = chat
+  const usage = call.labels
+    ? null
+    : chat
     ? { input_tokens: between(12, 2400), output_tokens: between(8, 900) }
     : call.kind === "transcription"
       ? { input_tokens: 0, output_tokens: 0, seconds: between(3, 90) }
@@ -605,6 +636,15 @@ const routesTable = {
     }),
   "GET /ui/api/providers": (_req, res) =>
     json(res, 200, { providers: providers.map((p) => ({ ...p, ...providerStats(p.name) })) }),
+  "GET /ui/api/mcp": (_req, res) =>
+    json(res, 200, {
+      servers: mcpServers.map((server) => {
+        const { name, transport, target, endpoint, credentials } = server;
+        const stats = providerStats(name);
+        const status = !stats.requests ? "idle" : stats.errors === stats.requests ? "failing" : "ok";
+        return { name, transport, target, endpoint, credentials, ...stats, status };
+      }),
+    }),
   "GET /ui/api/routes": (_req, res) => json(res, 200, routes),
   "GET /ui/api/requests": (req, res) => {
     const limit = Number(new URL(req.url, "http://x").searchParams.get("limit") ?? 100);

@@ -61,13 +61,39 @@ const SSE: &str = "text/event-stream";
 /// to each provider's transport.
 #[derive(Debug, Clone)]
 pub struct StreamableHttp {
-    path: &'static str,
+    path: Arc<str>,
+    /// If set, served at `path/{name}` for each of these names instead.
+    servers: Option<Arc<[String]>>,
 }
 
 impl StreamableHttp {
     /// Served and sent at `path`.
-    pub fn new(path: &'static str) -> Self {
-        Self { path }
+    pub fn new(path: impl AsRef<str>) -> Self {
+        Self {
+            path: path.as_ref().into(),
+            servers: None,
+        }
+    }
+
+    /// Served to clients at `{path}/{name}` for each of `names`, and at no
+    /// other path, so one gateway can front several servers (the caller
+    /// routes by name). It is still sent to a provider at `path`, so give
+    /// a provider's format its own.
+    pub fn serving(mut self, names: impl IntoIterator<Item: Into<String>>) -> Self {
+        self.servers = Some(names.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Whether it is served at `path`, as cleaned.
+    fn serves(&self, path: &str) -> bool {
+        let base = framing::clean_path(&self.path);
+        match &self.servers {
+            None => path == base,
+            Some(names) => path
+                .strip_prefix(base.trim_end_matches('/'))
+                .and_then(|rest| rest.strip_prefix('/'))
+                .is_some_and(|name| names.iter().any(|n| n == name)),
+        }
     }
 }
 
@@ -86,7 +112,7 @@ impl Format<ClientIo, Input, Output> for StreamableHttp {
     fn matches(&self, io: &ClientIo) -> bool {
         let head = io.request();
         [Method::POST, Method::GET, Method::DELETE].contains(head.method())
-            && framing::clean_path(head.uri().path()) == framing::clean_path(self.path)
+            && self.serves(&framing::clean_path(head.uri().path()))
     }
 
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
@@ -170,11 +196,11 @@ impl Format<ProviderIo, Output, Input> for StreamableHttp {
     }
 
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
-        let path = self.path;
+        let path = self.path.clone();
         Ok(io.bind(
             move |head, input: Option<&Input>| {
                 let streamed = "a call in mcp carries one body, not streamed inputs";
-                call_head(head, input.ok_or_else(|| Fault::config(streamed))?, path)?;
+                call_head(head, input.ok_or_else(|| Fault::config(streamed))?, &path)?;
                 Ok(framing::each(|input: &Input| match input.method {
                     Method::POST if input.messages.is_empty() => Err(Fault::config(
                         "a POST to an MCP server carries at least one message",

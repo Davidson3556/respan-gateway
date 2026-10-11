@@ -25,6 +25,7 @@ mod formats;
 mod init;
 mod jobs;
 mod logging;
+mod mcp;
 mod models;
 mod presets;
 mod quirks;
@@ -39,6 +40,7 @@ pub use config::{
 };
 pub use init::starter_config;
 pub use logging::LogFormat;
+pub use mcp::McpConfig;
 
 /// This binary's version, the workspace's.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
