@@ -25,7 +25,7 @@ processes or several components.
 | Kernel contracts | Hook ordering, ownership, cancellation, buffering, panic handling and progress | `crates/core/tests/`, core unit tests |
 | Shared data contracts | Input assembly, text access and message representation | Input unit tests |
 | HTTP behavior | Encoding, framing, credentials, headers, retry hints, body handling and stream completion | `crates/wires/http/tests/`, HTTP unit tests |
-| Provider compatibility | Native relay, OpenAI/Anthropic translation, tools, errors and usage; realtime relay and OpenAI Realtime/Gemini Live translation | `crates/formats/conversation-http/tests/{relay,translate,round_trips}`, `crates/formats/realtime-ws/tests/{relay,translate,fakes}`, format unit tests; each vendor's quirks in `crates/providers/tests/<vendor>.rs` |
+| Provider compatibility | Native relay and translation among OpenAI Chat, Anthropic Messages, Gemini `generateContent` and Responses, tools, reasoning controls, errors and usage; realtime relay and OpenAI Realtime/Gemini Live translation | `crates/formats/conversation-http/tests/{relay,translate,round_trips,gemini,responses,reasoning}`, `crates/formats/realtime-ws/tests/{relay,translate,fakes}`, format unit tests; each vendor's quirks in `crates/providers/tests/<vendor>.rs` |
 | Hosting and WebSocket sessions | HTTP ingress, upgrade, subprotocols, session events, backpressure, concurrency and close/recovery behavior | `crates/wires/ws/tests/`, `crates/serve/tests/`, WS unit tests |
 | MCP behavior | JSON-RPC messages, session state, streamable HTTP, stdio and reference-server interoperability | `crates/formats/mcp-http/tests/`, MCP unit tests |
 | Routing policy | Attempts, retries, fallback, races and explicit retry classification | `crates/plugins/tests/routing.rs`, routing unit tests |
@@ -87,7 +87,7 @@ cargo test --workspace --all-targets --all-features -- --list
 | `crates/*/src/` | Unit tests for private implementation details |
 | `crates/*/tests/` | Public contracts and protocol integration tests |
 | `crates/formats/conversation-http/tests/{relay,translate}/` | Provider suites grouped by requests, responses, filters, errors and related behavior; shared fakes remain in each parent test target |
-| `apps/gateway/tests/` | Executable integration tests (`e2e`, `app`), the library in process (`library`), the media kinds in process against a strict fake of OpenAI's media endpoints and Veo (`media`), redirects and bounded error bodies |
+| `apps/gateway/tests/` | The built executable against mockllm (`e2e`; `e2e_native` for Gemini `generateContent` and Responses; `e2e_media` for the media kinds), the command line (`cli`: init, check, models, proxy, `PORT`, the non-loopback guard), browser WebSocket keys (`ws_auth`), the app and library in process (`app`, `library`), the media kinds against a strict fake of OpenAI's media endpoints and Veo (`media`), vendor quirks (`quirks`), redirects and bounded error bodies |
 | `apps/gateway/tests/paths/` | Path matching, normalization, allowlists and real client path shapes, using one local wire fake |
 | `examples/tests/cases/<topic>/` | Test modules included by the corresponding example or private support module |
 | `examples/tests/text_*.rs` | Automatically discovered text and tool-argument integration suites |
@@ -103,8 +103,13 @@ Focused commands:
 
 ```bash
 cargo test -p respan-gateway --test paths
-cargo test -p respan-gateway-conversation --test relay usage::
-cargo test -p respan-gateway-conversation --test translate tools::
+cargo test -p respan-gateway --test cli
+cargo test -p respan-gateway --test e2e_native
+cargo test -p respan-gateway-conversation-http --test relay usage::
+cargo test -p respan-gateway-conversation-http --test translate tools::
+cargo test -p respan-gateway-conversation-http --test gemini
+cargo test -p respan-gateway-conversation-http --test responses
+cargo test -p respan-gateway-conversation-http --test reasoning
 cargo test -p respan-gateway-examples --example wallet
 cargo test -p respan-gateway-examples --test text_tool_json
 ```
@@ -154,15 +159,25 @@ can incur provider charges. Tests skip when their required key is absent, so
 an explicit run without credentials does not prove live coverage.
 
 ```bash
-cargo test --manifest-path validation/Cargo.toml --test live_providers -- --ignored
+OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-ant-... GEMINI_API_KEY=... \
+  cargo test --manifest-path validation/Cargo.toml --test live_providers -- --ignored
 cargo test --manifest-path validation/Cargo.toml --test live_ws -- --ignored
+# one test, one key:
+OPENAI_API_KEY=sk-... cargo test --manifest-path validation/Cargo.toml \
+  --test live_providers real_openai_embeddings -- --ignored
 ```
 
-The gateway suite uses `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`
-and `TYPESAFE_API_KEY` for its corresponding providers. The WebSocket suite
-uses `OPENAI_API_KEY` and `GEMINI_API_KEY`. Set only the credentials needed for
-the tests you select; individual test names can be used as Cargo filters.
-Provider endpoint/model overrides are documented in the test sources.
+`live_providers` covers chat relay and translation (OpenAI, Anthropic,
+Gemini `generateContent`, Responses, passthrough) and the media kinds
+(`real_openai_embeddings`, `real_openai_image_generation`,
+`real_openai_speech_then_transcription`, `real_gemini_embeddings`,
+`real_gemini_image_generation`). Video has no live test; it is covered
+against fakes. The gateway suite uses `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`GEMINI_API_KEY` and `TYPESAFE_API_KEY` for its corresponding providers. The
+WebSocket suite uses `OPENAI_API_KEY` and `GEMINI_API_KEY`. Set only the
+credentials needed for the tests you select; individual test names can be
+used as Cargo filters. Provider endpoint/model overrides are documented in
+the test sources.
 
 ## External tools
 
@@ -186,7 +201,7 @@ The relay timing benchmark is an ignored test harness in `benches/`, using
 local in-process responses. Run it explicitly with optimized code:
 
 ```bash
-cargo bench -p respan-gateway-conversation --bench relay -- --ignored --nocapture
+cargo bench -p respan-gateway-conversation-http --bench relay -- --ignored --nocapture
 ```
 
 ## Adding tests
