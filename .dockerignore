@@ -3,5 +3,8 @@ validation/target
 **/node_modules
 apps/ui/dist
 .git
+.github
 .claude
 python/.venv
+python/target
+**/__pycache__

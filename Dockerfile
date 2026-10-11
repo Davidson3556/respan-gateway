@@ -16,12 +16,20 @@ COPY --from=ui /src/apps/ui/dist apps/ui/dist
 RUN cargo build --release -p respan-gateway
 
 FROM debian:stable-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 gateway
 COPY --from=build /src/target/release/respan-gateway /usr/local/bin/respan-gateway
+USER gateway
+WORKDIR /home/gateway
+
+# The image listens on every address (port $PORT, 8080 by default; RESPAN_LISTEN overrides), so the gateway
+# refuses to start without a client key:
+#   docker run -p 8080:8080 -e OPENAI_API_KEY -e RESPAN_CLIENT_KEYS=sk-gw-change-me IMAGE
+# or `client_keys:` in a mounted config (-v $PWD/gateway.yaml:/home/gateway/gateway.yaml:ro).
+# Provider keys come from the environment (-e OPENAI_API_KEY ...) or the config.
+ENV PORT=8080
 EXPOSE 8080
-# Reachable from outside the container: set `keys` in a mounted gateway.yaml
-# (-v $PWD/gateway.yaml:/gateway.yaml), or publish the port on localhost only
-# (-p 127.0.0.1:8080:8080).
-WORKDIR /
-ENTRYPOINT ["respan-gateway", "--listen", "0.0.0.0:8080"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
+    CMD sh -c 'curl -fsS "http://127.0.0.1:${PORT:-8080}/healthz" >/dev/null || exit 1'
+ENTRYPOINT ["respan-gateway"]

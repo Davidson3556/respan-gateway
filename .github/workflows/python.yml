@@ -3,6 +3,7 @@ name: python
 on:
   push:
     branches: [main]
+    tags: ["v*"]
     paths: ["python/**", "apps/gateway/**", "crates/**", "Cargo.*", ".github/workflows/python.yml"]
   pull_request:
     paths: ["python/**", "apps/gateway/**", "crates/**", "Cargo.*", ".github/workflows/python.yml"]
@@ -50,6 +51,18 @@ jobs:
         with:
           name: wheel-${{ matrix.os }}
           path: python/dist/*.whl
+      # The wheel itself must import and run, not just build.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Test the wheel
+        shell: bash
+        run: |
+          python -m venv /tmp/wheel-venv
+          . /tmp/wheel-venv/bin/activate 2>/dev/null || . /tmp/wheel-venv/Scripts/activate
+          pip install pytest openai anthropic
+          pip install --find-links python/dist respan-gateway
+          cd python && pytest tests
 
   sdist:
     runs-on: ubuntu-latest
@@ -64,3 +77,22 @@ jobs:
         with:
           name: sdist
           path: python/dist/*.tar.gz
+
+  # On a v* tag: upload the wheels and sdist to PyPI by trusted publishing
+  # (no token; the PyPI project must trust this repository and workflow, see
+  # CONTRIBUTING.md#releasing).
+  pypi:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
