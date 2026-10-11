@@ -77,12 +77,7 @@ impl Built {
         )
         .layer(from_fn_with_state(keys.clone(), auth::consume))
         .layer(from_fn_with_state(process.log.clone(), requests::track));
-        let admin = Arc::new(Admin::new(
-            process.clone(),
-            config.source.clone(),
-            &plan,
-            &formats,
-        ));
+        let admin = Arc::new(Admin::new(process.clone(), &config, &plan, &formats));
         let cors = match &config.cors {
             Some(c) => Some(Cors::new(&c.origins, keys.required()).map_err(Error::new)?),
             None => None,

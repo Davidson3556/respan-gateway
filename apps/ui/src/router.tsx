@@ -21,6 +21,7 @@ export const routes = [
       { path: "playground", ...page(() => import("@/pages/playground"), "PlaygroundPage") },
       { path: "providers", ...page(() => import("@/pages/providers"), "ProvidersPage") },
       { path: "routes", ...page(() => import("@/pages/routes"), "RoutesPage") },
+      { path: "config", ...page(() => import("@/pages/config"), "ConfigPage") },
       { path: "settings", ...page(() => import("@/pages/settings"), "SettingsPage") },
       { path: "*", element: <NotFoundPage /> },
     ],

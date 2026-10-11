@@ -22,11 +22,13 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::app::{Process, ReloadError};
 use crate::auth::{self, ClientKeys};
 use crate::compose::Plan;
-use crate::config::Source;
+use crate::config::{Config, Source};
 use crate::formats::{KnownFormat, first_of_each_kind};
 use crate::history::{CSV_HEADER, Filter, csv_row};
 use crate::mcp::Transport;
 use crate::requests::{RequestRecord, rfc3339};
+
+mod edit;
 
 mod assets {
     include!(concat!(env!("OUT_DIR"), "/ui_assets.rs"));
@@ -37,6 +39,10 @@ mod assets {
 pub struct Admin {
     process: Arc<Process>,
     source: Source,
+    /// The config as the admin API shows it when there is no file.
+    stand_in: serde_norway::Value,
+    /// `admin_writes` was set.
+    writes: bool,
     auth_required: bool,
     /// Each provider, as `/ui/api/providers` lists it (`name`, `vendor`
     /// (string or null), `quirks`, `formats`, `kinds`, `base_url` (string),
@@ -50,7 +56,7 @@ pub struct Admin {
 impl Admin {
     pub(crate) fn new(
         process: Arc<Process>,
-        source: Source,
+        config: &Config,
         plan: &Plan,
         formats: &[KnownFormat],
     ) -> Self {
@@ -114,7 +120,9 @@ impl Admin {
         });
         Self {
             process,
-            source,
+            source: config.source.clone(),
+            stand_in: edit::stand_in(config),
+            writes: config.admin_writes,
             auth_required: !plan.keys.is_empty(),
             providers,
             routes,
@@ -135,6 +143,8 @@ pub fn router(admin: Arc<Admin>, keys: Arc<ClientKeys>) -> Router {
         .route("/ui/api/requests/{id}", get(request))
         .route("/ui/api/events", get(events))
         .route("/ui/api/reload", post(reload))
+        .route("/ui/api/config", get(edit::show).put(edit::save))
+        .route("/ui/api/config/validate", post(edit::validate))
         .route("/ui/api/{*rest}", get(not_found))
         .route_layer(from_fn_with_state(keys, auth::require))
         .with_state(admin);

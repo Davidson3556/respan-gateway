@@ -102,4 +102,5 @@ class GatewayConfig(TypedDict, total=False):
     mcp: Dict[str, McpConfig]
     agent: AgentConfig
     cors: CorsConfig
+    admin_writes: bool  # let the admin API and web UI rewrite the config file; needs client_keys
     ui: bool  # False also turns off the admin API behind models()/requests()/providers()
