@@ -1637,6 +1637,7 @@ dependencies = [
  "http-body-util",
  "pyo3",
  "respan-gateway",
+ "serde_norway",
  "tokio",
  "tower",
 ]

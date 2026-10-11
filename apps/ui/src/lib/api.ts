@@ -22,11 +22,13 @@ export interface Totals {
 
 export interface Overview {
   version: string;
-  listen: string;
+  /** null before the gateway has bound its address */
+  listen: string | null;
   started_at: string;
   uptime_seconds: number;
   auth_required: boolean;
-  config_source: "gateway.yaml" | "environment" | "proxy";
+  /** The config file's path, or `environment`, `proxy` or `inline`. */
+  config_source: string;
   totals: Totals;
 }
 
@@ -41,7 +43,7 @@ export interface Provider {
   vendor: string | null;
   formats: string[];
   kinds: Kind[];
-  base_url: string;
+  base_url: string | null;
   credentials: "gateway" | "client";
   quirks: Quirk[];
   requests: number;

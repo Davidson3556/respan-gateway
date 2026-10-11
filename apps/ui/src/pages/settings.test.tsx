@@ -35,6 +35,16 @@ describe("SettingsPage", () => {
     expect(screen.getByText(/This gateway requires a client key/)).toBeInTheDocument();
   });
 
+  it("shows a config file path and a gateway that is not listening yet", async () => {
+    serve({
+      "GET /ui/api/overview": () =>
+        json({ ...overview, listen: null, config_source: "/etc/respan/gateway.yaml" }),
+    });
+    renderSettings();
+    expect(await screen.findByText("Config file (/etc/respan/gateway.yaml)")).toBeInTheDocument();
+    expect(screen.getByText("not listening yet")).toBeInTheDocument();
+  });
+
   it("saves the gateway key, masked until shown, and clears it", async () => {
     serve({ "GET /ui/api/overview": () => json(overview) });
     renderSettings();

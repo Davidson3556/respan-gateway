@@ -263,7 +263,7 @@ class Gateway:
     def requests(self, limit: int = 100) -> List[Dict[str, Any]]:
         """The last `limit` requests the gateway served, newest first, as the web UI lists them.
 
-        The log is in memory and off with `log: false`; the admin API is off with `ui: false`.
+        The log is in memory, and `log: off` (the default here) only silences stderr; this admin API is off with `ui: false`.
         """
         return _items(self.request("GET", "/ui/api/requests", params={"limit": limit}), "requests")
 

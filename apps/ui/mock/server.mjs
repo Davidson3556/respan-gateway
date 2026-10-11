@@ -21,6 +21,11 @@ const startedAt = new Date();
 // vendor's formats and quirks. `gateway` credentials are the gateway's own
 // key; `client` providers take the caller's.
 const quirk = {
+  thought_signature: {
+    name: "thought_signature",
+    description:
+      "A Gemini 3 model refuses a function call in a request's history that has no `thoughtSignature`, as one from another format has none; it takes its documented placeholder in place of one.",
+  },
   openai_transcription_model: {
     name: "openai_transcription_model",
     description:
@@ -59,7 +64,9 @@ const quirk = {
 
 const kindOf = {
   "openai-chat": "chat",
+  "openai-responses": "chat",
   "anthropic-messages": "chat",
+  "gemini-generate": "chat",
   "openai-realtime": "realtime",
   "gemini-live": "realtime",
   "responses-ws": "responses",
@@ -86,6 +93,7 @@ const providers = [
     "openai",
     [
       "openai-chat",
+      "openai-responses",
       "openai-realtime",
       "responses-ws",
       "openai-images",
@@ -100,8 +108,15 @@ const providers = [
   vendor("anthropic", ["anthropic-messages"], [], "https://api.anthropic.com"),
   vendor(
     "gemini",
-    ["openai-chat", "gemini-live", "openai-images", "gemini-veo", "openai-embeddings"],
-    [quirk.model_id_prefix],
+    [
+      "openai-chat",
+      "gemini-generate",
+      "gemini-live",
+      "openai-images",
+      "gemini-veo",
+      "openai-embeddings",
+    ],
+    [quirk.model_id_prefix, quirk.thought_signature],
     "https://generativelanguage.googleapis.com/v1beta/openai",
   ),
   vendor(
@@ -126,7 +141,16 @@ const providers = [
 const routes = {
   serve: [
     { format: "openai-chat", kind: "chat", endpoints: ["POST /v1/chat/completions"] },
+    { format: "openai-responses", kind: "chat", endpoints: ["POST /v1/responses"] },
     { format: "anthropic-messages", kind: "chat", endpoints: ["POST /v1/messages"] },
+    {
+      format: "gemini-generate",
+      kind: "chat",
+      endpoints: [
+        "POST /v1beta/models/{model}:generateContent",
+        "POST /v1beta/models/{model}:streamGenerateContent",
+      ],
+    },
     { format: "openai-realtime", kind: "realtime", endpoints: ["GET /v1/realtime"] },
     { format: "responses-ws", kind: "responses", endpoints: ["GET /v1/responses"] },
     {
@@ -575,7 +599,7 @@ const routesTable = {
       started_at: startedAt.toISOString(),
       uptime_seconds: Math.floor((Date.now() - startedAt) / 1000) + 7_380,
       auth_required: !!KEY,
-      config_source: "gateway.yaml",
+      config_source: "./gateway.yaml",
       totals: totals(),
     }),
   "GET /ui/api/providers": (_req, res) =>

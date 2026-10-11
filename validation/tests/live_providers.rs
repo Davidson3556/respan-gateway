@@ -327,26 +327,41 @@ async fn real_openai_client_reaches_gemini_generate_content() {
     };
     let ask = serde_json::json!({ "role": "user", "content": "Call echo with text exactly 雪😀." });
     let first = json(
-        &chat(serde_json::json!({ "model": gemini_model(), "max_tokens": 1024,
-            "messages": [ask], "tools": [tool], "tool_choice": "required" }))
+        &chat(
+            serde_json::json!({ "model": gemini_model(), "max_tokens": 1024,
+            "messages": [ask], "tools": [tool], "tool_choice": "required" }),
+        )
         .await,
     );
     let call = &first["choices"][0]["message"]["tool_calls"][0];
-    assert_eq!(first["choices"][0]["finish_reason"], "tool_calls", "{first}");
+    assert_eq!(
+        first["choices"][0]["finish_reason"], "tool_calls",
+        "{first}"
+    );
     assert_eq!(call["function"]["name"], "echo");
-    assert_eq!(json(call["function"]["arguments"].as_str().unwrap())["text"], "雪😀");
+    assert_eq!(
+        json(call["function"]["arguments"].as_str().unwrap())["text"],
+        "雪😀"
+    );
     assert!(first["usage"]["prompt_tokens"].as_u64() > Some(0));
-    let streamed = chat(serde_json::json!({ "model": gemini_model(), "max_tokens": 1024,
+    let streamed = chat(
+        serde_json::json!({ "model": gemini_model(), "max_tokens": 1024,
         "stream": true, "stream_options": { "include_usage": true },
-        "messages": [serde_json::json!({ "role": "user", "content": "Say ok." })] }))
+        "messages": [serde_json::json!({ "role": "user", "content": "Say ok." })] }),
+    )
     .await;
     assert!(streamed.ends_with("data: [DONE]\n\n"), "{streamed}");
-    assert!(streamed.contains("\"finish_reason\":\"stop\""), "{streamed}");
+    assert!(
+        streamed.contains("\"finish_reason\":\"stop\""),
+        "{streamed}"
+    );
     let second = json(
-        &chat(serde_json::json!({ "model": gemini_model(), "max_tokens": 1024,
+        &chat(
+            serde_json::json!({ "model": gemini_model(), "max_tokens": 1024,
             "messages": [ask,
                 { "role": "assistant", "content": null, "tool_calls": [call] },
-                { "role": "tool", "tool_call_id": call["id"], "content": "雪😀" }] }))
+                { "role": "tool", "tool_call_id": call["id"], "content": "雪😀" }] }),
+        )
         .await,
     );
     assert_eq!(second["choices"][0]["finish_reason"], "stop", "{second}");
@@ -590,6 +605,195 @@ async fn real_openai_chat_client_to_responses_provider() {
     );
     assert!(
         body["usage"]["completion_tokens"].as_u64().unwrap() > 0,
+        "{body}"
+    );
+}
+
+// Media kinds. Each call is the smallest the provider allows.
+
+/// A vendor preset (its key comes from the environment) serving `formats`.
+fn vendor_config(vendor: &str, formats: &str) -> String {
+    format!("providers:\n  p:\n    vendor: {vendor}\nformats: [{formats}]\ndefault: p\n")
+}
+
+/// A client that waits for slow media.
+fn slow_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap()
+}
+
+async fn post_json(gw: &Gateway, path: &str, body: serde_json::Value) -> (u16, bytes::Bytes) {
+    let resp = slow_client()
+        .post(gw.url(path))
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    (resp.status().as_u16(), resp.bytes().await.unwrap())
+}
+
+fn parse(body: &[u8]) -> serde_json::Value {
+    json(std::str::from_utf8(body).unwrap_or("<binary>"))
+}
+
+#[tokio::test]
+#[ignore = "calls the real OpenAI API; needs OPENAI_API_KEY"]
+async fn real_openai_embeddings() {
+    if !has("OPENAI_API_KEY") {
+        return;
+    }
+    let gw = Gateway::start(&vendor_config("openai", "openai-embeddings")).await;
+    let (status, body) = post_json(
+        &gw,
+        "/v1/embeddings",
+        serde_json::json!({ "model": "text-embedding-3-small", "input": "hi" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let body = parse(&body);
+    let vector = body["data"][0]["embedding"].as_array().unwrap();
+    assert!(
+        vector.len() > 100 && vector.iter().all(|n| n.is_number()),
+        "{body}"
+    );
+    assert!(
+        body["usage"]["total_tokens"].as_u64().unwrap_or(0) > 0,
+        "{body}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "calls the real OpenAI API; needs OPENAI_API_KEY"]
+async fn real_openai_image_generation() {
+    if !has("OPENAI_API_KEY") {
+        return;
+    }
+    let gw = Gateway::start(&vendor_config("openai", "openai-images")).await;
+    let (status, body) = post_json(
+        &gw,
+        "/v1/images/generations",
+        serde_json::json!({ "model": model("OPENAI_IMAGE_MODEL", "gpt-image-1"),
+            "prompt": "a plain red circle", "size": "1024x1024", "quality": "low" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let body = parse(&body);
+    let image = body["data"][0]["b64_json"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{body}"));
+    assert!(
+        image.starts_with("iVBOR"),
+        "not a PNG: {}",
+        &image[..20.min(image.len())]
+    );
+}
+
+#[tokio::test]
+#[ignore = "calls the real OpenAI API; needs OPENAI_API_KEY"]
+async fn real_openai_speech_then_transcription() {
+    if !has("OPENAI_API_KEY") {
+        return;
+    }
+    let gw = Gateway::start(&vendor_config(
+        "openai",
+        "openai-speech, openai-transcriptions",
+    ))
+    .await;
+    let (status, audio) = post_json(
+        &gw,
+        "/v1/audio/speech",
+        serde_json::json!({ "model": "tts-1", "voice": "alloy", "input": "Hello world.",
+            "response_format": "mp3" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&audio));
+    assert!(audio.len() > 1000, "{} bytes", audio.len());
+
+    // The audio back through the gateway's multipart route.
+    let boundary = "respan-validation-boundary";
+    let mut form = Vec::new();
+    let mut part = |headers: &str, data: &[u8]| {
+        form.extend_from_slice(format!("--{boundary}\r\n{headers}\r\n\r\n").as_bytes());
+        form.extend_from_slice(data);
+        form.extend_from_slice(b"\r\n");
+    };
+    part(
+        "Content-Disposition: form-data; name=\"model\"",
+        b"whisper-1",
+    );
+    part(
+        "Content-Disposition: form-data; name=\"file\"; filename=\"hello.mp3\"\r\nContent-Type: audio/mpeg",
+        &audio,
+    );
+    form.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let resp = slow_client()
+        .post(gw.url("/v1/audio/transcriptions"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(form)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = resp.text().await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    let text = json(&body)["text"].as_str().unwrap().to_lowercase();
+    assert!(text.contains("hello"), "{body}");
+}
+
+#[tokio::test]
+#[ignore = "calls the real Gemini API; needs GEMINI_API_KEY"]
+async fn real_gemini_embeddings() {
+    if !has("GEMINI_API_KEY") {
+        return;
+    }
+    let gw = Gateway::start(&vendor_config("gemini", "openai-embeddings")).await;
+    let (status, body) = post_json(
+        &gw,
+        "/v1/embeddings",
+        serde_json::json!({ "model": model("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001"),
+            "input": "hi" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let body = parse(&body);
+    assert!(
+        body["data"][0]["embedding"]
+            .as_array()
+            .is_some_and(|v| v.len() > 100),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "calls the real Gemini API; needs GEMINI_API_KEY"]
+async fn real_gemini_image_generation() {
+    if !has("GEMINI_API_KEY") {
+        return;
+    }
+    let gw = Gateway::start(&vendor_config("gemini", "openai-images")).await;
+    let (status, body) = post_json(
+        &gw,
+        "/v1/images/generations",
+        serde_json::json!({ "model": model("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"),
+            "prompt": "a plain red circle", "response_format": "b64_json", "n": 1 }),
+    )
+    .await;
+    if status == 429 {
+        // The reply is the provider's, relayed: a key without image quota (free tier) is not a failure.
+        eprintln!("skipped: no image quota on this key");
+        return;
+    }
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let body = parse(&body);
+    assert!(
+        body["data"][0]["b64_json"]
+            .as_str()
+            .is_some_and(|s| s.len() > 100),
         "{body}"
     );
 }
