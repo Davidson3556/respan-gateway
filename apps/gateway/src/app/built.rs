@@ -26,6 +26,7 @@ use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{KnownFormat, formats, kind};
 use crate::jobs::VideoJobs;
 use crate::mcp::{self, McpRoute};
+use crate::mcp_aggregate::{self, Aggregate};
 use crate::models::{self, Models};
 use crate::quirks::with_quirks;
 use crate::requests::{self, Recorder, RequestLog};
@@ -57,15 +58,24 @@ impl Built {
         let providers: Vec<&str> = config.providers.keys().map(String::as_str).collect();
         let mcp = mcp::servers(&config.mcp, &providers)?;
         if !mcp.is_empty() {
-            formats.push(mcp::known(mcp.clone(), limit));
+            formats.push(mcp::known(
+                mcp.clone(),
+                config.mcp_aggregate.is_some(),
+                limit,
+            ));
         }
+        let aggregate = match &config.mcp_aggregate {
+            Some(a) => Some(mcp_aggregate::check(a, &mcp)?),
+            None => None,
+        };
         let (gateway, mut plan) = compose(&config, &formats)?;
         plan.mcp = mcp;
         if let Some(agent) = &config.agent {
             let serving = plan.serves(mcp::FORMAT);
             agent::check(agent, &plan.mcp, serving)?;
         }
-        let (gateway, closer) = with_plugins(gateway, &config, &plan, &formats, &process.log);
+        let (gateway, closer) =
+            with_plugins(gateway, &config, aggregate, &plan, &formats, &process.log);
         let keys = ClientKeys::new(plan.keys.clone());
         let relay = relay(
             &gateway,
@@ -134,6 +144,7 @@ fn routing(plan: &Plan, formats: &[KnownFormat]) -> Routing {
 fn with_plugins(
     gateway: Gateway,
     config: &Config,
+    aggregate: Option<Vec<String>>,
     plan: &Plan,
     formats: &[KnownFormat],
     log: &Arc<RequestLog>,
@@ -168,7 +179,13 @@ fn with_plugins(
     };
     let gateway = gateway
         .plugin(Recorder::new(log.clone(), formats, names))
-        .plugin(routing(plan, formats))
+        .plugin(routing(plan, formats));
+    // `/mcp` answers itself; `/mcp/{name}` is routed to its server.
+    let gateway = match (&config.mcp_aggregate, aggregate) {
+        (Some(config), Some(servers)) => gateway.plugin(Aggregate::new(config, servers)),
+        _ => gateway,
+    };
+    let gateway = gateway
         .plugin(McpRoute)
         .plugin(VideoJobs::new(&plan.upstreams, formats))
         .plugin(locate);

@@ -193,6 +193,76 @@ With `client_keys`, a session belongs to the key that opened it: another key
 naming its `Mcp-Session-Id` gets 404. Name `mcp` in `formats:` if you list
 formats.
 
+**OAuth for an HTTP server.** For a server that wants an OAuth access token
+rather than a fixed key, give it `oauth:` and the gateway gets its own token
+from the token endpoint (machine to machine) and sends it as the Bearer
+token:
+
+```yaml
+mcp:
+  crm:
+    url: "https://mcp.example.com/mcp"
+    oauth:
+      token_url: "https://auth.example.com/oauth/token"
+      client_id: "env:CRM_CLIENT_ID"
+      client_secret: "env:CRM_CLIENT_SECRET"
+      scopes: [read, write]          # optional
+      # refresh_token: "env:CRM_REFRESH_TOKEN"   # optional: see below
+```
+
+Without `refresh_token` the gateway uses the **client credentials** grant;
+with it, the **refresh token** grant (a token a person authorized once, which
+the gateway keeps alive; if the endpoint rotates it, the new one is kept in
+memory until the gateway restarts, so restart with a fresh one in the
+environment if the old one was revoked). The access token is cached until it
+expires, and a `401` from the server drops it, gets a new one and sends the
+call once more. `client_id`, `client_secret` and `refresh_token` are literal
+or `env:NAME`; none is logged or shown by `check`, the admin API or the UI.
+`oauth` replaces `key` and `auth` and cannot be combined with `forward_auth`.
+The browser flow (authorization code with PKCE, with a person to approve it)
+is not supported: for such a server use a personal access token as `key`, or
+authorize elsewhere and set the `refresh_token` it gives you.
+
+**One endpoint for all of them.** `mcp_aggregate:` turns on `/mcp`, which
+fronts the `mcp:` servers as a single MCP server, so a client configures one
+URL:
+
+```yaml
+mcp_aggregate: {}                 # every mcp: server that has no forward_auth
+# mcp_aggregate:
+#   servers: [github, files]      # or name them; lists show them in this order
+#   allow: ["github__search_*"]   # tool patterns, as agent: has them (default: all)
+#   deny: ["files__write_*"]      # wins over allow
+```
+
+A client has one session, owned by its key like any other; the gateway holds
+one session with each server behind it, opened with the client's and ended by
+its `DELETE`. What the client sees:
+
+- `initialize` answers with the servers' capabilities merged.
+- Tools and prompts are named `{server}__{name}` (`github__search`); a call
+  goes to that server under the name it knows. `allow` and `deny` apply to
+  tools; a withheld or unknown name is an error (-32602).
+- Resources are `mcp://{server}/{their URI}`, the same for templates and for
+  the URIs a tool's result links to or embeds; `resources/read` and
+  `subscribe` go to the server the URI names. Nothing is looked up.
+- Lists (`tools/list`, `prompts/list`, `resources/list`,
+  `resources/templates/list`) are the first page of every server's, merged. A
+  `nextCursor` (opaque) is there while any server has more, and asks for those
+  servers only.
+- The `GET` stream carries the servers' `list_changed`, `resources/updated`
+  and log notifications; a client's `notifications/cancelled` goes to every
+  server; progress notifications ride the answer to their call. Sampling,
+  elicitation, roots and completion are not offered. `ping` is answered.
+- The request log has one entry per client request (`tools/call github__search`
+  on path `/mcp`), with the server it was routed to as its provider.
+
+A server that does not answer `initialize` is left out of that session; the
+aggregate fails only if none does. A session's server sessions are ended by
+the client's `DELETE`; one that never comes is left to each server's idle
+timeout. Servers with `forward_auth` cannot be fronted (the sessions are the
+gateway's own). Each server stays at `/mcp/{name}` too.
+
 ### Agent loop
 
 With `agent:` the gateway runs MCP tools for the model, so a client that knows

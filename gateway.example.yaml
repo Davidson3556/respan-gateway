@@ -219,6 +219,28 @@ providers:
 #     env: { LOG_LEVEL: info }
 #     cwd: /data            # must exist; the child runs there
 # At most 32 MCP sessions per server. On Windows `npx` is found as `npx.cmd`.
+#
+# An HTTP server can get its token from an OAuth token endpoint, machine to
+# machine, in place of `key`: client credentials, or the refresh token grant
+# when `refresh_token` is set. The token is cached until it expires and
+# renewed after a 401. Secrets are literal or env:NAME. (The browser flow is
+# not supported: use a personal access token as `key` for such a server.)
+#   crm:
+#     url: "https://mcp.example.com/mcp"
+#     oauth:
+#       token_url: "https://auth.example.com/oauth/token"
+#       client_id: env:CRM_CLIENT_ID
+#       client_secret: env:CRM_CLIENT_SECRET
+#       scopes: [read, write]
+#       # refresh_token: env:CRM_REFRESH_TOKEN
+
+# One MCP endpoint, /mcp, for every mcp: server: tools and prompts are
+# named {server}__{name}, resources are mcp://{server}/{uri}, lists merge,
+# and the session is the client's own. Off unless set.
+# mcp_aggregate:
+#   servers: [github, files]      # default: every server without forward_auth
+#   allow: ["github__search_*"]   # tool patterns (default: all)
+#   deny: ["files__write_*"]      # wins over allow
 
 # Browser apps on other origins (MCP Inspector, a chat front end) are refused
 # unless listed here: their preflight is answered without a key, and their

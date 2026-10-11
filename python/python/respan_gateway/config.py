@@ -28,12 +28,31 @@ class ProviderConfig(TypedDict, total=False):
     auth: Auth
 
 
+class OAuthConfig(TypedDict, total=False):
+    """The gateway's own OAuth client for an HTTP MCP server (machine to machine)."""
+
+    token_url: str  # required
+    client_id: str  # required; literal or "env:NAME"
+    client_secret: str  # required; literal or "env:NAME"
+    scopes: List[str]
+    refresh_token: str  # literal or "env:NAME"; the refresh token grant, else client credentials
+
+
+class McpAggregateConfig(TypedDict, total=False):
+    """One MCP endpoint, /mcp, that fronts the `mcp` servers as a single server."""
+
+    servers: List[str]  # the `mcp` servers fronted; all without forward_auth if unset
+    allow: List[str]  # tool names "server__tool", "*" for any characters; all if unset
+    deny: List[str]  # never offered; wins over `allow`
+
+
 class McpConfig(TypedDict, total=False):
     """One MCP server, served at /mcp/{name}: an HTTP `url` or a stdio `command`."""
 
     url: str  # a streamable-HTTP endpoint
     key: str  # literal or "env:NAME", sent as a bearer token
     auth: Auth  # one header, in place of `key`
+    oauth: OAuthConfig  # a token from a token endpoint, in place of `key`
     forward_auth: bool  # send the client's credentials when there is no key
     command: List[str]  # a stdio server's program and arguments
     env: Dict[str, str]  # values literal or "env:NAME"
@@ -100,6 +119,7 @@ class GatewayConfig(TypedDict, total=False):
     prices: Dict[str, Price]  # by model prefix; requests then get a `cost_usd`
     shutdown_grace: Union[int, float, str]  # seconds, or "30s", "2m", "500ms"
     mcp: Dict[str, McpConfig]
+    mcp_aggregate: McpAggregateConfig
     agent: AgentConfig
     cors: CorsConfig
     admin_writes: bool  # let the admin API and web UI rewrite the config file; needs client_keys

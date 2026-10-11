@@ -37,7 +37,7 @@ use crate::config::AgentConfig;
 use crate::mcp::McpServer;
 
 /// The protocol version the gateway speaks as an MCP client.
-const PROTOCOL: &str = "2025-06-18";
+pub(crate) const PROTOCOL: &str = "2025-06-18";
 /// The owner of the gateway's own sessions.
 const OWNER: &str = "respan-gateway-agent";
 /// How many pages of a server's tool list are read.
@@ -159,13 +159,17 @@ pub fn plugin(
 /// Which tools are offered: those `allow` names (all, if it names none) but
 /// not those `deny` names, by the name the model has.
 #[derive(Debug, Clone, Default)]
-struct Filter {
+pub(crate) struct Filter {
     allow: Vec<String>,
     deny: Vec<String>,
 }
 
 impl Filter {
-    fn offers(&self, name: &str) -> bool {
+    pub(crate) fn new(allow: Vec<String>, deny: Vec<String>) -> Self {
+        Self { allow, deny }
+    }
+
+    pub(crate) fn offers(&self, name: &str) -> bool {
         let named = |patterns: &[String]| patterns.iter().any(|p| glob(p, name));
         (self.allow.is_empty() || named(&self.allow)) && !named(&self.deny)
     }
@@ -614,12 +618,12 @@ impl Servers {
     }
 }
 
-fn message(json: Value) -> Result<Message, Fault> {
+pub(crate) fn message(json: Value) -> Result<Message, Fault> {
     Message::try_from(json).map_err(Fault::internal)
 }
 
 /// The server's answer to request `id`: its result, or its error.
-fn answer(messages: &[Message], id: u64) -> Result<Result<Value, RpcError>, Fault> {
+pub(crate) fn answer(messages: &[Message], id: u64) -> Result<Result<Value, RpcError>, Fault> {
     let wanted = json!(id);
     for m in messages {
         if let Message::Response { outcome, .. } = m

@@ -311,6 +311,38 @@ processes it started (`taskkill /T /F`). Admin views and `check` show a
 server by its origin or program name only, never a path, argument or
 environment.
 
+### The aggregate endpoint
+
+`mcp_aggregate:` adds `/mcp` beside `/mcp/{name}` (`StreamableHttp::with_root`).
+`apps/gateway/src/mcp_aggregate.rs` is a plugin, `Aggregate`, registered before
+`McpRoute`, that answers requests to the root itself with `Response::stream`,
+as the agent does: it is an MCP server toward the client and the gateway's
+client of each `mcp:` server toward the providers, through `ClientContext::call`
+with the client's own extensions, so the `Owner` of the client key reaches the
+upstream transports and each server's own credentials apply. State is one table
+of client sessions (id, owner, and per server an optional upstream session
+opened by `initialize` and reopened once if a call on it fails); upstream
+sessions are not recoverable after the client's request ends, so they end with
+the client's `DELETE` and otherwise with the servers' own idle timeouts.
+Nothing is looked up to route: tools and prompts are `{server}__{name}` (the
+longest server name that prefixes the name wins), resources are
+`mcp://{server}/{uri}`, and a list cursor is a JSON object of the upstream
+cursors of the servers with more. A routed call streams the server's answer
+(progress notifications included) with URIs in its result prefixed; the `GET`
+stream merges the servers' own, keeping list changes, resource updates and log
+messages. The request log shows one entry per client request.
+
+### OAuth upstreams
+
+`apps/gateway/src/mcp_oauth.rs` is a token source per HTTP server with
+`oauth:` (client credentials, or refresh token if one is set; one task at a
+time fetches, the token is cached to its expiry less 30 seconds). It sits in
+`SessionOwners::send`, the wrapper every HTTP server's calls already pass for
+the session-owner check: the call gets `Authorization: Bearer`, and a `401`
+drops that token, gets another and sends a call with a whole body once more.
+`check --online` takes a token for its probe. Secrets are read at load through
+the same `env:` rule as keys and have no `Debug` output.
+
 ## The agent loop
 
 The loop that runs tools inside a chat request is a plugin, not a kernel

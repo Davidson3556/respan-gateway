@@ -37,12 +37,23 @@ def test_a_full_typed_config_parses() -> None:
                 "forward_auth": False,
             },
             "keyed": {"url": "http://127.0.0.1:9/mcp", "auth": {"type": "bearer", "key": "k"}},
+            "oauthed": {
+                "url": "http://127.0.0.1:9/mcp",
+                "oauth": {
+                    "token_url": "http://127.0.0.1:9/token",
+                    "client_id": "id",
+                    "client_secret": "secret",
+                    "scopes": ["read"],
+                    "refresh_token": "refresh",
+                },
+            },
             "local": {
                 "command": ["true"],
                 "env": {"TOKEN": "literal"},
                 "cwd": "/tmp",
             },
         },
+        "mcp_aggregate": {"servers": ["remote", "local"], "allow": ["remote__*"], "deny": ["remote__x"]},
         "agent": {
             "servers": ["remote", "local"],
             "allow": ["remote__*"],
