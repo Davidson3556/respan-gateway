@@ -29,6 +29,7 @@ use respan_gateway_http::Relay;
 const AT: &str = "http://mcp.test";
 
 /// An MCP server in `sh`: answers each request with an empty result.
+#[cfg(unix)]
 const ECHO: &str = r#"while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   [ -n "$id" ] && printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
@@ -645,6 +646,7 @@ async fn a_servers_refusal_of_a_notification_or_delete_reaches_the_client() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_stdio_child_answers_a_request_in_its_session() {
     let gw = gateway(StdioTransport::new("sh", ["-c", ECHO]).connect(), None);
@@ -679,6 +681,7 @@ async fn a_stdio_child_answers_a_request_in_its_session() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_mcp_servers_error_is_written_as_a_json_rpc_error() {
     let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
@@ -902,6 +905,7 @@ async fn list(gw: &Gateway, session: &str) -> StatusCode {
     status
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_child_that_exits_is_reaped_and_its_session_forgotten() {
     // What it leaves behind holds its stdout open.
@@ -918,6 +922,7 @@ async fn a_child_that_exits_is_reaped_and_its_session_forgotten() {
     panic!("the session of an exited child is still served");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn sessions_are_capped() {
     let gw = gateway(
@@ -934,6 +939,7 @@ async fn sessions_are_capped() {
     init(&gw, &[]).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_idle_session_ends() {
     let transport = StdioTransport::new("sh", ["-c", ECHO]).max_sessions(1);
@@ -958,6 +964,7 @@ async fn an_idle_session_ends() {
     panic!("an idle session is still served");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_notification_reaches_the_get_stream_when_the_posts_client_left() {
     let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b; sleep 0.3
@@ -988,6 +995,7 @@ echo '{"jsonrpc":"2.0","method":"notifications/message"}'; sleep 3"#;
     assert!(heard.await.is_ok(), "the GET stream got {seen:?}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_session_belongs_to_the_credential_that_started_it() {
     let gw = gateway(StdioTransport::new("sh", ["-c", ECHO]).connect(), None);
@@ -1010,6 +1018,7 @@ async fn a_session_belongs_to_the_credential_that_started_it() {
     assert_eq!(second.status(), StatusCode::CONFLICT);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn the_session_cap_is_per_owner() {
     let gw = gateway(
@@ -1027,6 +1036,7 @@ async fn the_session_cap_is_per_owner() {
     init(&gw, &[("authorization", "Bearer alice")]).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_flood_from_many_owners_hits_the_total() {
     let transport = StdioTransport::new("sh", ["-c", ECHO]).max_sessions(2);
@@ -1039,6 +1049,7 @@ async fn a_flood_from_many_owners_hits_the_total() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_answer_to_no_open_request_ends_the_oldest_post() {
     // The server answers `tools/list` with a parse error, id null.
@@ -1069,6 +1080,7 @@ impl Plugin for Authenticates {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_session_belongs_to_the_owner_a_plugin_sets() -> Result<(), Fault> {
     let gw = Gateway::new()
@@ -1092,6 +1104,7 @@ async fn a_session_belongs_to_the_owner_a_plugin_sets() -> Result<(), Fault> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_get_stream_that_falls_behind_ends() {
     let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b
@@ -1112,6 +1125,7 @@ for i in $(seq 500); do echo '{"jsonrpc":"2.0","method":"notifications/message"}
     assert!(messages(&body).len() < 500, "{}", messages(&body).len());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_late_answer_to_a_post_the_client_left_reaches_no_other_post() {
     let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'
@@ -1136,6 +1150,7 @@ echo '{"jsonrpc":"2.0","id":3,"result":{"fast":true}}'; exec sleep 100"#;
     assert!(outcome.is_ok());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_post_dropped_while_written_leaves_whole_lines() {
     // Busy for a second after `initialize`, then answers each whole line;
@@ -1163,6 +1178,7 @@ sed -u -n -e '/"jsonrpc".*"jsonrpc"/{s/.*/{"jsonrpc":"2.0","id":null,"error":{"c
     assert_eq!(messages(&body), [ok], "{body}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_post_behind_a_child_that_stopped_reading_still_times_out() {
     // Answers `initialize`, then never reads stdin again.
@@ -1190,6 +1206,7 @@ async fn a_post_behind_a_child_that_stopped_reading_still_times_out() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_post_the_server_never_answers_times_out_and_frees_its_session() {
     // Answers `initialize` only.
@@ -1228,6 +1245,7 @@ async fn a_post_the_server_never_answers_times_out_and_frees_its_session() {
     panic!("the session of a timed-out POST is still held");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_session_whose_initialize_is_never_answered_idles_out() {
     // Never answers, never exits.
@@ -1257,6 +1275,7 @@ fn running(pid: &Value) -> bool {
     probe.is_ok_and(|s| s.success())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_child_deaf_to_eof_and_sigterm_is_killed_with_all_it_started() {
     // Its background process, like itself, ignores SIGTERM.
@@ -1277,6 +1296,7 @@ echo '{"jsonrpc":"2.0","id":1,"result":{"pid":'$!'}}'; exec sleep 100"#;
     panic!("what the child started outlived its session");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_child_sees_only_path_and_what_it_is_given() {
     assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
@@ -1290,6 +1310,7 @@ async fn a_child_sees_only_path_and_what_it_is_given() {
     assert!(seen.starts_with("unset yes / /"), "{seen}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_initialize_whose_client_left_frees_its_slot() {
     let script = r#"read a; sleep 1; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; exec sleep 100"#;
@@ -1301,6 +1322,7 @@ async fn an_initialize_whose_client_left_frees_its_slot() {
     init(&gw, &[]).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_request_the_client_cancels_ends_its_post() {
     // Answers `initialize` only.
@@ -1508,6 +1530,7 @@ async fn invalid_rpc_envelopes_are_refused_before_contacting_the_server() {
     assert!(mock.sent().is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_zero_stdio_backlog_is_a_configuration_fault() {
     let gw = gateway(
@@ -1519,6 +1542,7 @@ async fn a_zero_stdio_backlog_is_a_configuration_fault() {
     assert_eq!(error_code(&outcome.expect_err("invalid backlog")), "config");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn overlapping_request_ids_are_refused_without_disrupting_the_first_post() {
     let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b
@@ -1742,6 +1766,7 @@ async fn split_unicode_multiline_events_and_typed_ids_survive_out_of_order_answe
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn stray_json_on_stdio_cannot_complete_a_post() {
     let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b
@@ -1821,6 +1846,7 @@ async fn server_requests_are_refused_in_json_framing_and_preserved_in_sse() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_request_naming_no_session_but_initialize_is_a_400() {
     let gw = gateway(StdioTransport::new("sh", ["-c", ECHO]).connect(), None);
@@ -1853,6 +1879,7 @@ async fn a_request_naming_no_session_but_initialize_is_a_400() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn session_ids_are_128_random_bits() {
     let gw = gateway(StdioTransport::new("sh", ["-c", ECHO]).connect(), None);
@@ -1866,6 +1893,7 @@ async fn session_ids_are_128_random_bits() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_open_get_stream_keeps_its_session_from_idling() {
     let transport = StdioTransport::new("sh", ["-c", ECHO]).idle(Duration::from_millis(200));
@@ -1898,6 +1926,7 @@ async fn heard(gw: &Gateway, session: &str, until: &str, then: impl Future) -> S
     seen
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn progress_goes_to_its_post_and_the_servers_own_messages_to_the_get_stream() {
     let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b
@@ -1926,6 +1955,7 @@ echo '{"jsonrpc":"2.0","id":2,"result":{}}'; exec sleep 100"#;
     assert!(seen.contains("notifications/message"), "{seen}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_timed_out_post_cancels_its_requests() {
     let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b; read c

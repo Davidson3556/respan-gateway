@@ -39,11 +39,14 @@ type Sessions = Mutex<HashMap<(String, u64), Option<Arc<Session>>>>;
 /// answer to its `initialize` ends before its first message, as when its
 /// client left or it timed out, since its id then reached no one. Its child
 /// is then stopped as MCP asks of a client: stdin closed, then SIGTERM,
-/// then SIGKILL to its process group, each a moment later. Its id is 128
+/// then SIGKILL to its process group, each a moment later (on Windows it
+/// starts in a process group of its own, and is ended with the processes it
+/// started by `taskkill /T /F`). Its id is 128
 /// bits from the operating system's secure random source (MCP: a session
 /// id "SHOULD be globally unique and cryptographically secure").
 ///
-/// The child is given only the gateway's `PATH`, so a program is found as
+/// The child is given only the gateway's `PATH` (and, on Windows, the few
+/// variables a program cannot start without), so a program is found as
 /// from a shell, and what [`env`](Self::env) adds: an MCP server is handed
 /// only the secrets meant for it, not the gateway's own. It runs in the
 /// gateway's directory unless [`current_dir`](Self::current_dir) says
@@ -266,6 +269,14 @@ impl StdioTransport {
             .stderr(Stdio::inherit());
         if let Some(path) = std::env::var_os("PATH") {
             command.env("PATH", path);
+        }
+        // Windows programs, and the `.cmd` shims such as `npx`'s, need
+        // these to start at all.
+        #[cfg(windows)]
+        for name in ["SystemRoot", "ComSpec", "PATHEXT", "TEMP", "TMP"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
         }
         command.envs(self.env.iter().cloned());
         if let Some(dir) = &self.dir {

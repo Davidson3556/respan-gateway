@@ -306,7 +306,10 @@ client's only to a server with `forward_auth`. The request log shows the
 method (and tool, prompt or resource) where other kinds show a model; the
 server is the provider. Children are the transport's: process groups,
 `stdin` closed then SIGTERM then SIGKILL, and `kill_on_drop` when the runtime
-stops.
+stops; on Windows the child starts in its own process group and ends with the
+processes it started (`taskkill /T /F`). Admin views and `check` show a
+server by its origin or program name only, never a path, argument or
+environment.
 
 ## The agent loop
 
@@ -321,7 +324,8 @@ adds the listed tools to the conversation and answers the request itself with
 as for any call), read as `Output` events. A step's events flow to the client
 (blocks renumbered without gaps over the steps), except the runner's tool
 calls, usage and the finish, which are decided when the step ends: calls only to
-the runner's tools are run in parallel and appended to the conversation as
+the runner's tools are run (at most `parallel` at once, their answers sharing
+a per-request byte budget) and appended to the conversation as
 the assistant's calls and a user message of results; anything else ends the
 loop, with the usage summed. Because the plugin replies, it is registered
 after the plugins that route or edit the request.
@@ -333,6 +337,9 @@ server's provider with an MCP `Input` (the server's credentials are the
 transport's; the call carries the `Owner` of no client key, and
 `ToolHop` so the request log keeps the server out of the request's provider
 field), through a session the runner keeps per server and restarts when lost,
-and a per-server tool list with a TTL. The config check refuses servers with
-`forward_auth`. The steps and tool calls go to the request log through the
+and a per-server tool list with a TTL, filtered by `agent.allow` and
+`agent.deny` (patterns over the name the model has). The config check refuses
+servers with `forward_auth`. `check --online` asks the same runner, through a
+request of the gateway's own marked with an extension no client can send, for
+the tools it offers. The steps and tool calls go to the request log through the
 plugin's observer (`Agent::observe`), which the recorder's entry implements.

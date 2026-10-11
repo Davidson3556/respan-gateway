@@ -116,6 +116,9 @@ impl Session {
         let command = command.stdin(Stdio::piped()).stdout(Stdio::piped());
         #[cfg(unix)]
         command.process_group(0);
+        // CREATE_NEW_PROCESS_GROUP, so the tree is the child's own.
+        #[cfg(windows)]
+        command.creation_flags(0x0000_0200);
         let mut child = command
             .kill_on_drop(true)
             .spawn()
@@ -380,11 +383,24 @@ async fn stop(mut child: Child, group: Option<i32>, writer: JoinHandle<()>) {
     let _ = child.wait().await;
 }
 
-/// Sends the child's process `group` SIGKILL if `kill`, else SIGTERM.
-/// Without unix process groups and signals, kills only the child, if
-/// `kill`.
-#[cfg_attr(not(unix), allow(unused_variables))]
+/// Sends the child's process `group` SIGKILL if `kill`, else SIGTERM. On
+/// Windows, which has no such signals, `kill` ends the child and everything
+/// it started (`taskkill /T /F`), and the other does nothing. Elsewhere
+/// without process groups, it kills only the child, if `kill`.
+#[cfg_attr(not(any(unix, windows)), allow(unused_variables))]
 fn signal(child: &mut Child, group: Option<i32>, kill: bool) {
+    #[cfg(windows)]
+    if kill && let Some(pid) = group {
+        let tree = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if tree.is_ok() {
+            return;
+        }
+    }
     #[cfg(unix)]
     if let Some(group) = group {
         let signal = if kill { libc::SIGKILL } else { libc::SIGTERM };
