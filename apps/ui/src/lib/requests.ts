@@ -65,6 +65,14 @@ export function timingOf(r: Pick<RequestRecord, "duration_ms" | "ttfb_ms">): Tim
   return { ttfb, rest: total - ttfb, total, ttfbShare: total > 0 ? ttfb / total : 0 };
 }
 
+/** Output tokens per second of a streamed answer, measured after its first byte; null if unmeasurable. */
+export function tokensPerSecond(r: RequestRecord): number | null {
+  const timing = timingOf(r);
+  const tokens = r.usage?.output_tokens ?? 0;
+  if (!r.stream || !timing || timing.rest <= 0 || tokens <= 0) return null;
+  return tokens / (timing.rest / 1000);
+}
+
 const quote = (json: unknown) => `'${JSON.stringify(json).replaceAll("'", "'\\''")}'`;
 
 /**

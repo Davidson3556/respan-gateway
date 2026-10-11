@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RequestRecord } from "./api";
-import { ANY, distinct, filterRequests, reproduceCurl, timingOf } from "./requests";
+import { ANY, distinct, filterRequests, reproduceCurl, timingOf, tokensPerSecond } from "./requests";
 
 const base: RequestRecord = {
   id: "r_1",
@@ -65,6 +65,18 @@ describe("timingOf", () => {
     expect(timingOf({ duration_ms: 100, ttfb_ms: 300 })?.rest).toBe(0);
     expect(timingOf({ duration_ms: 100, ttfb_ms: null })?.ttfbShare).toBe(0);
     expect(timingOf({ duration_ms: 0, ttfb_ms: 0 })?.ttfbShare).toBe(0);
+  });
+});
+
+describe("tokensPerSecond", () => {
+  const streamed = { ...base, stream: true, usage: { input_tokens: 10, output_tokens: 150 } };
+  it("counts output tokens over the time after the first byte", () => {
+    expect(tokensPerSecond(streamed)).toBe(200);
+  });
+  it("is null unless streamed, with output, and past the first byte", () => {
+    expect(tokensPerSecond({ ...streamed, stream: false })).toBeNull();
+    expect(tokensPerSecond({ ...streamed, usage: null })).toBeNull();
+    expect(tokensPerSecond({ ...streamed, ttfb_ms: 1000 })).toBeNull();
   });
 });
 

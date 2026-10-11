@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeOff } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { toast } from "sonner";
+import { CodeBlock } from "@/components/code-block";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,7 +18,7 @@ import { Label } from "@/components/ui/label";
 import { useGatewayKey, useOverview } from "@/hooks/queries";
 import { themeOptions, useTheme } from "@/hooks/use-theme";
 import { setGatewayKey } from "@/lib/api";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, formatUptime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 function KeyCard({ stored }: { stored: string | null }) {
@@ -125,13 +126,38 @@ function ThemeCard() {
   );
 }
 
+const sources = {
+  "gateway.yaml": "Config file (gateway.yaml)",
+  environment: "Environment variables",
+  proxy: "Proxy mode (no providers configured)",
+};
+
+function ConnectCard() {
+  const base = `${window.location.origin}/v1`;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Use this gateway</CardTitle>
+        <CardDescription>
+          Point an OpenAI or Anthropic client here; the SDK adds the endpoint paths itself.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <CodeBlock code={base} />
+      </CardContent>
+    </Card>
+  );
+}
+
 function AboutCard() {
   const { data } = useOverview();
   if (!data) return null;
   const rows: [string, string][] = [
     ["Version", data.version],
     ["Listening on", data.listen],
-    ["Configuration", data.config_source],
+    ["Configuration", sources[data.config_source]],
+    ["Client keys", data.auth_required ? "Required" : "Not required"],
+    ["Uptime", formatUptime(data.uptime_seconds)],
     ["Started", formatDateTime(data.started_at)],
   ];
   return (
@@ -140,11 +166,11 @@ function AboutCard() {
         <CardTitle className="text-base">About this gateway</CardTitle>
       </CardHeader>
       <CardContent>
-        <dl className="grid gap-2 text-sm sm:grid-cols-[10rem_1fr]">
+        <dl className="grid gap-x-4 gap-y-2.5 text-sm sm:grid-cols-[10rem_1fr]">
           {rows.map(([k, v]) => (
-            <div key={k} className="contents">
+            <div key={k} className="grid gap-0.5 sm:contents">
               <dt className="text-muted-foreground">{k}</dt>
-              <dd className="font-mono text-[13px]">{v}</dd>
+              <dd className="min-w-0 font-mono text-[13px] break-words">{v}</dd>
             </div>
           ))}
         </dl>
@@ -156,11 +182,12 @@ function AboutCard() {
 export function SettingsPage() {
   const stored = useGatewayKey();
   return (
-    <div className="grid max-w-3xl gap-6">
+    <div className="grid max-w-3xl grid-cols-1 gap-6">
       <PageHeader title="Settings" description="Preferences for this browser." />
       {/* Remount when the key changes elsewhere (the key dialog) to show it. */}
       <KeyCard key={stored ?? ""} stored={stored} />
       <ThemeCard />
+      <ConnectCard />
       <AboutCard />
     </div>
   );
