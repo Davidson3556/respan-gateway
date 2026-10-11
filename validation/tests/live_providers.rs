@@ -207,6 +207,151 @@ async fn real_gemini_native_stream_through_passthrough() {
     assert!(!text.trim().is_empty() && finished, "{body}");
 }
 
+fn gemini_config(serve: &str) -> String {
+    // The vendor, so its quirks run, speaking only the native format.
+    format!(
+        "providers:\n  p:\n    vendor: gemini\n    formats: gemini-generate\nformats: [{serve}]\ndefault: p\n"
+    )
+}
+
+fn gemini_model() -> String {
+    model("GEMINI_MODEL", "gemini-3.8-flash")
+}
+
+#[tokio::test]
+#[ignore = "calls the real Gemini API; needs GEMINI_API_KEY"]
+async fn real_gemini_generate_content_relay_and_tool_round_trip() {
+    if !has("GEMINI_API_KEY") {
+        return;
+    }
+    let gw = Gateway::start(&gemini_config("gemini-generate")).await;
+    let model = gemini_model();
+    let post = |method: &str, body: serde_json::Value| {
+        let url = gw.url(&format!("/v1beta/models/{model}:{method}"));
+        async move {
+            let resp = client()
+                .post(url)
+                .header("content-type", "application/json")
+                .body(body.to_string())
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status();
+            let (body, ended) = read_all(resp).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(ended, Ok(()));
+            body
+        }
+    };
+    let hi = serde_json::json!({
+        "systemInstruction": { "parts": [{ "text": "Answer in one word." }] },
+        "contents": [{ "role": "user", "parts": [{ "text": "Say ok." }] }],
+        "generationConfig": { "maxOutputTokens": 1024 },
+    });
+    let whole = json(&post("generateContent", hi.clone()).await);
+    assert_eq!(whole["candidates"][0]["finishReason"], "STOP", "{whole}");
+    assert!(whole["usageMetadata"]["promptTokenCount"].as_u64() > Some(0));
+    let streamed = post("streamGenerateContent?alt=sse", hi).await;
+    let chunks: Vec<_> = streamed
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .map(json)
+        .collect();
+    let last = chunks.last().unwrap();
+    assert_eq!(last["candidates"][0]["finishReason"], "STOP", "{streamed}");
+    assert!(last["usageMetadata"]["totalTokenCount"].as_u64() > Some(0));
+
+    // A function call, and the conversation going on with its result.
+    let tools = serde_json::json!([{ "functionDeclarations": [{
+        "name": "echo", "description": "Echoes text back",
+        "parameters": { "type": "OBJECT", "properties": { "text": { "type": "STRING" } },
+            "required": ["text"] } }] }]);
+    let ask = serde_json::json!({ "role": "user", "parts": [{ "text": "Call echo with text exactly 雪😀." }] });
+    let config = serde_json::json!({ "maxOutputTokens": 1024 });
+    let first = json(
+        &post(
+            "generateContent",
+            serde_json::json!({ "contents": [ask], "tools": tools, "generationConfig": config }),
+        )
+        .await,
+    );
+    let call = first["candidates"][0]["content"]["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p.get("functionCall").is_some())
+        .unwrap_or_else(|| panic!("{first}"))
+        .clone();
+    assert_eq!(call["functionCall"]["name"], "echo");
+    assert_eq!(call["functionCall"]["args"]["text"], "雪😀", "{first}");
+    let second = json(
+        &post(
+            "generateContent",
+            serde_json::json!({ "contents": [ask,
+                { "role": "model", "parts": [call.clone()] },
+                { "role": "user", "parts": [{ "functionResponse": { "name": "echo",
+                    "response": { "output": "雪😀" } } }] }],
+                "tools": tools, "generationConfig": config }),
+        )
+        .await,
+    );
+    assert_eq!(second["candidates"][0]["finishReason"], "STOP", "{second}");
+}
+
+#[tokio::test]
+#[ignore = "calls the real Gemini API through translation; needs GEMINI_API_KEY"]
+async fn real_openai_client_reaches_gemini_generate_content() {
+    if !has("GEMINI_API_KEY") {
+        return;
+    }
+    let gw = Gateway::start(&gemini_config("openai-chat")).await;
+    let tool = serde_json::json!({ "type": "function", "function": { "name": "echo",
+        "description": "Echoes text back",
+        "parameters": { "type": "object", "properties": { "text": { "type": "string" } },
+            "required": ["text"] } } });
+    let chat = |body: serde_json::Value| {
+        let url = gw.url("/v1/chat/completions");
+        async move {
+            let resp = client()
+                .post(url)
+                .body(body.to_string())
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status();
+            let (body, ended) = read_all(resp).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(ended, Ok(()));
+            body
+        }
+    };
+    let ask = serde_json::json!({ "role": "user", "content": "Call echo with text exactly 雪😀." });
+    let first = json(
+        &chat(serde_json::json!({ "model": gemini_model(), "max_tokens": 1024,
+            "messages": [ask], "tools": [tool], "tool_choice": "required" }))
+        .await,
+    );
+    let call = &first["choices"][0]["message"]["tool_calls"][0];
+    assert_eq!(first["choices"][0]["finish_reason"], "tool_calls", "{first}");
+    assert_eq!(call["function"]["name"], "echo");
+    assert_eq!(json(call["function"]["arguments"].as_str().unwrap())["text"], "雪😀");
+    assert!(first["usage"]["prompt_tokens"].as_u64() > Some(0));
+    let streamed = chat(serde_json::json!({ "model": gemini_model(), "max_tokens": 1024,
+        "stream": true, "stream_options": { "include_usage": true },
+        "messages": [serde_json::json!({ "role": "user", "content": "Say ok." })] }))
+    .await;
+    assert!(streamed.ends_with("data: [DONE]\n\n"), "{streamed}");
+    assert!(streamed.contains("\"finish_reason\":\"stop\""), "{streamed}");
+    let second = json(
+        &chat(serde_json::json!({ "model": gemini_model(), "max_tokens": 1024,
+            "messages": [ask,
+                { "role": "assistant", "content": null, "tool_calls": [call] },
+                { "role": "tool", "tool_call_id": call["id"], "content": "雪😀" }] }))
+        .await,
+    );
+    assert_eq!(second["choices"][0]["finish_reason"], "stop", "{second}");
+}
+
 #[tokio::test]
 #[ignore = "calls TypeSafe systemone through passthrough; needs TYPESAFE_API_KEY"]
 async fn real_typesafe_custom_decisions_through_passthrough() {

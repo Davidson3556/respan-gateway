@@ -42,8 +42,23 @@ fn now() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
+/// Whole milliseconds, rounded up: a persisted deadline is never earlier
+/// than the one asked for.
 fn milliseconds(duration: Duration) -> i64 {
-    duration.as_millis().min(i64::MAX as u128) as i64
+    duration
+        .as_nanos()
+        .div_ceil(1_000_000)
+        .min(i64::MAX as u128) as i64
+}
+
+/// The persisted form of a moment `after` from now.
+fn after(duration: Duration) -> i64 {
+    milliseconds(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .saturating_add(duration),
+    )
 }
 
 /// A weighted queue. Clones share a connection; `open` shares across processes.
@@ -108,9 +123,7 @@ impl Slots {
         let weight = self.weights.get(&user).copied().unwrap_or(1);
         let capacity = self.capacity;
         let lease = milliseconds(self.lease);
-        let expires = now().saturating_add(milliseconds(
-            deadline.saturating_duration_since(Instant::now()),
-        ));
+        let expires = after(deadline.saturating_duration_since(Instant::now()));
         let database = self.database.clone();
         let queued = self.database.transact(move |tx| {
             tx.execute_batch(SCHEMA).map_err(sql)?;

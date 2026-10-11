@@ -8,7 +8,7 @@
 #[path = "../../../../tests/support/http.rs"]
 mod http_support;
 use http_support::{LIMIT, serve, serve_live};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -308,7 +308,7 @@ fn frames(of: &[Result<&str, &str>]) -> Seen_ {
 #[derive(Clone, Default)]
 struct Seen {
     frames: Arc<Mutex<Seen_>>,
-    done: Arc<AtomicBool>,
+    done: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl Seen {
@@ -332,7 +332,7 @@ impl Seen {
                             .map_err(|e| respan_gateway_http::error_code(&e).to_string());
                         lock(&seen.frames).push(f);
                     }
-                    seen.done.store(true, Ordering::SeqCst);
+                    seen.done.send_replace(true);
                 });
                 if wait {
                     let _ = read.await;
@@ -343,7 +343,10 @@ impl Seen {
         })
     }
 
-    fn frames(&self) -> Seen_ {
+    /// The frames read, once the reader saw its body end: a response may
+    /// finish, on the delivery's word, before the reader took the last frame.
+    async fn frames(&self) -> Seen_ {
+        let _ = self.done.subscribe().wait_for(|done| *done).await;
         lock(&self.frames).clone()
     }
 }
@@ -458,7 +461,7 @@ async fn a_request_encoder_panic_on_a_later_frame_ends_the_call_internal() {
     let got = read(resp).await;
     drop(tx);
     gw.idle().await;
-    assert_eq!(seen.frames(), frames(&[Ok("first"), Err("internal")]));
+    assert_eq!(seen.frames().await, frames(&[Ok("first"), Err("internal")]));
     assert_eq!(codes(calls.all()), ["internal"], "client got {got:?}");
     assert_eq!(codes(outcomes.all()), ["internal"]);
     assert_eq!(code(&end.await), "internal");
@@ -476,7 +479,7 @@ async fn a_body_ends_at_its_first_failure() {
     }
     let (resp, _) = open(&gw, body, true).await;
     let _ = read(resp).await;
-    assert_eq!(seen.frames(), frames(&[Ok("one"), Err("internal")]));
+    assert_eq!(seen.frames().await, frames(&[Ok("one"), Err("internal")]));
 }
 
 /// B5: an encoder's own bytes are a whole request's body.
@@ -486,7 +489,11 @@ async fn a_request_encoders_open_saying_done_is_the_whole_body() {
     let (gw, _, _) = gateway_of(opening("<OPEN>"), seen.transport(true, done));
     let (resp, _) = open(&gw, chunks(vec!["q"]), false).await;
     assert_eq!(read(resp).await, Ok((200, "a;!".into())));
-    assert_eq!(seen.frames(), frames(&[Ok("<OPEN>")]), "a whole request");
+    assert_eq!(
+        seen.frames().await,
+        frames(&[Ok("<OPEN>")]),
+        "a whole request"
+    );
 }
 
 /// An empty data frame is an input, and its encoding of no bytes is a frame
@@ -501,7 +508,10 @@ async fn an_empty_frame_is_an_input_that_writes_an_empty_frame() {
     drop(tx);
     let (resp, _) = open(&gw, body, true).await;
     let _ = read(resp).await;
-    assert_eq!(seen.frames(), frames(&[Ok("one"), Ok(""), Ok("<END>")]));
+    assert_eq!(
+        seen.frames().await,
+        frames(&[Ok("one"), Ok(""), Ok("<END>")])
+    );
 }
 
 /// B1: the client's body breaks; the provider's body ends with that `Err`,
@@ -517,7 +527,10 @@ async fn a_broken_upload_ends_the_providers_body_with_the_err() {
     let (resp, _) = open(&gw, body, true).await;
     let _ = read(resp).await;
     gw.idle().await;
-    assert_eq!(seen.frames(), frames(&[Ok("hello"), Err("bad_request")]));
+    assert_eq!(
+        seen.frames().await,
+        frames(&[Ok("hello"), Err("bad_request")])
+    );
 }
 
 /// A streaming request's inputs follow, even with its body ended, and its

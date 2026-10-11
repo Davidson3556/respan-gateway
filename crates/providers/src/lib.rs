@@ -12,6 +12,7 @@
 
 use respan_gateway_conversation_http::Schema;
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
+use respan_gateway_conversation_http::gemini::GeminiGenerate;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_conversation_http::responses::OpenAiResponses;
 use respan_gateway_core::Plugin;
@@ -179,6 +180,8 @@ pub enum Format {
     OpenAiResponses(OpenAiResponses),
     /// Anthropic Messages.
     AnthropicMessages(AnthropicMessages),
+    /// Google Gemini's `generateContent`.
+    GeminiGenerate(GeminiGenerate),
     /// OpenAI Images.
     OpenAiImages(OpenAiImages),
     /// OpenAI Audio Transcriptions.
@@ -206,6 +209,7 @@ impl Format {
             Format::OpenAiChat(_) => OpenAiChat::NAME,
             Format::OpenAiResponses(_) => OpenAiResponses::NAME,
             Format::AnthropicMessages(_) => AnthropicMessages::NAME,
+            Format::GeminiGenerate(_) => GeminiGenerate::NAME,
             Format::OpenAiImages(_) => OpenAiImages::NAME,
             Format::OpenAiTranscriptions(_) => OpenAiTranscriptions::NAME,
             Format::OpenAiSpeech(_) => OpenAiSpeech::NAME,

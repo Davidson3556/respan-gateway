@@ -251,6 +251,11 @@ fn a_preset_is_every_format_of_its_vendor() {
         entries(1),
         [
             entry("openai-chat", "gemini", "http://g.test/v1beta/openai"),
+            entry(
+                "gemini-generate",
+                "gemini:gemini-generate",
+                "http://g.test/v1beta"
+            ),
             entry("gemini-live", "gemini:gemini-live", "ws://g.test"),
             entry(
                 "openai-images",
@@ -276,7 +281,7 @@ fn a_preset_is_every_format_of_its_vendor() {
         Some("Bearer AIza")
     );
     assert_eq!(header(1, 1, "x-goog-api-key").as_deref(), Some("AIza"));
-    assert_eq!(header(1, 3, "x-goog-api-key").as_deref(), Some("AIza"));
+    assert_eq!(header(1, 4, "x-goog-api-key").as_deref(), Some("AIza"));
     assert!(plan.upstreams.iter().all(|u| u.own_key));
     // Served by default: the chat formats, each chat, media and realtime client
     // format, and Responses over WebSocket.
@@ -292,6 +297,7 @@ fn a_preset_is_every_format_of_its_vendor() {
             "openai-speech",
             "openai-videos",
             "openai-embeddings",
+            "gemini-generate",
             "gemini-live",
             "responses-ws"
         ]
@@ -565,7 +571,7 @@ fn an_unknown_format_names_the_compiled_in_ones() {
     assert_eq!(
         resolve(yaml).err().as_deref(),
         Some(
-            "formats: unknown format 'nope'; compiled-in formats: [openai-chat, openai-responses, openai-realtime, responses-ws, openai-images, openai-transcriptions, openai-speech, openai-videos, openai-embeddings, anthropic-messages, gemini-live, gemini-veo, passthrough]"
+            "formats: unknown format 'nope'; compiled-in formats: [openai-chat, openai-responses, openai-realtime, responses-ws, openai-images, openai-transcriptions, openai-speech, openai-videos, openai-embeddings, anthropic-messages, gemini-generate, gemini-live, gemini-veo, passthrough]"
         )
     );
 }
