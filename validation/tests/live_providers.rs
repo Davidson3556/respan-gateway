@@ -179,7 +179,7 @@ async fn real_gemini_native_stream_through_passthrough() {
         "/v1beta/models/{}:streamGenerateContent?alt=sse",
         model("GEMINI_MODEL", "gemini-3.8-flash")
     );
-    let request = serde_json::json!({"contents":[{"parts":[{"text":"Say ok."}]}],"generationConfig":{"maxOutputTokens":64,"thinkingConfig":{"thinkingBudget":0}}});
+    let request = serde_json::json!({"contents":[{"parts":[{"text":"Say ok."}]}],"generationConfig":{"maxOutputTokens":256,"thinkingConfig":{"thinkingLevel":"low"}}});
     let resp = client()
         .post(gw.url(&path))
         .header("content-type", "application/json")

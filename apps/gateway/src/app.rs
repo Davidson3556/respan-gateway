@@ -9,7 +9,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::middleware::{from_fn_with_state, map_response};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{MethodRouter, get};
 use respan_gateway_core::Gateway;
 use respan_gateway_http::Relay;
 use respan_gateway_http::http::StatusCode;
@@ -229,6 +229,9 @@ impl App {
             .collect();
         if !self.config.raw_relay {
             endpoints.push("GET /v1/models".to_owned());
+            if self.plan.serves("gemini-generate") {
+                endpoints.push("GET /v1beta/models".to_owned());
+            }
         }
         endpoints.push("GET /healthz".to_owned());
         row("endpoints", endpoints);
@@ -392,9 +395,18 @@ fn routes(
     // A raw relay lets its vendor answer, with the client's credentials.
     if !config.raw_relay {
         let models = Arc::new(Models::new(&plan.upstreams, plan.routes.clone()));
-        let list = get(models::list).with_state(models);
+        let list = get(models::list).with_state(models.clone());
         let list = list.layer(from_fn_with_state(keys.clone(), auth::require));
         router = router.route("/v1/models", list);
+        // Gemini SDKs list at `/v1beta`; a POST there is a call of the relay.
+        let gemini = |route: MethodRouter<Arc<Models>>| {
+            let route = route.fallback_service(relay.clone());
+            let route = route.layer(from_fn_with_state(keys.clone(), auth::require));
+            route.with_state(models.clone())
+        };
+        router = router
+            .route("/v1beta/models", gemini(get(models::list_gemini)))
+            .route("/v1beta/models/{*model}", gemini(get(models::get_gemini)));
     }
     if config.ui {
         router = router.merge(admin::router(admin, keys.clone()));

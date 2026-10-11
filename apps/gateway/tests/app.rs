@@ -332,6 +332,52 @@ async fn models_are_merged_from_every_provider() {
 }
 
 #[tokio::test]
+async fn models_are_listed_in_geminis_shape_for_its_sdks() {
+    let (openai, seen) = listing(&["gpt-4o", "text-embedding-3-small"]).await;
+    let gw = Gateway::start(&format!(
+        "providers:\n  openai: {{ vendor: openai, base_url: '{openai}', key: sk-openai }}\nclient_keys: [gw-key]\n"
+    ))
+    .await;
+    let get = |path: &'static str| {
+        let request = client().get(gw.url(path));
+        async move {
+            request
+                .header("x-goog-api-key", "gw-key")
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let list = support::json(&get("/v1beta/models").await.text().await.unwrap());
+    let models = list["models"].as_array().unwrap();
+    // Chat models only: the ones generateContent serves.
+    assert_eq!(models.len(), 1, "{list}");
+    assert_eq!(models[0]["name"], "models/gpt-4o");
+    assert_eq!(models[0]["displayName"], "gpt-4o");
+    assert!(
+        models[0]["supportedGenerationMethods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m == "streamGenerateContent")
+    );
+    let one = get("/v1beta/models/gpt-4o").await;
+    assert_eq!(one.status(), 200);
+    let one = support::json(&one.text().await.unwrap());
+    assert_eq!(one["name"], "models/gpt-4o");
+    let prefixed = get("/v1beta/models/models/gpt-4o").await;
+    assert_eq!(prefixed.status(), 200);
+    let missing = get("/v1beta/models/nope").await;
+    assert_eq!(missing.status(), 404);
+    let error = support::json(&missing.text().await.unwrap());
+    assert_eq!(error["error"]["status"], "NOT_FOUND", "{error}");
+    // Without the gateway's key it is refused, like /v1/models.
+    let anon = client().get(gw.url("/v1beta/models")).send().await.unwrap();
+    assert_eq!(anon.status(), 401);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn the_merged_models_win_over_a_served_passthrough() {
     let (openai, seen) = listing(&["gpt-4o"]).await;
     let origin = openai.trim_end_matches("/v1");

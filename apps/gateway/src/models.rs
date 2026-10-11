@@ -1,12 +1,13 @@
 //! `GET /v1/models`: every provider's models in one OpenAI-shaped list,
 //! each named as a client asks for it: as it is if routing sends that name
-//! to its provider, else as `provider/model`.
+//! to its provider, else as `provider/model`. `GET /v1beta/models` is the
+//! same list in Gemini's shape, for Gemini SDKs.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use respan_gateway_core::futures::future::join_all;
 use respan_gateway_http::http::{HeaderMap, StatusCode};
@@ -269,6 +270,59 @@ pub async fn list(State(models): State<Arc<Models>>) -> Response {
     match models.list().await {
         Ok(list) => Json(list).into_response(),
         Err(why) => auth::error(StatusCode::BAD_GATEWAY, "upstream_error", &why),
+    }
+}
+
+/// A Gemini-shaped error body.
+fn gemini_error(status: StatusCode, name: &str, message: &str) -> Response {
+    let body = json!({"error": {"code": status.as_u16(), "message": message, "status": name}});
+    (status, Json(body)).into_response()
+}
+
+/// The chat models of an OpenAI-shaped `list` as Gemini lists them: the ones
+/// `generateContent` serves.
+fn gemini_models(list: &Value) -> Vec<Value> {
+    let models = list["data"].as_array().into_iter().flatten();
+    models
+        .filter(|m| m["kind"] == "chat")
+        .filter_map(|m| {
+            let id = m["id"].as_str()?;
+            Some(json!({
+                "name": format!("models/{id}"),
+                "baseModelId": id,
+                "displayName": id,
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+            }))
+        })
+        .collect()
+}
+
+/// `GET /v1beta/models`: the merged list in Gemini's shape.
+pub async fn list_gemini(State(models): State<Arc<Models>>) -> Response {
+    match models.list().await {
+        Ok(list) => Json(json!({ "models": gemini_models(&list) })).into_response(),
+        Err(why) => gemini_error(StatusCode::BAD_GATEWAY, "UNAVAILABLE", &why),
+    }
+}
+
+/// `GET /v1beta/models/{model}`: one of the merged list, named with or
+/// without `models/`.
+pub async fn get_gemini(State(models): State<Arc<Models>>, Path(model): Path<String>) -> Response {
+    let list = match models.list().await {
+        Ok(list) => list,
+        Err(why) => return gemini_error(StatusCode::BAD_GATEWAY, "UNAVAILABLE", &why),
+    };
+    let wanted = format!("models/{}", model.strip_prefix("models/").unwrap_or(&model));
+    match gemini_models(&list)
+        .into_iter()
+        .find(|m| m["name"] == wanted)
+    {
+        Some(found) => Json(found).into_response(),
+        None => gemini_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            &format!("{wanted} is not found"),
+        ),
     }
 }
 

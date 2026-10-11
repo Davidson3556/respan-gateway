@@ -81,7 +81,8 @@ curl localhost:8080/v1/videos -d '{"model":"veo-3.0-generate-001","prompt":"a pa
 ```
 
 `GET /v1/models` lists every provider's models as clients name them, each
-with its `kind`,
+with its `kind` (`GET /v1beta/models` and `/v1beta/models/{model}` list its
+chat models in Gemini's shape, for Gemini SDKs),
 `GET /healthz` answers `ok`, and the web UI at
 [localhost:8080/ui/](http://localhost:8080/ui/) shows providers, routes and
 each request live; each finished request is also one line on stderr (`--log json` or
