@@ -5,6 +5,22 @@ mod support;
 use support::*;
 /// Where a Gemini Live client connects ([`GeminiLive`]).
 const PATH: &str = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+/// The setup every session opens with.
+fn setup() -> Value {
+    json!({"setup": {"model": "models/test"}})
+}
+/// Answers a setup as the Live API does, and anything else with `then`.
+fn after_setup(event: &Value, then: Vec<Value>) -> Vec<Value> {
+    match event.get("setup") {
+        Some(_) => vec![json!({"setupComplete": {}})],
+        None => then,
+    }
+}
+/// A session past its setup.
+async fn set_up(live: &mut Live) {
+    send(live, setup()).await;
+    assert!(next(live).await.unwrap().get("setupComplete").is_some());
+}
 fn configured(balance: i64) -> Sessions {
     let ledger = MemoryLedger::new();
     ledger.open("demo", None, balance);
@@ -23,14 +39,15 @@ async fn setup_audio_tools_and_resumption_pass_while_turns_are_metered() {
         if event.get("setup").is_some(){return vec![json!({"setupComplete":{}})]}
         if event["clientContent"]["turnComplete"]==true||event["realtimeInput"].get("activityEnd").is_some(){return vec![
             json!({"toolCall":{"functionCalls":[{"id":"f","name":"echo","args":{}}]}}),
-            json!({"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AAAA"}}]},"turnComplete":true},"usageMetadata":{"totalTokenCount":23,"promptTokensDetails":[{"modality":"AUDIO","tokenCount":10}]}}),
+            json!({"serverContent":{"modelTurn":{"parts":[{"inlineData":{"mimeType":"audio/pcm;rate=24000","data":"AAAA"}}]}}}),
+            json!({"serverContent":{"turnComplete":true},"usageMetadata":{"promptTokenCount":13,"responseTokenCount":10,"totalTokenCount":23,"promptTokensDetails":[{"modality":"AUDIO","tokenCount":10}]}}),
             json!({"sessionResumptionUpdate":{"newHandle":"resume1","resumable":true}}),
         ]}vec![]
     },move|base|gateway(WsTransport::new(base).unwrap(),sessions).unwrap()).await;
     send(&mut live,json!({"setup":{"model":"models/test","sessionResumption":{},"generationConfig":{"maxOutputTokens":9000}}})).await;
     next(&mut live).await.unwrap();
     send(&mut live,json!({"clientContent":{"turns":[{"role":"user","parts":[{"text":"hello"}]}],"turnComplete":true}})).await;
-    for _ in 0..3 {
+    for _ in 0..4 {
         next(&mut live).await.unwrap();
     }
     send(&mut live, json!({"realtimeInput":{"activityStart":{}}})).await;
@@ -46,6 +63,8 @@ async fn setup_audio_tools_and_resumption_pass_while_turns_are_metered() {
         audio["serverContent"]["modelTurn"]["parts"][0]["inlineData"]["data"],
         "AAAA"
     );
+    let done = next(&mut live).await.unwrap();
+    assert_eq!(done["usageMetadata"]["totalTokenCount"], 23);
     next(&mut live).await.unwrap();
     close(&mut live).await;
     assert_eq!(observed.ledger.spent("demo"), 46);
@@ -66,16 +85,20 @@ async fn interruptions_and_separate_usage_finish_once() {
     let observed = sessions.clone();
     let mut live = start(
         PATH,
-        |_| {
-            vec![
-                json!({"usageMetadata":{"totalTokenCount":11}}),
-                json!({"serverContent":{"interrupted":true}}),
-                json!({"serverContent":{"turnComplete":true}}),
-            ]
+        |event| {
+            after_setup(
+                &event,
+                vec![
+                    json!({"usageMetadata":{"promptTokenCount":4,"responseTokenCount":7}}),
+                    json!({"serverContent":{"interrupted":true}}),
+                    json!({"serverContent":{"turnComplete":true}}),
+                ],
+            )
         },
         move |base| gateway(WsTransport::new(base).unwrap(), sessions).unwrap(),
     )
     .await;
+    set_up(&mut live).await;
     send(&mut live, json!({"clientContent":{"turnComplete":true}})).await;
     for _ in 0..3 {
         next(&mut live).await.unwrap();
@@ -89,7 +112,7 @@ async fn unreserved_audio_and_unaffordable_turns_are_refused() {
     for (balance, event) in [
         (
             1_000_000,
-            json!({"realtimeInput":{"audio":{"data":"AAAA"}}}),
+            json!({"realtimeInput":{"audio":{"mimeType":"audio/pcm;rate=16000","data":"AAAA"}}}),
         ),
         (1, json!({"clientContent":{"turnComplete":true}})),
     ] {
@@ -97,14 +120,15 @@ async fn unreserved_audio_and_unaffordable_turns_are_refused() {
         let observed = sessions.clone();
         let mut live = start(
             PATH,
-            |_| vec![],
+            |event| after_setup(&event, vec![]),
             move |base| gateway(WsTransport::new(base).unwrap(), sessions).unwrap(),
         )
         .await;
+        set_up(&mut live).await;
         send(&mut live, event).await;
         assert!(next(&mut live).await.is_none());
         close(&mut live).await;
-        assert!(live.received.lock().unwrap().is_empty());
+        assert_eq!(live.received.lock().unwrap().len(), 1, "the setup alone");
         assert_eq!(observed.ledger.spent("demo"), 0);
     }
 }
@@ -115,10 +139,16 @@ async fn going_away_passes_unchanged_and_a_cut_turn_charges_its_reservation() {
     let observed = sessions.clone();
     let mut live = start(
         PATH,
-        |_| vec![json!({"goAway":{"timeLeft":"10s"},"future":"preserved"})],
+        |event| {
+            after_setup(
+                &event,
+                vec![json!({"goAway":{"timeLeft":"10s"},"future":"preserved"})],
+            )
+        },
         move |base| gateway(WsTransport::new(base).unwrap(), sessions).unwrap(),
     )
     .await;
+    set_up(&mut live).await;
     send(&mut live, json!({"clientContent":{"turnComplete":true}})).await;
     let notice = next(&mut live).await.unwrap();
     assert_eq!(notice["goAway"]["timeLeft"], "10s");
@@ -171,10 +201,11 @@ async fn a_tool_response_without_an_active_turn_reserves_before_generation() {
     let observed = sessions.clone();
     let mut live = start(
         PATH,
-        |_| vec![],
+        |event| after_setup(&event, vec![]),
         move |base| gateway(WsTransport::new(base).unwrap(), sessions).unwrap(),
     )
     .await;
+    set_up(&mut live).await;
     send(
         &mut live,
         json!({"toolResponse":{"functionResponses":[{"id":"f","response":{"result":"x"}}]}}),
@@ -182,6 +213,6 @@ async fn a_tool_response_without_an_active_turn_reserves_before_generation() {
     .await;
     assert!(next(&mut live).await.is_none());
     close(&mut live).await;
-    assert!(live.received.lock().unwrap().is_empty());
+    assert_eq!(live.received.lock().unwrap().len(), 1, "the setup alone");
     assert_eq!(observed.ledger.spent("demo"), 0);
 }

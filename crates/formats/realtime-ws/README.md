@@ -32,9 +32,25 @@ its `native`, as the frame has them, and events of no form in the kind,
 such as its items and content parts, as `Output::Native`. A field is taken
 as the kind's only where it writes back as it came, so a relay to OpenAI
 keeps what every event says, not its exact bytes (audio is base64 anew,
-padded). The other formats decode every frame to the kind's
-`Input::Native` or `Output::Native`, tagged with their name. None writes
-another format's native, or translates to another format yet.
+padded).
+
+`GeminiLive` does the same for the Live API's messages: a client's `setup`
+(first and once, its model without `models/`; a message of more than one
+field closes the session 1007), `clientContent` turns, `realtimeInput`
+audio and text, `activityEnd`, `toolResponse`; the server's
+`setupComplete`, model turns of audio and text, transcripts, `toolCall`,
+`interrupted`, `voiceActivity`, `turnComplete` and `usageMetadata`. A
+message that says several things is several events: what it says beyond
+them stays on the first its client writes, so it is written back as it
+came, unless its events are written as several messages, such as a turn
+of two parts. Messages and tools' answers are held until what answers
+them, so `clientContent` and `toolResponse` are written whole.
+`activityStart`, `audioStreamEnd`, `goAway`, `toolCallCancellation` and
+`sessionResumptionUpdate` stay native.
+
+`ResponsesWs` decodes every frame to the kind's `Input::Native` or
+`Output::Native`, tagged with its name. None writes another format's
+native, or translates to another format yet.
 
 Plugins filter events with `cx.filter(|e: &mut Output| ..)` (client edge)
 or `px.filter(..)` (provider edge), and drop one with a `Filter` that does

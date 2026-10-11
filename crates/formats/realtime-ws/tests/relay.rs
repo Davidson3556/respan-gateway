@@ -14,12 +14,12 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use realtime::{Fake, ToolCall, Turn, Usage, openai};
+use realtime::{Fake, ToolCall, Turn, Usage, gemini, openai};
 use respan_gateway_core::futures::{SinkExt, StreamExt};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_http::relay::Relay;
 use respan_gateway_realtime::{AudioFormat, Input, Modality, Output, Status, Turns};
-use respan_gateway_realtime_ws::OpenAiRealtime;
+use respan_gateway_realtime_ws::{GeminiLive, OpenAiRealtime};
 use respan_gateway_ws::{Limits, WsTransport};
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
@@ -547,4 +547,151 @@ async fn openai_relays_a_g711_session_unchanged() {
         .flatten()
         .collect();
     assert_eq!(heard, spoken);
+}
+
+/// A Gemini Live client through a gateway to the strict fake, which writes
+/// binary frames.
+async fn gemini() -> (Fake, Client, Seen) {
+    let fake = gemini::start().await;
+    let transport = GeminiLive.transport(fake.base_url()).unwrap();
+    let (addr, seen) = serve(GeminiLive, transport).await;
+    let key = ("x-goog-api-key", "AIza-test");
+    let client = Client::connect(addr, gemini::PATH, key).await;
+    (fake, client, seen)
+}
+
+fn has(field: &'static str) -> impl Fn(&Value) -> bool {
+    move |message| message.get(field).is_some()
+}
+
+fn pcm16k(ms: usize) -> Vec<u8> {
+    (0..ms * 16)
+        .flat_map(|i| (i as i16).to_le_bytes())
+        .collect()
+}
+
+// 9: a setup, a voice turn with transcripts, an interruption, a tool call
+// and its answer, a resumption handle and a warning the session ends.
+#[tokio::test]
+async fn gemini_relays_a_session() {
+    let (fake, mut client, seen) = gemini().await;
+    let setup = json!({"setup": {"model": "models/gemini-live",
+        "generationConfig": {"responseModalities": ["AUDIO"],
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}}},
+        "systemInstruction": {"parts": [{"text": "Be brief."}]},
+        "tools": [{"functionDeclarations": [{"name": "weather",
+            "parameters": {"type": "OBJECT", "properties": {"city": {"type": "STRING"}}}}]}],
+        "inputAudioTranscription": {}, "outputAudioTranscription": {},
+        "sessionResumption": {}}});
+    client.say(setup).await;
+    assert!(client.hear().await.get("setupComplete").is_some());
+
+    let chunk = json!({"realtimeInput": {"audio": {"mimeType": "audio/pcm;rate=16000",
+        "data": base64(&pcm16k(100))}}});
+    client.say(chunk.clone()).await;
+    client.say(chunk).await;
+    fake.received(3).await;
+    fake.answer(Turn {
+        heard: Some("what time is it".into()),
+        audio: Some(pcm(150)),
+        transcript: Some("It is noon.".into()),
+        usage: usage(),
+        ..Turn::default()
+    });
+    fake.user_stops();
+    client.until(has("sessionResumptionUpdate")).await;
+
+    fake.answer(Turn {
+        audio: Some(pcm(300)),
+        held: true,
+        ..Turn::default()
+    });
+    fake.user_stops();
+    let audio = |m: &Value| m["serverContent"]["modelTurn"].is_object();
+    for _ in 0..3 {
+        client.until(audio).await;
+    }
+    fake.user_speaks();
+    let cut = client.hear().await;
+    assert_eq!(cut, json!({"serverContent": {"interrupted": true}}));
+
+    fake.answer(Turn {
+        tool_call: Some(ToolCall {
+            name: "weather".into(),
+            arguments: json!({"city": "Paris"}),
+        }),
+        ..Turn::default()
+    });
+    let asks = json!({"clientContent": {"turns": [{"role": "user",
+        "parts": [{"text": "Weather in Paris?"}]}], "turnComplete": true}});
+    client.say(asks).await;
+    let call = client.until(has("toolCall")).await;
+    let id = call.last().unwrap()["toolCall"]["functionCalls"][0]["id"].clone();
+    fake.answer(Turn {
+        audio: Some(pcm(100)),
+        transcript: Some("It is 21 degrees.".into()),
+        usage: usage(),
+        ..Turn::default()
+    });
+    let answer = json!({"toolResponse": {"functionResponses": [{"id": id, "name": "weather",
+        "response": {"celsius": 21}}]}});
+    client.say(answer).await;
+    client.until(has("sessionResumptionUpdate")).await;
+    fake.go_away();
+    assert_eq!(client.hear().await["goAway"]["timeLeft"], "10s");
+    client.relayed(&fake).await;
+
+    let inputs = seen.inputs();
+    let Input::Session(session) = &inputs[0] else {
+        panic!("{inputs:?}")
+    };
+    assert_eq!(session.model.as_deref(), Some("gemini-live"));
+    assert_eq!(session.instructions.as_deref(), Some("Be brief."));
+    assert_eq!(session.voice.as_deref(), Some("Kore"));
+    assert_eq!(
+        (session.input_transcription, session.output_transcription),
+        (Some(true), Some(true))
+    );
+    let audio = |e: &Input| {
+        matches!(e, Input::Audio { audio, .. }
+        if audio.format == AudioFormat::pcm16(16_000) && audio.data == pcm16k(100))
+    };
+    assert_eq!(inputs.iter().filter(|e| audio(e)).count(), 2);
+    assert!(inputs.iter().any(|e| matches!(e, Input::ToolResult(result)
+        if json!(result.id) == id && result.output == "{\"celsius\":21}")));
+
+    let outputs = seen.outputs();
+    let statuses: Vec<Status> = outputs
+        .iter()
+        .filter_map(|e| match e {
+            Output::ResponseDone { status, .. } => Some(status.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            Status::Completed,
+            Status::Interrupted,
+            Status::Completed,
+            Status::Completed
+        ]
+    );
+    let kinds: Vec<&str> = outputs.iter().filter_map(variant).collect();
+    for kind in ["speech_started", "input_transcript", "usage", "tool_call"] {
+        assert!(kinds.contains(&kind), "{kind} in {kinds:?}");
+    }
+    let spoken = outputs.iter().any(|e| {
+        matches!(e, Output::Audio { audio, .. }
+        if audio.format == AudioFormat::pcm16(24_000))
+    });
+    assert!(spoken);
+    let natives = outputs
+        .iter()
+        .filter(|e| {
+            matches!(e, Output::Native(n)
+            if n.value.get("goAway").is_some() || n.value.get("sessionResumptionUpdate").is_some())
+        })
+        .count();
+    assert_eq!(natives, 3);
 }
