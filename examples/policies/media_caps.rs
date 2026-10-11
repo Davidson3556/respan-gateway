@@ -261,6 +261,8 @@ async fn main() -> Result<(), Fault> {
     let request = json_request("/v1/images/generations", "gw-acme", &images);
     let (status, body) = send(&gw, request).await;
     println!("five images: {status}\n{body}");
+    let (status, body) = send(&gw, upload("gw-acme", 2 << 20)).await;
+    println!("a 2 MiB upload: {status}\n{body}");
     Ok(())
 }
 
