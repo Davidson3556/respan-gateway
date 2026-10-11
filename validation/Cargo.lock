@@ -1281,6 +1281,7 @@ dependencies = [
  "axum",
  "clap",
  "dotenvy",
+ "getrandom 0.3.4",
  "indexmap",
  "respan-gateway-conversation",
  "respan-gateway-conversation-http",
@@ -1298,6 +1299,7 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "tokio",
+ "tower",
 ]
 
 [[package]]
