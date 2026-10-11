@@ -252,7 +252,7 @@ fn tool_part(block: &Value) -> Option<Content> {
 /// another format's are refused.
 fn block_fields(block: &mut Value, native: &Option<NativeFields>) -> Result<(), Fault> {
     let what = |key: &str| format!("a tool part's '{key}'");
-    let fields = kept_fields(ANTHROPIC, native, what, Keep::default())?;
+    let fields = kept_fields(ANTHROPIC, native, what, Keep::CACHE_MARKER)?;
     if let Some(block) = block.as_object_mut() {
         block.extend(fields);
     }
