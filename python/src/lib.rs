@@ -18,7 +18,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
-use respan_gateway::{App, Config};
+use respan_gateway::{App, Config, LogFormat};
 use tokio::runtime::Runtime;
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle};
@@ -228,12 +228,27 @@ struct Native {
     router: Router,
 }
 
+/// Whether the YAML in `text` sets `log` itself.
+fn sets_log(text: &str) -> bool {
+    serde_norway::from_str::<serde_norway::Value>(text)
+        .ok()
+        .and_then(|v| v.get("log").map(|_| true))
+        .unwrap_or(false)
+}
+
 impl Native {
-    fn new(config: Result<Config, respan_gateway::Error>) -> PyResult<Self> {
+    /// A library prints nothing per request unless its configuration asks:
+    /// `log` defaults to `off` here (the binary's default is `text`).
+    /// `text` is the configuration's source, if it has one.
+    fn new(config: Result<Config, respan_gateway::Error>, text: Option<&str>) -> PyResult<Self> {
         let config_error = |e: respan_gateway::Error| ConfigError::new_err(e.to_string());
+        let mut config = config.map_err(config_error)?;
+        if !text.is_some_and(sets_log) {
+            config.log = LogFormat::Off;
+        }
         // Providers may need the runtime to set up their clients.
         let _entered = runtime().enter();
-        let app = App::new(config.map_err(config_error)?).map_err(config_error)?;
+        let app = App::new(config).map_err(config_error)?;
         Ok(Self {
             router: app.router(),
             app: Arc::new(app),
@@ -265,20 +280,21 @@ impl Native {
     /// A gateway from YAML (JSON is YAML).
     #[staticmethod]
     fn from_yaml(text: &str) -> PyResult<Self> {
-        Self::new(Config::parse(text))
+        Self::new(Config::parse(text), Some(text))
     }
 
     /// A gateway from the YAML file at `path`.
     #[staticmethod]
     fn from_file(path: &str) -> PyResult<Self> {
-        Self::new(Config::load(path))
+        Self::new(Config::load(path), std::fs::read_to_string(path).ok().as_deref())
     }
 
     /// A gateway as the binary starts with no arguments: `./gateway.yaml`
     /// if there is one, else the vendors the environment has keys for.
     #[staticmethod]
     fn discover() -> PyResult<Self> {
-        Self::new(Config::discover(None))
+        let file = std::fs::read_to_string(respan_gateway::DEFAULT_FILE).ok();
+        Self::new(Config::discover(None), file.as_deref())
     }
 
     /// Sends one request through the router and returns once its head is

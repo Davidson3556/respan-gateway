@@ -83,7 +83,10 @@ gw.requests(limit=20)      # the request log, newest first
 
 `amodels()`, `aproviders()` and `arequests()` are the asyncio versions.
 `providers()` and `requests()` read the web UI's admin API in-process, so
-`ui: false` (or `log: false` for the log) turns them off.
+`ui: false` turns them off (the log is in memory, always on with the UI).
+A gateway in your process prints nothing per request: `log` defaults to
+`off` here (the binary's is `text`). Set `log: text` or `log: json` in the
+config for stderr lines, `serve_forever()` included.
 
 ## Serve
 
