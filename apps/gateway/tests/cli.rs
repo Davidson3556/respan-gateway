@@ -305,3 +305,124 @@ async fn models_lists_each_providers_models_with_their_kind() {
         out.stderr
     );
 }
+
+/// A provider that lists models only for `key`, answering 401 to the rest.
+async fn lists_for(key: &'static str) -> String {
+    let server = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(move |headers: axum::http::HeaderMap| async move {
+            let sent = headers.get("authorization").and_then(|v| v.to_str().ok());
+            match sent == Some(&format!("Bearer {key}")) {
+                true => (
+                    axum::http::StatusCode::OK,
+                    axum::Json(json!({"object": "list", "data": [{"id": "gpt-4o"}]})),
+                ),
+                false => (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    axum::Json(json!({"error": {"message": "bad key"}})),
+                ),
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, server).await });
+    base
+}
+
+#[tokio::test]
+async fn check_online_says_per_provider_whether_it_answers_the_key() {
+    let (good, wrong) = (lists_for("sk-good").await, lists_for("sk-other").await);
+    let down = support::closed_port().await;
+    let dir = empty_dir();
+    std::fs::write(
+        dir.join("gateway.yaml"),
+        format!(
+            "providers:
+  fine: {{ vendor: openai, base_url: '{good}', key: sk-good }}
+  stale: {{ vendor: groq, base_url: '{wrong}', key: sk-good }}
+  gone: {{ vendor: mistral, base_url: '{down}/v1', key: sk-good }}"
+        ),
+    )
+    .unwrap();
+
+    // Offline, `check` calls nobody.
+    let out = run(&dir, &["check"], &[]).await;
+    assert!(
+        out.ok && !out.stdout.contains("reachable"),
+        "{}",
+        out.stdout
+    );
+
+    let out = run(&dir, &["check", "--online"], &[]).await;
+    assert!(!out.ok, "{}", out.stdout);
+    let online = out.stdout.split("online (").nth(1).unwrap();
+    let state = |name: &str| {
+        let line = online.lines().find(|l| l.trim_start().starts_with(name));
+        line.unwrap_or_else(|| panic!("{online}")).to_owned()
+    };
+    assert!(state("fine ").contains(" reachable "), "{online}");
+    assert!(state("stale").contains("unauthorized"), "{online}");
+    assert!(state("stale").contains("answered 401"), "{online}");
+    assert!(state("gone ").contains("unreachable"), "{online}");
+    assert!(!format!("{}{}", out.stdout, out.stderr).contains("sk-good"));
+    assert!(!online.contains("127.0.0.1"), "{online}");
+
+    // All reachable is success.
+    std::fs::write(
+        dir.join("gateway.yaml"),
+        format!("providers: {{ fine: {{ vendor: openai, base_url: '{good}', key: sk-good }} }}"),
+    )
+    .unwrap();
+    let out = run(&dir, &["check", "--online"], &[]).await;
+    assert!(out.ok, "{}{}", out.stdout, out.stderr);
+}
+
+#[tokio::test]
+async fn init_enables_a_vendor_by_an_env_reference_and_says_how_to_set_it() {
+    let dir = empty_dir();
+    let args = ["init", "-p", "groq", "-p", "mistral=env:MY_MISTRAL"];
+    let out = run(&dir, &args, &[]).await;
+    assert!(out.ok, "{}", out.stderr);
+    assert!(out.stdout.contains("set GROQ_API_KEY"), "{}", out.stdout);
+    assert!(out.stdout.contains("set MY_MISTRAL"), "{}", out.stdout);
+    let file = std::fs::read_to_string(dir.join("gateway.yaml")).unwrap();
+    assert!(
+        file.contains("vendor: groq, key: 'env:GROQ_API_KEY'"),
+        "{file}"
+    );
+    assert!(
+        file.contains("vendor: mistral, key: 'env:MY_MISTRAL'"),
+        "{file}"
+    );
+
+    // With the variable set, the file checks and nothing is left to say.
+    let env = [("GROQ_API_KEY", "gsk-x"), ("MY_MISTRAL", "m-x")];
+    let out = run(&dir, &["check"], &env).await;
+    assert!(out.ok, "{}", out.stderr);
+    let out = run(&dir, &["init", "-p", "groq", "--force"], &env).await;
+    assert!(out.ok && !out.stdout.contains("set GROQ"), "{}", out.stdout);
+
+    let out = run(&dir, &["init", "-p", "nope", "--force"], &[]).await;
+    assert!(!out.ok, "{}", out.stdout);
+    assert!(out.stderr.contains("unknown vendor nope"), "{}", out.stderr);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn init_writes_a_literal_key_only_when_given_and_keeps_the_file_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = empty_dir();
+    let out = run(&dir, &["init", "-p", "groq=gsk-literal"], &[]).await;
+    assert!(out.ok, "{}", out.stderr);
+    assert!(out.stderr.contains("plain text"), "{}", out.stderr);
+    assert!(!out.stdout.contains("gsk-literal") && !out.stderr.contains("gsk-literal"));
+    let path = dir.join("gateway.yaml");
+    let file = std::fs::read_to_string(&path).unwrap();
+    assert!(file.contains("key: 'gsk-literal'"), "{file}");
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o077, 0, "{mode:o}");
+    let out = run(&dir, &["check"], &[]).await;
+    assert!(out.ok, "{}", out.stderr);
+    assert!(!out.stdout.contains("gsk-literal"), "{}", out.stdout);
+}

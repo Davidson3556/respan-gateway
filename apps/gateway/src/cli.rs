@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::init::Chosen;
 use crate::logging::{Level, LogFormat};
 use crate::{App, Config, ProxyVendor, VERSION};
 use clap::{ArgGroup, Parser, Subcommand};
@@ -45,7 +46,13 @@ enum Command {
     /// Serve the gateway (the default)
     Serve,
     /// Check the configuration, print what it serves and exit
-    Check,
+    Check {
+        /// Also make one call to each provider with its key (listing its
+        /// models) and say whether it is reachable, refuses the key or is
+        /// unreachable; the exit status is 1 unless all are reachable
+        #[arg(long)]
+        online: bool,
+    },
     /// List the models of every provider, as `/v1/models` does, and exit
     Models,
     /// Write a commented starter config from the keys in the environment
@@ -56,6 +63,11 @@ enum Command {
         /// Replace the file if it exists
         #[arg(long)]
         force: bool,
+        /// Enable a vendor too, such as `groq`, its key read from its
+        /// variable (`env:GROQ_API_KEY`); `VENDOR=env:NAME` reads another,
+        /// and `VENDOR=KEY` writes the key itself into the file
+        #[arg(short, long, value_name = "VENDOR[=KEY]")]
+        provider: Vec<String>,
     },
     /// Relay one vendor's whole API, with each client's own credentials
     ///
@@ -82,7 +94,9 @@ enum Command {
 const EXAMPLES: &str = "Examples:
   respan-gateway                    Serve ./gateway.yaml, or the providers in the environment
   respan-gateway init               Write a starter ./gateway.yaml
+  respan-gateway init -p groq       Write a starter that also enables groq, key env:GROQ_API_KEY
   respan-gateway check -c my.yaml   Check a config and print what it serves
+  respan-gateway check --online     ... and call each provider with its key
   respan-gateway models             List the models the providers offer
   respan-gateway proxy --anthropic  Sit in front of Claude Code
 
@@ -151,8 +165,13 @@ where
     };
     let command = cli.command.unwrap_or(Command::Serve);
     let models = matches!(command, Command::Models);
+    let online = matches!(command, Command::Check { online: true });
     let (config, check) = match command {
-        Command::Init { output, force } => return init(&output, force),
+        Command::Init {
+            output,
+            force,
+            provider,
+        } => return init(&output, force, &provider),
         Command::Proxy {
             anthropic,
             url,
@@ -171,7 +190,7 @@ where
             (Ok(Config::proxy(vendor, url.as_deref())), check)
         }
         Command::Serve => (Config::discover(cli.config.as_deref()), false),
-        Command::Check | Command::Models => (Config::discover(cli.config.as_deref()), true),
+        Command::Check { .. } | Command::Models => (Config::discover(cli.config.as_deref()), true),
     };
     let mut config = match config {
         Ok(config) => config,
@@ -199,6 +218,11 @@ where
     if check {
         println!("{}", app.report());
         println!("{source}: ok");
+        if online {
+            let (report, all_reachable) = app.probe().await;
+            println!("\n{report}");
+            return if all_reachable { SUCCESS } else { FAILURE };
+        }
         return SUCCESS;
     }
     if let Some(path) = &dotenv {
@@ -269,18 +293,49 @@ async fn list_models(app: &App) -> u8 {
     }
 }
 
-fn init(output: &Path, force: bool) -> u8 {
+fn init(output: &Path, force: bool, providers: &[String]) -> u8 {
+    let chosen: Result<Vec<Chosen>, String> = providers.iter().map(|p| Chosen::parse(p)).collect();
+    let chosen = match chosen {
+        Ok(chosen) => chosen,
+        Err(e) => return fail(&e),
+    };
     if output.exists() && !force {
         let path = output.display();
         return fail(&format!("{path} exists; add --force to replace it"));
     }
-    let config = crate::starter_config();
-    if let Err(e) = std::fs::write(output, config) {
+    let private = chosen.iter().any(Chosen::is_literal);
+    if let Err(e) = write_config(output, &crate::init::starter(&chosen), private) {
         return fail(&format!("write {}: {e}", output.display()));
     }
     let path = output.display();
-    let found = crate::init::detected_vendors();
-    if found.is_empty() {
+    for c in &chosen {
+        let id = c.vendor.id;
+        match (c.is_literal(), c.variable()) {
+            (true, _) => eprintln!(
+                "warning: {path} holds {id}'s key in plain text; keep it private, or use \
+                 `-p {id}` to read it from {} instead",
+                c.vendor.key_env.first().copied().unwrap_or("a variable")
+            ),
+            (_, Some(var)) if std::env::var(var).is_ok_and(|v| !v.is_empty()) => {}
+            (_, Some(var)) => {
+                println!("{id}: set {var} (export {var}=..., or put it in .env) before you serve.")
+            }
+            _ => {}
+        }
+    }
+    let mut found = crate::init::detected_vendors();
+    if !chosen.is_empty() {
+        for c in &chosen {
+            if !found.contains(&c.vendor.id) {
+                found.push(c.vendor.id);
+            }
+        }
+        println!(
+            "wrote {path} with {} enabled.\n\
+             Next: `respan-gateway check --online`, then `respan-gateway`.",
+            found.join(", ")
+        );
+    } else if found.is_empty() {
         println!(
             "wrote {path} with openai enabled; no provider key is in the environment.\n\
              Next: set OPENAI_API_KEY (export it, or put it in .env), then `respan-gateway check`."
@@ -293,6 +348,25 @@ fn init(output: &Path, force: bool) -> u8 {
         );
     }
     SUCCESS
+}
+
+/// Writes `text` to `path`, readable by its owner alone if `private`: it
+/// holds a key.
+fn write_config(path: &Path, text: &str, private: bool) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if private {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        return file.write_all(text.as_bytes());
+    }
+    let _ = private;
+    std::fs::write(path, text)
 }
 
 const SUCCESS: u8 = 0;

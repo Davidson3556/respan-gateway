@@ -28,7 +28,7 @@ use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{KnownFormat, formats, kind};
 use crate::jobs::VideoJobs;
 use crate::logging::Level;
-use crate::models::{self, Models};
+use crate::models::{self, Models, Probe};
 use crate::quirks::with_quirks;
 use crate::report;
 use crate::requests::{self, Recorder, RequestLog};
@@ -269,6 +269,15 @@ impl App {
     pub async fn models(&self) -> (Vec<Value>, Vec<String>) {
         let models = Models::new(&self.plan.upstreams, self.plan.routes.clone());
         models.collect().await
+    }
+
+    /// The report of `check --online`: one call to each provider with its
+    /// key, listing its models, and how it answered; and whether every one
+    /// of them did.
+    pub async fn probe(&self) -> (String, bool) {
+        let models = Models::new(&self.plan.upstreams, self.plan.routes.clone());
+        let probes: Vec<Probe> = models.probe().await;
+        (report::online(&probes), report::all_reachable(&probes))
     }
 
     /// A chat request to the default chat provider, as curl sends it.

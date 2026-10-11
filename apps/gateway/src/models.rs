@@ -36,6 +36,41 @@ struct Listing {
     kinds: Vec<(Kind, String)>,
 }
 
+/// Why a provider gave no list, and the status it answered with, if any.
+struct Refusal {
+    status: Option<u16>,
+    why: String,
+}
+
+impl Refusal {
+    fn of(why: String) -> Self {
+        Self { status: None, why }
+    }
+
+    fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
+        self
+    }
+}
+
+/// How a provider answered a call made with its key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reach {
+    Reachable,
+    /// It refused the key, answering with this status.
+    Unauthorized(u16),
+    /// It did not answer, or not with a list; why.
+    Unreachable(String),
+}
+
+/// A provider's [`Reach`] and how long it took to answer.
+#[derive(Debug, Clone)]
+pub struct Probe {
+    pub provider: String,
+    pub reach: Reach,
+    pub took: Duration,
+}
+
 #[derive(Debug)]
 pub struct Models {
     client: reqwest::Client,
@@ -117,25 +152,66 @@ impl Models {
         self.cached.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// One provider's models, or why it did not say.
-    async fn fetch(&self, listing: &Listing) -> Result<Vec<Value>, String> {
-        let failed = |why: String| format!("{}: {why}", listing.provider);
+    /// One provider's answer to its list call, or why it gave none.
+    async fn get(&self, listing: &Listing) -> Result<Value, Refusal> {
         let request = self
             .client
             .get(&listing.url)
             .headers(listing.headers.clone());
         let answered = tokio::time::timeout(TIMEOUT, async {
-            let resp = request.send().await.map_err(|e| unreachable(&e))?;
-            if !resp.status().is_success() {
-                return Err(format!("answered {}", resp.status().as_u16()));
+            let resp = request
+                .send()
+                .await
+                .map_err(|e| Refusal::of(unreachable(&e)))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let why = format!("answered {}", status.as_u16());
+                return Err(Refusal::of(why).with_status(status.as_u16()));
             }
-            let body = resp.bytes().await.map_err(|_| "its answer broke off")?;
-            serde_json::from_slice::<Value>(&body).map_err(|_| "its answer is not JSON".to_owned())
+            let body = resp
+                .bytes()
+                .await
+                .map_err(|_| Refusal::of("its answer broke off".to_owned()))?;
+            serde_json::from_slice::<Value>(&body)
+                .map_err(|_| Refusal::of("its answer is not JSON".to_owned()))
         });
-        let body = match answered.await {
-            Ok(body) => body.map_err(failed)?,
-            Err(_) => return Err(failed(format!("no answer within {}s", TIMEOUT.as_secs()))),
+        match answered.await {
+            Ok(body) => body,
+            Err(_) => Err(Refusal::of(format!(
+                "no answer within {}s",
+                TIMEOUT.as_secs()
+            ))),
+        }
+    }
+
+    /// One call to each provider that lists its models, with its key: how
+    /// each answered and how long it took. A provider that lists nothing
+    /// is not called.
+    pub async fn probe(&self) -> Vec<Probe> {
+        join_all(self.listings.iter().map(|l| self.probe_one(l))).await
+    }
+
+    async fn probe_one(&self, listing: &Listing) -> Probe {
+        let started = Instant::now();
+        let reach = match self.get(listing).await {
+            Ok(_) => Reach::Reachable,
+            Err(Refusal {
+                status: Some(s @ (401 | 403)),
+                ..
+            }) => Reach::Unauthorized(s),
+            Err(Refusal { why, .. }) => Reach::Unreachable(why),
         };
+        Probe {
+            provider: listing.provider.clone(),
+            reach,
+            took: started.elapsed(),
+        }
+    }
+
+    /// One provider's models, or why it did not say.
+    async fn fetch(&self, listing: &Listing) -> Result<Vec<Value>, String> {
+        let failed = |why: String| format!("{}: {why}", listing.provider);
+        let body = self.get(listing).await.map_err(|r| failed(r.why))?;
         let Some(models) = body["data"].as_array() else {
             return Err(failed("its answer has no `data` list".to_owned()));
         };

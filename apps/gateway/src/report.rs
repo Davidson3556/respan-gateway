@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 
 use crate::compose::Plan;
 use crate::formats::KnownFormat;
+use crate::models::{Probe, Reach};
 use crate::{Config, VERSION};
 
 /// A label, then each value on a line of its own.
@@ -94,6 +95,35 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
         row(&mut lines, "quirks", quirks);
     }
     lines.join("\n")
+}
+
+/// What `check --online` prints: how each provider answered a call made
+/// with its key. No key, and no URL, is named.
+pub fn online(probes: &[Probe]) -> String {
+    let width = probes.iter().map(|p| p.provider.len()).max().unwrap_or(0);
+    let mut lines = vec!["online (one call to each provider, with its key)".to_owned()];
+    for p in probes {
+        let (state, note) = match &p.reach {
+            Reach::Reachable => ("reachable", String::new()),
+            Reach::Unauthorized(status) => (
+                "unauthorized",
+                format!("  it answered {status}: check the key"),
+            ),
+            Reach::Unreachable(why) => ("unreachable", format!("  {why}")),
+        };
+        let ms = p.took.as_millis();
+        let provider = &p.provider;
+        lines.push(format!("  {provider:<width$}  {state:<12}  {ms} ms{note}"));
+    }
+    if probes.is_empty() {
+        lines.push("  no provider lists its models".to_owned());
+    }
+    lines.join("\n")
+}
+
+/// Whether every provider probed answered.
+pub fn all_reachable(probes: &[Probe]) -> bool {
+    probes.iter().all(|p| p.reach == Reach::Reachable)
 }
 
 fn onoff(on: bool) -> String {
