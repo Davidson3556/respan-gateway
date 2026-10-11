@@ -62,7 +62,8 @@ jobs:
       - run: cargo test --workspace --all-targets --all-features
       - run: cargo test --workspace --doc --all-features
 
-  # The unix-only code is cfg-gated; this keeps Windows compiling.
+  # The unix-only code is cfg-gated; this keeps Windows compiling and runs
+  # the stdio MCP tests there.
   windows:
     needs: ui
     runs-on: windows-latest
@@ -75,6 +76,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets
+      # The stdio MCP path at runtime: a Python child, its process tree
+      # ended by taskkill, and a `.cmd` shim found through PATHEXT.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo test -p respan-gateway --test e2e_mcp_stdio
 
   # validation/ is outside the workspace and its tests are opt-in; compile it.
   validation:
