@@ -28,6 +28,30 @@ class ProviderConfig(TypedDict, total=False):
     auth: Auth
 
 
+class McpConfig(TypedDict, total=False):
+    """One MCP server, served at /mcp/{name}: an HTTP `url` or a stdio `command`."""
+
+    url: str  # a streamable-HTTP endpoint
+    key: str  # literal or "env:NAME", sent as a bearer token
+    auth: Auth  # one header, in place of `key`
+    forward_auth: bool  # send the client's credentials when there is no key
+    command: List[str]  # a stdio server's program and arguments
+    env: Dict[str, str]  # values literal or "env:NAME"
+    cwd: str
+
+
+class AgentConfig(TypedDict, total=False):
+    """The agent loop: the gateway runs the tools of `mcp` servers inside chat requests."""
+
+    tools: List[str]  # the `mcp` servers whose tools are offered
+    models: List[str]  # model prefixes the loop applies to; every chat model if unset
+    max_steps: int
+    timeout: Union[int, float, str]  # seconds, or "5m"
+    tool_timeout: Union[int, float, str]
+    cache: Union[int, float, str]  # how long a server's tool list is kept
+    max_result: Union[int, str]  # bytes, or a size such as "64KiB"
+
+
 class PluginConfig(TypedDict, total=False):
     models: List[Dict[str, str]]  # [{"prefix": "claude-", "provider": "anthropic"}]
 
@@ -43,4 +67,9 @@ class GatewayConfig(TypedDict, total=False):
     listen: str
     body_limit: Union[int, str]  # bytes, or a size such as "32MiB"
     log: str  # "text", "json" or "off"
+    ws_message_limit: Union[int, str]  # bytes, or a size such as "16MiB"
+    request_log: int  # finished requests the web UI keeps
+    shutdown_grace: Union[int, float, str]  # seconds, or "30s", "2m", "500ms"
+    mcp: Dict[str, McpConfig]
+    agent: AgentConfig
     ui: bool  # False also turns off the admin API behind models()/requests()/providers()
