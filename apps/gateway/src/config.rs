@@ -67,6 +67,11 @@ pub struct Config {
     /// Whether the web UI and its admin API are served under `/ui/`.
     #[serde(default = "enabled")]
     pub ui: bool,
+    /// Whether the admin API may rewrite the config file (`PUT
+    /// /ui/api/config`, the web UI's editor); off if unset. Needs
+    /// `client_keys` and a config file.
+    #[serde(default)]
+    pub admin_writes: bool,
     /// Providers by name, in order: the first serving a kind is that
     /// kind's default.
     #[serde(default)]
@@ -119,6 +124,7 @@ impl Default for Config {
             client_keys: Vec::new(),
             log: LogFormat::Text,
             ui: true,
+            admin_writes: false,
             providers: IndexMap::new(),
             formats: None,
             mcp: IndexMap::new(),

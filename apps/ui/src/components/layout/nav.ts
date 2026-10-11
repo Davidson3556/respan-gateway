@@ -1,5 +1,6 @@
 import {
   Activity,
+  FileCode,
   FlaskConical,
   LayoutDashboard,
   Route,
@@ -23,6 +24,7 @@ export const build: NavItem[] = [
   { to: "/playground", label: "Playground", icon: FlaskConical },
   { to: "/providers", label: "Providers", icon: Server },
   { to: "/routes", label: "Routes", icon: Route },
+  { to: "/config", label: "Config", icon: FileCode },
 ];
 
 export const settings: NavItem = { to: "/settings", label: "Settings", icon: Settings };

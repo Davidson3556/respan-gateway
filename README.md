@@ -147,8 +147,19 @@ old one keeps serving. A changed `listen` needs a restart. `SIGHUP` is unix-only
 `POST /ui/api/reload` or `--watch`. In Docker, a `listen:` in a mounted config
 beats `PORT`, so `listen: 127.0.0.1:8080` there is unreachable from outside.
 
-Not there yet: no admin writes (the web UI and admin API are read-only apart
-from reload).
+**Admin config** (behind the client keys, like the rest of `/ui/api/`):
+`GET /ui/api/config` shows the config file as on disk with every secret
+(`client_keys`, provider and MCP `key`/`auth.key`, MCP `env` values and
+program arguments, and MCP URLs that carry credentials) as `"…"`, while an
+`env:NAME` reference stays as written; `POST /ui/api/config/validate` (YAML
+body) parses and composes it as a reload would, touching nothing, and answers
+`{ok}` or `{ok: false, error, line, column}`. With `admin_writes: true`, a
+config file and `client_keys`, `PUT /ui/api/config` validates the body, writes
+it atomically (temp file, rename, the old file kept as `<file>.bak`) and
+reloads; otherwise it is `403`. A secret left as `"…"` in the body keeps the
+file's value at that place, so the redacted view can be edited and sent back
+(YAML comments are not kept when it does). The web UI's Config page does all of
+this.
 
 ### MCP servers
 

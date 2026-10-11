@@ -146,6 +146,30 @@ export interface RequestRecord {
   error: string | null;
 }
 
+/** What `GET /ui/api/config` answers: the config with every secret redacted. */
+export interface ConfigView {
+  source: "file" | "environment" | "proxy" | "inline";
+  path: string | null;
+  writes_enabled: boolean;
+  /** Why writes are off; null when they are on. */
+  writes_disabled_reason: string | null;
+  /** What stands for a secret in `yaml`; sent back, it keeps the file's value. */
+  placeholder: string;
+  yaml: string;
+}
+
+/** What `POST /ui/api/config/validate` answers. */
+export type Validation =
+  | { ok: true }
+  | { ok: false; error: string; line: number | null; column: number | null };
+
+/** What `PUT /ui/api/config` answers once saved and reloaded. */
+export interface Saved extends Reloaded {
+  saved: true;
+  path: string;
+  backup: string | null;
+}
+
 export interface Model {
   id: string;
   object: "model";
@@ -159,12 +183,22 @@ export const KEY_STORAGE = "respan.gatewayKey";
 export class ApiError extends Error {
   readonly status: number;
   readonly type: string | null;
+  /** Where in a posted document the error is, when the gateway says. */
+  readonly line: number | null;
+  readonly column: number | null;
 
-  constructor(status: number, message: string, type: string | null = null) {
+  constructor(
+    status: number,
+    message: string,
+    type: string | null = null,
+    at: { line?: number | null; column?: number | null } = {},
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.type = type;
+    this.line = at.line ?? null;
+    this.column = at.column ?? null;
   }
 }
 
@@ -215,14 +249,18 @@ export function authHeaders(init?: HeadersInit): Headers {
 async function errorFrom(res: Response): Promise<ApiError> {
   let message = res.statusText || `HTTP ${res.status}`;
   let type: string | null = null;
+  let at: { line?: number | null; column?: number | null } = {};
   try {
     const text = await res.text();
     try {
-      const body = JSON.parse(text) as { error?: { message?: string; type?: string } | string };
+      const body = JSON.parse(text) as {
+        error?: { message?: string; type?: string; line?: number | null; column?: number | null } | string;
+      };
       if (typeof body.error === "string") message = body.error;
       else if (body.error?.message) {
         message = body.error.message;
         type = body.error.type ?? null;
+        at = body.error;
       }
     } catch {
       if (text.trim()) message = text.trim().slice(0, 300);
@@ -230,7 +268,7 @@ async function errorFrom(res: Response): Promise<ApiError> {
   } catch {
     // Body unreadable; keep the status text.
   }
-  return new ApiError(res.status, message, type);
+  return new ApiError(res.status, message, type, at);
 }
 
 /** fetch with the gateway key attached; throws ApiError on a non-2xx answer. */
@@ -256,7 +294,19 @@ export async function postJson<T>(path: string, body: unknown, signal?: AbortSig
   return (await res.json()) as T;
 }
 
+async function sendYaml<T>(method: string, path: string, yaml: string): Promise<T> {
+  const res = await gatewayFetch(path, {
+    method,
+    headers: { "content-type": "text/yaml", accept: "application/json" },
+    body: yaml,
+  });
+  return (await res.json()) as T;
+}
+
 export const api = {
+  config: (signal?: AbortSignal) => getJson<ConfigView>("/ui/api/config", signal),
+  validateConfig: (yaml: string) => sendYaml<Validation>("POST", "/ui/api/config/validate", yaml),
+  saveConfig: (yaml: string) => sendYaml<Saved>("PUT", "/ui/api/config", yaml),
   overview: (signal?: AbortSignal) => getJson<Overview>("/ui/api/overview", signal),
   providers: (signal?: AbortSignal) =>
     getJson<{ providers: Provider[] }>("/ui/api/providers", signal).then((r) => r.providers),

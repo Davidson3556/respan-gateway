@@ -992,6 +992,36 @@ async function videos(req, res, path) {
 
 let reloadedAt = null; // set by POST /ui/api/reload
 
+// The admin config: redacted already, as the gateway shows it. MOCK_WRITES=1
+// turns on the editor; a body containing "bogus" is refused with a place.
+const WRITES = !!process.env.MOCK_WRITES;
+let configYaml = `listen: 127.0.0.1:8080
+admin_writes: ${WRITES}
+client_keys:
+- …
+- env:GATEWAY_KEY
+providers:
+  openai:
+    vendor: openai
+    key: env:OPENAI_API_KEY
+  anthropic:
+    vendor: anthropic
+    key: …
+  local:
+    formats: openai-chat
+    base_url: http://127.0.0.1:11434/v1
+mcp:
+  github:
+    url: https://api.githubcopilot.com/mcp/
+    key: …
+`;
+
+function checkConfig(text) {
+  const at = text.split("\n").findIndex((l) => l.includes("bogus"));
+  if (at === -1) return { ok: true };
+  return { ok: false, error: "unknown field `bogus`, expected one of `listen`, `providers`, `mcp`", line: at + 1, column: 1 };
+}
+
 const routesTable = {
   "GET /healthz": (_req, res) => res.end("ok"),
   "GET /ui/api/overview": (_req, res) =>
@@ -1009,6 +1039,30 @@ const routesTable = {
   "POST /ui/api/reload": (_req, res) => {
     reloadedAt = new Date();
     json(res, 200, { reloaded_at: reloadedAt.toISOString(), restart_required: [] });
+  },
+  "GET /ui/api/config": (_req, res) =>
+    json(res, 200, {
+      source: "file",
+      path: "./gateway.yaml",
+      writes_enabled: WRITES,
+      writes_disabled_reason: WRITES ? null : "admin_writes is not set in the config",
+      placeholder: "…",
+      yaml: configYaml,
+    }),
+  "POST /ui/api/config/validate": async (req, res) =>
+    json(res, 200, checkConfig((await readBody(req)).toString())),
+  "PUT /ui/api/config": async (req, res) => {
+    if (!WRITES) {
+      return json(res, 403, { error: { message: "admin_writes is not set in the config", type: "admin_writes_disabled" } });
+    }
+    const text = (await readBody(req)).toString();
+    const checked = checkConfig(text);
+    if (!checked.ok) {
+      return json(res, 422, { error: { message: checked.error, type: "invalid_config", line: checked.line, column: checked.column } });
+    }
+    configYaml = text;
+    reloadedAt = new Date();
+    json(res, 200, { saved: true, path: "./gateway.yaml", backup: "./gateway.yaml.bak", reloaded_at: reloadedAt.toISOString(), restart_required: [] });
   },
   "GET /ui/api/providers": (_req, res) =>
     json(res, 200, { providers: providers.map((p) => ({ ...p, ...providerStats(p.name) })) }),

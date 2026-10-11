@@ -10,6 +10,7 @@ export const queryKeys = {
   requests: ["requests"] as const,
   request: (id: string) => ["request", id] as const,
   models: ["models"] as const,
+  config: ["config"] as const,
 };
 
 export function useOverview() {
@@ -17,6 +18,13 @@ export function useOverview() {
     queryKey: queryKeys.overview,
     queryFn: ({ signal }) => api.overview(signal),
     refetchInterval: 5000,
+  });
+}
+
+export function useConfig() {
+  return useQuery({
+    queryKey: queryKeys.config,
+    queryFn: ({ signal }) => api.config(signal),
   });
 }
 

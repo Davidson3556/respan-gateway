@@ -24,6 +24,10 @@ listen: 127.0.0.1:8080
 # admin API at /ui/ (`/` redirects there).
 # log: text
 # ui: true
+# `admin_writes: true` lets the admin API and the UI's Config page rewrite
+# this file (`PUT /ui/api/config`: validated, written atomically, the old
+# file kept as `<file>.bak`, then reloaded). Needs `client_keys`.
+# admin_writes: false
 
 # The most bytes of a client's request, and of a provider's answer held at
 # once: past it, the request fails 413, the answer 502. A number of bytes
