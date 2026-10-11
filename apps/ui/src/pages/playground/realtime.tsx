@@ -167,7 +167,7 @@ function Presence({ state, level }: { state: RealtimeState; level: number }) {
           className={cn(
             "relative flex size-14 items-center justify-center rounded-full",
             state.speaker === "assistant"
-              ? "bg-brand text-brand-foreground"
+              ? "bg-brand text-white"
               : live
                 ? "bg-secondary text-secondary-foreground"
                 : "bg-muted text-muted-foreground",
@@ -192,7 +192,7 @@ function Transcript({ lines }: { lines: Line[] }) {
     bottom.current?.scrollIntoView({ block: "nearest" });
   }, [lines]);
   return (
-    <ol className="grid gap-4" aria-label="Transcript">
+    <ol className="grid grid-cols-[minmax(0,1fr)] gap-4" aria-label="Transcript">
       {lines.map((line) =>
         line.role === "user" ? (
           <li key={line.id} className="flex justify-end">
@@ -240,7 +240,7 @@ export function RealtimeTab() {
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[18rem_1fr]">
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[18rem_minmax(0,1fr)]">
       <Card className="h-fit gap-5 p-4">
         <ModelPicker id="realtime-model" choice={choice} />
         {active ? (

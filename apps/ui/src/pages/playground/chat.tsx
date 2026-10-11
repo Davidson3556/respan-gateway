@@ -227,7 +227,7 @@ export function ChatTab() {
   };
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[18rem_1fr]">
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[18rem_minmax(0,1fr)]">
       <Card className="h-fit gap-5 p-4">
         {apis.length > 1 && (
           <SelectField
@@ -281,7 +281,7 @@ export function ChatTab() {
               </div>
             </EmptyState>
           ) : (
-            <div className="grid gap-6">
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-6">
               {turns.map((t, i) => (
                 <Message
                   key={i}

@@ -1,20 +1,24 @@
 // A stand-in for the gateway, for developing and screenshotting the UI
 // without the Rust binary. It serves the admin API from the UI contract with
-// generated traffic, and fake /v1 endpoints for the playground (chat, images,
+// generated traffic, and fake /v1 endpoints for the playground (chat over
+// the four client APIs, a realtime voice socket, images,
 // transcription, speech, embeddings and video jobs; a video prompt containing
 // "fail" makes its job fail). Zero dependencies.
 //
 //   pnpm mock                      # http://127.0.0.1:8080, open
 //   MOCK_KEY=secret pnpm mock      # every call needs "Bearer secret"
 //   PORT=8081 MOCK_QUIET=1 pnpm mock   # another port; no generated traffic
+//   MOCK_NO_REALTIME=1 pnpm mock   # no realtime provider: the Realtime tab says so
 
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { crc32, deflateSync } from "node:zlib";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const KEY = process.env.MOCK_KEY ?? "";
 const QUIET = !!process.env.MOCK_QUIET;
+const NO_REALTIME = !!process.env.MOCK_NO_REALTIME;
 const startedAt = new Date();
 
 // Providers as the registry in crates/providers/README.md has them: each
@@ -209,7 +213,7 @@ const routes = {
   ],
   defaults: [
     { kind: "chat", provider: "openai" },
-    { kind: "realtime", provider: "openai" },
+    ...(NO_REALTIME ? [] : [{ kind: "realtime", provider: "openai" }]),
     { kind: "responses", provider: "openai" },
     { kind: "image", provider: "openai" },
     { kind: "transcription", provider: "openai" },
@@ -219,7 +223,7 @@ const routes = {
   ],
 };
 
-const models = [
+const allModels = [
   ["gpt-4o-mini", "openai", "chat"],
   ["gpt-4.1", "openai", "chat"],
   ["claude-sonnet-4-5", "anthropic", "chat"],
@@ -235,6 +239,7 @@ const models = [
   ["sora-2", "openai", "video"],
   ["text-embedding-3-small", "openai", "embedding"],
 ].map(([id, owned_by, kind]) => ({ id, object: "model", owned_by, kind }));
+const models = allModels.filter((m) => !(NO_REALTIME && m.kind === "realtime"));
 
 // --- request records ------------------------------------------------------
 
@@ -481,50 +486,383 @@ function authorized(req) {
   return header === `Bearer ${KEY}` || req.headers["x-api-key"] === KEY;
 }
 
-async function chat(req, res) {
-  const body = JSON.parse((await readBody(req)).toString() || "{}");
-  const model = body.model ?? "gpt-4o-mini";
-  const record = begin({
+// The four client APIs a chat can speak. Each says how to find the model and
+// the user's last words in a request, and how its streamed and whole answers
+// look; `chat` below does the rest the same way for all of them.
+const sse = (data, event) => `${event ? `event: ${event}\n` : ""}data: ${JSON.stringify(data)}\n\n`;
+
+const clientApis = {
+  "openai-chat": {
     path: "/v1/chat/completions",
-    format: "openai-chat",
+    model: (b) => b.model,
+    last: (b) => b.messages?.at(-1)?.content,
+    whole: ({ id, model, usage }) => ({
+      id,
+      object: "chat.completion",
+      model,
+      choices: [{ index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" }],
+      usage: { prompt_tokens: usage.in, completion_tokens: usage.out },
+    }),
+    open: () => [],
+    delta: ({ id, model }, text) =>
+      sse({ id, object: "chat.completion.chunk", model, choices: [{ index: 0, delta: { content: text } }] }),
+    close: ({ id, model, usage }) => [
+      sse({ id, object: "chat.completion.chunk", model, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }),
+      sse({
+        id,
+        object: "chat.completion.chunk",
+        model,
+        choices: [],
+        usage: { prompt_tokens: usage.in, completion_tokens: usage.out },
+      }),
+      "data: [DONE]\n\n",
+    ],
+  },
+  "anthropic-messages": {
+    path: "/v1/messages",
+    model: (b) => b.model,
+    last: (b) => {
+      const c = b.messages?.at(-1)?.content;
+      return typeof c === "string" ? c : c?.[0]?.text;
+    },
+    whole: ({ id, model, usage }) => ({
+      id,
+      type: "message",
+      role: "assistant",
+      model,
+      content: [{ type: "text", text: reply }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: usage.in, output_tokens: usage.out },
+    }),
+    open: ({ id, model, usage }) => [
+      sse(
+        {
+          type: "message_start",
+          message: { id, type: "message", role: "assistant", model, content: [], usage: { input_tokens: usage.in, output_tokens: 0 } },
+        },
+        "message_start",
+      ),
+      sse({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "content_block_start"),
+    ],
+    delta: (_ctx, text) =>
+      sse({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }, "content_block_delta"),
+    close: ({ usage }) => [
+      sse({ type: "content_block_stop", index: 0 }, "content_block_stop"),
+      sse(
+        { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: usage.out } },
+        "message_delta",
+      ),
+      sse({ type: "message_stop" }, "message_stop"),
+    ],
+  },
+  "openai-responses": {
+    path: "/v1/responses",
+    model: (b) => b.model,
+    last: (b) => {
+      const c = typeof b.input === "string" ? b.input : b.input?.at(-1)?.content;
+      return typeof c === "string" ? c : c?.[0]?.text;
+    },
+    whole: ({ id, model, usage }) => ({
+      id,
+      object: "response",
+      model,
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: reply }] }],
+      usage: { input_tokens: usage.in, output_tokens: usage.out },
+    }),
+    open: ({ id, model }) => [
+      sse({ type: "response.created", response: { id, object: "response", model, status: "in_progress" } }, "response.created"),
+    ],
+    delta: (_ctx, text) =>
+      sse(
+        { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: text },
+        "response.output_text.delta",
+      ),
+    close: ({ id, model, usage }) => [
+      sse(
+        {
+          type: "response.completed",
+          response: { id, object: "response", model, status: "completed", usage: { input_tokens: usage.in, output_tokens: usage.out } },
+        },
+        "response.completed",
+      ),
+    ],
+  },
+  "gemini-generate": {
+    path: (url) => url.pathname,
+    model: (_b, url) => decodeURIComponent(url.pathname.split("/").pop().split(":")[0]),
+    last: (b) => b.contents?.at(-1)?.parts?.[0]?.text,
+    whole: ({ usage }) => ({
+      candidates: [{ content: { role: "model", parts: [{ text: reply }] }, finishReason: "STOP", index: 0 }],
+      usageMetadata: { promptTokenCount: usage.in, candidatesTokenCount: usage.out },
+    }),
+    open: () => [],
+    delta: (_ctx, text) => sse({ candidates: [{ content: { role: "model", parts: [{ text }] }, index: 0 }] }),
+    close: ({ usage }) => [
+      sse({
+        candidates: [{ content: { role: "model", parts: [{ text: "" }] }, finishReason: "STOP", index: 0 }],
+        usageMetadata: { promptTokenCount: usage.in, candidatesTokenCount: usage.out },
+      }),
+    ],
+  },
+};
+
+async function chat(req, res, format = "openai-chat") {
+  const api = clientApis[format];
+  const url = new URL(req.url, "http://x");
+  const body = JSON.parse((await readBody(req)).toString() || "{}");
+  const model = api.model(body, url) ?? "gpt-4o-mini";
+  const streaming = format === "gemini-generate" ? url.pathname.includes(":stream") : !!body.stream;
+  const record = begin({
+    path: typeof api.path === "function" ? api.path(url) : api.path,
+    format,
     kind: "chat",
     model,
-    stream: !!body.stream,
+    stream: streaming,
   });
   const started = Date.now();
-  const usage = { prompt_tokens: between(20, 80), completion_tokens: reply.split(/\s+/).length };
-  const done = () =>
+  const usage = { in: between(20, 80), out: reply.split(/\s+/).length };
+  const ctx = { id: `chatcmpl-${record.id}`, model, usage };
+  const done = () => {
+    // Asking for tools or files makes this an agent loop the gateway ran.
+    const agent = /tool|file/i.test(String(api.last(body, url) ?? ""));
+    const step = (index, finish, tools) => ({
+      index, duration_ms: between(300, 900), input_tokens: usage.in, output_tokens: usage.out, finish, tools,
+    });
     finish(record, {
       status: 200,
       duration: Date.now() - started,
-      usage: { input_tokens: usage.prompt_tokens, output_tokens: usage.completion_tokens },
+      usage: { input_tokens: usage.in, output_tokens: usage.out },
+      ...(agent && {
+        steps: [
+          step(1, "tool_use", [
+            { name: "files__read_file", duration_ms: between(8, 90), error: false, bytes: between(300, 6000) },
+            { name: "files__list_directory", duration_ms: between(5, 40), error: false, bytes: between(100, 900) },
+          ]),
+          step(2, "stop", []),
+        ],
+      }),
     });
-  const base = { id: `chatcmpl-${record.id}`, object: "chat.completion.chunk", model };
+  };
 
-  if (!body.stream) {
+  if (!streaming) {
     await sleep(600);
     done();
-    return json(res, 200, {
-      ...base,
-      object: "chat.completion",
-      choices: [{ index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" }],
-      usage,
-    });
+    return json(res, 200, api.whole(ctx));
   }
 
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
   let closed = false;
   req.on("close", () => (closed = true));
   await sleep(350);
+  for (const frame of api.open(ctx)) res.write(frame);
   for (const piece of reply.match(/\S+\s*/g)) {
     if (closed) break;
-    res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { content: piece } }] })}\n\n`);
+    res.write(api.delta(ctx, piece));
     await sleep(between(15, 45));
   }
-  res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
-  res.write(`data: ${JSON.stringify({ ...base, choices: [], usage })}\n\n`);
-  res.end("data: [DONE]\n\n");
+  res.end(api.close(ctx).join(""));
   done();
+}
+
+// --- realtime: a WebSocket by hand, so the mock needs no dependency ----------
+//
+// Speak into the mic and the mock hears a turn (any audible chunk starts one,
+// half a second of quiet ends it), transcribes it as a scripted question and
+// answers aloud with a short rising tone and a transcript. Speaking while it
+// answers cuts the answer off, as server VAD does.
+
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const RATE = 24000;
+
+function wsFrame(text) {
+  const payload = Buffer.from(text);
+  const n = payload.length;
+  const head =
+    n < 126
+      ? Buffer.from([0x81, n])
+      : n < 65536
+        ? Buffer.from([0x81, 126, n >> 8, n & 255])
+        : Buffer.concat([Buffer.from([0x81, 127, 0, 0, 0, 0]), Buffer.from([n >>> 24, (n >> 16) & 255, (n >> 8) & 255, n & 255])]);
+  return Buffer.concat([head, payload]);
+}
+
+/** Calls onText for each text frame in what the client sends; onClose on a close frame. */
+function wsReader(socket, onText, onClose) {
+  let buf = Buffer.alloc(0);
+  socket.on("data", (chunk) => {
+    buf = Buffer.concat([buf, chunk]);
+    for (;;) {
+      if (buf.length < 2) return;
+      const opcode = buf[0] & 15;
+      let len = buf[1] & 127;
+      let at = 2;
+      if (len === 126) {
+        if (buf.length < 4) return;
+        len = buf.readUInt16BE(2);
+        at = 4;
+      } else if (len === 127) {
+        if (buf.length < 10) return;
+        len = Number(buf.readBigUInt64BE(2));
+        at = 10;
+      }
+      const masked = (buf[1] & 128) !== 0;
+      if (buf.length < at + (masked ? 4 : 0) + len) return;
+      const mask = masked ? buf.subarray(at, at + 4) : null;
+      const start = at + (masked ? 4 : 0);
+      const data = Buffer.from(buf.subarray(start, start + len));
+      if (mask) for (let i = 0; i < data.length; i++) data[i] ^= mask[i % 4];
+      buf = buf.subarray(start + len);
+      if (opcode === 1) onText(data.toString());
+      else if (opcode === 8) return onClose();
+      else if (opcode === 9) socket.write(Buffer.concat([Buffer.from([0x8a, data.length]), data]));
+    }
+  });
+  socket.on("close", onClose);
+  socket.on("error", onClose);
+}
+
+/** 100 ms of a sine at `hz`, as base64 PCM16 at 24 kHz. */
+function toneChunk(hz) {
+  const samples = new Int16Array(RATE / 10);
+  for (let i = 0; i < samples.length; i++) {
+    const fade = Math.min(1, i / 240, (samples.length - i) / 240);
+    samples[i] = Math.round(Math.sin((2 * Math.PI * hz * i) / RATE) * 9000 * fade);
+  }
+  return Buffer.from(samples.buffer).toString("base64");
+}
+
+const spoken = "It's a clear afternoon, with a light breeze and temperatures in the low twenties.";
+
+function realtimeSession(socket, model) {
+  const send = (event) => socket.writable && socket.write(wsFrame(JSON.stringify(event)));
+  const record = begin({ path: "/v1/realtime", format: "openai-realtime", kind: "realtime", model, stream: true });
+  const started = Date.now();
+  let turn = 0;
+  let voiced = 0;
+  let quiet = 0;
+  let spoke = 0;
+  let latched = false;
+  let speaking = false; // the user
+  let answer = null; // the running answer: { cancelled }
+  let closed = false;
+
+  send({ type: "session.created", session: { type: "realtime", model } });
+
+  async function reply(n) {
+    const mine = (answer = { cancelled: false });
+    const item = `item_a${n}`;
+    send({ type: "response.created", response: { id: `resp_${n}`, status: "in_progress" } });
+    send({ type: "conversation.item.created", item: { id: item, role: "assistant" } });
+    const words = spoken.match(/\S+\s*/g);
+    for (let i = 0; i < 18 && !mine.cancelled && !closed; i++) {
+      send({
+        type: "response.output_audio.delta",
+        response_id: `resp_${n}`,
+        item_id: item,
+        content_index: 0,
+        delta: toneChunk(330 + 40 * (i % 6)),
+      });
+      const piece = words.splice(0, 1)[0];
+      if (piece) {
+        send({ type: "response.output_audio_transcript.delta", response_id: `resp_${n}`, item_id: item, delta: piece });
+      }
+      await sleep(100);
+    }
+    if (mine.cancelled || closed) return;
+    send({ type: "response.output_audio_transcript.done", item_id: item, transcript: spoken });
+    send({ type: "response.output_audio.done", item_id: item });
+    send({ type: "response.done", response: { id: `resp_${n}`, status: "completed" } });
+    answer = null;
+  }
+
+  function endOfTurn() {
+    speaking = false;
+    spoke = 0;
+    const n = ++turn;
+    send({ type: "input_audio_buffer.speech_stopped" });
+    send({ type: "conversation.item.created", item: { id: `item_u${n}`, role: "user" } });
+    send({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: `item_u${n}`,
+      transcript: "What's the weather like this afternoon?",
+    });
+    void reply(n);
+  }
+
+  function hear(base64) {
+    const pcm = new Int16Array(Buffer.from(base64, "base64").buffer.slice(0));
+    let sum = 0;
+    for (const v of pcm) sum += (v / 32768) ** 2;
+    const loud = Math.sqrt(sum / Math.max(1, pcm.length)) > 0.01;
+    // A speaker who never pauses is cut off after two seconds, as a VAD timeout would.
+    if (speaking && ++spoke > 50) {
+      spoke = 0;
+      voiced = 0;
+      latched = true;
+      return endOfTurn();
+    }
+    // Having been cut off, the speaker is not heard again until the answer is done.
+    if (latched && answer) return;
+    latched = false;
+    if (loud) {
+      quiet = 0;
+      if (++voiced === 2 && !speaking) {
+        speaking = true;
+        if (answer) answer.cancelled = true;
+        send({ type: "input_audio_buffer.speech_started" });
+      }
+    } else if (speaking && ++quiet >= 12) {
+      voiced = 0;
+      quiet = 0;
+      endOfTurn();
+    }
+  }
+
+  wsReader(
+    socket,
+    (text) => {
+      const event = JSON.parse(text);
+      if (event.type === "input_audio_buffer.append") hear(event.audio);
+      else if (event.type === "response.cancel" && answer) answer.cancelled = true;
+      else if (event.type === "response.create" && !answer) void reply(++turn);
+    },
+    () => {
+      if (closed) return;
+      closed = true;
+      if (answer) answer.cancelled = true;
+      finish(record, { status: 101, duration: Date.now() - started });
+      socket.destroy();
+    },
+  );
+}
+
+function upgrade(req, socket) {
+  const url = new URL(req.url, "http://x");
+  const protocols = (req.headers["sec-websocket-protocol"] ?? "").split(",").map((p) => p.trim());
+  const sent =
+    protocols.find((p) => p.startsWith("openai-insecure-api-key."))?.slice("openai-insecure-api-key.".length) ??
+    url.searchParams.get("key");
+  const reject = (status, text) => {
+    socket.end(`HTTP/1.1 ${status} ${text}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`);
+  };
+  if (url.pathname !== "/v1/realtime") return reject(404, "Not Found");
+  if (KEY && sent !== KEY && !authorized(req)) return reject(401, "Unauthorized");
+  const model = url.searchParams.get("model") ?? "gpt-realtime";
+  if (NO_REALTIME) return reject(404, "No realtime provider");
+  const accept = createHash("sha1").update(req.headers["sec-websocket-key"] + WS_GUID).digest("base64");
+  socket.write(
+    [
+      "HTTP/1.1 101 Switching Protocols",
+      "upgrade: websocket",
+      "connection: Upgrade",
+      `sec-websocket-accept: ${accept}`,
+      ...(protocols.includes("realtime") ? ["sec-websocket-protocol: realtime"] : []),
+      "",
+      "",
+    ].join("\r\n"),
+  );
+  realtimeSession(socket, model);
 }
 
 async function media(req, res, { path, format, kind, model, answer }) {
@@ -679,6 +1017,8 @@ const routesTable = {
   },
   "GET /v1/models": (_req, res) => json(res, 200, { object: "list", data: models }),
   "POST /v1/chat/completions": chat,
+  "POST /v1/messages": (req, res) => chat(req, res, "anthropic-messages"),
+  "POST /v1/responses": (req, res) => chat(req, res, "openai-responses"),
   "POST /v1/images/generations": (req, res) =>
     media(req, res, {
       path: "/v1/images/generations",
@@ -736,12 +1076,17 @@ const routesTable = {
     }),
 };
 
-createServer((req, res) => {
+const server = createServer((req, res) => {
   const path = new URL(req.url, "http://x").pathname;
   if (path !== "/healthz" && !authorized(req)) {
     return json(res, 401, {
       error: { message: "A gateway key is required", type: "authentication_error" },
     });
+  }
+  if (req.method === "POST" && /^\/v1beta\/models\/[^/]+:(stream)?[gG]enerateContent$/.test(path)) {
+    return chat(req, res, "gemini-generate").catch((err) =>
+      json(res, 500, { error: { message: String(err), type: "mock_error" } }),
+    );
   }
   const route = path.startsWith("/ui/api/requests/") ? null : routesTable[`${req.method} ${path}`];
   if (route) {
@@ -761,6 +1106,8 @@ createServer((req, res) => {
     return record ? json(res, 200, record) : notFound(res, "Request evicted or unknown");
   }
   notFound(res, `No format serves ${req.method} ${path}`);
-}).listen(PORT, "127.0.0.1", () => {
+});
+server.on("upgrade", upgrade);
+server.listen(PORT, "127.0.0.1", () => {
   console.log(`mock gateway on http://127.0.0.1:${PORT}${KEY ? " (key required)" : ""}`);
 });
