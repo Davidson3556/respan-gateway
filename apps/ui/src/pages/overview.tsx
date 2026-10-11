@@ -41,7 +41,7 @@ function Stats() {
         label="Uptime"
         icon={Clock}
         value={data && formatUptime(data.uptime_seconds)}
-        hint={data && `config: ${data.config_source.split(/[\\/]/).pop()}`}
+        hint={data && `config: ${data.config_path?.split(/[\\/]/).pop() ?? data.config_source}`}
       />
     </div>
   );

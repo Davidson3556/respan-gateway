@@ -599,7 +599,8 @@ const routesTable = {
       started_at: startedAt.toISOString(),
       uptime_seconds: Math.floor((Date.now() - startedAt) / 1000) + 7_380,
       auth_required: !!KEY,
-      config_source: "./gateway.yaml",
+      config_source: "file",
+      config_path: "./gateway.yaml",
       totals: totals(),
     }),
   "GET /ui/api/providers": (_req, res) =>

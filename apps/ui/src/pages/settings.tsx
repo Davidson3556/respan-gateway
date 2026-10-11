@@ -17,7 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useGatewayKey, useOverview } from "@/hooks/queries";
 import { themeOptions, useTheme } from "@/hooks/use-theme";
-import { setGatewayKey } from "@/lib/api";
+import { setGatewayKey, type Overview } from "@/lib/api";
 import { formatDateTime, formatUptime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -126,14 +126,14 @@ function ThemeCard() {
   );
 }
 
-const sources: Record<string, string> = {
+const sources: Record<Exclude<Overview["config_source"], "file">, string> = {
   environment: "Environment variables",
   proxy: "Proxy mode (no providers configured)",
   inline: "Built in code",
 };
 
-function describeSource(source: string) {
-  return sources[source] ?? `Config file (${source})`;
+function describeSource({ config_source, config_path }: Overview) {
+  return config_source === "file" ? `Config file (${config_path})` : sources[config_source];
 }
 
 function ConnectCard() {
@@ -159,7 +159,7 @@ function AboutCard() {
   const rows: [string, string][] = [
     ["Version", data.version],
     ["Listening on", data.listen ?? "not listening yet"],
-    ["Configuration", describeSource(data.config_source)],
+    ["Configuration", describeSource(data)],
     ["Client keys", data.auth_required ? "Required" : "Not required"],
     ["Uptime", formatUptime(data.uptime_seconds)],
     ["Started", formatDateTime(data.started_at)],

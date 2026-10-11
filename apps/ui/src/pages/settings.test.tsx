@@ -13,6 +13,7 @@ const overview: Overview = {
   uptime_seconds: 3700,
   auth_required: true,
   config_source: "environment",
+  config_path: null,
   totals: { requests: 0, errors: 0, in_flight: 0, input_tokens: 0, output_tokens: 0 },
 };
 
@@ -38,7 +39,7 @@ describe("SettingsPage", () => {
   it("shows a config file path and a gateway that is not listening yet", async () => {
     serve({
       "GET /ui/api/overview": () =>
-        json({ ...overview, listen: null, config_source: "/etc/respan/gateway.yaml" }),
+        json({ ...overview, listen: null, config_source: "file", config_path: "/etc/respan/gateway.yaml" }),
     });
     renderSettings();
     expect(await screen.findByText("Config file (/etc/respan/gateway.yaml)")).toBeInTheDocument();

@@ -12,7 +12,8 @@ const overview: Overview = {
   started_at: "2026-10-10T12:00:00.000Z",
   uptime_seconds: 60,
   auth_required: true,
-  config_source: "gateway.yaml",
+  config_source: "file",
+  config_path: "gateway.yaml",
   totals: { requests: 0, errors: 0, in_flight: 0, input_tokens: 0, output_tokens: 0 },
 };
 

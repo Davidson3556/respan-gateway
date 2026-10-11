@@ -27,8 +27,10 @@ export interface Overview {
   started_at: string;
   uptime_seconds: number;
   auth_required: boolean;
-  /** The config file's path, or `environment`, `proxy` or `inline`. */
-  config_source: string;
+  /** Where the configuration came from. */
+  config_source: "file" | "environment" | "proxy" | "inline";
+  /** The config file's path when `config_source` is `file`. */
+  config_path: string | null;
   totals: Totals;
 }
 
@@ -43,7 +45,7 @@ export interface Provider {
   vendor: string | null;
   formats: string[];
   kinds: Kind[];
-  base_url: string | null;
+  base_url: string;
   credentials: "gateway" | "client";
   quirks: Quirk[];
   requests: number;
