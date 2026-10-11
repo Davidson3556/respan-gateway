@@ -485,6 +485,27 @@ formats: [responses-ws]"
     assert!(resolve(&routed).is_ok());
 }
 
+#[tokio::test]
+async fn a_models_route_applies_to_every_kind_its_provider_serves() {
+    let yaml = "providers:
+  chat: { formats: openai-chat, base_url: 'https://a.test/v1', key: k }
+  asr: { formats: openai-transcriptions, base_url: 'https://b.test/v1', key: k }
+formats: [openai-chat, openai-transcriptions]
+plugins: [{ models: [{ prefix: voice, provider: asr }, { prefix: voice-chat, provider: chat }] }]";
+    let plan = plan(yaml).unwrap_or_else(|e| panic!("{e}"));
+    let route = |kind, format, model| {
+        plan.routes
+            .route(kind, format, Some(model))
+            .map(|r| r.provider)
+    };
+    // The prefix reaches the provider of each kind that serves it; a kind
+    // the provider does not serve falls through to that kind's default.
+    let transcription = route(kind::TRANSCRIPTION, "openai-transcriptions", "voice-1");
+    assert_eq!(transcription.as_deref(), Some("asr"));
+    let chat = route(kind::CHAT, "openai-chat", "voice-1");
+    assert_eq!(chat.as_deref(), Some("chat"));
+}
+
 #[test]
 fn a_format_served_after_passthrough_is_refused() {
     let yaml = "formats: [passthrough, openai-chat]";

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use respan_gateway_conversation as conversation;
 use respan_gateway_core::{Extensions, Fault, Format, Gateway, Upstream};
-use respan_gateway_http::http::HeaderMap;
+use respan_gateway_http::http::{HeaderMap, Uri};
 use respan_gateway_http::passthrough::Passthrough;
 use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo, Wire, reqwest};
 use respan_gateway_media::{embedding, image, speech, transcription, video};
@@ -239,7 +239,9 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
         Ok(explained(client, provider, base_url, limit))
     };
     let google = move |provider: &str, base_url: &str, auth| -> Result<_, Fault> {
-        let client = HttpTransport::new(base_url)?.with_client(google_storage()?);
+        let client = HttpTransport::new(base_url)?
+            .with_connect_timeout(std::time::Duration::from_secs(10))?
+            .follow_redirects(google_storage);
         Ok(explained(
             client.with_headers(auth)?,
             provider,
@@ -430,23 +432,26 @@ pub fn unreachable(e: &reqwest::Error) -> String {
     format!("could not be reached: {cause}")
 }
 
-/// A client for the Gemini API, which serves a video's bytes by redirecting
-/// to Google's storage: it follows redirects to Google's hosts over HTTPS
-/// alone, as each is sent the key too.
-fn google_storage() -> Result<reqwest::Client, Fault> {
-    let policy = reqwest::redirect::Policy::custom(|attempt| {
-        let host = attempt.url().host_str().unwrap_or_default();
-        let google = [".googleapis.com", ".googleusercontent.com"];
-        let trusted =
-            attempt.url().scheme() == "https" && google.iter().any(|domain| host.ends_with(domain));
-        match trusted && attempt.previous().len() < 5 {
-            true => attempt.follow(),
-            false => attempt.stop(),
-        }
-    });
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .redirect(policy)
-        .build()
-        .map_err(|e| Fault::internal("the HTTP client could not be built").with_source(e))
+/// The redirects the Gemini API's calls follow: it serves a video's bytes by
+/// redirecting to Google's storage, so Google's hosts over HTTPS alone. The
+/// wire leaves the key behind once a call leaves the API's origin.
+fn google_storage(uri: &Uri) -> bool {
+    let host = uri.host().unwrap_or_default();
+    let google = [".googleapis.com", ".googleusercontent.com"];
+    uri.scheme_str() == Some("https") && google.iter().any(|domain| host.ends_with(domain))
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+
+    #[test]
+    fn only_googles_hosts_over_https_are_followed() {
+        let follows = |uri: &str| google_storage(&uri.parse().unwrap_or_default());
+        assert!(follows("https://storage.googleapis.com/v/1"));
+        assert!(follows("https://x.googleusercontent.com/v"));
+        assert!(!follows("http://storage.googleapis.com/v"));
+        assert!(!follows("https://evil.test/storage.googleapis.com"));
+        assert!(!follows("https://googleapis.com.evil.test/v"));
+    }
 }
