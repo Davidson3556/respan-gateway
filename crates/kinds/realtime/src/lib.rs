@@ -35,7 +35,7 @@ pub enum Input {
     /// Configure the session; a field left `None` is left as it is. The
     /// first event of every session, as its format decodes it (one opening
     /// with no frame of its own carries what the handshake said, such as
-    /// OpenAI's `?model=`).
+    /// a model in the URL's query).
     Session(Session),
     /// The next chunk of the user's audio, in its own format.
     Audio {
@@ -44,8 +44,8 @@ pub enum Input {
         /// The event's fields the kind has no place for, such as an event id.
         native: Option<NativeFields>,
     },
-    /// The user's audio so far is a turn: OpenAI's `input_audio_buffer.commit`,
-    /// Gemini's `activityEnd`. Only with [`Turns::Manual`] in Gemini.
+    /// The user's audio so far is a turn, an explicit end of the user's activity. Only
+    /// meaningful with [`Turns::Manual`].
     Commit {
         /// The event's fields the kind has no place for.
         native: Option<NativeFields>,
@@ -61,8 +61,8 @@ pub enum Input {
     },
     /// What a tool answered the model's call `id`.
     ToolResult(ToolResult),
-    /// Answer now: OpenAI's `response.create`; implied in Gemini by a
-    /// complete turn, the end of an activity, or a tool's answer.
+    /// Answer now. Some specs imply it instead, by a complete turn, the
+    /// end of an activity, or a tool's answer.
     Respond {
         /// Fields the kind has no place for, such as a response's own
         /// instructions or an out-of-band response.
@@ -74,7 +74,7 @@ pub enum Input {
         native: Option<NativeFields>,
     },
     /// An event the kind has no form for, as `format` has it, such as
-    /// OpenAI's `conversation.item.truncate`. Sent only in that format.
+    /// a spec's own history edit. Sent only in that format.
     Native(NativeValue),
 }
 
@@ -117,7 +117,7 @@ pub fn set_model(
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Session {
-    /// The model, as its provider names it, without Gemini's `models/`.
+    /// The model, as its provider names it, without any path prefix a spec adds.
     pub model: Option<String>,
     /// Instructions for the model.
     pub instructions: Option<String>,
@@ -126,7 +126,7 @@ pub struct Session {
     /// The voice, as the provider names it.
     pub voice: Option<String>,
     /// The format of the user's audio, where the spec declares it per
-    /// session (OpenAI); each [`Audio`] says its own.
+    /// session; each [`Audio`] says its own.
     pub input_audio: Option<AudioFormat>,
     /// The format of the model's audio.
     pub output_audio: Option<AudioFormat>,
@@ -142,8 +142,8 @@ pub struct Session {
     pub tool_choice: Option<ToolChoice>,
     /// Most tokens in one response.
     pub max_output_tokens: Option<u64>,
-    /// The fields the kind has no place for, such as OpenAI's noise
-    /// reduction or Gemini's context window compression.
+    /// The fields the kind has no place for, such as noise
+    /// reduction or context window compression.
     pub native: Option<NativeFields>,
 }
 
@@ -179,8 +179,8 @@ pub struct Vad {
     pub respond: Option<bool>,
     /// Whether the user's speech stops the model's response (barge-in).
     pub interrupt: Option<bool>,
-    /// Tuning the kind has no place for: OpenAI's threshold, VAD type and
-    /// eagerness, Gemini's sensitivities.
+    /// Tuning the kind has no place for, such as thresholds, detector types
+    /// and sensitivities.
     pub native: Option<NativeFields>,
 }
 
@@ -208,7 +208,7 @@ impl Audio {
     }
 }
 
-/// How audio is encoded: always mono, as both specs are.
+/// How audio is encoded: always mono.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AudioFormat {
     /// The sample encoding.
@@ -259,7 +259,7 @@ pub struct ToolResult {
     pub id: String,
     /// What the tool said: JSON text, or plain text.
     pub output: String,
-    /// The fields the kind has no place for, such as Gemini's scheduling.
+    /// The fields the kind has no place for, such as when the model should act on it.
     pub native: Option<NativeFields>,
 }
 
@@ -278,10 +278,9 @@ impl ToolResult {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Output {
-    /// The session began, configured so (OpenAI's `session.created`).
+    /// The session began, configured so.
     Opened(Session),
-    /// A configuration took effect (OpenAI's `session.updated`, Gemini's
-    /// `setupComplete`).
+    /// A configuration took effect.
     Updated(Session),
     /// The user began speaking: a client stops playing the model's audio.
     SpeechStarted {
@@ -443,14 +442,14 @@ mod tests {
     fn only_a_session_names_a_model() {
         let mut session = Input::Session(Session::default());
         assert_eq!(session.model(), None);
-        set_model("gpt-realtime")(&mut session).expect("set");
-        assert_eq!(session.model(), Some("gpt-realtime"));
+        set_model("model-a")(&mut session).expect("set");
+        assert_eq!(session.model(), Some("model-a"));
 
         let mut commit = Input::Commit { native: None };
-        commit.set_model("gpt-realtime".into());
+        commit.set_model("model-a".into());
         assert_eq!(commit, Input::Commit { native: None });
         assert_eq!(commit.model(), None);
-        let native = Input::native("openai-realtime", serde_json::json!({"type": "x"}));
+        let native = Input::native("realtime-x", serde_json::json!({"type": "x"}));
         assert_eq!(native.model(), None);
     }
 }
