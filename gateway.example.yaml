@@ -31,7 +31,7 @@ listen: 127.0.0.1:8080
 # vendors' JSON APIs take.
 # body_limit: 32MiB
 
-# The file is read once at start: change it, restart. (No hot reload.)
+# The file is read at start and again on reload (see "Reloading" below).
 #
 # Providers, by name, in order: the first serving a kind (chat, realtime,
 # image, transcription, speech, embedding, video, ...) is that kind's default. A vendor

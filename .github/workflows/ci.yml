@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Called by release.yml and python.yml so a tag publishes only if these pass.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          package_json_file: apps/ui/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22

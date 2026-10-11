@@ -46,16 +46,22 @@ and optional tests that require external services or tools.
 
 ## Releasing
 
-Tag `vX.Y.Z` on `main` and push the tag. Three workflows run:
+Tag `vX.Y.Z` on `main` and push the tag. Two workflows run (and call `ci.yml`):
 
-- `release.yml` builds the binary (web UI embedded) for Linux x86_64 and
-  aarch64 and macOS aarch64 and attaches them to a GitHub release, and pushes
-  the Docker image, `linux/amd64` and `linux/arm64`, to
-  `ghcr.io/<owner>/respan-gateway` (tags `X.Y.Z`, `X.Y`, `latest`) with the
-  built-in `GITHUB_TOKEN`. After the first push, make the package public in
+- `release.yml` first checks that the tag equals the `Cargo.toml` workspace
+  version and runs `ci.yml`; nothing is published if either fails. It builds
+  the binary (web UI embedded) for Linux x86_64 and aarch64 (native runners),
+  macOS aarch64 and x86_64, and Windows x86_64, and attaches them with a
+  `SHA256SUMS` file to a GitHub release. It also pushes the Docker image,
+  `linux/amd64` and `linux/arm64`, to `ghcr.io/<owner>/respan-gateway` (tags
+  `X.Y.Z`, `X.Y`, `latest`) with the built-in `GITHUB_TOKEN`: each
+  architecture's image is assembled from its natively built binary
+  (`--target prebuilt` of the `Dockerfile`; no emulation) and the two are
+  merged into one manifest. After the first push, make the package public in
   the repository's package settings if it should be pullable without login.
-- `python.yml` builds abi3 wheels (Linux, macOS, Windows) and the sdist,
-  tests the wheels, and publishes them to PyPI.
+- `python.yml` builds the UI, then abi3 wheels (Linux, macOS, Windows; UI
+  embedded) and the sdist (no UI: it builds with the placeholder page), tests
+  the wheels, and, once `ci.yml` passes too, publishes them to PyPI.
 
 PyPI uses trusted publishing, so no token is stored. **One-time setup by the
 owner**, before the first tag: on pypi.org, add a *pending publisher* for the

@@ -136,7 +136,9 @@ prefixes (longest wins); else the kind's default
 keys are set) or `--watch` (on a change of the file) re-read the config and
 swap it in for new requests; open requests and sessions finish on the old
 one, the request log carries over, and an invalid config is refused while the
-old one keeps serving. A changed `listen` needs a restart.
+old one keeps serving. A changed `listen` needs a restart. `SIGHUP` is unix-only; on Windows use
+`POST /ui/api/reload` or `--watch`. In Docker, a `listen:` in a mounted config
+beats `PORT`, so `listen: 127.0.0.1:8080` there is unreachable from outside.
 
 Not there yet: no admin writes (the web UI and admin API are read-only apart
 from reload).

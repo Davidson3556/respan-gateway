@@ -4,15 +4,45 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    paths: ["python/**", "apps/gateway/**", "crates/**", "Cargo.*", ".github/workflows/python.yml"]
+    paths: ["python/**", "apps/gateway/**", "crates/**", "Cargo.*", "apps/ui/**", ".github/workflows/python.yml"]
   pull_request:
-    paths: ["python/**", "apps/gateway/**", "crates/**", "Cargo.*", ".github/workflows/python.yml"]
+    paths: ["python/**", "apps/gateway/**", "crates/**", "Cargo.*", "apps/ui/**", ".github/workflows/python.yml"]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The web UI is embedded in the binary by apps/gateway/build.rs when
+  # apps/ui/dist exists, so wheels and test builds need it built first.
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: apps/ui/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/ui/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: apps/ui/dist
+
+  # A v* tag publishes to PyPI only if the repository's CI passes too.
+  ci:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/ci.yml
+
   test:
+    needs: ui
     strategy:
       fail-fast: false
       matrix:
@@ -24,6 +54,10 @@ jobs:
         working-directory: python
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: apps/ui/dist
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
@@ -36,12 +70,17 @@ jobs:
         if: matrix.python == '3.13'
 
   wheels:
+    needs: ui
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: apps/ui/dist
       # One abi3 wheel per platform serves every Python from 3.9.
       - uses: PyO3/maturin-action@v1
         with:
@@ -64,6 +103,8 @@ jobs:
           pip install --find-links python/dist respan-gateway
           cd python && pytest tests
 
+  # The sdist carries no built UI (apps/ui/dist is untracked): building from
+  # it embeds the placeholder page. Wheels have the real UI.
   sdist:
     runs-on: ubuntu-latest
     steps:
@@ -83,7 +124,7 @@ jobs:
   # CONTRIBUTING.md#releasing).
   pypi:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, wheels, sdist]
+    needs: [test, wheels, sdist, ci]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -91,6 +132,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: "{wheel-*,sdist}"
           path: dist
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
