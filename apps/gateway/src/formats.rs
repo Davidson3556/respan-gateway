@@ -265,6 +265,16 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
             Spoken::AnthropicMessages(f) => {
                 KnownFormat::of(kind::CHAT, &["POST /v1/messages"], f, http).model(chat())
             }
+            Spoken::GeminiGenerate(f) => KnownFormat::of(
+                kind::CHAT,
+                &[
+                    "POST /v1beta/models/{model}:generateContent",
+                    "POST /v1beta/models/{model}:streamGenerateContent",
+                ],
+                f,
+                http,
+            )
+            .model(chat()),
             Spoken::OpenAiImages(f) => KnownFormat::of(
                 kind::IMAGE,
                 &["POST /v1/images/generations", "POST /v1/images/edits"],

@@ -34,11 +34,12 @@ pub(crate) struct Keep {
 }
 
 impl Keep {
-    /// Nothing is the format's own, and a cache marker is dropped by
-    /// another format: a marker only hints at what to cache.
+    /// Nothing is the format's own, and a cache marker or a thought
+    /// signature is dropped by another format: each only hints, at what to
+    /// cache or at the thinking behind a part, to the format that wrote it.
     pub const CACHE_MARKER: Keep = Keep {
         own: &[],
-        droppable: &["cache_control"],
+        droppable: &["cache_control", "thoughtSignature"],
     };
 }
 

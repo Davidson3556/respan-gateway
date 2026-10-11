@@ -181,7 +181,10 @@ DeepSeek's `reasoning_content`, read into the gateway's events. The media format
 `openai-videos`, `openai-embeddings`) take the same base URL; Veo (`gemini-veo`, a provider
 format only) takes the Gemini API's,
 `https://generativelanguage.googleapis.com/v1beta`, with its key in
-`x-goog-api-key` ([media formats](crates/formats/media-http/README.md)).
+`x-goog-api-key` ([media formats](crates/formats/media-http/README.md)), as does
+Gemini's own chat API, `gemini-generate` (`generateContent` and
+`streamGenerateContent`, with the model in the path;
+[conversation formats](crates/formats/conversation-http/README.md)).
 
 Sessions go over WebSocket: a provider of format `openai-realtime` (OpenAI
 Realtime), `responses-ws` (OpenAI Responses over WebSocket) or
@@ -254,7 +257,7 @@ closes remaining contract gaps rather than reopening its design.
 |---|---|---|
 | M1 Relay kernel | Plugin chain, byte-for-byte relay, response edits, kinds, OpenAI and Anthropic, text translation both ways, model router, HTTP adapter, YAML config, `check` | done |
 | M2 Plugin API | Calls of their own input, async stream filters, unread bodies; API fixes before the freeze | done |
-| M3 Formats | Gemini Live and Responses over WebSocket, OpenAI's media endpoints, Veo. Not yet Gemini `generateContent` or Responses over HTTP (those relay through `passthrough`) | partial |
+| M3 Formats | Gemini Live and Responses over WebSocket, Gemini `generateContent`, OpenAI's media endpoints, Veo. Not yet Responses over HTTP (it relays through `passthrough`) | partial |
 | M4 Plugins and examples | Fallback, hedge, limits, memo, application billing | done, as [examples](examples/README.md) |
 | M5 Translation | Tools, images and reasoning between OpenAI Chat and Anthropic Messages | done |
 | M6 Hard cases | Realtime relay and OpenAI Realtime / Gemini Live translation, video jobs, PII rewriting and admission (examples) | done |

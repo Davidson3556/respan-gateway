@@ -90,6 +90,7 @@ export function reproduceCurl(r: RequestRecord, origin: string, withKey: boolean
       messages: [{ role: "user", content: "hi" }],
       stream: r.stream,
     },
+    "gemini-generate": { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
     "openai-images": { model, prompt: "a lighthouse at dusk" },
     "openai-speech": { model, input: "Hello from the gateway.", voice: "alloy" },
     "openai-embeddings": { model, input: "hello" },

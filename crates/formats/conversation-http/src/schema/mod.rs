@@ -72,6 +72,10 @@ pub trait Schema: Copy + Send + Sync + 'static {
     const NAME: &'static str;
     /// The path a request is posted to, which a client's request ends with.
     const PATH: &'static str;
+    /// Whether a request that asks for a stream says so in its body
+    /// (`"stream": true`), as OpenAI's and Anthropic's do; a format that says
+    /// it in the path leaves it out.
+    const STREAM_FLAG: bool = true;
     /// Headers a request to a provider gets if it has none of that name.
     const HEADERS: &'static [(&'static str, &'static str)] = &[];
     /// The keys of a conversation's `native` this format writes itself, from
@@ -112,6 +116,12 @@ pub trait Schema: Copy + Send + Sync + 'static {
     /// Spell the fields of `v` as `original`, the client's request in this
     /// format, did, where the format has two spellings of one field.
     fn respell(_original: &Value, _v: &mut Map<String, Value>) {}
+    /// The path and query of the call for `input`, if they depend on it or on
+    /// whether a stream is asked, such as a model named in the path; `None`
+    /// for [`Schema::PATH`], keeping the call's query.
+    fn target(&self, _input: &Input, _stream: bool) -> Result<Option<String>, Fault> {
+        Ok(None)
+    }
     /// Whether `raw`, an event of this format the kind has no form for,
     /// changes no answer: a keep-alive, or what the format keeps beside a
     /// response. Another format drops it when translating, and refuses any

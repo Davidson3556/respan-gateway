@@ -62,6 +62,51 @@ no form for, stays native to this format. A full context window
 (`model_context_window_exceeded`) is a native finish whose fallback is the
 token limit.
 
+## Google Gemini
+
+`gemini::GeminiGenerate`, named `gemini-generate`: a `POST` to a path
+`.../models/{model}:generateContent` or `:streamGenerateContent?alt=sse`
+(the JSON-array stream, without `alt=sse`, is refused); its provider base URL
+includes the version, such as `https://generativelanguage.googleapis.com/v1beta`,
+with the key in `x-goog-api-key`.
+
+The model is in the path, not the body: a client's request names it there
+(with no `models/`), and a call to a provider writes it from the input's
+model. Whether to stream is the method, not a field. `contents` are
+messages (`model` is the assistant), `systemInstruction` a leading system
+message, `thought` parts reasoning, `inlineData` and `fileData` an image,
+audio or document by MIME type, and `functionCall` and `functionResponse` the
+tool call and its result. Gemini names a result by its tool, not by an id:
+a call without an `id` is given one of the format's own (`gemini_call_..`),
+which its result finds by name and which Gemini never sees; writing a
+request, a result finds its tool by the call's id. A result's `response`
+object is its text as JSON; an object written stays one, other text goes
+under `output` (`error` for a failure). The results of one turn are one
+content. Tool declarations take `parameters` (OpenAPI types in upper case)
+or `parametersJsonSchema`, and are written as the latter; `toolConfig` is the
+tool choice (`ANY` with one allowed name is a named tool); `generationConfig`
+gives the output limit, `temperature`, `topP`, stop sequences and structured
+output (`responseMimeType` with a schema).
+
+What the kind has no form for stays native and is refused in another format:
+`safetySettings`, `cachedContent`, `topK`, `thinkingConfig` and other
+`generationConfig` fields, tools Google runs (`googleSearch`), a `toolConfig`
+beyond the choice, video parts. A part's `thoughtSignature` is the one native
+field another format drops, as it only hints at the thinking behind the part
+(Gemini 3 needs one on a function call in the history; the
+[Gemini quirk](../../providers/README.md) supplies its documented placeholder).
+Writing, a request for several candidates, one tool call at a time and an end
+user's id are refused.
+
+A response's first candidate is the events: consecutive text parts one text
+block, a function call a tool block (its arguments whole), `STOP` a tool use
+when calls were made. Reasons that filter (`SAFETY`, `RECITATION`, `BLOCKLIST`,
+..) are filtered, a blocked prompt too; others (`MALFORMED_FUNCTION_CALL`,
+`OTHER`, ..) stay native, and another format refuses them rather than call
+the answer finished. Usage counts the thoughts in the output, and the cached
+tokens in the input. A stream with no `finishReason` was cut. Errors are
+`{"error": {"code", "message", "status"}}`.
+
 ## Tests
 
 The suites under `tests/` drive the kernel's relay through these formats and
