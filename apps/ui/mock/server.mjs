@@ -631,6 +631,8 @@ async function videos(req, res, path) {
   notFound(res, `No format serves ${req.method} ${path}`);
 }
 
+let reloadedAt = null; // set by POST /ui/api/reload
+
 const routesTable = {
   "GET /healthz": (_req, res) => res.end("ok"),
   "GET /ui/api/overview": (_req, res) =>
@@ -639,11 +641,16 @@ const routesTable = {
       listen: `127.0.0.1:${PORT}`,
       started_at: startedAt.toISOString(),
       uptime_seconds: Math.floor((Date.now() - startedAt) / 1000) + 7_380,
+      reloaded_at: reloadedAt?.toISOString() ?? null,
       auth_required: !!KEY,
       config_source: "file",
       config_path: "./gateway.yaml",
       totals: totals(),
     }),
+  "POST /ui/api/reload": (_req, res) => {
+    reloadedAt = new Date();
+    json(res, 200, { reloaded_at: reloadedAt.toISOString(), restart_required: [] });
+  },
   "GET /ui/api/providers": (_req, res) =>
     json(res, 200, { providers: providers.map((p) => ({ ...p, ...providerStats(p.name) })) }),
   "GET /ui/api/mcp": (_req, res) =>

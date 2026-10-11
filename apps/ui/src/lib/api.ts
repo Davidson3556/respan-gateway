@@ -27,12 +27,21 @@ export interface Overview {
   listen: string | null;
   started_at: string;
   uptime_seconds: number;
+  /** RFC 3339 time of the last config reload; null if never reloaded. */
+  reloaded_at: string | null;
   auth_required: boolean;
   /** Where the configuration came from. */
   config_source: "file" | "environment" | "proxy" | "inline";
   /** The config file's path when `config_source` is `file`. */
   config_path: string | null;
   totals: Totals;
+}
+
+/** What `POST /ui/api/reload` answers. */
+export interface Reloaded {
+  reloaded_at: string | null;
+  /** What only a restart applies, such as a changed `listen`. */
+  restart_required: string[];
 }
 
 /** A vendor quirk the gateway handles for a provider. */
@@ -254,6 +263,7 @@ export const api = {
     ),
   request: (id: string, signal?: AbortSignal) =>
     getJson<RequestRecord>(`/ui/api/requests/${encodeURIComponent(id)}`, signal),
+  reload: (signal?: AbortSignal) => postJson<Reloaded>("/ui/api/reload", {}, signal),
   models: (signal?: AbortSignal) =>
     getJson<{ object: "list"; data: Model[] }>("/v1/models", signal).then((r) => r.data),
 };

@@ -11,6 +11,7 @@ const overview: Overview = {
   listen: "127.0.0.1:8080",
   started_at: "2026-10-10T12:00:00.000Z",
   uptime_seconds: 3700,
+  reloaded_at: null,
   auth_required: true,
   config_source: "environment",
   config_path: null,
