@@ -230,17 +230,22 @@ impl ClientKeys {
 /// embedding library's own reads of the admin API. It is a typed extension of
 /// the in-process request, set only by that code; no header, query or body
 /// can make one, so a request from the network never has it. `require`
-/// accepts it in place of a client key, for `/ui/api/` alone.
+/// accepts it in place of a client key for reads: the admin API and the
+/// model lists.
 #[derive(Debug, Clone, Copy)]
 pub struct Trusted;
 
-/// Whether `req` is a trusted read of the admin API.
+/// Whether `req` is a trusted read: of the admin API, or of a model list.
 fn is_trusted(req: &Request) -> bool {
-    req.extensions().get::<Trusted>().is_some() && req.uri().path().starts_with("/ui/api/")
+    let path = req.uri().path();
+    let read = path.starts_with("/ui/api/")
+        || req.method() == Method::GET
+            && (path == "/v1/models" || path.starts_with("/v1beta/models"));
+    read && req.extensions().get::<Trusted>().is_some()
 }
 
 /// Refuses a request without a valid key, leaving it as it is. A
-/// [`Trusted`] request to the admin API needs none.
+/// [`Trusted`] read needs none.
 pub async fn require(State(keys): State<Arc<ClientKeys>>, req: Request, next: Next) -> Response {
     match is_trusted(&req) || keys.allows(req.headers()) {
         true => next.run(req).await,
@@ -617,6 +622,7 @@ mod tests {
         let app = axum::Router::new()
             .route("/ui/api/x", axum::routing::get(|| async { "ok" }))
             .route("/v1/x", axum::routing::get(|| async { "ok" }))
+            .route("/v1/models", axum::routing::get(|| async { "ok" }))
             .route_layer(axum::middleware::from_fn_with_state(keys.clone(), require));
         app.oneshot(req)
             .await
@@ -625,11 +631,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_the_in_process_mark_stands_in_for_a_key_and_only_on_the_admin_api() {
+    async fn only_the_in_process_mark_stands_in_for_a_key_and_only_for_reads() {
         let keys = ClientKeys::new(vec![client("a", "k1")]);
         assert_eq!(status(&keys, request("/ui/api/x", true)).await, 200);
         assert_eq!(status(&keys, request("/ui/api/x", false)).await, 401);
         assert_eq!(status(&keys, request("/v1/x", true)).await, 401);
+        assert_eq!(status(&keys, request("/v1/models", true)).await, 200);
+        assert_eq!(status(&keys, request("/v1/models", false)).await, 401);
         // Nothing a remote client sends is the mark.
         let mut forged = request("/ui/api/x", false);
         for name in ["trusted", "x-respan-trusted", "x-respan-agent", "host"] {

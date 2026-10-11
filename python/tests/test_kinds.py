@@ -100,6 +100,8 @@ def test_only_the_introspection_helpers_skip_the_key(fake):
             gw.openai().images.generate(model="gpt-image-1", prompt="x")
         assert not [r for r in gw.requests() if r["path"].startswith("/ui/")]  # admin reads are not logged
         assert gw.providers()
+        assert gw.request("GET", "/v1/models").status_code == 401
+        assert gw.models() is not None
 
 
 def test_client_keys_are_named_in_the_request_log(fake):

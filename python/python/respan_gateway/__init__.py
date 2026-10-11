@@ -210,8 +210,8 @@ class Gateway:
         return self._async
 
     def _admin(self, path: str, **kwargs: Any) -> httpx.Response:
-        """A read of the admin API for the helpers below. This process owns the
-        gateway, so these (and only these) need no client key."""
+        """A read of the admin API or the model list for the helpers below. This
+        process owns the gateway, so these (and only these) need no client key."""
         if self._admin_sync is None:
             transport = transports(httpx)[0](self._native, trusted=True)
             self._admin_sync = httpx.Client(base_url=_BASE, transport=transport, timeout=None)
@@ -261,11 +261,11 @@ class Gateway:
         `speech`, `video` or `realtime`); `kind` filters them. This asks
         every provider, so it takes as long as the slowest.
         """
-        return _models(self.request("GET", "/v1/models"), kind)
+        return _models(self._admin("/v1/models"), kind)
 
     async def amodels(self, kind: Optional[str] = None) -> List[Dict[str, Any]]:
         """`models` for asyncio."""
-        return _models(await self.arequest("GET", "/v1/models"), kind)
+        return _models(await self._aadmin("/v1/models"), kind)
 
     def providers(self) -> List[Dict[str, Any]]:
         """The configured providers with their formats and request counts.
