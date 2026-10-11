@@ -158,6 +158,8 @@ pub struct Filter {
     /// `ok`, `error`, `pending`, or a class such as `2xx`.
     pub status: Option<String>,
     pub provider: Option<String>,
+    /// The name of the client key.
+    pub client: Option<String>,
     /// A substring of the model, any case.
     pub model: Option<String>,
     /// An RFC 3339 time, or its date: only requests started at or after it.
@@ -170,6 +172,7 @@ impl Filter {
             want.as_deref().is_none_or(|w| have == Some(w))
         };
         is(&self.kind, r.kind.as_deref())
+            && is(&self.client, r.client.as_deref())
             && is(&self.provider, r.provider.as_deref())
             && self.status.as_deref().is_none_or(|s| status_is(s, r))
             && self.model.as_deref().is_none_or(|m| {
@@ -199,7 +202,7 @@ fn status_is(want: &str, r: &RequestRecord) -> bool {
 }
 
 /// The columns of a CSV export.
-pub const CSV_HEADER: &str = "id,started_at,method,path,format,kind,model,provider,status,\
+pub const CSV_HEADER: &str = "id,started_at,method,path,format,kind,model,provider,client,status,\
 duration_ms,ttfb_ms,stream,input_tokens,output_tokens,cost_usd,error";
 
 /// One record as a CSV row, with [`CSV_HEADER`]'s columns.
@@ -215,6 +218,7 @@ pub fn csv_row(r: &RequestRecord) -> String {
         text(r.kind.as_deref()),
         text(r.model.as_deref()),
         text(r.provider.as_deref()),
+        text(r.client.as_deref()),
         n(r.status.map(u64::from)),
         n(r.duration_ms),
         n(r.ttfb_ms),

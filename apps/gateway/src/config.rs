@@ -14,6 +14,44 @@ use crate::logging::LogFormat;
 use crate::mcp::McpConfig;
 use crate::presets;
 
+/// A client key in the config: the key alone, or with the name its requests
+/// are logged under.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ClientKey {
+    Key(String),
+    Named(NamedKey),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedKey {
+    pub name: String,
+    pub key: String,
+}
+
+impl ClientKey {
+    pub fn key(&self) -> &str {
+        match self {
+            Self::Key(key) => key,
+            Self::Named(named) => &named.key,
+        }
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Key(_) => None,
+            Self::Named(named) => Some(&named.name),
+        }
+    }
+}
+
+impl From<&str> for ClientKey {
+    fn from(key: &str) -> Self {
+        Self::Key(key.to_owned())
+    }
+}
+
 /// A gateway's configuration, as `gateway.yaml` writes it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,10 +94,12 @@ pub struct Config {
     /// `2m` or `500ms`; 30 s if unset.
     #[serde(default, deserialize_with = "shutdown_grace")]
     pub shutdown_grace: Option<Duration>,
-    /// Client keys, literal or `env:NAME`. When set, every request needs
-    /// one; it is consumed by the gateway and never sent to a provider.
+    /// Client keys, literal or `env:NAME`, each alone or as
+    /// `{ name, key }`. When set, every request needs one; it is consumed
+    /// by the gateway and never sent to a provider. A request is logged
+    /// under its key's name (`key-1`, `key-2`... for a key without one).
     #[serde(default)]
-    pub client_keys: Vec<String>,
+    pub client_keys: Vec<ClientKey>,
     /// How each finished request is printed to stderr: `text`, `json` or
     /// `off`.
     #[serde(default)]
@@ -267,7 +307,7 @@ pub const DEFAULT_FILE: &str = "gateway.yaml";
 impl Config {
     /// A configuration from YAML text.
     pub fn parse(yaml: &str) -> Result<Config, Error> {
-        serde_norway::from_str(yaml).map_err(|e| Error::new(explain(&e.to_string())))
+        serde_norway::from_str(yaml).map_err(|e| Error::new(redacted(&e.to_string())))
     }
 
     /// The configuration in the file at `path`.
@@ -352,27 +392,6 @@ impl Config {
     pub fn source(&self) -> &Source {
         &self.source
     }
-}
-
-/// Keys that were renamed, with their new names; `agent.` ones are named
-/// under their section.
-const RENAMED: [(&str, &str); 3] = [
-    ("request_log", "request_history"),
-    ("tools", "agent.servers"),
-    ("cache", "agent.tool_list_ttl"),
-];
-
-/// A serde error for a person: no value of the config in it, which may be a
-/// secret (`invalid type: string "sk-..."`), and a hint where a key was
-/// renamed.
-fn explain(message: &str) -> String {
-    let mut said = redacted(message);
-    for (old, new) in RENAMED {
-        if said.contains(&format!("unknown field `{old}`")) {
-            said.push_str(&format!("\n(`{old}` is now `{new}`)"));
-        }
-    }
-    said
 }
 
 /// `message` with the values serde echoes in it left out: a string
@@ -657,7 +676,13 @@ providers:
   one: { formats: openai-chat, base_url: 'http://z.test' }
 ";
         let config = Config::parse(yaml).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(config.client_keys, ["env:GATEWAY_KEY", "sk-local"]);
+        assert_eq!(
+            config.client_keys,
+            [
+                ClientKey::from("env:GATEWAY_KEY"),
+                ClientKey::from("sk-local")
+            ]
+        );
         assert!(config.log == LogFormat::Off && !config.ui);
         assert!(config.formats.is_none());
         let names: Vec<&str> = config.providers.keys().map(String::as_str).collect();
@@ -772,16 +797,6 @@ providers:
             .map(|e| e.to_string())
             .unwrap_or_default();
         assert!(said.contains("string \"...\""), "{said}");
-    }
-
-    #[test]
-    fn renamed_keys_are_refused_with_their_new_names() {
-        let said = |text: &str| Config::parse(text).err().map(|e| e.to_string());
-        assert!(said("request_log: 5").is_some_and(|e| e.contains("`request_history`")));
-        let agent = "agent: { servers: [a], tools: [a] }";
-        assert!(said(agent).is_some_and(|e| e.contains("agent.servers")));
-        let cache = "agent: { servers: [a], cache: 5 }";
-        assert!(said(cache).is_some_and(|e| e.contains("agent.tool_list_ttl")));
     }
 
     #[test]

@@ -16,7 +16,10 @@ listen: 127.0.0.1:8080
 # `Authorization: Bearer <key>`, `x-api-key` or `x-goog-api-key`; the
 # gateway takes it off, and no provider sees it. The web UI asks for one too.
 # RESPAN_CLIENT_KEYS (comma separated) adds more from the environment.
-# client_keys: [env:GATEWAY_KEY]
+# A key may carry a name, which each request in the log and the export shows
+# as its `client` (filter by it: /ui/api/requests?client=app); a key without
+# one is key-1, key-2... by its place in the list, never the key itself.
+# client_keys: [env:GATEWAY_KEY, { name: ci, key: env:CI_KEY }]
 
 # How each finished request is printed to stderr, with a timestamp and a
 # level: text (the default), json (a line each) or off. `--log` and

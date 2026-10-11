@@ -1786,3 +1786,66 @@ fn base64(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
 }
+
+#[tokio::test]
+async fn a_realtime_session_is_one_record_that_ends_with_the_session_and_sums_its_usage() {
+    use realtime::{Turn, Usage};
+    let openai = realtime::openai::start().await;
+    let gw = Gateway::start(&format!(
+        "providers:\n  openai: {{ vendor: openai, base_url: '{}', key: sk-gw }}\nformats: [openai-realtime]\n",
+        openai.base_url().replace("ws://", "http://")
+    ))
+    .await;
+    let records = || async {
+        let resp = client()
+            .get(gw.url("/ui/api/requests"))
+            .send()
+            .await
+            .unwrap();
+        let all = json(&resp.text().await.unwrap());
+        let all = all["requests"].as_array().unwrap().clone();
+        all.into_iter()
+            .filter(|r| r["path"] == "/v1/realtime")
+            .collect::<Vec<_>>()
+    };
+    let (mut ws, _) = session(&gw, "/v1/realtime?model=gpt-realtime", "realtime").await;
+    until(&mut ws, of_type("session.created")).await;
+    for (text, input, output) in [("one", 10, 20), ("two", 5, 7)] {
+        openai.answer(Turn {
+            text: Some(text.into()),
+            usage: Usage {
+                input_tokens: input,
+                output_tokens: output,
+                ..Usage::default()
+            },
+            ..Turn::default()
+        });
+        say(&mut ws, json!({"type": "response.create"})).await;
+        until(&mut ws, of_type("response.done")).await;
+    }
+    // Still open: no end, no duration, no usage claimed from the handshake.
+    let open = records().await;
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0]["status"], 101);
+    assert!(open[0]["duration_ms"].is_null(), "{open:?}");
+    let before = open[0]["id"].clone();
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    ws.close(None).await.unwrap();
+    let mut done = Vec::new();
+    for _ in 0..500 {
+        done = records().await;
+        if !done[0]["duration_ms"].is_null() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(done.len(), 1, "{done:?}");
+    let record = &done[0];
+    assert_eq!(record["id"], before);
+    assert!(record["duration_ms"].as_u64().unwrap() >= 300, "{record}");
+    assert!(record["ttfb_ms"].as_u64().unwrap() < record["duration_ms"].as_u64().unwrap());
+    assert_eq!(record["usage"]["input_tokens"], 15, "{record}");
+    assert_eq!(record["usage"]["output_tokens"], 27, "{record}");
+    assert!(record["error"].is_null(), "{record}");
+}

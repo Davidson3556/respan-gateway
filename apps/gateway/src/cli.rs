@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use crate::config::ClientKey;
 use crate::init::Chosen;
 use crate::logging::{Level, LogFormat};
 use crate::{App, Config, ProxyVendor, Source, VERSION};
@@ -215,6 +216,9 @@ where
         listen: cli.listen.filter(|l| !l.is_empty()),
         log: cli.log,
     };
+    let config_beats_port = overrides.listen.is_none()
+        && config.as_ref().is_ok_and(|c| c.listen.is_some())
+        && std::env::var("PORT").is_ok_and(|p| !p.is_empty());
     let config = match config
         .map_err(|e| e.to_string())
         .and_then(|c| overrides.apply(c))
@@ -232,7 +236,13 @@ where
     if models {
         return list_models(&app).await;
     }
-    if let Some(refusal) = app.open_refusal(app.listen()) {
+    if let Some(mut refusal) = app.open_refusal(app.listen()) {
+        if config_beats_port {
+            refusal.push_str(
+                "\n  The config's `listen:` wins over PORT, so PORT is ignored; to follow \
+                 PORT, remove `listen:` from the config.",
+            );
+        }
         return fail(&refusal);
     }
     if check {
@@ -321,7 +331,7 @@ impl Overrides {
         }
         if let Ok(keys) = std::env::var("RESPAN_CLIENT_KEYS") {
             let keys = keys.split(',').map(str::trim).filter(|k| !k.is_empty());
-            config.client_keys.extend(keys.map(str::to_owned));
+            config.client_keys.extend(keys.map(ClientKey::from));
         }
         if let Some(log) = self.log {
             config.log = log;

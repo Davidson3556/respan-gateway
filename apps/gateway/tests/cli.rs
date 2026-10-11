@@ -494,6 +494,27 @@ async fn an_open_gateway_beyond_loopback_is_refused_with_what_to_do() {
         "{}",
         out.stderr
     );
+    assert!(!out.stderr.contains("wins over PORT"), "{}", out.stderr);
+    // A config's `listen:` beats PORT, and the refusal says so.
+    std::fs::write(
+        dir.join("gateway.yaml"),
+        "listen: 0.0.0.0:8\nproviders: { openai: { vendor: openai } }\n",
+    )
+    .unwrap();
+    let out = run(&dir, &[], &[env[0], ("PORT", "9")]).await;
+    assert!(
+        !out.ok && out.stderr.contains("0.0.0.0:8"),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("`listen:` wins over PORT") && out.stderr.contains("remove `listen:`"),
+        "{}",
+        out.stderr
+    );
+    let out = run(&dir, &[], &[env[0]]).await;
+    assert!(!out.stderr.contains("wins over PORT"), "{}", out.stderr);
+    std::fs::remove_file(dir.join("gateway.yaml")).unwrap();
     // Loopback is fine without keys (`check` shows the plan).
     let out = run(&dir, &["check", "--listen", "127.0.0.1:0"], &env).await;
     assert!(out.ok, "{}", out.stderr);

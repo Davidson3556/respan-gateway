@@ -9,7 +9,8 @@ use respan_gateway_core::{Fault, Gateway};
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
-use crate::config::{Auth, Config, PluginConfig, ProviderConfig};
+use crate::auth::Client;
+use crate::config::{Auth, ClientKey, Config, PluginConfig, ProviderConfig};
 use crate::formats::{KnownFormat, kind};
 use crate::presets;
 use respan_gateway_plugins::{Kind, Routes, Speaks};
@@ -48,7 +49,7 @@ pub struct Plan {
     pub upstreams: Vec<Upstream>,
     pub serve: Vec<String>,
     pub routes: Arc<Routes>,
-    pub keys: Vec<String>,
+    pub keys: Vec<Client>,
     /// The MCP servers, set by the app that built their format.
     pub mcp: Vec<crate::mcp::McpServer>,
 }
@@ -75,11 +76,7 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
             names(&upstreams)
         )));
     }
-    let keys = config
-        .client_keys
-        .iter()
-        .map(|key| secret("client_keys", key))
-        .collect::<Result<_, _>>()?;
+    let keys = clients(&config.client_keys)?;
     if upstreams.is_empty() && config.mcp.is_empty() {
         return Err(Fault::config(
             "providers: none configured; add one, such as `openai: { vendor: openai }`",
@@ -392,6 +389,27 @@ pub fn secret(owner: &str, value: &str) -> Result<String, Fault> {
         "" => Err(Fault::config(format!("{owner}: {empty}"))),
         trimmed => Ok(trimmed.to_owned()),
     }
+}
+
+/// The client keys, read, each with the name its requests are logged
+/// under: its own, else `key-<n>` by its place in the list.
+fn clients(entries: &[ClientKey]) -> Result<Vec<Client>, Fault> {
+    let mut clients: Vec<Client> = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let key = secret("client_keys", entry.key())?;
+        let name = match entry.name().map(str::trim) {
+            Some("") => return Err(Fault::config("client_keys: a name is empty")),
+            Some(name) => name.to_owned(),
+            None => format!("key-{}", i + 1),
+        };
+        if clients.iter().any(|c| c.name == name) {
+            return Err(Fault::config(format!(
+                "client_keys: the name '{name}' is used twice"
+            )));
+        }
+        clients.push(Client { name, key });
+    }
+    Ok(clients)
 }
 
 /// A key read already, sent as a format expects.

@@ -78,7 +78,7 @@ configuration is a `ConfigError` (a `ValueError`).
 ```python
 gw.models()                # [{"id": "gpt-image-1", "owned_by": "openai", "kind": "image"}, ...]
 gw.providers()             # each provider with its formats and request counts
-gw.requests(limit=20)      # the request log, newest first
+gw.requests(limit=20)      # the request log, newest first; filters such as client="ci" (a client key's name)
 ```
 
 `amodels()`, `aproviders()` and `arequests()` are the asyncio versions.

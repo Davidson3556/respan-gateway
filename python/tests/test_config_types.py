@@ -17,7 +17,7 @@ def test_a_full_typed_config_parses() -> None:
         "request_history_file_max": "64MiB",
         "prices": {"gpt-4o": {"input": 2.5, "output": 10, "cached_input": 1.25}},
         "shutdown_grace": "10s",
-        "client_keys": ["client-key"],
+        "client_keys": ["client-key", {"name": "ci", "key": "ci-key"}],
         "log": "off",
         "ui": True,
         "providers": {

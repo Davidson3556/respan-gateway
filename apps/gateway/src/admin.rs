@@ -281,12 +281,17 @@ async fn routes(State(admin): State<Arc<Admin>>) -> Json<Value> {
 }
 
 #[derive(Debug, Deserialize)]
-struct Limit {
+struct Recent {
     limit: Option<usize>,
+    #[serde(flatten)]
+    filter: Filter,
 }
 
-async fn requests(State(admin): State<Arc<Admin>>, Query(q): Query<Limit>) -> Json<Value> {
-    let requests = admin.process.log.recent(q.limit.unwrap_or(100));
+/// `GET /ui/api/requests?limit=N`: the last requests, newest first, narrowed
+/// by the export's filters (`kind`, `status`, `provider`, `client`, `model`,
+/// `since`).
+async fn requests(State(admin): State<Arc<Admin>>, Query(q): Query<Recent>) -> Json<Value> {
+    let requests = admin.process.log.recent(q.limit.unwrap_or(100), &q.filter);
     Json(json!({ "requests": requests }))
 }
 
@@ -302,7 +307,7 @@ struct ExportQuery {
 /// oldest first, one record per line (`jsonl`, the records of
 /// `/ui/api/requests`; or `csv` with a header row), as a download. The
 /// filters narrow it as the UI's do, all optional: `kind`; `status` (`ok`,
-/// `error`, `pending`, or a class such as `2xx`); `provider`; `model` (a
+/// `error`, `pending`, or a class such as `2xx`); `provider`; `client` (a key's name); `model` (a
 /// case-blind substring); `since` (an RFC 3339 time or date).
 async fn export(State(admin): State<Arc<Admin>>, Query(q): Query<ExportQuery>) -> Response {
     let (content_type, name, header): (_, _, Option<&str>) = match q.format.as_deref() {

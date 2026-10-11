@@ -108,7 +108,7 @@ directory (the environment wins). `respan-gateway --help` lists them:
 | `RESPAN_CONFIG` | The config file, as `--config` |
 | `RESPAN_LISTEN` | Where to listen, as `--listen` (`127.0.0.1:8080`, `localhost:8080`, `8080`) |
 | `PORT` | The port, on every address (`0.0.0.0`), if neither `--listen`, `RESPAN_LISTEN` nor `listen:` says; for hosts that hand it out |
-| `RESPAN_CLIENT_KEYS` | Client keys, comma separated, added to the config's `client_keys:` |
+| `RESPAN_CLIENT_KEYS` | Client keys, comma separated, added to the config's `client_keys:` (named `key-N`) |
 | `RESPAN_LOG` | `text`, `json` or `off` (one stderr line per finished request), as `--log` |
 | `RESPAN_<VENDOR>_BASE_URL` | Moves a vendor's base URL when there is no config file |
 

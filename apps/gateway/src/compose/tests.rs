@@ -382,13 +382,39 @@ fn a_bad_provider_is_an_error() {
 }
 
 #[test]
-fn client_keys_are_literal_or_from_the_environment() {
+fn client_keys_are_literal_or_from_the_environment_and_named() {
     let unset = plan("client_keys: [literal, 'env:RESPAN_TEST_UNSET']");
     let said = "client_keys: environment variable RESPAN_TEST_UNSET is not set";
     assert_eq!(unset.err().as_deref(), Some(said));
     let one = "providers: { p: { formats: openai-chat, base_url: 'http://x.test' } }";
     let set = plan(&format!("{one}\nclient_keys: [one, two]")).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(set.keys, ["one", "two"]);
+    let names = |p: &Plan| {
+        p.keys
+            .iter()
+            .map(|c| (c.name.clone(), c.key.clone()))
+            .collect::<Vec<_>>()
+    };
+    let pair = |n: &str, k: &str| (n.to_owned(), k.to_owned());
+    assert_eq!(names(&set), [pair("key-1", "one"), pair("key-2", "two")]);
+    let named = "client_keys: [plain, { name: app, key: secret }, { name: ci, key: 'env:RESPAN_TEST_UNSET' }]";
+    let said = "client_keys: environment variable RESPAN_TEST_UNSET is not set";
+    assert_eq!(
+        plan(&format!("{one}\n{named}")).err().as_deref(),
+        Some(said)
+    );
+    let named = "client_keys: [plain, { name: app, key: secret }]";
+    let set = plan(&format!("{one}\n{named}")).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(names(&set), [pair("key-1", "plain"), pair("app", "secret")]);
+    for (keys, said) in [
+        (
+            "[{ name: a, key: x }, { name: a, key: y }]",
+            "client_keys: the name 'a' is used twice",
+        ),
+        ("[{ name: ' ', key: x }]", "client_keys: a name is empty"),
+    ] {
+        let got = plan(&format!("{one}\nclient_keys: {keys}")).err();
+        assert_eq!(got.as_deref(), Some(said), "{keys}");
+    }
 }
 
 #[test]
@@ -594,7 +620,8 @@ fn an_empty_key_is_refused_and_keys_are_trimmed() {
             "{keys}"
         );
     }
-    let trimmed = plan(&format!("{one}client_keys: [' gk ']")).map(|p| p.keys);
+    let trimmed = plan(&format!("{one}client_keys: [' gk ']"))
+        .map(|p| p.keys.into_iter().map(|c| c.key).collect::<Vec<_>>());
     assert_eq!(trimmed, Ok(vec!["gk".to_owned()]));
     let empty_provider_key =
         "providers: { p: { formats: openai-chat, base_url: 'http://x.test', key: '' } }";

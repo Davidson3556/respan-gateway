@@ -62,8 +62,15 @@ impl Plugin for ClientCredentials {
     }
 }
 
+/// A client key, read, and the name its requests are logged under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Client {
+    pub name: String,
+    pub key: String,
+}
+
 #[derive(Debug, Default)]
-pub struct ClientKeys(Vec<String>);
+pub struct ClientKeys(Vec<Client>);
 
 /// An opaque id of a client key: a keyed hash, different for every process,
 /// never the key. The gateway hands it on as the call's [`Owner`], for
@@ -85,7 +92,7 @@ enum Presented {
 }
 
 impl ClientKeys {
-    pub fn new(keys: Vec<String>) -> Arc<Self> {
+    pub fn new(keys: Vec<Client>) -> Arc<Self> {
         Arc::new(Self(keys))
     }
 
@@ -93,10 +100,19 @@ impl ClientKeys {
         !self.0.is_empty()
     }
 
+    /// The client `key` is the key of, if any.
+    fn client(&self, key: &str) -> Option<&Client> {
+        let key = key.trim().as_bytes();
+        let found = |c: &&Client| constant_time_eq(c.key.as_bytes(), key);
+        match key.is_empty() {
+            true => None,
+            false => self.0.iter().find(found),
+        }
+    }
+
     /// Whether `key` is one of the client keys.
     fn is_key(&self, key: &str) -> bool {
-        let key = key.trim().as_bytes();
-        !key.is_empty() && self.0.iter().any(|k| constant_time_eq(k.as_bytes(), key))
+        self.client(key).is_some()
     }
 
     fn presented(&self, headers: &HeaderMap) -> Presented {
@@ -123,8 +139,8 @@ impl ClientKeys {
         }
     }
 
-    /// The id of the client key `headers` present, if any.
-    fn identify(&self, headers: &HeaderMap) -> Option<Owner> {
+    /// The client whose key `headers` present, if any, and its id.
+    fn identify(&self, headers: &HeaderMap) -> Option<(Owner, &str)> {
         let bearer = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
         let bearer = bearer
             .and_then(|v| v.split_once(' '))
@@ -133,7 +149,8 @@ impl ClientKeys {
             .into_iter()
             .filter_map(|name| headers.get(name)?.to_str().ok());
         let mut presented = bearer.into_iter().chain(others);
-        presented.find(|key| self.is_key(key)).map(client_id)
+        let client = presented.find_map(|key| self.client(key))?;
+        Some((client_id(&client.key), &client.name))
     }
 
     pub fn allows(&self, headers: &HeaderMap) -> bool {
@@ -173,10 +190,11 @@ pub async fn consume(
         Presented::Refused => unauthorized(),
         Presented::Open => next.run(req).await,
         Presented::Valid(holders) => {
-            if let Some(owner) = keys.identify(req.headers()) {
+            if let Some((owner, name)) = keys.identify(req.headers()) {
                 // The gateway's own extensions ride in the request's.
                 let mut calls = req.extensions_mut().remove::<Extensions>();
                 let calls = calls.get_or_insert_with(Extensions::new);
+                crate::requests::attribute(calls, name);
                 calls.insert(owner);
                 let calls = std::mem::take(calls);
                 req.extensions_mut().insert(calls);
@@ -421,9 +439,16 @@ mod tests {
         headers
     }
 
+    fn client(name: &str, key: &str) -> Client {
+        Client {
+            name: name.to_owned(),
+            key: key.to_owned(),
+        }
+    }
+
     #[test]
     fn a_key_is_read_from_any_of_three_headers() {
-        let keys = ClientKeys(vec!["k1".into(), "k2".into()]);
+        let keys = ClientKeys(vec![client("a", "k1"), client("b", "k2")]);
         let presented = |pairs: &[(&'static str, &str)]| keys.presented(&headers(pairs));
         let valid = |names: &[HeaderName]| Presented::Valid(names.to_vec());
         assert_eq!(
@@ -448,21 +473,30 @@ mod tests {
 
     #[test]
     fn a_client_key_has_an_id_that_is_not_the_key() {
-        let keys = ClientKeys(vec!["k1".into(), "k2".into()]);
+        let keys = ClientKeys(vec![client("a", "k1"), client("b", "k2")]);
         let id = |pairs: &[(&'static str, &str)]| keys.identify(&headers(pairs));
         let one = id(&[("authorization", "Bearer k1")]);
         assert_eq!(one, id(&[("x-api-key", "k1")]));
         assert_ne!(one, id(&[("x-api-key", "k2")]));
-        assert!(one.is_some_and(|Owner(id)| !id.contains("k1")));
+        assert!(one.is_some_and(|(Owner(id), _)| !id.contains("k1")));
         assert_eq!(id(&[("authorization", "Bearer sk-provider")]), None);
         // The gateway's key is the one named, not the client's own.
         let both = [("authorization", "Bearer sk-provider"), ("x-api-key", "k2")];
         assert_eq!(id(&both), id(&[("x-api-key", "k2")]));
+        let name = |pairs: &[(&'static str, &str)]| {
+            let found = keys.identify(&headers(pairs));
+            found.map(|(_, name)| name.to_owned())
+        };
+        assert_eq!(name(&[("x-api-key", "k2")]).as_deref(), Some("b"));
+        assert_eq!(
+            name(&[("authorization", "Bearer k1")]).as_deref(),
+            Some("a")
+        );
     }
 
     #[test]
     fn every_header_holding_a_valid_key_is_taken_off() {
-        let keys = ClientKeys(vec!["k1".into()]);
+        let keys = ClientKeys(vec![client("a", "k1")]);
         let all = [
             ("authorization", "Bearer k1"),
             ("x-api-key", "k1"),
@@ -476,7 +510,7 @@ mod tests {
 
     #[test]
     fn an_empty_key_never_matches() {
-        let keys = ClientKeys(vec![String::new()]);
+        let keys = ClientKeys(vec![client("a", "")]);
         assert_eq!(
             keys.presented(&headers(&[("x-api-key", "")])),
             Presented::Refused

@@ -77,13 +77,18 @@ class Price(_Rates, total=False):
     cached_input: float  # for cached input tokens; `input` if unset
 
 
+class NamedClientKey(TypedDict):
+    name: str  # what the request log calls this client
+    key: str  # literal or env:NAME
+
+
 class GatewayConfig(TypedDict, total=False):
     """The top level of a gateway configuration."""
 
     providers: Dict[str, ProviderConfig]
     formats: List[str]  # the formats served to clients
     default: str  # the default provider
-    client_keys: List[str]  # when set, every request needs one
+    client_keys: List[Union[str, NamedClientKey]]  # when set, every request needs one; a bare key is named key-1, key-2...
     plugins: List[PluginConfig]
     listen: str
     body_limit: Union[int, str]  # bytes, or a size such as "32MiB"

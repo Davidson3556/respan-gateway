@@ -163,7 +163,8 @@ async fn the_history_is_exported_as_json_lines_or_csv_and_filtered() {
     assert_eq!(rows.len(), 4, "{text}");
     assert!(rows[0].starts_with("id,started_at,method,path,"));
     assert!(
-        rows[1].contains(",POST,/v1/chat/completions,openai-chat,chat,gpt-4o-mini,openai,200,")
+        rows[1]
+            .contains(",POST,/v1/chat/completions,openai-chat,chat,gpt-4o-mini,openai,key-1,200,")
     );
 
     let bad = auth("/ui/api/requests/export?format=xml")
@@ -378,4 +379,67 @@ async fn bad_prices_and_sizes_are_refused() {
             .unwrap();
         assert!(!out.status.success(), "{yaml}");
     }
+}
+
+#[tokio::test]
+async fn requests_carry_the_name_of_their_client_key() {
+    let up = FakeOpenAi::start().await;
+    up.answer(Answer::text("ok"));
+    let keys =
+        "client_keys:\n  - { name: app, key: k-app }\n  - k-plain\n  - { name: ci, key: k-ci }";
+    let gw = Gateway::start(&config(&up, keys)).await;
+    for (key, model) in [
+        ("k-app", "m1"),
+        ("k-plain", "m2"),
+        ("k-ci", "m3"),
+        ("k-app", "m4"),
+    ] {
+        let body = json!({"model": model, "messages": [{"role": "user", "content": "hi"}]});
+        let resp = client()
+            .post(gw.url(CHAT))
+            .bearer_auth(key)
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        resp.text().await.unwrap();
+    }
+    let ask = |path: &'static str| async {
+        let resp = client()
+            .get(gw.url(path))
+            .bearer_auth("k-app")
+            .send()
+            .await
+            .unwrap();
+        resp.text().await.unwrap()
+    };
+    let all: Value = support::json(&ask("/ui/api/requests").await);
+    let mut clients: Vec<_> = all["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["path"] == CHAT)
+        .map(|r| r["client"].as_str().unwrap().to_owned())
+        .collect();
+    clients.reverse();
+    assert_eq!(clients, ["app", "key-2", "ci", "app"]);
+    let key_leaks = ask("/ui/api/requests").await;
+    assert!(!key_leaks.contains("k-plain") && !key_leaks.contains("k-ci"));
+
+    let only: Value = support::json(&ask("/ui/api/requests?client=app&limit=1").await);
+    assert_eq!(only["requests"].as_array().unwrap().len(), 1);
+    let none: Value = support::json(&ask("/ui/api/requests?client=nobody").await);
+    assert!(none["requests"].as_array().unwrap().is_empty());
+    let jsonl = ask("/ui/api/requests/export?client=ci&kind=chat").await;
+    let rows: Vec<Value> = jsonl.lines().map(support::json).collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["model"], "m3");
+    let csv = ask("/ui/api/requests/export?format=csv&client=key-2").await;
+    let mut lines = csv.lines();
+    let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+    let column = header.iter().position(|c| *c == "client").unwrap();
+    let row: Vec<&str> = lines.next().unwrap().split(',').collect();
+    assert_eq!(row[column], "key-2");
+    assert!(lines.next().is_none());
 }

@@ -260,22 +260,24 @@ class Gateway:
         """`providers` for asyncio."""
         return _items(await self.arequest("GET", "/ui/api/providers"), "providers")
 
-    def requests(self, limit: int = 100) -> List[Dict[str, Any]]:
+    def requests(self, limit: int = 100, **filters: str) -> List[Dict[str, Any]]:
         """The last `limit` requests the gateway served, newest first, as the web UI lists them.
+
+        `filters` are those of `export_requests`, such as `client="app"` (the name of a client key; each record's `client`).
 
         The log is in memory, and `log: off` (the default here) only silences stderr; this admin API is off with `ui: false`.
         """
-        return _items(self.request("GET", "/ui/api/requests", params={"limit": limit}), "requests")
+        return _items(self.request("GET", "/ui/api/requests", params={"limit": limit, **filters}), "requests")
 
-    async def arequests(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def arequests(self, limit: int = 100, **filters: str) -> List[Dict[str, Any]]:
         """`requests` for asyncio."""
-        return _items(await self.arequest("GET", "/ui/api/requests", params={"limit": limit}), "requests")
+        return _items(await self.arequest("GET", "/ui/api/requests", params={"limit": limit, **filters}), "requests")
 
     def export_requests(self, format: str = "jsonl", **filters: str) -> str:
         """The requests the gateway kept, oldest first, as `jsonl` (one record per line) or `csv`.
 
         `filters` narrow it as the web UI's do: `kind`, `status` ("ok", "error", "pending" or a class such as "2xx"),
-        `provider`, `model` (a substring) and `since` (an RFC 3339 time).
+        `provider`, `client` (a client key's name), `model` (a substring) and `since` (an RFC 3339 time).
         """
         return _export(self.request("GET", "/ui/api/requests/export", params={"format": format, **filters}))
 

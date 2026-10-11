@@ -89,3 +89,13 @@ def test_client_keys(fake):
         with pytest.raises(openai.AuthenticationError):
             gw.openai().images.generate(model="gpt-image-1", prompt="x")
         assert gw.openai(api_key="gw-secret").images.generate(model="gpt-image-1", prompt="x").data
+
+
+def test_client_keys_are_named_in_the_request_log(fake):
+    keys = ["plain", {"name": "ci", "key": "ci-secret"}]
+    with rg.Gateway(config={**config_for(fake), "client_keys": keys}) as gw:
+        for key in ("plain", "ci-secret"):
+            assert gw.openai(api_key=key).images.generate(model="gpt-image-1", prompt="x").data
+        assert {r["client"] for r in gw.requests() if r["path"].endswith("/images/generations")} == {"key-1", "ci"}
+        only = gw.requests(client="ci")
+        assert [r["client"] for r in only] == ["ci"]

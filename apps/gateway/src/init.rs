@@ -153,6 +153,7 @@ ui: true
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ClientKey;
 
     fn chosen(specs: &[&str]) -> Vec<Chosen> {
         let all: Result<Vec<_>, _> = specs.iter().map(|s| Chosen::parse(s)).collect();
@@ -212,7 +213,7 @@ mod tests {
         );
         let text = starter(&[], Some(&a));
         let config = crate::Config::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
-        assert_eq!(config.client_keys, [a]);
+        assert_eq!(config.client_keys, [ClientKey::Key(a)]);
         let hint = crate::Config::parse(&starter(&[], None)).unwrap_or_else(|e| panic!("{e}"));
         assert!(hint.client_keys.is_empty());
     }

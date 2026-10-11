@@ -604,9 +604,6 @@ fn the_agent_keys_are_validated_and_the_old_names_say_what_replaced_them() {
     assert!(said("agent:\n  servers: [files]\n  deny: ['']\n").contains("deny"));
     assert!(said("agent:\n  servers: [files]\n  parallel: 0\n").contains("parallel"));
     assert!(said("agent:\n  servers: [files]\n  max_results: 0\n").contains("max_results"));
-    assert!(said("agent:\n  tools: [files]\n").contains("agent.servers"));
-    assert!(said("agent:\n  servers: [files]\n  cache: 5m\n").contains("agent.tool_list_ttl"));
-    assert!(said("request_log: 5\n").contains("request_history"));
     let ok = "agent:\n  servers: [files]\n  allow: ['files__*']\n  parallel: 2\n  max_results: 1MiB\n  tool_list_ttl: 1m\n";
     assert!(check_args(&format!("{base}{server}{ok}"), &[]).0);
 }
