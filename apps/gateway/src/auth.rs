@@ -1,4 +1,4 @@
-//! Whose keys go where. Client keys: when the config sets `keys`, every
+//! Whose keys go where. Client keys: when the config sets `client_keys`, every
 //! request carries one, as `Authorization: Bearer`, `x-api-key` or
 //! `x-goog-api-key`, and the gateway takes it off: no provider sees it. A
 //! browser's WebSocket can set no header, so on an upgrade a key may also
@@ -235,7 +235,7 @@ impl LocalOnly {
             if !self.answers_to(&name) {
                 return Some(format!(
                     "Host '{name}' is not this gateway's: without client keys it answers \
-                     only to localhost; set `keys:` to reach it by another name"
+                     only to localhost; set `client_keys:` to reach it by another name"
                 ));
             }
         }
@@ -246,7 +246,7 @@ impl LocalOnly {
         if cross_site || origin.is_some_and(|at| !same_origin(at)) {
             return Some(
                 "a cross-origin browser request is refused: without client keys any web \
-                 page could spend the gateway's provider keys; set `keys:` to allow it"
+                 page could spend the gateway's provider keys; set `client_keys:` to allow it"
                     .to_owned(),
             );
         }

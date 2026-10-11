@@ -98,8 +98,13 @@ impl App {
         let relay = relay(&gateway, &plan, &formats, limit, &stopping)
             .layer(from_fn_with_state(keys.clone(), auth::consume))
             .layer(from_fn_with_state(log.clone(), requests::track));
-        let source = config.source.to_string();
-        let admin = Admin::new(log, source, &plan, &formats, stopping.clone());
+        let admin = Admin::new(
+            log,
+            config.source.clone(),
+            &plan,
+            &formats,
+            stopping.clone(),
+        );
         let admin = Arc::new(admin);
         let local =
             (!keys.required()).then(|| LocalOnly::new(config.listen.unwrap_or(DEFAULT_LISTEN)));
@@ -250,13 +255,19 @@ impl App {
         lines.join("\n")
     }
 
-    /// A warning for a gateway anyone may reach and spend through.
-    pub fn warning(&self, addr: SocketAddr) -> Option<String> {
+    /// Why it must not serve on `addr`, if it must not: a gateway with
+    /// provider keys of its own, on an address other machines reach, and no
+    /// client keys, lets anyone who reaches it spend them. (Its `Host`
+    /// guard would also refuse every non-local name.) `proxy` is exempt: it
+    /// holds no keys, each client brings its own.
+    pub fn open_refusal(&self, addr: SocketAddr) -> Option<String> {
         let open = self.plan.keys.is_empty() && !addr.ip().is_loopback();
-        open.then(|| {
+        (open && !self.config.raw_relay).then(|| {
             format!(
-                "listening on {addr} with no client keys: anyone who can reach it \
-                 spends your provider keys; set `client_keys:` in the config"
+                "refusing to listen on {addr} with no client keys: anyone who can reach it \
+                 would spend your provider keys, and without keys it answers only to \
+                 localhost anyway.\n  Set `client_keys:` in the config (`respan-gateway init \
+                 --client-key` writes a strong one), or listen on 127.0.0.1."
             )
         })
     }

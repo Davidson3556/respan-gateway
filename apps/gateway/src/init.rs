@@ -54,20 +54,41 @@ impl Chosen {
 
 /// The starter config from the environment alone.
 pub fn starter_config() -> String {
-    starter(&[])
+    starter(&[], None)
+}
+
+/// A new client key: `sk-gw-` and 32 url-safe characters (192 bits) from
+/// the system's CSPRNG.
+pub fn new_client_key() -> Result<String, getrandom::Error> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)?;
+    // 64 divides 256, so masking a byte to 6 bits is unbiased.
+    let random: String = bytes
+        .iter()
+        .map(|b| char::from(ALPHABET[usize::from(b & 63)]))
+        .collect();
+    Ok(format!("sk-gw-{random}"))
 }
 
 /// The starter config: the vendors with keys in the environment, and those
 /// `chosen`, enabled, with any base URL the environment moves them to
 /// (`OLLAMA_HOST`, `RESPAN_<VENDOR>_BASE_URL`), the rest commented out;
-/// OpenAI enabled if there are none. A chosen vendor's entry names its key.
-pub fn starter(chosen: &[Chosen]) -> String {
+/// OpenAI enabled if there are none. `client_key` is written into
+/// `client_keys:`, else a hint is. A chosen vendor's entry names its key.
+pub fn starter(chosen: &[Chosen], client_key: Option<&str>) -> String {
     let detected = presets::detected();
     let found = |vendor: &str| detected.iter().find(|(p, ..)| p.id == vendor);
     let picked = |vendor: &str| chosen.iter().find(|c| c.vendor.id == vendor);
     let enabled = |vendor: &str| match detected.is_empty() && chosen.is_empty() {
         true => vendor == "openai",
         false => found(vendor).is_some() || picked(vendor).is_some(),
+    };
+    let client_keys = match client_key {
+        Some(key) => format!("client_keys: ['{}']", key.replace('\'', "''")),
+        None => {
+            "# client_keys: [env:GATEWAY_KEY]   # or `respan-gateway init --client-key`".to_owned()
+        }
     };
     let mut providers = String::new();
     for vendor in ALL {
@@ -100,8 +121,9 @@ listen: 127.0.0.1:8080
 
 # Client keys: when set, every request needs one (Authorization: Bearer,
 # x-api-key or x-goog-api-key). Without them, anyone who can reach the
-# gateway spends your provider keys: keep it local.
-# client_keys: [env:GATEWAY_KEY]
+# gateway spends your provider keys: keep it local (the gateway refuses to
+# listen beyond loopback without one).
+{client_keys}
 
 # Providers, by name. A vendor preset brings its base URL, its key from the
 # environment, every format the gateway speaks for it, and its model names
@@ -150,7 +172,7 @@ mod tests {
         let picks = chosen(&["groq", "mistral=env:MY_MISTRAL", "openai=sk-'odd"]);
         assert_eq!(picks[0].variable(), Some("GROQ_API_KEY"));
         assert!(!picks[0].is_literal() && picks[2].is_literal());
-        let text = starter(&picks);
+        let text = starter(&picks, None);
         let config = crate::Config::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
         assert!(config.providers.len() >= 3, "{text}");
         for vendor in ["groq", "mistral", "openai"] {
@@ -174,5 +196,24 @@ mod tests {
             "{e}"
         );
         assert!(Chosen::parse("groq=").is_err());
+    }
+
+    #[test]
+    fn a_client_key_is_long_random_and_written_into_the_config() {
+        let key = || new_client_key().unwrap_or_else(|e| panic!("{e}"));
+        let (a, b) = (key(), key());
+        assert_ne!(a, b);
+        let random = a.strip_prefix("sk-gw-").unwrap_or_default();
+        assert_eq!(random.len(), 32, "{a}");
+        assert!(
+            random
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+        );
+        let text = starter(&[], Some(&a));
+        let config = crate::Config::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+        assert_eq!(config.client_keys, [a]);
+        let hint = crate::Config::parse(&starter(&[], None)).unwrap_or_else(|e| panic!("{e}"));
+        assert!(hint.client_keys.is_empty());
     }
 }

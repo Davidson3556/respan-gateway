@@ -1,6 +1,7 @@
 //! The `respan-gateway` command line.
 
 use std::ffi::OsString;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use crate::init::Chosen;
@@ -29,7 +30,7 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Where to listen, such as 127.0.0.1:8080, localhost:8080 or 8080, in
-    /// place of the config's (PORT alone sets the port)
+    /// place of the config's. Beyond loopback, client keys are required
     #[arg(long, global = true, value_name = "ADDR", env = "RESPAN_LISTEN")]
     listen: Option<String>,
 
@@ -68,6 +69,10 @@ enum Command {
         /// and `VENDOR=KEY` writes the key itself into the file
         #[arg(short, long, value_name = "VENDOR[=KEY]")]
         provider: Vec<String>,
+        /// Generate a client key (`sk-gw-...`), write it into `client_keys:`
+        /// and print it once: what a gateway beyond localhost needs
+        #[arg(long)]
+        client_key: bool,
     },
     /// Relay one vendor's whole API, with each client's own credentials
     ///
@@ -94,6 +99,7 @@ enum Command {
 const EXAMPLES: &str = "Examples:
   respan-gateway                    Serve ./gateway.yaml, or the providers in the environment
   respan-gateway init               Write a starter ./gateway.yaml
+  respan-gateway init --client-key  ... with a generated client key, printed once
   respan-gateway init -p groq       Write a starter that also enables groq, key env:GROQ_API_KEY
   respan-gateway check -c my.yaml   Check a config and print what it serves
   respan-gateway check --online     ... and call each provider with its key
@@ -105,7 +111,10 @@ Environment (also read from ./.env):
                      Provider keys; with no config file each is a provider
   RESPAN_CONFIG      The config file, as --config
   RESPAN_LISTEN      Where to listen, as --listen
-  PORT               The port to listen on (on 127.0.0.1), if nothing else says
+  PORT               The port to listen on, on every address (0.0.0.0), if
+                     neither --listen, RESPAN_LISTEN nor the config's `listen:` says
+  RESPAN_CLIENT_KEYS Client keys, comma separated, added to the config's
+                     `client_keys:`; a gateway on a non-loopback address needs one
   RESPAN_LOG         text, json or off, as --log
   RESPAN_<VENDOR>_BASE_URL
                      Moves a vendor's base URL when there is no config file";
@@ -171,7 +180,8 @@ where
             output,
             force,
             provider,
-        } => return init(&output, force, &provider),
+            client_key,
+        } => return init(&output, force, &provider, client_key),
         Command::Proxy {
             anthropic,
             url,
@@ -196,12 +206,25 @@ where
         Ok(config) => config,
         Err(e) => return fail(&e.to_string()),
     };
-    let listen = cli.listen.or_else(|| std::env::var("PORT").ok());
-    if let Some(listen) = listen.filter(|l| !l.is_empty()) {
+    let listen = cli.listen.filter(|l| !l.is_empty());
+    if let Some(listen) = listen {
         match crate::config::parse_listen(&listen) {
             Ok(addr) => config.listen = Some(addr),
             Err(e) => return fail(&format!("listen {listen}: {e}")),
         }
+    } else if config.listen.is_none() {
+        // What a PaaS host sets: its router reaches us from outside.
+        let port = std::env::var("PORT").ok().filter(|p| !p.is_empty());
+        if let Some(port) = port {
+            match port.trim().parse::<u16>() {
+                Ok(n) => config.listen = Some(SocketAddr::from(([0, 0, 0, 0], n))),
+                Err(_) => return fail(&format!("PORT={port}: not a port number")),
+            }
+        }
+    }
+    if let Ok(keys) = std::env::var("RESPAN_CLIENT_KEYS") {
+        let keys = keys.split(',').map(str::trim).filter(|k| !k.is_empty());
+        config.client_keys.extend(keys.map(str::to_owned));
     }
     if let Some(log) = cli.log {
         config.log = log;
@@ -214,6 +237,9 @@ where
     };
     if models {
         return list_models(&app).await;
+    }
+    if let Some(refusal) = app.open_refusal(app.listen()) {
+        return fail(&refusal);
     }
     if check {
         println!("{}", app.report());
@@ -242,9 +268,6 @@ where
             eprintln!("{}", log.line(Level::Info, "listening", fields));
         }
         _ => println!("{}", app.banner(bound)),
-    }
-    if let Some(warning) = app.warning(bound) {
-        log.say(Level::Warn, &warning);
     }
     match app.serve(listener, crate::shutdown_signal()).await {
         Ok(()) => SUCCESS,
@@ -293,7 +316,7 @@ async fn list_models(app: &App) -> u8 {
     }
 }
 
-fn init(output: &Path, force: bool, providers: &[String]) -> u8 {
+fn init(output: &Path, force: bool, providers: &[String], client_key: bool) -> u8 {
     let chosen: Result<Vec<Chosen>, String> = providers.iter().map(|p| Chosen::parse(p)).collect();
     let chosen = match chosen {
         Ok(chosen) => chosen,
@@ -303,8 +326,19 @@ fn init(output: &Path, force: bool, providers: &[String]) -> u8 {
         let path = output.display();
         return fail(&format!("{path} exists; add --force to replace it"));
     }
-    let private = chosen.iter().any(Chosen::is_literal);
-    if let Err(e) = write_config(output, &crate::init::starter(&chosen), private) {
+    let private = client_key || chosen.iter().any(Chosen::is_literal);
+    let key = match client_key {
+        true => match crate::init::new_client_key() {
+            Ok(key) => Some(key),
+            Err(e) => return fail(&format!("generate a client key: {e}")),
+        },
+        false => None,
+    };
+    if let Err(e) = write_config(
+        output,
+        &crate::init::starter(&chosen, key.as_deref()),
+        private,
+    ) {
         return fail(&format!("write {}: {e}", output.display()));
     }
     let path = output.display();
@@ -322,6 +356,13 @@ fn init(output: &Path, force: bool, providers: &[String]) -> u8 {
             }
             _ => {}
         }
+    }
+    if let Some(key) = &key {
+        println!(
+            "client key (shown once; it is also in {path}):\n  {key}\n\
+             Clients send it as `Authorization: Bearer {key}` or `x-api-key: {key}`; the \
+             gateway takes it off, no provider sees it.\n"
+        );
     }
     let mut found = crate::init::detected_vendors();
     if !chosen.is_empty() {

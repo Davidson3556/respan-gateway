@@ -511,12 +511,8 @@ async fn the_admin_api_reports_requests_as_they_happen() {
     assert_eq!(overview["totals"]["in_flight"], 0);
     assert_eq!(overview["auth_required"], false);
     assert_eq!(overview["listen"], gw.base.trim_start_matches("http://"));
-    assert!(
-        overview["config_source"]
-            .as_str()
-            .unwrap()
-            .ends_with(".yaml")
-    );
+    assert_eq!(overview["config_source"], "file");
+    assert!(overview["config_path"].as_str().unwrap().ends_with(".yaml"));
 
     let providers = get_json(&gw, "/ui/api/providers").await;
     let openai_info = &providers["providers"][0];

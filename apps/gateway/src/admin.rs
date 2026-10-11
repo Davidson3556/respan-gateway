@@ -22,6 +22,7 @@ use tokio::sync::watch;
 
 use crate::auth::{self, ClientKeys};
 use crate::compose::Plan;
+use crate::config::Source;
 use crate::formats::{KnownFormat, first_of_each_kind};
 use crate::requests::{RequestLog, rfc3339};
 
@@ -33,12 +34,14 @@ mod assets {
 #[derive(Debug)]
 pub struct Admin {
     pub log: Arc<RequestLog>,
-    pub source: String,
+    pub source: Source,
     pub auth_required: bool,
     pub listen: OnceLock<SocketAddr>,
     started_at: SystemTime,
     started: Instant,
-    /// Each provider, as `/ui/api/providers` lists it, but its counts.
+    /// Each provider, as `/ui/api/providers` lists it (`name`, `vendor`
+    /// (string or null), `quirks`, `formats`, `kinds`, `base_url` (string),
+    /// `credentials` (`"gateway"` or `"client"`), and the counts), but its counts.
     providers: Vec<Value>,
     routes: Value,
     /// Set once the server stops: open event streams then end.
@@ -48,7 +51,7 @@ pub struct Admin {
 impl Admin {
     pub fn new(
         log: Arc<RequestLog>,
-        source: String,
+        source: Source,
         plan: &Plan,
         formats: &[KnownFormat],
         stopping: Arc<watch::Sender<bool>>,
@@ -68,7 +71,7 @@ impl Admin {
                         .collect::<Vec<_>>(),
                     "formats": formats,
                     "kinds": kinds,
-                    "base_url": u.entries.first().map(|e| e.base_url.as_str()),
+                    "base_url": u.entries.first().map_or("", |e| e.base_url.as_str()),
                     "credentials": if u.own_key { "gateway" } else { "client" },
                 })
             })
@@ -129,14 +132,35 @@ pub fn router(admin: Arc<Admin>, keys: Arc<ClientKeys>) -> Router {
         .merge(api)
 }
 
+/// `GET /ui/api/overview`:
+///
+/// ```json
+/// {
+///   "version": "0.1.0",
+///   "listen": "127.0.0.1:8080",          // string, or null before the socket is bound
+///   "started_at": "2026-10-11T09:00:00Z",
+///   "uptime_seconds": 12,
+///   "auth_required": false,
+///   "config_source": "file",             // "file" | "environment" | "proxy" | "inline"
+///   "config_path": "gateway.yaml",       // the file as given; null unless config_source is "file"
+///   "totals": { ... }
+/// }
+/// ```
 async fn overview(State(admin): State<Arc<Admin>>) -> Json<Value> {
+    let (source, path) = match &admin.source {
+        Source::File(path) => ("file", Some(path.display().to_string())),
+        Source::Environment => ("environment", None),
+        Source::Proxy => ("proxy", None),
+        Source::Inline => ("inline", None),
+    };
     Json(json!({
         "version": crate::VERSION,
         "listen": admin.listen.get().map(ToString::to_string),
         "started_at": rfc3339(admin.started_at),
         "uptime_seconds": admin.started.elapsed().as_secs(),
         "auth_required": admin.auth_required,
-        "config_source": admin.source,
+        "config_source": source,
+        "config_path": path,
         "totals": admin.log.totals(),
     }))
 }

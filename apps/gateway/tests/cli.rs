@@ -208,8 +208,12 @@ async fn dotenv_gives_keys_and_settings_but_never_beats_the_environment() {
     let out = run(&dir, &["check"], &[("RESPAN_CONFIG", "a.yaml")]).await;
     assert!(out.stdout.contains("config     a.yaml"), "{}", out.stdout);
 
-    // Without a config, the key in .env makes a provider; PORT sets the port.
-    std::fs::write(dir.join(".env"), "OPENAI_API_KEY=sk-from-dotenv\nPORT=0\n").unwrap();
+    // Without a config, the key in .env makes a provider; PORT sets the port (with a client key).
+    std::fs::write(
+        dir.join(".env"),
+        "OPENAI_API_KEY=sk-from-dotenv\nPORT=0\nRESPAN_CLIENT_KEYS=k\n",
+    )
+    .unwrap();
     let gw = Gateway::run_with(&[], &dir, &[]).await;
     let banner = gw.stdout_until("config").await;
     assert!(banner.contains("config     environment"), "{banner}");
@@ -425,4 +429,159 @@ async fn init_writes_a_literal_key_only_when_given_and_keeps_the_file_private() 
     let out = run(&dir, &["check"], &[]).await;
     assert!(out.ok, "{}", out.stderr);
     assert!(!out.stdout.contains("gsk-literal"), "{}", out.stdout);
+}
+
+#[tokio::test]
+async fn port_binds_every_address_but_only_when_nothing_else_says_where() {
+    let dir = empty_dir();
+    let env = [
+        ("OPENAI_API_KEY", "sk"),
+        ("RESPAN_CLIENT_KEYS", "k"),
+        ("PORT", "0"),
+    ];
+    let gw = Gateway::run_with(&[], &dir, &env).await;
+    assert!(gw.base.starts_with("http://0.0.0.0:"), "{}", gw.base);
+
+    // The config's `listen:`, RESPAN_LISTEN and --listen all beat PORT.
+    std::fs::write(
+        dir.join("gateway.yaml"),
+        "listen: 127.0.0.1:0\nproviders: { openai: { vendor: openai } }\n",
+    )
+    .unwrap();
+    let gw = Gateway::run_with(&[], &dir, &env).await;
+    assert!(gw.base.starts_with("http://127.0.0.1:"), "{}", gw.base);
+    std::fs::remove_file(dir.join("gateway.yaml")).unwrap();
+    let with = |extra: (&'static str, &'static str)| [env[0], env[1], env[2], extra];
+    let gw = Gateway::run_with(&[], &dir, &with(("RESPAN_LISTEN", "127.0.0.1:0"))).await;
+    assert!(gw.base.starts_with("http://127.0.0.1:"), "{}", gw.base);
+    let gw = Gateway::run_with(&["--listen", "127.0.0.1:0"], &dir, &env).await;
+    assert!(gw.base.starts_with("http://127.0.0.1:"), "{}", gw.base);
+
+    let out = run(&dir, &["check"], &[env[0], ("PORT", "http")]).await;
+    assert!(
+        out.stderr.contains("PORT=http: not a port"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[tokio::test]
+async fn an_open_gateway_beyond_loopback_is_refused_with_what_to_do() {
+    let dir = empty_dir();
+    let env = [("OPENAI_API_KEY", "sk")];
+    for args in [
+        &["--listen", "0.0.0.0:0"][..],
+        &["check", "--listen", "[::]:0"],
+    ] {
+        let out = run(&dir, args, &env).await;
+        assert!(!out.ok, "{}", out.stdout);
+        assert!(
+            out.stderr.starts_with("error: refusing to listen on "),
+            "{}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains("spend your provider keys"),
+            "{}",
+            out.stderr
+        );
+        assert!(out.stderr.contains("init --client-key"), "{}", out.stderr);
+    }
+    // PORT alone is the same open gateway.
+    let out = run(&dir, &[], &[env[0], ("PORT", "9")]).await;
+    assert!(
+        !out.ok && out.stderr.contains("0.0.0.0:9"),
+        "{}",
+        out.stderr
+    );
+    // Loopback is fine without keys (`check` shows the plan).
+    let out = run(&dir, &["check", "--listen", "127.0.0.1:0"], &env).await;
+    assert!(out.ok, "{}", out.stderr);
+}
+
+#[tokio::test]
+async fn with_client_keys_a_remote_host_and_origin_are_served() {
+    let dir = empty_dir();
+    let env = [("OPENAI_API_KEY", "sk"), ("RESPAN_CLIENT_KEYS", "k1, k2")];
+    let gw = Gateway::run_with(&["--listen", "0.0.0.0:0"], &dir, &env).await;
+    let overview = format!("{}/ui/api/overview", gw.base);
+    let remote = client()
+        .get(&overview)
+        .header("host", "gateway.example.com")
+        .header("origin", "https://app.example.com")
+        .header("authorization", "Bearer k2");
+    let res = remote.send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    let body: serde_json::Value = serde_json::from_slice(&res.bytes().await.unwrap()).unwrap();
+    assert_eq!(body["auth_required"], true);
+    assert_eq!(body["config_source"], "environment");
+    assert!(body["config_path"].is_null());
+    let res = client()
+        .get(&overview)
+        .header("host", "gateway.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 401);
+}
+
+#[tokio::test]
+async fn proxy_holds_no_keys_so_it_may_listen_beyond_loopback() {
+    let dir = empty_dir();
+    let gw = Gateway::run_with(
+        &["proxy", "--anthropic", "--listen", "0.0.0.0:0"],
+        &dir,
+        &[],
+    )
+    .await;
+    assert!(gw.base.starts_with("http://0.0.0.0:"), "{}", gw.base);
+}
+
+#[tokio::test]
+async fn init_client_key_writes_a_strong_key_and_prints_it_once() {
+    let dir = empty_dir();
+    let out = run(&dir, &["init", "--client-key"], &[("OPENAI_API_KEY", "sk")]).await;
+    assert!(out.ok, "{}", out.stderr);
+    let file = std::fs::read_to_string(dir.join("gateway.yaml")).unwrap();
+    let key = out
+        .stdout
+        .split_whitespace()
+        .find(|w| w.starts_with("sk-gw-") && w.len() == 38)
+        .unwrap_or_else(|| panic!("{}", out.stdout));
+    assert!(file.contains(&format!("client_keys: ['{key}']")), "{file}");
+    assert_eq!(out.stdout.matches(key).count(), 3, "{}", out.stdout);
+    assert!(
+        out.stdout.contains("Authorization: Bearer"),
+        "{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("x-api-key"), "{}", out.stdout);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.join("gateway.yaml"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "{mode:o}");
+    }
+    // The file serves beyond loopback now.
+    let out = run(
+        &dir,
+        &["check", "--listen", "0.0.0.0:0"],
+        &[("OPENAI_API_KEY", "sk")],
+    )
+    .await;
+    assert!(
+        out.ok && out.stdout.contains("on: 1 client key"),
+        "{}{}",
+        out.stdout,
+        out.stderr
+    );
+
+    // Without the flag, the key stays a hint.
+    let out = run(&dir, &["init", "--force"], &[]).await;
+    assert!(out.ok && !out.stdout.contains("sk-gw-"), "{}", out.stdout);
+    let file = std::fs::read_to_string(dir.join("gateway.yaml")).unwrap();
+    assert!(file.contains("\n# client_keys: ["), "{file}");
 }
