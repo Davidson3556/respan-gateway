@@ -7,9 +7,9 @@
 //! kind has no place for in its `native`, and writes a request from the
 //! value alone. A response, streamed or whole, decodes into the events of
 //! [`Output`] and is encoded from them, so what survives a relay is what
-//! the events and `native` say, not the provider's bytes. Only an explicit
-//! raw relay ([`respan_gateway_http::Relay::RAW`]) sends the client's
-//! own bytes.
+//! the events and `native` say, not the provider's bytes. A request to a
+//! provider of its own format keeps the headers and query parameters of
+//! the format's spec ([`Schema::CARRIED`]).
 //!
 //! What a format has no form for stays in its own terms (optional
 //! `NativeFields`, a `Content::Native`, a `Output::Native`) and is written
@@ -24,15 +24,15 @@ mod values;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use crate::fields::{rest_of, unix_now};
 #[cfg(test)]
 pub(crate) use errors::answer;
 pub use errors::{merge_details, read_provider_error};
 pub(crate) use errors::{says, says_error};
 pub use exchange::Asked;
 #[cfg(test)]
-pub(crate) use exchange::OutputParser;
+pub(crate) use exchange::Held;
 pub(crate) use exchange::{Gate, error_event, response_encoder, unreadable_event};
-pub(crate) use respan_gateway_http::framing::fields::{rest_of, unix_now};
 pub(crate) use values::{
     INERT, Keep, Names, NativeFieldsExt, Totals, UsageFields, block_fields, check_usage, count,
     decode_content, decode_message, decode_tools, each_tool, encode_content, encode_message,
@@ -43,12 +43,12 @@ pub(crate) use values::{
 pub(crate) use values::{effort_name, own_native, parse_effort, reasoning_of, take_native};
 
 use respan_gateway_conversation::{Assembled, Content, Input, Output};
-use respan_gateway_core::{Connection, EventSink, EventStream, Fault};
-use respan_gateway_http::bytes::Bytes;
+use respan_gateway_core::{Connection, EventSink, Fault};
+use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{
     self, StatusCode, request::Parts as RequestHead, response::Parts as ResponseHead,
 };
-use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo, Reply, bodiless};
+use respan_gateway_http::{ClientIo, Encoder, ProviderIo, Reply, rules::bodiless};
 use serde_json::{Map, Value};
 
 /// Provider HTTP delivery preference, set in call extensions.
@@ -80,14 +80,23 @@ pub trait Schema: Copy + Send + Sync + 'static {
     const STREAM_FLAG: bool = true;
     /// Headers a request to a provider gets if it has none of that name.
     const HEADERS: &'static [(&'static str, &'static str)] = &[];
+    /// The request headers of this format's spec, such as a version or beta
+    /// flags: a client's request of this format carries them to a provider
+    /// of it, where they replace [`Schema::HEADERS`].
+    const CARRIED: &'static [&'static str] = &[];
+    /// The query parameters of this format's spec, carried as
+    /// [`Schema::CARRIED`] is.
+    const CARRIED_QUERY: &'static [&'static str] = &[];
     /// The keys of a conversation's `native` this format writes itself, from
     /// the conversation and the native together.
     const OWN: &'static [&'static str] = &[];
-    /// Decodes a response, whole or streamed, into events.
-    type Decoding: Decoder;
+    /// Decodes the events of a streamed response into events.
+    type Decoding: respan_gateway_http::Decoder<Output>;
 
-    /// A decoder of one response.
+    /// A decoder of one streamed response's events.
     fn decoder(&self) -> Self::Decoding;
+    /// The events of one whole response body `v`.
+    fn decode_body(&self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault>;
     /// A JSON request as a conversation, noting what it has no place for.
     fn decode_json(&self, v: &Value) -> Input;
     /// A conversation as a request, but for its own `native` fields and the
@@ -141,13 +150,16 @@ pub trait Schema: Copy + Send + Sync + 'static {
     /// ending in [`Schema::PATH`].
     fn accepts<B>(&self, request: &http::Request<B>) -> bool {
         request.method() == http::Method::POST
-            && respan_gateway_http::framing::path_ends_with(request.uri(), Self::PATH)
+            && respan_gateway_http_syntax::path_ends_with(request.uri(), Self::PATH)
     }
 
-    /// Read a request lazily: the decoder of a client's request.
-    fn read_request(&self, request: http::Request<Body>) -> EventStream<Input> {
+    /// The decoder of a client's request of `head`, one JSON body.
+    fn read_request(&self, _head: &RequestHead) -> Box<dyn respan_gateway_http::Decoder<Input>> {
         let schema = *self;
-        respan_gateway_http::messages(request, move |_, raw| schema.decode_request(raw))
+        Box::new(move |raw: Bytes, out: &mut Vec<Input>| {
+            out.push(schema.decode_request(raw)?);
+            Ok(())
+        })
     }
 
     /// Decode a finite JSON request synchronously.
@@ -178,14 +190,14 @@ pub trait Schema: Copy + Send + Sync + 'static {
         Ok(v)
     }
 
-    /// Read provider response events with fresh per-body parser state: the
-    /// decoder of a provider's answer.
+    /// The decoder of a provider's answer of `head` to the `call`, with
+    /// fresh state; `None` if it has no body.
     fn read_response(
         &self,
-        response: http::Response<Body>,
-        call: http::Request<Bytes>,
-    ) -> EventStream<Output> {
-        exchange::read_response(*self, response, &call.into_parts().0)
+        head: &ResponseHead,
+        call: &http::Request<Bytes>,
+    ) -> Option<Box<dyn respan_gateway_http::Decoder<Output>>> {
+        exchange::read_response(*self, head, call.method())
     }
 
     /// Decode a finite answer synchronously, without polling an async stream.
@@ -237,7 +249,10 @@ pub trait Schema: Copy + Send + Sync + 'static {
         let encoder = self.response_encoder(&mut head, request);
         let bytes = match bodiless(request.method(), head.status) {
             true => Bytes::new(),
-            false => respan_gateway_http::encode_all(encoder, replies)?,
+            false => {
+                let mut encoder = encoder;
+                encoder.encode_all(replies)?
+            }
         };
         Ok(http::Response::from_parts(head, bytes))
     }
@@ -245,16 +260,19 @@ pub trait Schema: Copy + Send + Sync + 'static {
     /// This format at the client edge: requests in, responses out.
     fn bind_client(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         let schema = *self;
-        let wire = io.extensions().get::<respan_gateway_http::Wire>().cloned();
+        let wire = io
+            .extensions()
+            .get::<respan_gateway_http::raw::Original>()
+            .cloned();
+        let io = io.with_error(move |fault, request, head| schema.refusal(fault, request, head));
         Ok(io.bind(
-            move |request| {
+            move |head| {
                 if let Some(wire) = &wire {
                     exchange::seed_asked::<Self>(wire);
                 }
-                schema.read_request(request)
+                schema.read_request(head)
             },
             move |reply| schema.write_response(reply),
-            move |fault, request, head| schema.refusal(fault, request, head),
         ))
     }
 
@@ -263,22 +281,28 @@ pub trait Schema: Copy + Send + Sync + 'static {
     fn bind_provider(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
         let schema = *self;
         let stream = io.extensions().get::<StreamResponse>().copied();
-        let wire = io.extensions().get::<respan_gateway_http::Wire>().cloned();
+        let wire = io
+            .extensions()
+            .get::<respan_gateway_http::raw::Original>()
+            .cloned();
+        let io = io.with_refusal(move |answer| errors::answer(&schema, answer));
         Ok(io.bind(
             move |head, input| exchange::post(schema, head, input, wire.as_ref(), stream),
-            move |response, call| schema.read_response(response, call),
-            move |answer| errors::answer(&schema, answer),
+            move |head, call| schema.read_response(head, call),
         ))
     }
 }
 
-/// A format's decoder of a response into events, which holds what it needs
-/// between the events of one body.
-pub trait Decoder: Send + 'static {
-    /// The events of one stream event, `raw`.
-    fn event(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault>;
-    /// The events of a stream that has ended, or an error if it was cut.
-    fn end(&mut self, out: &mut Vec<Output>) -> Result<(), Fault>;
-    /// The events of one whole response body `v`.
-    fn body(&mut self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault>;
+/// What `write` writes into one buffer, as one frame if it wrote anything:
+/// how an encoder of one body's chunks gives them as frames.
+pub(crate) fn frame(
+    frames: &mut Vec<Bytes>,
+    write: impl FnOnce(&mut BytesMut) -> Result<(), Fault>,
+) -> Result<(), Fault> {
+    let mut out = BytesMut::new();
+    write(&mut out)?;
+    if !out.is_empty() {
+        frames.push(out.freeze());
+    }
+    Ok(())
 }

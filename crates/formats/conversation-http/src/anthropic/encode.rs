@@ -7,8 +7,8 @@ use crate::schema::{
 use respan_gateway_conversation::{Block, Delta, Finish, Output, Start, Usage};
 use respan_gateway_core::{Fault, NativeValue};
 use respan_gateway_http::Encoder;
-use respan_gateway_http::bytes::BytesMut;
-use respan_gateway_http::framing::sse::event;
+use respan_gateway_http::bytes::{Bytes, BytesMut};
+use respan_gateway_sse::event;
 use serde_json::{Map, Value, json};
 
 use super::{ANTHROPIC, AnthropicMessages, BLOCK_FIELDS, FINISH, StopFields, USAGE, usage_body};
@@ -215,19 +215,33 @@ pub(super) fn emit(out: &mut BytesMut, v: Value) {
     out.extend_from_slice(event(v["type"].as_str(), &v).as_bytes());
 }
 
-impl Encoder<Output> for EventStream {
-    fn encode(&mut self, reply: &Output, out: &mut BytesMut) -> Result<(), Fault> {
+impl EventStream {
+    pub(crate) fn encode_into(&mut self, reply: &Output, out: &mut BytesMut) -> Result<(), Fault> {
         let mut made = BytesMut::new();
         self.write(reply, &mut made)?;
         self.gate.pass(reply, &made, out);
         Ok(())
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    pub(crate) fn end_into(
+        &mut self,
+        end: &Result<(), Fault>,
+        out: &mut BytesMut,
+    ) -> Result<(), Fault> {
         if end.is_ok() {
             self.gate.release(out);
         }
         self.write_end(end, out)
+    }
+}
+
+impl Encoder<Output> for EventStream {
+    fn encode(&mut self, reply: &Output, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        crate::schema::frame(frames, |out| self.encode_into(reply, out))
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        crate::schema::frame(frames, |out| self.end_into(&end, out))
     }
 }
 
@@ -284,7 +298,10 @@ impl EventStream {
             if self.finish.is_some() {
                 self.finish(out)?;
             }
-            let body = match f.get::<respan_gateway_http::RawReply>().map(|r| r.0.body()) {
+            let body = match f
+                .get::<respan_gateway_http::raw::RawReply>()
+                .map(|r| r.0.body())
+            {
                 Some(raw) => String::from_utf8_lossy(raw).into_owned(),
                 None => AnthropicMessages::error_body(f).to_string(),
             };

@@ -24,7 +24,7 @@
 use respan_gateway_conversation::{Input, Output};
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::futures::{future::BoxFuture, stream::BoxStream};
-use respan_gateway_core::{ErrorCode, RetryAfter};
+use respan_gateway_core::{ErrorCode, Provider, RetryAfter};
 use respan_gateway_examples::LIMIT;
 use respan_gateway_examples::admission::{Slot, Slots};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -33,9 +33,9 @@ use std::time::Duration;
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
-use respan_gateway_http::Status;
-use respan_gateway_http::Wire;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
+use respan_gateway_http::raw::Original;
+use respan_gateway_http_faults::Status;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -145,7 +145,7 @@ struct Admission {
 #[async_trait]
 impl Plugin for Admission {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+        let asked = cx.extensions().get::<Original>().and_then(Original::get);
         let paid = asked
             .and_then(|a| a.headers().get("x-tier"))
             .is_some_and(|t| t == "paid");
@@ -169,15 +169,15 @@ impl Plugin for Admission {
         // Explicitly forward the demonstration's tracing label.
         if let Some(label) = cx
             .extensions()
-            .get::<Wire>()
-            .and_then(Wire::get)
+            .get::<Original>()
+            .and_then(Original::get)
             .and_then(|a| a.headers().get("x-case-label"))
             .cloned()
         {
             let mut headers = http::HeaderMap::new();
             headers.insert("x-case-label", label);
             cx.extensions_mut()
-                .insert(respan_gateway_http::CallHeaders(headers));
+                .insert(respan_gateway_http::call::CallHeaders(headers));
         }
         Ok(None)
     }
@@ -196,7 +196,7 @@ const OK: &str =
     r#"{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}"#;
 
 fn gateway(
-    provider: respan_gateway_http::HttpTransport,
+    provider: respan_gateway_http_transport::HttpTransport,
     slots: &Slots,
     free: Duration,
 ) -> Result<Gateway, Fault> {
@@ -206,7 +206,7 @@ fn gateway(
         free,
     };
     Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(
@@ -216,7 +216,7 @@ fn gateway(
                 }),
                 LIMIT,
             ),
-        )?
+        ))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(admission)
         .target("openai")

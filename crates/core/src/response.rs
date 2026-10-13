@@ -10,7 +10,7 @@ use crate::Fault;
 use crate::call::{CallEdge, SharedCall};
 use crate::events::MAX_BATCH;
 use crate::fault::PANICKED;
-use crate::leg::{cut, locked, on_close, run, yield_ready};
+use crate::layers::{cut, locked, on_close, run, yield_ready};
 use crate::values::{AnyEvents, Values, erase, take, view};
 
 /// A response for the client, from a provider or a plugin. Dropped unsent

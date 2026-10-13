@@ -12,7 +12,7 @@ use std::sync::Arc;
 use respan_gateway_core::futures::channel::mpsc;
 use respan_gateway_core::futures::{Stream, StreamExt, future, stream};
 use respan_gateway_core::{
-    ClientContext, EventStream, Fault, Filter, Gateway, Plugin, Response, async_trait,
+    ClientContext, EventStream, Fault, Filter, Gateway, Plugin, Provider, Response, async_trait,
 };
 use respan_gateway_realtime::{Input, Output, ToolResult};
 use respan_gateway_realtime_ws::{GeminiLive, OpenAiRealtime};
@@ -104,7 +104,7 @@ fn gateway(transport: WsTransport, allowed: &[&str]) -> Result<Gateway, Fault> {
     Gateway::new()
         .client::<Input, _, _>(OpenAiRealtime)?
         .client::<Input, _, _>(GeminiLive)?
-        .provider::<Input, _, _>("gemini", GeminiLive, transport.connect())?
+        .provider(Provider::new("gemini", GeminiLive, transport.connect()))?
         .plugin(ToolGuard { allowed })
         .target("gemini")
 }

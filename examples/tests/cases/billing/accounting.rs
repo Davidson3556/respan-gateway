@@ -1,7 +1,7 @@
 //! `Accounting` in a gateway: never overspend, settle exactly once, refuse
 //! what has no bound, and release what a cancelled hook held.
 
-use respan_gateway_core::{BadRequest, Upstream};
+use respan_gateway_core::{BadRequest, Provider, Upstream};
 use respan_gateway_examples::LIMIT;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -18,9 +18,9 @@ use http_support::{post, read_whole, serve};
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation::{Input, Output};
 use respan_gateway_conversation_http::openai::OpenAiChat;
-use respan_gateway_http::HttpTransport;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION};
+use respan_gateway_http_transport::HttpTransport;
 
 const CHAT: &str = "/v1/chat/completions";
 /// 10 output tokens at 10 each.
@@ -100,7 +100,7 @@ fn gateway(
 ) -> Gateway {
     let accounting = Accounting::new(ledger, quote).ttl(Duration::from_millis(200));
     let gw = Gateway::new().client::<Input, _, _>(OpenAiChat);
-    let gw = gw.and_then(|g| g.provider::<Input, _, _>("p", OpenAiChat, transport));
+    let gw = gw.and_then(|g| g.provider(Provider::new("p", OpenAiChat, transport)));
     let gw = gw.and_then(|g| g.target("p"));
     let gw = gw.map(|g| g.plugin(first));
     gw.map(|g| g.plugin(accounting))
@@ -311,7 +311,7 @@ async fn a_quote_without_accounts_is_refused_with_http_401() {
     let accounting = Accounting::new(ledger.clone(), |_, _| Ok(Quote::new([] as [&str; 0], 100)));
     let gw = Gateway::new()
         .client::<Input, _, _>(OpenAiChat)
-        .and_then(|g| g.provider::<Input, _, _>("p", OpenAiChat, http(&fake)))
+        .and_then(|g| g.provider(Provider::new("p", OpenAiChat, http(&fake))))
         .and_then(|g| g.target("p"))
         .map(|g| g.plugin(accounting))
         .unwrap_or_else(|f| panic!("{f}"));
@@ -432,7 +432,7 @@ async fn a_call_sent_that_times_out_before_its_head_is_charged_the_reserve() {
         },
         LIMIT,
     );
-    let gw = gw.and_then(|g| g.provider::<Input, _, _>("p", OpenAiChat, no_head));
+    let gw = gw.and_then(|g| g.provider(Provider::new("p", OpenAiChat, no_head)));
     let gw = gw.and_then(|g| g.target("p"));
     let gw = gw.map(|g| g.plugin(accounting));
     let gw = gw.unwrap_or_else(|f| panic!("{f}"));

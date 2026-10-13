@@ -11,7 +11,7 @@
 //!
 //! `batch_split.rs` builds on this kind (it includes this file as a module).
 
-use respan_gateway_core::{BadRequest, Upstream};
+use respan_gateway_core::{BadRequest, Provider, Upstream};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mockllm::{Answer, FakeOpenAi};
@@ -21,10 +21,10 @@ use respan_gateway_core::{
     async_trait,
 };
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::{self, whole};
+use respan_gateway_http::framing;
 use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
-use respan_gateway_http::{self as h, ClientIo, ProviderIo};
+use respan_gateway_http::{self as h, ClientIo, ProviderIo, Whole};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -67,18 +67,25 @@ impl Format<ClientIo, EmbedRequest, Embeddings> for OpenAiEmbeddings {
 
     fn matches(&self, io: &ClientIo) -> bool {
         io.request().method() == Method::POST
-            && framing::clean_path(io.request().uri().path()).ends_with("/embeddings")
+            && respan_gateway_http_syntax::clean_path(io.request().uri().path())
+                .ends_with("/embeddings")
     }
 
     fn bind(&self, io: ClientIo) -> Result<Connection<EmbedRequest, Embeddings>, Fault> {
-        Ok(io.bind(
-            |request| h::messages(request, |_, raw| read_request(raw)),
+        Ok(io.with_error(error).bind(
+            // The request's one body, read into its one input.
+            |_| {
+                Box::new(|raw: Bytes, out: &mut Vec<EmbedRequest>| {
+                    out.push(read_request(raw)?);
+                    Ok(())
+                })
+            },
+            // The response written whole, once it ended.
             |reply| {
                 let mut head = reply.head();
                 framing::default_content_type(&mut head, "application/json");
-                Ok(reply.write(head, whole::collect(write_embeddings)))
+                Ok(reply.write(head, Box::new(Whole::new(write_embeddings))))
             },
-            error,
         ))
     }
 }
@@ -90,6 +97,7 @@ impl Format<ProviderIo, Embeddings, EmbedRequest> for OpenAiEmbeddings {
 
     fn bind(&self, io: ProviderIo) -> Result<Connection<Embeddings, EmbedRequest>, Fault> {
         Ok(io.bind(
+            // The call's head, and its one input written as its body.
             |head, request: Option<&EmbedRequest>| {
                 if request.is_none() {
                     return Err(Fault::config(format!(
@@ -97,18 +105,23 @@ impl Format<ProviderIo, Embeddings, EmbedRequest> for OpenAiEmbeddings {
                     )));
                 }
                 head.method = Method::POST;
-                framing::set_path(head, "/embeddings")?;
+                respan_gateway_http_syntax::set_path(head, "/embeddings")?;
                 head.headers
                     .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                Ok(framing::each(write_request))
-            },
-            |response, _| {
-                whole::read(response.into_body(), |raw, out| {
-                    out.push(read_embeddings(raw)?);
+                Ok(Box::new(|r: &EmbedRequest, out: &mut Vec<Bytes>| {
+                    out.push(write_request(r)?);
                     Ok(())
-                })
+                }))
             },
-            |answer| h::provider_fault(NAME, answer),
+            // The answer read whole into its one output.
+            |_, _| {
+                Some(Box::new(Whole::new(
+                    |raw: Bytes, out: &mut Vec<Embeddings>| {
+                        out.push(read_embeddings(raw)?);
+                        Ok(())
+                    },
+                )))
+            },
         ))
     }
 }
@@ -247,7 +260,11 @@ async fn embed(body: &'static str) -> Result<(Bytes, StatusCode, Bytes, Usage), 
     let gw = Gateway::new()
         .plugin(PinModel(PINNED))
         .plugin(metered.clone())
-        .provider::<EmbedRequest, _, _>("openai", OpenAiEmbeddings, provider.connect())?
+        .provider(Provider::new(
+            "openai",
+            OpenAiEmbeddings,
+            provider.connect(),
+        ))?
         .client::<EmbedRequest, _, _>(OpenAiEmbeddings)?
         .target("openai")?;
     let (status, _, answered) = read_whole(serve(&gw, post("/v1/embeddings", body)).await.0).await;

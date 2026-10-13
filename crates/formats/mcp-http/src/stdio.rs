@@ -14,11 +14,11 @@ use std::time::Duration;
 
 use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_core::{BadRequest, ErrorCode, Extensions, Fault, Upstream};
-use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{self, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Body, Completion, Credential};
+use respan_gateway_http_faults::Status;
 use respan_gateway_mcp::Message;
 use tokio::process::Command;
 
@@ -170,7 +170,7 @@ impl StdioTransport {
 
     /// Reads at most `bytes` of one line, so of one message, the child
     /// writes; a longer line is no message. By default 32 MiB, the most
-    /// an [`HttpTransport`](respan_gateway_http::HttpTransport) reads of one
+    /// an `respan_gateway_http_transport::HttpTransport` reads of one
     /// answer, so a server over stdio may say as much at once as one over
     /// HTTP.
     pub fn max_line(mut self, bytes: usize) -> Self {

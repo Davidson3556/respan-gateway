@@ -25,14 +25,15 @@ use respan_gateway_core::ErrorCode;
 use respan_gateway_core::futures;
 use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_core::{
-    ClientContext, Connection, Fault, Filter, Format, Gateway, Plugin, ProviderContext, Response,
-    async_trait,
+    ClientContext, Connection, Fault, Filter, Format, Gateway, Plugin, Provider, ProviderContext,
+    Response, async_trait,
 };
-use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_http::passthrough;
-use respan_gateway_http::{Body, ClientIo, HttpTransport, ProviderIo, connect};
+use respan_gateway_http::{Body, ClientIo, ProviderIo, connect};
+use respan_gateway_http_faults::Status;
+use respan_gateway_http_transport::HttpTransport;
+use respan_gateway_passthrough_http as passthrough;
 use serde_json::json;
 use support::{Metered, with_plugins};
 
@@ -50,11 +51,9 @@ impl Format<ClientIo, passthrough::Input<Raw>, passthrough::Output<Raw>> for Raw
         &self,
         io: ClientIo,
     ) -> Result<Connection<passthrough::Input<Raw>, passthrough::Output<Raw>>, Fault> {
-        Ok(io.bind(
-            passthrough::read_request,
-            passthrough::write_response,
-            respan_gateway_http::plain,
-        ))
+        Ok(io
+            .with_error(respan_gateway_http::rules::plain)
+            .bind(passthrough::read_request, passthrough::write_response))
     }
 }
 impl Format<ProviderIo, passthrough::Output<Raw>, passthrough::Input<Raw>> for Raw {
@@ -65,11 +64,7 @@ impl Format<ProviderIo, passthrough::Output<Raw>, passthrough::Input<Raw>> for R
         &self,
         io: ProviderIo,
     ) -> Result<Connection<passthrough::Output<Raw>, passthrough::Input<Raw>>, Fault> {
-        Ok(io.bind(
-            passthrough::write_request,
-            passthrough::read_response,
-            |answer| respan_gateway_http::provider_fault("raw", answer),
-        ))
+        Ok(io.bind(passthrough::write_request, passthrough::read_response))
     }
 }
 
@@ -87,7 +82,11 @@ where
 {
     let (log, calls) = (Outcomes::default(), Calls::default());
     let gw = Gateway::new()
-        .provider::<I, O, _>("p", format.clone(), connect(transport, LIMIT))
+        .provider(Provider::new(
+            "p",
+            format.clone(),
+            connect(transport, LIMIT),
+        ))
         .and_then(|g| {
             Ok(g.client::<I, O, _>(format)?
                 .plugin(log.clone())
@@ -343,16 +342,25 @@ impl Format<ClientIo, Input, Output> for Counted {
     }
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         let count = self.0.clone();
-        Ok(io.bind(
-            move |request| {
-                respan_gateway_http::messages(request, move |_, raw| {
-                    count.fetch_add(1, Ordering::Relaxed);
-                    OpenAiChat.decode_request(raw)
-                })
-            },
-            |reply| OpenAiChat.write_response(reply),
-            |fault, request, head| OpenAiChat.refusal(fault, request, head),
-        ))
+        Ok(io
+            .with_error(|fault, request, head| OpenAiChat.refusal(fault, request, head))
+            .bind(
+                move |_request| {
+                    {
+                        Box::new(move |raw: Bytes, out: &mut Vec<_>| {
+                            let value: Result<_, Fault> = {
+                                {
+                                    count.fetch_add(1, Ordering::Relaxed);
+                                    OpenAiChat.decode_request(raw)
+                                }
+                            };
+                            out.push(value?);
+                            Ok(())
+                        })
+                    }
+                },
+                |reply| OpenAiChat.write_response(reply),
+            ))
     }
 }
 impl Format<ProviderIo, Output, Input> for Counted {
@@ -463,7 +471,7 @@ async fn a_meter_registered_after_a_cutting_filter_sees_every_increment() {
         let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
         assert!(body.contains("\"a\"") && !body.contains("\"b\""), "{body}");
         let call = &calls.all()[0];
-        assert!(matches!(call, Err(f) if respan_gateway_http::error_code(f) == "cap"));
+        assert!(matches!(call, Err(f) if respan_gateway_http_faults::error_code(f) == "cap"));
         let usage = meter.total();
         assert_eq!(usage.output_tokens, metered, "after: {after}");
     }

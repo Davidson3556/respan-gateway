@@ -1,7 +1,7 @@
-//! Fallback, hedging and stalls (use cases 4 and 6). `Resilient` retries
-//! the target as `Retry-After` asks, then falls back to a provider in
-//! another format, or, for a request marked `x-hedge`, races a second
-//! deployment started 200 ms later. A `watchdog` fails OpenAI when its head
+//! Fallback, hedging and stalls (use cases 4 and 6). The `Fallback` plugin
+//! retries the target as `Retry-After` asks, then falls back to a provider in
+//! another format; for a request marked `x-hedge`, the `Hedge` plugin races a
+//! second deployment started 200 ms later. A `watchdog` fails OpenAI when its head
 //! takes over 2 s or its stream goes silent for 1 s. A stream that fails after
 //! its first content reached the client is never retried. Not built here:
 //! splitting an embedding batch and merging `/v1/models`.
@@ -16,12 +16,11 @@ use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
 use respan_gateway_conversation::{Input, Output, set_model};
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
-use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
+use respan_gateway_core::{Fault, Gateway, Plugin, Provider, ProviderContext, async_trait};
 use respan_gateway_http::http::{self, HeaderValue};
-use respan_gateway_http::{Body, Wire, retryable, watchdog};
-use respan_gateway_plugins::routing::{Attempt, Backoff, Until, first_success, race};
+use respan_gateway_http::{Body, call::watchdog, raw::Original};
+use respan_gateway_http_faults::retryable;
+use respan_gateway_plugin_fallback::{Attempt, Backoff, Fallback, Hedge, Until};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -30,40 +29,38 @@ use http_support::{post, read_whole, serve};
 #[path = "../support/http.rs"]
 mod provider_support;
 
-/// Falls back from the target to Anthropic, or hedges it with `openai-eu`.
-struct Resilient;
+/// Falls back from the target to Anthropic.
+fn fallback() -> Fallback {
+    // Each answer is judged at its first content; `Until::End` would hold
+    // each whole and race for the first to finish.
+    Fallback::new(retryable)
+        .after("openai", ["anthropic"])
+        .backoff(Backoff::new(
+            2,
+            Duration::from_millis(250),
+            Duration::from_secs(5),
+        ))
+        .until(Until::content(Output::is_content))
+}
+
+/// Hedges the target with `openai-eu`, started 200 ms later, for a request
+/// marked `x-hedge`.
+fn hedge() -> Hedge {
+    Hedge::new(Duration::from_millis(200))
+        .after("openai", ["openai-eu"])
+        .until(Until::content(Output::is_content))
+        .when(|cx| {
+            let asked = cx.extensions().get::<Original>().and_then(Original::get);
+            asked.is_some_and(|a| a.headers().contains_key("x-hedge"))
+        })
+}
+
+/// Anthropic names its models its own way: a change for one provider's
+/// calls goes in `on_provider`, keyed on the provider.
+struct ClaudeModel;
 
 #[async_trait]
-impl Plugin for Resilient {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let target = cx.target().map(str::to_owned);
-        let Some(target) = target.filter(|_| cx.is_kind::<Input>()) else {
-            return Ok(None);
-        };
-        // Each answer is judged at its first content; `Until::End` would
-        // hold each whole and race for the first to finish.
-        let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
-        if asked.is_some_and(|a| a.headers().contains_key("x-hedge")) {
-            let calls = [cx.call(target), cx.call("openai-eu")];
-            let stagger = Duration::from_millis(200);
-            return race(calls, stagger, Until::content(Output::is_content))
-                .await
-                .map(Some);
-        }
-        let backoff = Backoff::new(2, Duration::from_millis(250), Duration::from_secs(5));
-        let calls = [cx.call(target), cx.call("anthropic")];
-        first_success(
-            calls,
-            &backoff,
-            Until::content(Output::is_content),
-            retryable,
-        )
-        .await
-        .map(Some)
-    }
-
-    /// Anthropic names its models its own way: a change for one provider's
-    /// calls goes here, keyed on the provider.
+impl Plugin for ClaudeModel {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         if px.provider() == "anthropic" && px.is_kind::<Input>() {
             px.filter(set_model("claude-sonnet-4-5"))?;
@@ -88,7 +85,7 @@ impl Plugin for Log {
         let end = end
             .as_ref()
             .err()
-            .map_or("ok", respan_gateway_http::error_code);
+            .map_or("ok", respan_gateway_http_faults::error_code);
         let chat = px.input::<Input>().ok();
         let model = chat.and_then(|c| c.model.as_deref()).unwrap_or("-");
         let line = format!("{} {model} #{index} {role:?} {end}", px.provider());
@@ -99,7 +96,7 @@ impl Plugin for Log {
 }
 
 #[derive(Clone, Copy)]
-enum Provider {
+enum Fake {
     OpenAi,
     Europe,
 }
@@ -107,7 +104,7 @@ enum Provider {
 /// The body the client got, and each attempt as logged, by provider.
 type Run = Result<(String, Vec<String>, [usize; 3]), Fault>;
 
-type Replies = Vec<(Provider, Answer)>;
+type Replies = Vec<(Fake, Answer)>;
 
 /// A streamed chat request.
 fn chat() -> http::Request<Body> {
@@ -127,8 +124,8 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
     let log = Log::default();
     for (provider, answer) in replies {
         match provider {
-            Provider::OpenAi => openai.answer(answer),
-            Provider::Europe => europe.answer(answer),
+            Fake::OpenAi => openai.answer(answer),
+            Fake::Europe => europe.answer(answer),
         }
     }
     claude.answer(anthropic());
@@ -149,23 +146,25 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
     );
     let gw = Gateway::new()
         .client::<Input, _, _>(OpenAiChat)?
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(primary, LIMIT),
-        )?
-        .provider::<Input, _, _>(
+        ))?
+        .provider(Provider::new(
             "openai-eu",
             OpenAiChat,
             provider_support::openai(&europe.base_url())?.connect(),
-        )?
-        .provider::<Input, _, _>(
+        ))?
+        .provider(Provider::new(
             "anthropic",
             AnthropicMessages,
             provider_support::anthropic(&claude.base_url())?.connect(),
-        )?
+        ))?
         .plugin(log.clone())
-        .plugin(Resilient)
+        .plugin(ClaudeModel)
+        .plugin(hedge())
+        .plugin(fallback())
         .target("openai")?;
     let (status, _, body) = read_whole(serve(&gw, req).await.0).await;
     gw.idle().await;
@@ -211,8 +210,8 @@ fn rate_limited() -> Answer {
 
 async fn rate_limited_then_fallback() -> Run {
     let replies = vec![
-        (Provider::OpenAi, rate_limited()),
-        (Provider::OpenAi, rate_limited()),
+        (Fake::OpenAi, rate_limited()),
+        (Fake::OpenAi, rate_limited()),
     ];
     let name = "OpenAI answers 429 with Retry-After: 1, twice; Anthropic answers";
     run(name, Duration::ZERO, chat(), replies).await
@@ -220,7 +219,7 @@ async fn rate_limited_then_fallback() -> Run {
 
 async fn cut_after_first_words() -> Run {
     let name = "OpenAI's stream breaks after its first words: committed, not retried";
-    let replies = vec![(Provider::OpenAi, openai("Hello", true))];
+    let replies = vec![(Fake::OpenAi, openai("Hello", true))];
     run(name, Duration::ZERO, chat(), replies).await
 }
 
@@ -231,7 +230,7 @@ async fn stalled_then_fallback() -> Run {
 
 async fn slow_whole_answer() -> Run {
     let ok = r#"{"id":"c","model":"gpt-4o","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"an essay"}}]}"#;
-    let replies = vec![(Provider::OpenAi, Answer::raw(ok))];
+    let replies = vec![(Fake::OpenAi, Answer::raw(ok))];
     let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"write an essay"}]}"#;
     let name = "OpenAI's whole answer takes 1.5 s: within the head bound, not cut";
     let req = post("/v1/chat/completions", body);
@@ -240,7 +239,7 @@ async fn slow_whole_answer() -> Run {
 
 async fn hedged() -> Run {
     let (late, fast) = (openai("late", false), openai("fast", false));
-    let replies = vec![(Provider::OpenAi, late), (Provider::Europe, fast)];
+    let replies = vec![(Fake::OpenAi, late), (Fake::Europe, fast)];
     let name = "Hedged: OpenAI takes 900 ms; openai-eu starts 200 ms in and wins";
     let mut req = chat();
     req.headers_mut()

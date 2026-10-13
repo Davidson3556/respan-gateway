@@ -24,10 +24,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_core::{Fault, Filter, Gateway, Plugin, ProviderContext, async_trait};
+use respan_gateway_core::{Fault, Filter, Gateway, Plugin, Provider, ProviderContext, async_trait};
 use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
-use respan_gateway_http::Status;
+use respan_gateway_http_faults::Status;
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
@@ -182,7 +182,7 @@ fn gateway(
 ) -> Result<Gateway, Fault> {
     let accounting = Accounting::new(ledger, quote);
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
+        .provider(Provider::new("openai", OpenAiChat, transport))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(Cap) // before accounting
         .plugin(accounting)

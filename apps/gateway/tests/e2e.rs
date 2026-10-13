@@ -7,10 +7,11 @@
 //! framing, streams, sessions and breaks included. Clients speak real HTTP
 //! and WebSocket to the real axum server.
 //!
-//! A raw relay sends the client's request bytes unedited, which these tests
-//! check byte for byte. Responses are re-encoded, so they are checked by
-//! meaning: every event and field the provider sent is present, in the same
-//! format, and the gateway may add what the format requires.
+//! A request is written again by its format, which round-trips one of its
+//! own: these tests check it says what the client's did, with its spec's
+//! headers. Responses are re-encoded, so they are checked by meaning: every
+//! event and field the provider sent is present, in the same format, and
+//! the gateway may add what the format requires.
 //!
 //! Run: `cargo test -p respan-gateway --test e2e`. Calls to real providers
 //! are in `validation/tests/live_providers.rs`, ignored unless asked for.
@@ -38,7 +39,7 @@ fn one_provider(format: &str, base_url: &str) -> String {
         "providers:
   p: {{ formats: {format}, base_url: '{base_url}' }}
 formats: [openai-chat, anthropic-messages]
-default: p
+plugins: {{ routing: {{ default: p }} }}
 "
     )
 }
@@ -52,8 +53,9 @@ fn both(openai: &str, anthropic: &str) -> String {
   anthropic: {{ formats: anthropic-messages, base_url: '{anthropic}', auth: {{ type: header, name: x-api-key, key: sk-gw-anthropic }} }}
 formats: [openai-chat, anthropic-messages]
 plugins:
-  - models: [{{ prefix: claude, provider: anthropic }}]
-default: openai
+  routing:
+    models: [{{ prefix: claude, provider: anthropic }}]
+    default: openai
 "
     )
 }
@@ -219,9 +221,9 @@ async fn openai_whole_relay_sends_the_request_byte_exact_and_passes_the_clients_
     let got = &openai.requests()[0];
     assert_eq!(got.path, CHAT);
     assert_eq!(
-        got.raw,
-        OPENAI_REQUEST.as_bytes(),
-        "the client's bytes, unread"
+        got.body,
+        json(OPENAI_REQUEST),
+        "the client's request, round-tripped"
     );
     assert_eq!(got.header("authorization"), Some("Bearer sk-client"));
     assert_eq!(got.header("openai-beta"), Some("assistants=v9"));
@@ -255,13 +257,17 @@ async fn openai_stream_relay_sends_the_request_byte_exact_and_passes_the_clients
     assert_eq!(ended, Ok(()));
     let got = &openai.requests()[0];
     assert_eq!(got.path, CHAT);
-    assert_eq!(got.raw, request.as_bytes());
+    assert_eq!(
+        got.body,
+        json(&request),
+        "the client's request, round-tripped"
+    );
     assert_eq!(got.header("authorization"), Some("Bearer sk-client"));
     assert_relays_all(&body, &OPENAI_STREAM);
 }
 
 #[tokio::test]
-async fn raw_proxy_preserves_the_clients_usage_request() {
+async fn a_proxy_asks_for_usage_its_client_never_sees() {
     let openai = FakeOpenAi::start().await;
     let gw = Gateway::run(&[
         "proxy",
@@ -291,8 +297,9 @@ async fn raw_proxy_preserves_the_clients_usage_request() {
 
     let (body, ended) = read_all(resp).await;
     assert_eq!(ended, Ok(()));
+    // The gateway asks for usage, to log it; the client did not.
     let seen = body_of(&openai, 0);
-    assert!(seen["stream_options"]["include_usage"].is_null());
+    assert_eq!(seen["stream_options"]["include_usage"], true);
     assert_eq!(seen["metadata"]["kept"], "yes");
     // What the provider sends a client that did not ask for usage.
     assert_relays_all(&body, &OPENAI_STREAM);
@@ -313,7 +320,7 @@ async fn a_provider_with_its_own_key_replaces_the_clients() {
         "providers:
   p: {{ formats: openai-chat, base_url: '{}', auth: {{ type: bearer, key: sk-own }} }}
 formats: [openai-chat]
-default: p
+plugins: {{ routing: {{ default: p }} }}
 ",
         openai.base_url()
     );
@@ -358,7 +365,11 @@ async fn anthropic_stream_relay_sends_the_request_byte_exact_and_passes_the_clie
     assert_eq!(ended, Ok(()));
     let got = &anthropic.requests()[0];
     assert_eq!(got.path, MESSAGES);
-    assert_eq!(got.raw, request.as_bytes());
+    assert_eq!(
+        got.body,
+        json(&request),
+        "the client's request, round-tripped"
+    );
     assert_eq!(got.header("x-api-key"), Some("sk-ant-client"));
     assert_eq!(got.header("anthropic-version"), Some("2023-06-01"));
     assert_eq!(
@@ -384,7 +395,8 @@ async fn anthropic_whole_relay_sends_the_request_byte_exact_with_the_clients_own
 
     let answer = r#"{"id":"msg_1", "type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}"#;
     anthropic.answer(Answer::raw(answer));
-    // A raw relay sends the client's headers as they came, its version too.
+    // A call of the client's own format carries its spec's headers, its
+    // version too.
     let resp = post(
         gw.url(MESSAGES),
         &[
@@ -525,8 +537,9 @@ async fn an_openai_clients_key_does_not_reach_an_anthropic_provider_without_one(
   anthropic: {{ formats: anthropic-messages, base_url: '{}' }}
 formats: [openai-chat]
 plugins:
-  - models: [{{ prefix: claude, provider: anthropic }}]
-default: openai
+  routing:
+    models: [{{ prefix: claude, provider: anthropic }}]
+    default: openai
 ",
         openai.base_url(),
         anthropic.base_url()
@@ -1046,7 +1059,8 @@ async fn cookies_and_forwarding_headers_do_not_reach_the_provider() {
     ] {
         assert!(got.header(gone).is_none(), "{gone} reached the provider");
     }
-    assert_eq!(got.header("x-custom"), Some("kept"));
+    // Nor does a header of no spec of the format, which writes the head.
+    assert_eq!(got.header("x-custom"), None);
 }
 
 #[tokio::test]
@@ -1294,7 +1308,7 @@ async fn serving_passthrough_needs_a_provider_of_that_format() {
         "providers:
   p: { formats: openai-chat, base_url: 'http://127.0.0.1:1/v1' }
 formats: [openai-chat, passthrough]
-default: p
+plugins: { routing: { default: p } }
 ",
     );
     let out = std::process::Command::new(bin)
@@ -1322,14 +1336,14 @@ async fn proxy_needs_no_config_and_relays_claude_code_with_its_own_credentials()
         ("anthropic-version", "2023-06-01"),
         ("anthropic-beta", "interleaved-thinking-2025-05-14"),
     ];
-    // Chat, streamed, byte for byte, in odd spacing.
+    // Chat, streamed, in odd spacing: written again, it says the same.
     anthropic.answer(script(&ANTHROPIC_STREAM));
     let asked = r#"{ "model":"claude-sonnet-4-5","max_tokens":64, "stream":true,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"} }"#;
     let resp = post(gw.url(MESSAGES), &headers, asked).await;
     assert_eq!(resp.status(), 200);
     assert_relays_all(&resp.text().await.unwrap(), &ANTHROPIC_STREAM);
     let got = &anthropic.requests()[0];
-    assert_eq!(got.raw, asked.as_bytes());
+    assert_eq!(got.body, json(asked), "the client's request, round-tripped");
     assert_eq!(got.header("x-api-key"), Some("sk-ant-own"));
     assert_eq!(
         got.header("anthropic-beta"),

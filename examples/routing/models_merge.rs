@@ -23,14 +23,14 @@ use respan_gateway_core::Upstream;
 use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::futures::{TryStreamExt, stream};
 use respan_gateway_core::{
-    ClientContext, Connection, Fault, Format, Gateway, Plugin, Response, async_trait,
+    ClientContext, Connection, Fault, Format, Gateway, Plugin, Provider, Response, async_trait,
 };
-use respan_gateway_http::HttpTransport;
+use respan_gateway_http::Whole;
 use respan_gateway_http::framing;
-use respan_gateway_http::framing::whole;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_http::passthrough;
-use respan_gateway_http::{self as h, ClientIo, ProviderIo};
+use respan_gateway_http::{ClientIo, ProviderIo};
+use respan_gateway_http_transport::HttpTransport;
+use respan_gateway_passthrough_http as passthrough;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -56,9 +56,14 @@ impl Format<ClientIo, passthrough::Input<Models>, passthrough::Output<Models>> f
         &self,
         io: ClientIo,
     ) -> Result<Connection<passthrough::Input<Models>, passthrough::Output<Models>>, Fault> {
-        Ok(io.bind(
-            passthrough::read_request,
-            |reply| {
+        Ok(io
+            .with_error(|fault, _, head| {
+                framing::default_content_type(head, "application/json");
+                json!({ "error": { "message": fault.message() } })
+                    .to_string()
+                    .into()
+            })
+            .bind(passthrough::read_request, |reply| {
                 // A merged list has no provider's head to borrow a content type from.
                 let mut head = reply.head();
                 framing::default_content_type(&mut head, "application/json");
@@ -68,15 +73,8 @@ impl Format<ClientIo, passthrough::Input<Models>, passthrough::Output<Models>> f
                         .flat_map(|g| g.0.body().to_vec())
                         .collect::<Vec<u8>>())
                 };
-                Ok(reply.write(head, whole::collect(write)))
-            },
-            |fault, _, head| {
-                framing::default_content_type(head, "application/json");
-                json!({ "error": { "message": fault.message() } })
-                    .to_string()
-                    .into()
-            },
-        ))
+                Ok(reply.write(head, Box::new(Whole::new(write))))
+            }))
     }
 }
 
@@ -89,11 +87,7 @@ impl Format<ProviderIo, passthrough::Output<Models>, passthrough::Input<Models>>
         &self,
         io: ProviderIo,
     ) -> Result<Connection<passthrough::Output<Models>, passthrough::Input<Models>>, Fault> {
-        Ok(io.bind(
-            passthrough::write_request,
-            passthrough::read_response,
-            |answer| h::provider_fault("models", answer),
-        ))
+        Ok(io.bind(passthrough::write_request, passthrough::read_response))
     }
 }
 
@@ -238,11 +232,7 @@ fn gateway(a: &LocalModels, b: &LocalModels) -> Result<Gateway, Fault> {
     let mut gateway = Gateway::new().client::<passthrough::Input<Models>, _, _>(Models)?;
     for (name, server, token) in providers {
         let transport = HttpTransport::new(&server.url)?.with_headers(key(token))?;
-        gateway = gateway.provider::<passthrough::Input<Models>, _, _>(
-            name,
-            Models,
-            transport.connect(),
-        )?;
+        gateway = gateway.provider(Provider::new(name, Models, transport.connect()))?;
     }
     Ok(gateway.plugin(MergeModels(
         providers.iter().map(|(name, ..)| *name).collect(),

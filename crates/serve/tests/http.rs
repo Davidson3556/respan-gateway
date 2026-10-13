@@ -11,15 +11,17 @@ use std::sync::{Arc, Mutex};
 
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
-use respan_gateway_core::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, async_trait};
-use respan_gateway_http::HttpTransport;
+use respan_gateway_core::{
+    ClientContext, Extensions, Fault, Format, Gateway, Plugin, Provider, async_trait,
+};
+use respan_gateway_http::call::{CallHeaders, credentials};
 use respan_gateway_http::http;
 use respan_gateway_http::{Body, Completion, ProviderIo};
-use respan_gateway_http::{CallHeaders, credentials};
+use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_serve::router;
 use tokio::net::TcpListener;
 
-use respan_gateway_http::Relay;
+use respan_gateway_plugin_relay::Relay;
 
 const SSE: &str =
     "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
@@ -56,16 +58,17 @@ where
     T: Fn(Extensions) -> ProviderIo + Send + Sync + 'static,
 {
     Gateway::new()
-        .provider("local", format, transport)
+        .provider(Provider::new("local", format, transport))
         .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"))
 }
 
-/// A gateway relaying OpenAI clients raw, with their own paths, to the
-/// provider's origin `base`.
+/// A gateway relaying OpenAI clients to the provider at the origin `base`,
+/// its API under `/v1`.
 fn openai_gateway(base: impl Into<String>) -> Gateway {
-    gateway_to(OpenAiChat, http(base).connect()).plugin(Relay::RAW)
+    let base = format!("{}/v1", base.into());
+    gateway_to(OpenAiChat, http(base).connect()).plugin(Relay)
 }
 
 async fn spawn(app: Router) -> String {
@@ -400,30 +403,26 @@ fn exchange(
     call
 }
 
-// The adapter lifts the client's credentials into an extension,
-// which the transport puts back when it has no keys of its own.
+// The adapter lifts the client's credentials into an extension, which a
+// transport with no keys of its own puts back when the call asks, as a
+// relay's does.
 #[tokio::test]
-async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
+async fn without_headers_of_its_own_a_relay_passes_the_clients_credentials() {
     use respan_gateway_http::http_body_util::BodyExt;
-    use respan_gateway_http::passthrough;
-    use respan_gateway_http::passthrough::Passthrough;
+    use respan_gateway_passthrough_http as passthrough;
+    use respan_gateway_passthrough_http::Passthrough;
     let head = call_head("/v1/chat?key=k&beta=1", &CLIENT);
     let before = head.headers.clone();
     let gateway = Gateway::new()
         .client::<passthrough::Input<Passthrough>, _, _>(Passthrough)
         .expect("valid test setup")
-        .provider::<passthrough::Input<Passthrough>, _, _>(
+        .provider(Provider::new(
             "relay",
             Passthrough,
             respan_gateway_http::connect(
                 move |mut call| {
                     let before = before.clone();
                     async move {
-                        assert!(
-                            call.extensions()
-                                .get::<respan_gateway_core::Extensions>()
-                                .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some())
-                        );
                         credentials(&mut call, &http::HeaderMap::new());
                         assert_eq!(call.headers(), &before);
                         assert_eq!(call.uri(), "/v1/chat?beta=1&key=k");
@@ -432,11 +431,11 @@ async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
                 },
                 LIMIT,
             ),
-        )
+        ))
         .expect("valid test setup")
         .target("relay")
         .expect("valid test setup")
-        .plugin(Relay::RAW);
+        .plugin(Relay);
     let (answer, ended) = respan_gateway_http::handle(
         &gateway,
         http::Request::from_parts(head, Body::full("")),
@@ -540,13 +539,13 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
     .await;
     let log = Log::default();
     let gateway = Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "local",
             OpenAiChat,
             http(format!("{provider}/v1")).connect(),
-        )
+        ))
         .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
-        .map(|g| g.plugin(log.clone()).plugin(Relay::HEADS))
+        .map(|g| g.plugin(log.clone()).plugin(Relay))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
     let base = spawn(router(gateway.clone())).await;
@@ -697,7 +696,7 @@ impl Plugin for L6Ends {
         let code = end
             .as_ref()
             .err()
-            .map_or("ok", respan_gateway_http::error_code)
+            .map_or("ok", respan_gateway_http_faults::error_code)
             .to_owned();
         self.0
             .lock()
@@ -712,7 +711,7 @@ impl Plugin for L6Ends {
         let code = end
             .as_ref()
             .err()
-            .map_or("ok", respan_gateway_http::error_code)
+            .map_or("ok", respan_gateway_http_faults::error_code)
             .to_owned();
         self.0
             .lock()
@@ -726,7 +725,7 @@ impl Plugin for L6Ends {
 /// complete, so each request and call ends `ok`, never `abandoned`.
 async fn l6_bodiless(with_304: bool) {
     use axum::routing::get;
-    use respan_gateway_http::passthrough::Passthrough;
+    use respan_gateway_passthrough_http::Passthrough;
     let big = "x".repeat(1 << 20);
     let provider = spawn(
         Router::new()
@@ -746,12 +745,14 @@ async fn l6_bodiless(with_304: bool) {
     .await;
     let ends = L6Ends::default();
     let gateway = Gateway::new()
-        .provider::<respan_gateway_http::passthrough::Input<
-            respan_gateway_http::passthrough::Passthrough,
-        >, _, _>("any", Passthrough, http(provider.clone()).connect())
+        .provider(Provider::new(
+            "any",
+            Passthrough,
+            http(provider.clone()).connect(),
+        ))
         .and_then(|g| {
-            g.client::<respan_gateway_http::passthrough::Input<
-                respan_gateway_http::passthrough::Passthrough,
+            g.client::<respan_gateway_passthrough_http::Input<
+                respan_gateway_passthrough_http::Passthrough,
             >, _, _>(Passthrough)
         })
         .map(|g| g.plugin(ends.clone()))

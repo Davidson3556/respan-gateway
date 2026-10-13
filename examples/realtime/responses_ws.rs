@@ -13,7 +13,7 @@ use budget::{Budget, OUTPUT};
 use respan_gateway_core::BadRequest;
 use respan_gateway_core::futures::{StreamExt, TryStreamExt};
 use respan_gateway_core::{
-    ClientContext, EventStream, Fault, Gateway, Plugin, Response, async_trait,
+    ClientContext, EventStream, Fault, Gateway, Plugin, Provider, Response, async_trait,
 };
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
@@ -119,7 +119,7 @@ impl Plugin for Sessions {
 fn gateway(transport: WsTransport, sessions: Sessions) -> Result<Gateway, Fault> {
     Gateway::new()
         .client::<Input, _, _>(ResponsesWs)?
-        .provider::<Input, _, _>("responses", ResponsesWs, transport.connect())?
+        .provider(Provider::new("responses", ResponsesWs, transport.connect()))?
         .plugin(sessions)
         .target("responses")
 }

@@ -8,7 +8,6 @@ use respan_gateway_core::futures::stream;
 use respan_gateway_core::{BadRequest, Fault, Upstream};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::sse;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
 use respan_gateway_mcp::Message;
@@ -449,7 +448,7 @@ fn events(
         let (mut rx, on_late) = state?;
         match within(until, rx.recv()).await {
             Ok(next) => {
-                let event = Bytes::from(sse::event(None, Value::from(next?)));
+                let event = Bytes::from(respan_gateway_sse::event(None, Value::from(next?)));
                 Some((Ok(event), Some((rx, on_late))))
             }
             Err(late) => {

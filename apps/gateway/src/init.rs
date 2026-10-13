@@ -134,13 +134,16 @@ listen: 127.0.0.1:8080
 # serving a kind (chat, realtime, ...) is that kind's default.
 providers:
 {providers}
-# Route model names to providers, before the presets' own names:
+# Plugins, each under its name. Routing sends model names to providers,
+# before the presets' own names, and a default for requests nothing else
+# routes; fallback tries other providers when one refuses:
 # plugins:
-#   - models:
+#   routing:
+#     models:
 #       - {{ prefix: llama, provider: groq }}
-
-# The default provider for requests nothing else routes:
-# default: openai
+#     default: openai
+#   fallback:
+#     after: {{ openai: [openai-eu] }}
 
 # Print each request to stderr as text or json (or off); serve the web UI
 # at /ui/.

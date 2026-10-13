@@ -12,6 +12,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+respan-gateway-sse.workspace = true
+respan-gateway-http-syntax.workspace = true
+respan-gateway-http-faults.workspace = true
 base64.workspace = true
 getrandom = { workspace = true, features = ["std"] }
 memchr.workspace = true
@@ -26,6 +29,7 @@ serde_json.workspace = true
 axum.workspace = true
 futures.workspace = true
 multer = "3"
-respan-gateway-http = { workspace = true, features = ["reqwest"] }
-respan-gateway-plugins.workspace = true
+respan-gateway-http.workspace = true
+respan-gateway-http-transport.workspace = true
+respan-gateway-plugin-routing.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }

@@ -1,8 +1,8 @@
 use super::*;
 use respan_gateway_conversation::{Message, Role};
-use respan_gateway_core::{Connection, Format};
-use respan_gateway_http::passthrough;
+use respan_gateway_core::{Connection, Format, Provider};
 use respan_gateway_http::{self as h, ClientIo, ProviderIo};
+use respan_gateway_passthrough_http as passthrough;
 
 /// OpenAI's Responses API, relayed byte for byte: traffic of no kind.
 #[derive(Clone)]
@@ -14,18 +14,17 @@ impl Format<ClientIo, passthrough::Input<Responses>, passthrough::Output<Respons
     }
     fn matches(&self, io: &ClientIo) -> bool {
         io.request().method() == h::http::Method::POST
-            && h::framing::clean_path(io.request().uri().path()).ends_with("/responses")
+            && respan_gateway_http_syntax::clean_path(io.request().uri().path())
+                .ends_with("/responses")
     }
     fn bind(
         &self,
         io: ClientIo,
     ) -> Result<Connection<passthrough::Input<Responses>, passthrough::Output<Responses>>, Fault>
     {
-        Ok(io.bind(
-            passthrough::read_request,
-            passthrough::write_response,
-            h::plain,
-        ))
+        Ok(io
+            .with_error(h::rules::plain)
+            .bind(passthrough::read_request, passthrough::write_response))
     }
 }
 
@@ -40,11 +39,7 @@ impl Format<ProviderIo, passthrough::Output<Responses>, passthrough::Input<Respo
         io: ProviderIo,
     ) -> Result<Connection<passthrough::Output<Responses>, passthrough::Input<Responses>>, Fault>
     {
-        Ok(io.bind(
-            passthrough::write_request,
-            passthrough::read_response,
-            |answer| h::provider_fault("responses", answer),
-        ))
+        Ok(io.bind(passthrough::write_request, passthrough::read_response))
     }
 }
 
@@ -58,7 +53,7 @@ fn gateway_with_responses(
     + 'static,
 ) -> Result<Gateway, Fault> {
     gateway(transport.clone())?
-        .provider::<passthrough::Input<Responses>, _, _>("responses", Responses, transport)?
+        .provider(Provider::new("responses", Responses, transport))?
         .client::<passthrough::Input<Responses>, _, _>(Responses)
 }
 

@@ -13,36 +13,30 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
-#[cfg(feature = "reqwest")]
 use futures::TryStreamExt;
 use hooks::Outcomes;
-#[cfg(feature = "reqwest")]
 use http::HeaderMap;
-#[cfg(feature = "reqwest")]
 use http::header::AUTHORIZATION;
 use http::header::{HOST, UPGRADE};
 use http::{HeaderValue, StatusCode};
 use http_body_util::BodyExt;
 use http_support::{LIMIT, post, read_whole, serve, serve_live, streamed};
-#[cfg(feature = "reqwest")]
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation::{Input, Output};
-#[cfg(feature = "reqwest")]
 use respan_gateway_conversation::{Message, Role};
 use respan_gateway_conversation_http::Schema;
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures;
-use respan_gateway_core::{BadRequest, Upstream};
+use respan_gateway_core::{BadRequest, Provider, Upstream};
 use respan_gateway_core::{
-    ClientContext, Connection, EventStream, Fault, Format, Gateway, Plugin, ProviderContext,
-    Response, async_trait,
+    ClientContext, Connection, Fault, Format, Gateway, Plugin, ProviderContext, Response,
+    async_trait,
 };
-#[cfg(feature = "reqwest")]
-use respan_gateway_http::HttpTransport;
 use respan_gateway_http::bytes;
 use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo};
 use respan_gateway_http::{http, http_body_util};
+use respan_gateway_http_transport::HttpTransport;
 
 /// A message in: its number in its stream and its text.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,32 +68,8 @@ impl Format<ClientIo, In, Out> for Msg {
         io.request().uri().path().starts_with("/msg")
     }
     fn bind(&self, io: ClientIo) -> Result<Connection<In, Out>, Fault> {
-        Ok(io.bind(
-            |request| {
-                let body = request.into_body();
-                if let Some(raw) = body.full_bytes().cloned() {
-                    EventStream::lazy(move || {
-                        let mut out = Vec::new();
-                        let mut decoder = Numbering(0);
-                        decoder.decode(raw.clone(), &mut out)?;
-                        decoder.end(&mut out)?;
-                        if out.len() != 1 {
-                            return Err(BadRequest::fault("expected one input"));
-                        }
-                        Ok(out.remove(0))
-                    })
-                } else {
-                    respan_gateway_http::framing::parse(
-                        body,
-                        Numbering(0),
-                        |state, bytes, out| state.decode(bytes, out),
-                        |state, end, out| {
-                            end?;
-                            state.end(out)
-                        },
-                    )
-                }
-            },
+        Ok(io.with_error(|_, _, _| Bytes::new()).bind(
+            |_| Box::new(Numbering(0)),
             |reply| {
                 let mut head = reply.head();
                 if reply.request().headers().contains_key(UPGRADE) && head.status == StatusCode::OK
@@ -108,7 +78,6 @@ impl Format<ClientIo, In, Out> for Msg {
                 }
                 Ok(reply.write(head, Box::new(Answers)))
             },
-            |_, _, _| Bytes::new(),
         ))
     }
 }
@@ -123,17 +92,15 @@ impl Format<ProviderIo, Out, In> for Msg {
                     Some(value) => format!("/msg/{}", value.1),
                     None => "/msg".to_owned(),
                 };
-                respan_gateway_http::framing::set_path(head, &path)?;
+                respan_gateway_http_syntax::set_path(head, &path)?;
                 Ok(Box::new(Numbered(0)) as Box<dyn Encoder<In>>)
             },
-            |response, _| {
-                EventStream::stream(
-                    response
-                        .into_body()
-                        .map(|raw| raw.map(|raw| Out(String::from_utf8_lossy(&raw).into_owned()))),
-                )
+            |_, _| {
+                Some(Box::new(|raw: Bytes, out: &mut Vec<Out>| {
+                    out.push(Out(String::from_utf8_lossy(&raw).into_owned()));
+                    Ok(())
+                }))
             },
-            |answer| respan_gateway_http::provider_fault("msg", answer),
         ))
     }
 }
@@ -141,7 +108,7 @@ impl Format<ProviderIo, Out, In> for Msg {
 /// Numbers the messages it decodes.
 struct Numbering(usize);
 
-impl Numbering {
+impl respan_gateway_http::Decoder<In> for Numbering {
     fn decode(&mut self, bytes: Bytes, out: &mut Vec<In>) -> Result<(), Fault> {
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let kept = In::new;
@@ -155,17 +122,13 @@ impl Numbering {
         }
         Ok(())
     }
-
-    fn end(&mut self, _out: &mut Vec<In>) -> Result<(), Fault> {
-        Ok(())
-    }
 }
 
 /// Numbers the frames it writes, each as its text.
 struct Numbered(usize);
 
-impl Encoder<In> for Numbered {
-    fn encode(&mut self, input: &In, out: &mut BytesMut) -> Result<(), Fault> {
+impl Numbered {
+    fn encode_into(&mut self, input: &In, out: &mut BytesMut) -> Result<(), Fault> {
         let text = &input.1;
         if text.contains("no") {
             return Err(BadRequest::fault("msg cannot say no"));
@@ -175,7 +138,31 @@ impl Encoder<In> for Numbered {
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+}
+
+impl Encoder<In> for Numbered {
+    fn encode(
+        &mut self,
+        value: &In,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.encode_into(value, &mut out)?;
+        frames.push(out.freeze());
+        Ok(())
+    }
+
+    fn end(
+        &mut self,
+        end: Result<(), Fault>,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.end_into(&end, &mut out)?;
+        frames.extend((!out.is_empty()).then(|| out.freeze()));
         Ok(())
     }
 }
@@ -183,13 +170,37 @@ impl Encoder<In> for Numbered {
 /// Writes each answer as its text.
 struct Answers;
 
-impl Encoder<Out> for Answers {
-    fn encode(&mut self, answer: &Out, out: &mut BytesMut) -> Result<(), Fault> {
+impl Answers {
+    fn encode_into(&mut self, answer: &Out, out: &mut BytesMut) -> Result<(), Fault> {
         out.extend_from_slice(answer.0.as_bytes());
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+}
+
+impl Encoder<Out> for Answers {
+    fn encode(
+        &mut self,
+        value: &Out,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.encode_into(value, &mut out)?;
+        frames.push(out.freeze());
+        Ok(())
+    }
+
+    fn end(
+        &mut self,
+        end: Result<(), Fault>,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.end_into(&end, &mut out)?;
+        frames.extend((!out.is_empty()).then(|| out.freeze()));
         Ok(())
     }
 }
@@ -226,7 +237,7 @@ impl Echo {
         let echoed = body.map(move |frame| {
             let noted = match &frame {
                 Ok(bytes) => String::from_utf8_lossy(bytes).into_owned(),
-                Err(fault) => format!("Err({})", respan_gateway_http::error_code(fault)),
+                Err(fault) => format!("Err({})", respan_gateway_http_faults::error_code(fault)),
             };
             seen.lock().map(|mut s| s.push(noted)).ok();
             frame
@@ -261,11 +272,11 @@ impl Echo {
 /// A gateway serving msg, calling a msg provider over `echo`, with `plugin`.
 fn msg(echo: &Echo, plugin: impl Plugin) -> Gateway {
     Gateway::new()
-        .provider::<In, _, _>(
+        .provider(Provider::new(
             "msg",
             Msg,
             respan_gateway_http::connect(echo.clone().into_sender(), LIMIT),
-        )
+        ))
         .and_then(|g| Ok(g.client::<In, _, _>(Msg)?.target("msg")?.plugin(plugin)))
         .unwrap_or_else(|e| panic!("{e}"))
 }
@@ -362,7 +373,7 @@ async fn r8_content_that_cannot_be_written_is_a_bad_request_edited_or_not() {
         let (_, ended) = serve(&gw, post("/msg", body)).await;
         let end = ended
             .await
-            .map_err(|f| respan_gateway_http::error_code(&f).to_owned());
+            .map_err(|f| respan_gateway_http_faults::error_code(&f).to_owned());
         assert_eq!(end, Err(code.to_owned()), "{body} {edit:?}");
         assert!(echo.seen().is_empty(), "nothing is sent");
     }
@@ -446,7 +457,6 @@ fn scripted(
     }
 }
 
-#[cfg(feature = "reqwest")]
 fn real(fake: &FakeOpenAi) -> impl Clone + Fn(http::Request<Body>) -> SendFuture + use<> {
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer sk-test"));
@@ -487,11 +497,11 @@ fn chat(
     plugins: Vec<Arc<dyn Plugin>>,
 ) -> Gateway {
     let gw = Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(transport, LIMIT),
-        )
+        ))
         .and_then(|g| {
             g.client::<Input, _, _>(OpenAiChat)?
                 .client::<Input, _, _>(AnthropicMessages)?
@@ -504,7 +514,6 @@ fn chat(
 // A relay passes the client's end-to-end headers and query as a proxy does,
 // minus conditions, ranges, overrides and encodings, and the transport strips
 // who sent it and cookies. A translated call carries none.
-#[cfg(feature = "reqwest")]
 #[tokio::test]
 async fn r3_a_relay_passes_the_clients_headers_and_query_as_a_proxy_does() {
     let fake = FakeOpenAi::start().await;
@@ -561,11 +570,11 @@ async fn cookies_and_forwarding_headers_reach_no_transport() {
         }
     };
     let gw = Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(transport, LIMIT),
-        )
+        ))
         .and_then(|g| g.client::<Input, _, _>(OpenAiChat)?.target("openai"))
         .unwrap_or_else(|e| panic!("{e}"));
     let _ = read_whole(
@@ -591,7 +600,6 @@ async fn cookies_and_forwarding_headers_reach_no_transport() {
 
 // A call's own input is written from its value, with none of the client's
 // bytes, headers or query, even in the client's format.
-#[cfg(feature = "reqwest")]
 #[tokio::test]
 async fn r9_a_calls_own_input_is_written_from_its_value_alone() {
     struct Judge;
@@ -642,15 +650,16 @@ impl Format<ClientIo, Input, Output> for Noted {
     }
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         let seen = self.0.clone();
-        Ok(io.bind(
-            |request| AnthropicMessages.read_request(request),
-            move |reply| {
-                let mut head = reply.head();
-                let encoder = AnthropicMessages.response_encoder(&mut head, reply.request());
-                Ok(reply.write(head, Box::new(Noting(seen, encoder))))
-            },
-            |fault, request, head| AnthropicMessages.refusal(fault, request, head),
-        ))
+        Ok(io
+            .with_error(|fault, request, head| AnthropicMessages.refusal(fault, request, head))
+            .bind(
+                |request| AnthropicMessages.read_request(request),
+                move |reply| {
+                    let mut head = reply.head();
+                    let encoder = AnthropicMessages.response_encoder(&mut head, reply.request());
+                    Ok(reply.write(head, Box::new(Noting(seen, encoder))))
+                },
+            ))
     }
 }
 impl Format<ProviderIo, Output, Input> for Noted {
@@ -665,7 +674,7 @@ impl Format<ProviderIo, Output, Input> for Noted {
 struct Noting(Arc<Mutex<Vec<&'static str>>>, Box<dyn Encoder<Output>>);
 
 impl Encoder<Output> for Noting {
-    fn encode(&mut self, reply: &Output, out: &mut BytesMut) -> Result<(), Fault> {
+    fn encode(&mut self, reply: &Output, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         let noted = match reply {
             Output::Native(respan_gateway_core::NativeValue { format, .. })
                 if &**format == AnthropicMessages.name() =>
@@ -679,7 +688,7 @@ impl Encoder<Output> for Noting {
         self.1.encode(reply, out)
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         self.1.end(end, out)
     }
 }
@@ -714,17 +723,17 @@ async fn r2_an_encoder_writes_its_own_formats_events_as_they_are_and_no_others()
             )
         };
         let gw = Gateway::new()
-            .provider::<Input, _, _>(
+            .provider(Provider::new(
                 "anthropic",
                 noting.clone(),
                 respan_gateway_http::connect(sse(&stream), LIMIT),
-            )
+            ))
             .and_then(|g| {
-                g.provider::<Input, _, _>(
+                g.provider(Provider::new(
                     "openai",
                     OpenAiChat,
                     respan_gateway_http::connect(sse(&[chunk, "data: [DONE]\n\n"]), LIMIT),
-                )
+                ))
             })
             .and_then(|g| g.client::<Input, _, _>(noting.clone())?.target(provider))
             .unwrap_or_else(|e| panic!("{e}"));

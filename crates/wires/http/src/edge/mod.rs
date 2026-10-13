@@ -3,7 +3,6 @@
 
 mod body;
 mod client;
-mod encoder;
 mod provider;
 mod reader;
 mod upload;
@@ -17,8 +16,14 @@ use respan_gateway_core::Fault;
 
 pub use body::Body;
 pub use client::{ClientIo, Framing, Reply, handle};
-pub use encoder::{Encoder, encode_all, messages};
 pub use provider::{ProviderIo, connect};
+
+/// A body, its bytes one item per data frame, ending with an `Err` if it
+/// broke off.
+pub type Frames = futures::stream::BoxStream<'static, Result<Bytes, Fault>>;
+
+/// Actual completion of an outgoing transfer, independent of response headers.
+pub type Completion = BoxFuture<'static, Result<(), Fault>>;
 
 const PANICKED: &str = "a plugin or format panicked";
 pub(crate) type Written = (http::Response<Body>, crate::Completion);
@@ -113,8 +118,37 @@ impl http_body::Body for Pump {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::passthrough::Passthrough;
-    use respan_gateway_core::{EventStream, Format, Upstream};
+    use respan_gateway_core::{EventSink, EventStream, Format, Upstream};
+
+    /// A format that reads one message and writes nothing: only the reply's
+    /// refusal matters here.
+    struct Silent;
+
+    impl Format<ClientIo, Bytes, Bytes> for Silent {
+        fn name(&self) -> &str {
+            "silent"
+        }
+
+        fn bind(
+            &self,
+            io: ClientIo,
+        ) -> Result<respan_gateway_core::Connection<Bytes, Bytes>, Fault> {
+            Ok(io.bind(
+                |_| {
+                    Box::new(|raw: Bytes, out: &mut Vec<Bytes>| {
+                        out.push(raw);
+                        Ok(())
+                    })
+                },
+                |_| {
+                    let sink = futures::sink::unfold((), |(), _: Result<Bytes, Fault>| async {
+                        Ok::<(), Fault>(())
+                    });
+                    Ok(EventSink::new(sink))
+                },
+            ))
+        }
+    }
 
     /// A reply prepared before handling ends is kept, however it ended.
     #[tokio::test]
@@ -122,7 +156,7 @@ mod tests {
         let request = http::Request::post("/x").body(Body::full("q"));
         let request = request.unwrap_or_default();
         let (incoming, answer) = ClientIo::accept(request, Framing::Whole, 1024);
-        let Ok((opening, mut outgoing)) = Passthrough.bind(incoming) else {
+        let Ok((opening, mut outgoing)) = Silent.bind(incoming) else {
             panic!("bound")
         };
         assert!(opening.await.is_ok());

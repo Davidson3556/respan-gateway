@@ -25,12 +25,12 @@ use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::ErrorCode;
 use respan_gateway_core::futures::stream;
-use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, ProviderContext};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Provider, ProviderContext};
 use respan_gateway_core::{Response, async_trait};
 use respan_gateway_http::Body;
-use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, StatusCode};
+use respan_gateway_http_faults::Status;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -157,7 +157,7 @@ fn base(
     + 'static,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
+        .provider(Provider::new("openai", OpenAiChat, transport))?
         .client::<Input, _, _>(OpenAiChat)?
         .client::<Input, _, _>(AnthropicMessages)
 }

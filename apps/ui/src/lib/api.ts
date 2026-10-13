@@ -103,8 +103,8 @@ export interface Usage {
   seconds?: number;
 }
 
-/** A tool the gateway ran for the model in an agent loop. */
-export interface AgentTool {
+/** A tool the gateway ran for the model in a tool loop. */
+export interface ToolLoopTool {
   /** As the model named it, `<server>__<tool>`. */
   name: string;
   duration_ms: number;
@@ -113,15 +113,15 @@ export interface AgentTool {
   bytes: number;
 }
 
-/** One call to the model in an agent loop, and the tools it asked for. */
-export interface AgentStep {
+/** One call to the model in a tool loop, and the tools it asked for. */
+export interface ToolLoopStep {
   index: number;
   duration_ms: number;
   input_tokens: number;
   output_tokens: number;
   /** Why the model stopped: `tool_use`, `stop`, … */
   finish?: string;
-  tools: AgentTool[];
+  tools: ToolLoopTool[];
 }
 
 export interface RequestRecord {
@@ -143,8 +143,8 @@ export interface RequestRecord {
   usage: Usage | null;
   /** What it cost in US dollars; absent when the model is unpriced. */
   cost_usd?: number;
-  /** The agent loop's steps, in order; absent without the loop. */
-  steps?: AgentStep[];
+  /** The tool loop's steps, in order; absent without the loop. */
+  steps?: ToolLoopStep[];
   error: string | null;
 }
 

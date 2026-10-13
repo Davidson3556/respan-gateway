@@ -12,6 +12,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+respan-gateway-http-syntax.workspace = true
+respan-gateway-http-faults.workspace = true
 respan-gateway-core.workspace = true
 respan-gateway-http.workspace = true
 serde_json.workspace = true
@@ -22,6 +24,8 @@ rustls-native-certs = "0.8"
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
 [dev-dependencies]
+respan-gateway-plugin-relay.workspace = true
+respan-gateway-passthrough-http.workspace = true
 axum.workspace = true
 respan-gateway-serve.workspace = true
 http.workspace = true
@@ -29,7 +33,8 @@ respan-gateway-realtime.workspace = true
 respan-gateway-realtime-ws.workspace = true
 respan-gateway-conversation.workspace = true
 respan-gateway-conversation-http.workspace = true
-respan-gateway-http = { workspace = true, features = ["reqwest"] }
+respan-gateway-http.workspace = true
+respan-gateway-http-transport.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time", "sync", "test-util"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }

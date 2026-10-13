@@ -6,11 +6,11 @@ use super::{
     unb64, unreadable, whole_json,
 };
 use respan_gateway_conversation::Usage;
-use respan_gateway_core::{BadRequest, Connection, EventStream, Fault, Format, Upstream};
+use respan_gateway_core::{BadRequest, Connection, Fault, Format, Upstream};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::{path_ends_with, whole};
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
-use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo};
+use respan_gateway_http::{ClientIo, Decoder, Encoder, ProviderIo, Whole};
+use respan_gateway_http_syntax::path_ends_with;
 use respan_gateway_media::embedding::{Embedding, Input, Item, Output, Start};
 use serde_json::{Map, Value};
 
@@ -55,9 +55,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiEmbeddings {
     }
 
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
-        Ok(bind_provider(io, NAME, post, |response, _| {
-            read_response(response)
-        }))
+        Ok(bind_provider(io, NAME, post, |_, _| Some(read_response())))
     }
 }
 
@@ -141,9 +139,9 @@ fn items_json(items: &[Item]) -> Result<Value, Fault> {
     }
 }
 
-/// A provider's answer: one JSON body.
-fn read_response(response: http::Response<Body>) -> EventStream<Output> {
-    whole::read(response.into_body(), decode_whole)
+/// The decoder of a provider's answer: one JSON body.
+fn read_response() -> Box<dyn Decoder<Output>> {
+    Box::new(Whole::new(decode_whole))
 }
 
 /// The events of a whole JSON response.
@@ -201,7 +199,9 @@ fn response_encoder(
 ) -> Box<dyn Encoder<Output>> {
     super::content_type(head, "application/json");
     let base64 = asked.get("encoding_format").and_then(Value::as_str) == Some("base64");
-    whole::collect(move |events: &[Output]| encode_whole(events, base64))
+    Box::new(Whole::new(move |events: &[Output]| {
+        encode_whole(events, base64)
+    }))
 }
 
 /// A vector as the client asked: as base64 of little-endian `f32`s, or as

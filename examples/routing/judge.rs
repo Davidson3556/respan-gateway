@@ -18,12 +18,12 @@ use respan_gateway_conversation::{Assembled, Input, Message, Output, Role};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Fault, Gateway, Plugin, Provider, ProviderContext, Response, async_trait,
 };
-use respan_gateway_http::Status;
-use respan_gateway_http::Wire;
 #[cfg(test)]
 use respan_gateway_http::http;
+use respan_gateway_http::raw::Original;
+use respan_gateway_http_faults::Status;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -87,7 +87,7 @@ struct Egress(Arc<Mutex<Vec<String>>>);
 impl Plugin for Egress {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         self.seen().push(px.provider().to_owned());
-        let asked = px.extensions().get::<Wire>().and_then(Wire::get);
+        let asked = px.extensions().get::<Original>().and_then(Original::get);
         if asked.is_some_and(|a| a.headers().contains_key("x-blocked")) {
             return Err(Fault::new("no calls for you")
                 .with(ErrorCode("egress".into()))
@@ -110,21 +110,21 @@ fn gateway(
     egress: Egress,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "judge",
             OpenAiChat,
             provider_support::openai(&judge.base_url())?.connect(),
-        )?
-        .provider::<Input, _, _>(
+        ))?
+        .provider(Provider::new(
             "cheap",
             OpenAiChat,
             provider_support::openai(&cheap.base_url())?.connect(),
-        )?
-        .provider::<Input, _, _>(
+        ))?
+        .provider(Provider::new(
             "strong",
             OpenAiChat,
             provider_support::openai(&strong.base_url())?.connect(),
-        )?
+        ))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(egress)
         .plugin(Judge)

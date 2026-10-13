@@ -67,7 +67,7 @@ async fn a_panic_anywhere_still_ends_everything_once() {
                     let gw = Gateway::new()
                         .client::<In, _, _>(Toy)
                         .unwrap()
-                        .provider::<In, _, _>("a", Toy, connect(transport))
+                        .provider(Provider::new::<In, _, _>("a", Toy, connect(transport)))
                         .unwrap()
                         .target("a")
                         .unwrap()

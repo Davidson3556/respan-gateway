@@ -55,7 +55,7 @@ async fn gateway(base: &str) -> Gateway {
         "providers:
   any: {{ formats: passthrough, base_url: '{base}' }}
 formats: [passthrough]
-default: any
+plugins: {{ routing: {{ default: any }} }}
 "
     ))
     .await
@@ -103,7 +103,7 @@ async fn an_endless_error_is_answered_at_the_limit() {
 providers:
   any: {{ formats: passthrough, base_url: '{base}' }}
 formats: [passthrough]
-default: any
+plugins: {{ routing: {{ default: any }} }}
 "
     ))
     .await;

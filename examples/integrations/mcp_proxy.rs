@@ -16,11 +16,11 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::futures::stream;
-use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Provider, Response, async_trait};
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use serde_json::{Value, json};
 
-use respan_gateway_http::HttpTransport;
+use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_mcp as mcp;
 use respan_gateway_mcp::{Input, Output};
 use respan_gateway_mcp_http::{SESSION, StdioTransport, StreamableHttp};
@@ -92,7 +92,7 @@ fn gateway(
     + 'static,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Input, _, _>("tools", StreamableHttp::default(), server)?
+        .provider(Provider::new("tools", StreamableHttp::default(), server))?
         .client::<Input, _, _>(StreamableHttp::default())?
         .plugin(ToolAllowList(Arc::from(["echo"])))
         .target("tools")

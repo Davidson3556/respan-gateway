@@ -2,6 +2,7 @@
 //! the fields a value keeps for its own format, tools, usage totals, the
 //! faults of what cannot be written, and small JSON helpers.
 
+use crate::fields;
 use respan_gateway_conversation::{
     Block, Content, Delta, Finish, Input, Message, Output, Role, Tool, ToolChoice,
 };
@@ -9,9 +10,8 @@ use respan_gateway_conversation::{Effort, Reasoning, Start, Usage};
 use respan_gateway_core::{
     BadRequest, ErrorCode, Fault, NativeFields, NativeValue, Truncated, Upstream,
 };
-use respan_gateway_http::Status;
-use respan_gateway_http::framing::fields;
 use respan_gateway_http::http::StatusCode;
+use respan_gateway_http_faults::Status;
 use serde_json::{Map, Value};
 
 use super::Schema;

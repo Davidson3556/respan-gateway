@@ -207,7 +207,7 @@ async fn the_request_log_keeps_the_configured_number_of_requests_across_reloads(
     let path = write_config(&config(
         "127.0.0.1:0",
         &[("alpha", &a.base_url())],
-        "request_history: 3",
+        "plugins: { request_log: { history: 3 } }",
     ));
     let gw = serve(&path, &[]).await;
     for _ in 0..5 {
@@ -220,7 +220,7 @@ async fn the_request_log_keeps_the_configured_number_of_requests_across_reloads(
         config(
             "127.0.0.1:0",
             &[("alpha", &a.base_url())],
-            "request_history: 2",
+            "plugins: { request_log: { history: 2 } }",
         ),
     )
     .unwrap();

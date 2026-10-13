@@ -19,13 +19,14 @@ use respan_gateway_conversation::Input;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures::future::join;
 use respan_gateway_core::futures::{StreamExt, stream};
-use respan_gateway_core::{Fault, Gateway};
+use respan_gateway_core::{Fault, Gateway, Provider};
 use respan_gateway_examples::LIMIT;
 use respan_gateway_examples::Meter;
 use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::http;
 use respan_gateway_http::http::HeaderValue;
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{HttpTransport, http};
+use respan_gateway_http_transport::HttpTransport;
 
 /// The gateway, with no server. For real use, the transport is
 /// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
@@ -37,7 +38,7 @@ fn gateway(
     tally: Meter,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, provider)?
+        .provider(Provider::new("openai", OpenAiChat, provider))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(tally)
         .target("openai")
@@ -62,7 +63,7 @@ async fn ask(
     let (head, ()) = http::Request::post("/v1/chat/completions")
         .header("content-type", "application/json")
         .body(())
-        .map_err(respan_gateway_http::built_wrong)?
+        .map_err(respan_gateway_http_faults::built_wrong)?
         .into_parts();
     let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
     let request = http::Request::from_parts(head, respan_gateway_http::Body::stream(body));

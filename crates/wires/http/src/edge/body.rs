@@ -43,9 +43,9 @@ impl Body {
     }
 
     /// The most bytes a reader may hold of it at once: of a provider's
-    /// answer, its transport's limit ([`connect`](crate::connect)), which
-    /// the readers of [`formats`](crate::framing) keep a whole body, or one
-    /// event, to. `None` for a body no binding read, already in memory.
+    /// answer, its transport's limit ([`connect`](crate::connect)), which a
+    /// [`Decoder`](crate::Decoder) that holds bytes keeps a whole body, or
+    /// one event, to. `None` for a body no binding read, already in memory.
     pub fn limit(&self) -> Option<usize> {
         self.limit
     }
@@ -58,10 +58,20 @@ impl Body {
         }
     }
 
+    /// Its values, as `decoder` reads its frames, as a binding reads a
+    /// body: the decoder held to its limit, until it is
+    /// [`done`](crate::Decoder::done).
+    pub fn decode<T: Send + 'static>(
+        self,
+        decoder: Box<dyn crate::Decoder<T>>,
+    ) -> respan_gateway_core::EventStream<T> {
+        crate::codec::decode(self, decoder)
+    }
+
     /// Whether its bytes come as a stream of frames rather than whole: how a
     /// call uploads. Not whether its input is live, one message per frame,
     /// which the adapter says ([`ClientIo::accept`](crate::ClientIo::accept)).
-    pub(crate) fn is_streaming(&self) -> bool {
+    pub fn is_streaming(&self) -> bool {
         matches!(self.data, Data::Stream(_))
     }
 }

@@ -177,15 +177,15 @@ impl Shared {
             retired.retain(|g| g.idle().now_or_never().is_none());
             retired.push(previous.gateway.clone());
         }
-        // Its agent's and its aggregate's sessions end once the requests on
+        // Its tool loop's and its aggregate's sessions end once the requests on
         // it do.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let (agent, aggregate) = (previous.closer.clone(), previous.aggregate.clone());
+            let (tool_loop, aggregate) = (previous.closer.clone(), previous.aggregate.clone());
             let gateway = previous.gateway.clone();
-            if agent.is_some() || aggregate.is_some() {
+            if tool_loop.is_some() || aggregate.is_some() {
                 runtime.spawn(async move {
                     gateway.idle().await;
-                    if let Some(closer) = agent {
+                    if let Some(closer) = tool_loop {
                         closer.close(&gateway).await;
                     }
                     if let Some(closer) = aggregate {

@@ -8,7 +8,7 @@ mod tests;
 
 use respan_gateway_core::{BadRequest, Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::{ClientIo, ProviderIo, Wire, framing};
+use respan_gateway_http::{ClientIo, ProviderIo, raw::Original};
 use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::WsTransport;
 
@@ -81,9 +81,7 @@ impl Format<ClientIo, Input, Output> for OpenAiRealtime {
         let mut client = input::Client::new(model);
         let read = move |raw: Bytes, out: &mut Vec<Input>| client.read(raw, out);
         let mut client = output::Client::default();
-        let write = framing::each_message(move |event: &Output, out: &mut Vec<Bytes>| {
-            client.write(event, out)
-        });
+        let write = Box::new(move |event: &Output, out: &mut Vec<Bytes>| client.write(event, out));
         Ok(SPEC.client(io, Box::new(read), write))
     }
 }
@@ -96,7 +94,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiRealtime {
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
         // The model routing chose, else the one the client's handshake asks for.
         let chosen = io.extensions().get::<SessionModel>().map(|m| m.0.clone());
-        let asked = || requested_model(io.extensions().get::<Wire>()?);
+        let asked = || requested_model(io.extensions().get::<Original>()?);
         let model = chosen.or_else(asked).ok_or_else(|| {
             BadRequest::fault(
                 "OpenAI Realtime takes its model at connect: name it with ?model= on the session's URL",
@@ -104,9 +102,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiRealtime {
         })?;
         let query = Some(format!("model={model}"));
         let mut provider = input::Provider::new(model);
-        let write = framing::each_message(move |event: &Input, out: &mut Vec<Bytes>| {
-            provider.write(event, out)
-        });
+        let write = Box::new(move |event: &Input, out: &mut Vec<Bytes>| provider.write(event, out));
         let mut provider = output::Provider::default();
         let read = move |raw: Bytes, out: &mut Vec<Output>| provider.read(raw, out);
         Ok(SPEC.provider(io, query, write, Box::new(read), None))

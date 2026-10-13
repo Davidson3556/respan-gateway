@@ -2,9 +2,10 @@ use super::*;
 use respan_gateway_conversation::Input;
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_core::ErrorCode;
-use respan_gateway_core::{Plugin, ProviderContext, async_trait};
+use respan_gateway_core::{Plugin, Provider, ProviderContext, async_trait};
 use respan_gateway_examples::Meter;
-use respan_gateway_http::{Status, http};
+use respan_gateway_http::http;
+use respan_gateway_http_faults::Status;
 
 async fn ask(gw: &Gateway, req: &'static str) -> Result<(http::HeaderMap, String), Fault> {
     let (status, headers, body) =
@@ -35,7 +36,7 @@ async fn answers_json_or_sse_as_asked() -> Result<(), Fault> {
 async fn the_same_model_answers_in_anthropics_format() -> Result<(), Fault> {
     let model: Model = Arc::new(echo);
     let gw = Gateway::new()
-        .provider::<Input, _, _>("local", Local, move |_| model.clone())?
+        .provider(Provider::new("local", Local, move |_| model.clone()))?
         .client::<Input, _, _>(AnthropicMessages)?
         .target("local")?;
     let req = r#"{"model":"echo","max_tokens":9,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#;

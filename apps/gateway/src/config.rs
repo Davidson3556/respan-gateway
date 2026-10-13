@@ -32,7 +32,7 @@ pub struct NamedKey {
     /// key does; once one sets `true`, only those do.
     #[serde(default)]
     pub admin: Option<bool>,
-    /// The agent and aggregate tools (`server__tool` globs) the key's
+    /// The tool loop and aggregate tools (`server__tool` globs) the key's
     /// requests may use, within the global `allow` and `deny`; all if unset.
     #[serde(default)]
     pub tools: Option<Vec<String>>,
@@ -152,19 +152,6 @@ pub struct Config {
     /// bytes or a size such as `16MiB`; 16 MiB if unset.
     #[serde(default, deserialize_with = "ws_message_limit")]
     pub ws_message_limit: Option<usize>,
-    /// How many finished requests the in-memory request history (the web
-    /// UI's) keeps; 1000 if unset.
-    #[serde(default, deserialize_with = "request_history")]
-    pub request_history: Option<usize>,
-    /// A file each finished request is appended to as one JSON line (the
-    /// request history's records: no bodies, no keys), and the last
-    /// `request_history` of which are read back at start; none if unset.
-    pub request_history_file: Option<PathBuf>,
-    /// The size at which that file moves to `<file>.1` (replacing the one
-    /// there) and a new one starts; a number of bytes or a size such as
-    /// `64MiB`; 64 MiB if unset.
-    #[serde(default, deserialize_with = "request_history_file_max")]
-    pub request_history_file_max: Option<usize>,
     /// What models cost, by model prefix (the longest matching wins), in
     /// dollars per million tokens. Set, each request in the history gets a
     /// `cost_usd`, and the overview's totals the sum; there is no built-in
@@ -211,24 +198,18 @@ pub struct Config {
     /// if that lists formats.
     #[serde(default)]
     pub mcp: IndexMap<String, McpConfig>,
-    /// One MCP endpoint, `/mcp`, that fronts the `mcp:` servers as a single
-    /// server (tools and prompts as `{server}__{name}`); off if unset.
-    pub mcp_aggregate: Option<AggregateConfig>,
     /// Which web pages may call the gateway from a browser; none if unset.
     pub cors: Option<CorsConfig>,
-    /// Compiled-in plugins, in the order listed.
+    /// The compiled-in plugins, each configured under its name. The gateway
+    /// runs them in an order of its own, whatever the order here.
     #[serde(default)]
-    pub plugins: Vec<PluginConfig>,
-    /// Run tools of `mcp:` servers inside chat requests; off if unset.
-    pub agent: Option<AgentConfig>,
-    /// The provider of each kind it serves for requests nothing else
-    /// routes.
-    pub default: Option<String>,
+    pub plugins: PluginsConfig,
     #[serde(skip)]
     pub(crate) source: Source,
-    /// Relay each request raw, with the client's own credentials (`proxy`).
+    /// Relay each request to one vendor, with the client's own credentials
+    /// (`proxy`).
     #[serde(skip)]
-    pub(crate) raw_relay: bool,
+    pub(crate) relay: bool,
 }
 
 fn enabled() -> bool {
@@ -241,9 +222,6 @@ impl Default for Config {
             listen: None,
             body_limit: None,
             ws_message_limit: None,
-            request_history: None,
-            request_history_file: None,
-            request_history_file_max: None,
             prices: IndexMap::new(),
             shutdown_grace: None,
             client_keys: Vec::new(),
@@ -253,13 +231,10 @@ impl Default for Config {
             providers: IndexMap::new(),
             formats: None,
             mcp: IndexMap::new(),
-            mcp_aggregate: None,
-            plugins: Vec::new(),
+            plugins: PluginsConfig::default(),
             cors: None,
-            agent: None,
-            default: None,
             source: Source::Inline,
-            raw_relay: false,
+            relay: false,
         }
     }
 }
@@ -294,13 +269,113 @@ pub enum Auth {
     Header { name: String, key: String },
 }
 
-/// One plugin, by the one field that configures it.
+/// The compiled-in plugins. Each is configured under its own name, and the
+/// gateway registers them in a fixed order: the request log, routing, the
+/// MCP aggregate, video jobs, the tool loop, hedge, then fallback. Video
+/// jobs are always on; each vendor's quirks are a plugin of its providers,
+/// not of the gateway.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginsConfig {
+    /// Which provider each request goes to; always on.
+    #[serde(default)]
+    pub routing: RoutingConfig,
+    /// Retry a request's target, then fall back to other providers; off if
+    /// unset.
+    pub fallback: Option<FallbackConfig>,
+    /// Race a request's target against other providers started a little
+    /// later; off if unset.
+    pub hedge: Option<HedgeConfig>,
+    /// Run tools of `mcp:` servers inside chat requests; off if unset.
+    pub tool_loop: Option<ToolLoopConfig>,
+    /// One MCP endpoint, `/mcp`, that fronts the `mcp:` servers as a single
+    /// server (tools and prompts as `{server}__{name}`); off if unset.
+    pub mcp_aggregate: Option<AggregateConfig>,
+    /// The request history the web UI and admin API read; always on.
+    #[serde(default)]
+    pub request_log: RequestLogConfig,
+}
+
+/// Routing: which provider each request goes to.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingConfig {
+    /// Model routes: model prefix to provider, before the presets' own
+    /// names, for every kind the provider serves.
+    #[serde(default)]
+    pub models: Vec<ModelRoute>,
+    /// The provider of each kind it serves for requests nothing else
+    /// routes; the first provider serving the kind if unset.
+    pub default: Option<String>,
+}
+
+/// Fallback: a request to a provider with a chain is retried as `tries`
+/// allows, then sent to each provider of the chain in turn.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PluginConfig {
-    /// Model routes: model prefix to provider, tried in order, for every
-    /// kind the provider serves.
-    pub models: Vec<ModelRoute>,
+pub struct FallbackConfig {
+    /// Each provider's chain: the providers tried after it, in order. An
+    /// empty chain retries the provider alone.
+    pub after: IndexMap<String, Vec<String>>,
+    /// Tries per provider, retries included; 1 if unset.
+    pub tries: Option<u32>,
+    /// The first wait before a retry, doubled after each; 250 ms if unset.
+    #[serde(default, deserialize_with = "fallback_backoff")]
+    pub backoff: Option<Duration>,
+    /// The longest wait before a retry; a `Retry-After` longer than it means
+    /// no retry. 10 s if unset.
+    #[serde(default, deserialize_with = "fallback_max_backoff")]
+    pub max_backoff: Option<Duration>,
+    /// How far an answer is read before it counts as a success.
+    #[serde(default)]
+    pub until: Commit,
+}
+
+/// Hedge: a request to a provider with a chain also goes to each provider
+/// of the chain, `stagger` after the one before; the first success wins.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HedgeConfig {
+    /// Each provider's chain: the providers raced against it, started in
+    /// order.
+    pub after: IndexMap<String, Vec<String>>,
+    /// The wait before starting the next provider; 200 ms if unset.
+    #[serde(default, deserialize_with = "hedge_stagger")]
+    pub stagger: Option<Duration>,
+    /// How far an answer is read before it counts as a success.
+    #[serde(default)]
+    pub until: Commit,
+}
+
+/// How far an attempt's answer is read before it counts as a success, and
+/// nothing is retried after.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Commit {
+    /// Its head: a success status. The default.
+    #[default]
+    Head,
+    /// Its whole answer, held until it ends cleanly.
+    End,
+}
+
+/// The request log: the history of finished requests.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestLogConfig {
+    /// How many finished requests the in-memory history (the web UI's)
+    /// keeps; 1000 if unset.
+    #[serde(default, deserialize_with = "request_log_history")]
+    pub history: Option<usize>,
+    /// A file each finished request is appended to as one JSON line (the
+    /// history's records: no bodies, no keys), and the last `history` of
+    /// which are read back at start; none if unset.
+    pub file: Option<PathBuf>,
+    /// The size at which that file moves to `<file>.1` (replacing the one
+    /// there) and a new one starts; a number of bytes or a size such as
+    /// `64MiB`; 64 MiB if unset.
+    #[serde(default, deserialize_with = "request_log_file_max")]
+    pub file_max: Option<usize>,
 }
 
 /// Browser access: the origins whose pages may call the gateway.
@@ -314,12 +389,12 @@ pub struct CorsConfig {
     pub origins: Vec<String>,
 }
 
-/// The agent loop: the gateway offers the tools of `mcp:` servers to the
+/// The tool loop: the gateway offers the tools of `mcp:` servers to the
 /// model and runs the ones it calls, so a client that knows nothing of MCP
 /// gets answers that used them.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentConfig {
+pub struct ToolLoopConfig {
     /// The `mcp:` servers whose tools the gateway offers and runs, as
     /// `<server>__<tool>`.
     pub servers: Vec<String>,
@@ -338,23 +413,23 @@ pub struct AgentConfig {
     /// The most calls to the model for one request; 8 if unset.
     pub max_steps: Option<u32>,
     /// The wall-clock limit of one request's loop; 5 minutes if unset.
-    #[serde(default, deserialize_with = "agent_timeout")]
+    #[serde(default, deserialize_with = "tool_loop_timeout")]
     pub timeout: Option<Duration>,
     /// The limit of one tool call; 60 s if unset.
-    #[serde(default, deserialize_with = "agent_tool_timeout")]
+    #[serde(default, deserialize_with = "tool_loop_tool_timeout")]
     pub tool_timeout: Option<Duration>,
     /// How long a server's tool list is kept; 5 minutes if unset.
-    #[serde(default, deserialize_with = "agent_tool_list_ttl")]
+    #[serde(default, deserialize_with = "tool_loop_tool_list_ttl")]
     pub tool_list_ttl: Option<Duration>,
     /// The most tool calls of one step that run at once; 4 if unset.
     pub parallel: Option<usize>,
     /// The most bytes of one tool's answer the model sees; 64 KiB if unset.
     /// A tool's output is untrusted input to the model.
-    #[serde(default, deserialize_with = "agent_max_result")]
+    #[serde(default, deserialize_with = "tool_loop_max_result")]
     pub max_result: Option<usize>,
     /// The most bytes of tool answers the model sees in one request, over
     /// all its steps; 256 KiB if unset.
-    #[serde(default, deserialize_with = "agent_max_results")]
+    #[serde(default, deserialize_with = "tool_loop_max_results")]
     pub max_results: Option<usize>,
 }
 
@@ -451,8 +526,10 @@ impl Config {
     }
 
     /// The configuration of `proxy`: one vendor at `url` (its public API if
-    /// `None`), no keys of its own, its chat format and every other
-    /// request relayed raw, byte for byte, with each client's credentials.
+    /// `None`), no keys of its own, its chat format and every other request
+    /// relayed, with each client's credentials: the chat format writes the
+    /// client's request in its own spec, and passthrough relays the rest
+    /// byte for byte.
     pub fn proxy(vendor: ProxyVendor, url: Option<&str>) -> Config {
         let (name, format, default) = match vendor {
             ProxyVendor::Anthropic => (
@@ -463,19 +540,18 @@ impl Config {
             ProxyVendor::OpenAi => ("openai", "openai-chat", "https://api.openai.com/v1"),
         };
         let url = url.unwrap_or(default).trim_end_matches('/');
-        // Every call is a raw relay of the client's own path, so both
-        // formats sit at the vendor's origin.
-        let origin = url.strip_suffix("/v1").unwrap_or(url);
+        // The chat format writes its own path after the vendor's API base;
+        // passthrough relays the client's path at the vendor's origin.
         let provider = ProviderConfig {
             formats: Some(vec![format.to_owned(), "passthrough".to_owned()]),
-            base_url: Some(origin.to_owned()),
+            base_url: Some(url.to_owned()),
             ..ProviderConfig::default()
         };
         Config {
             providers: IndexMap::from([(name.to_owned(), provider)]),
             formats: Some(vec![format.to_owned(), "passthrough".to_owned()]),
             source: Source::Proxy,
-            raw_relay: true,
+            relay: true,
             ..Config::default()
         }
     }
@@ -587,8 +663,20 @@ fn ws_message_limit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D:
     byte_size(d, "ws_message_limit")
 }
 
-fn request_history_file_max<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    byte_size(d, "request_history_file_max")
+fn request_log_file_max<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    byte_size(d, "plugins: request_log: file_max")
+}
+
+fn fallback_backoff<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "plugins: fallback: backoff")
+}
+
+fn fallback_max_backoff<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "plugins: fallback: max_backoff")
+}
+
+fn hedge_stagger<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "plugins: hedge: stagger")
 }
 
 /// Dollars per million tokens of a model prefix.
@@ -614,9 +702,11 @@ fn prices<'de, D: Deserializer<'de>>(d: D) -> Result<IndexMap<String, Price>, D:
     Ok(prices)
 }
 
-fn request_history<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+fn request_log_history<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
     match Option::<usize>::deserialize(d)? {
-        Some(0) => Err(serde::de::Error::custom("request_history: must be above 0")),
+        Some(0) => Err(serde::de::Error::custom(
+            "plugins: request_log: history: must be above 0",
+        )),
         kept => Ok(kept),
     }
 }
@@ -643,24 +733,24 @@ fn shutdown_grace<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D
     span(d, "shutdown_grace")
 }
 
-fn agent_timeout<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "agent: timeout")
+fn tool_loop_timeout<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "plugins: tool_loop: timeout")
 }
 
-fn agent_tool_timeout<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "agent: tool_timeout")
+fn tool_loop_tool_timeout<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "plugins: tool_loop: tool_timeout")
 }
 
-fn agent_tool_list_ttl<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "agent: tool_list_ttl")
+fn tool_loop_tool_list_ttl<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "plugins: tool_loop: tool_list_ttl")
 }
 
-fn agent_max_result<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    byte_size(d, "agent: max_result")
+fn tool_loop_max_result<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    byte_size(d, "plugins: tool_loop: max_result")
 }
 
-fn agent_max_results<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    byte_size(d, "agent: max_results")
+fn tool_loop_max_results<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    byte_size(d, "plugins: tool_loop: max_results")
 }
 
 /// The time `text` says: a number and a unit (`ms`, `s`, `m`, `h`),
@@ -856,11 +946,12 @@ providers:
 
     #[test]
     fn limits_are_sizes_counts_and_durations() {
-        let config =
-            Config::parse("ws_message_limit: 1MiB\nrequest_history: 50\nshutdown_grace: 2m")
-                .unwrap_or_else(|e| panic!("{e}"));
+        let config = Config::parse(
+            "ws_message_limit: 1MiB\nplugins: { request_log: { history: 50 } }\nshutdown_grace: 2m",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(config.ws_message_limit, Some(1 << 20));
-        assert_eq!(config.request_history, Some(50));
+        assert_eq!(config.plugins.request_log.history, Some(50));
         assert_eq!(config.shutdown_grace, Some(Duration::from_secs(120)));
         let grace = |text: &str| Config::parse(text).map(|c| c.shutdown_grace);
         assert_eq!(
@@ -876,12 +967,18 @@ providers:
             Ok(Some(Duration::from_millis(500)))
         );
         let defaults = Config::parse("{}").unwrap_or_else(|e| panic!("{e}"));
-        assert!(defaults.request_history.is_none() && defaults.shutdown_grace.is_none());
+        assert!(
+            defaults.plugins.request_log.history.is_none() && defaults.shutdown_grace.is_none()
+        );
         for (text, key) in [
             ("shutdown_grace: soon", "shutdown_grace"),
             ("shutdown_grace: 5 days", "shutdown_grace"),
-            ("request_history: 0", "request_history"),
-            ("request_history: many", "request_history"),
+            ("plugins: { request_log: { history: 0 } }", "history"),
+            ("plugins: { request_log: { history: many } }", "history"),
+            (
+                "plugins: { fallback: { after: {}, backoff: soon } }",
+                "backoff",
+            ),
             ("ws_message_limit: 0", "ws_message_limit"),
             ("ws_message_limit: big", "ws_message_limit"),
             ("body_limit: 0", "body_limit"),
@@ -898,6 +995,13 @@ providers:
             "target: p",
             "keys: []",
             "providers: { p: { format: x } }",
+            "request_history: 10",
+            "tool_loop: { servers: [m] }",
+            "mcp_aggregate: {}",
+            "default: p",
+            "plugins: [{ models: [] }]",
+            "plugins: { quirks: false }",
+            "plugins: { video_jobs: false }",
         ];
         for text in old {
             assert!(Config::parse(text).is_err(), "{text}");
@@ -937,25 +1041,54 @@ providers:
     }
 
     #[test]
-    fn agent_and_cors_keys_parse() {
-        let yaml = "agent:
-  servers: [github]
-  allow: ['github__*']
-  deny: ['github__delete_*']
-  tool_list_ttl: 1m
-  parallel: 2
-  max_result: 8KiB
-  max_results: 64KiB
+    fn tool_loop_and_cors_keys_parse() {
+        let yaml = "plugins:
+  tool_loop:
+    servers: [github]
+    allow: ['github__*']
+    deny: ['github__delete_*']
+    tool_list_ttl: 1m
+    parallel: 2
+    max_result: 8KiB
+    max_results: 64KiB
 cors: { origins: ['https://app.example.com'] }";
         let config = Config::parse(yaml).unwrap_or_else(|e| panic!("{e}"));
-        let agent = config.agent.unwrap_or_else(|| panic!("agent"));
-        assert_eq!(agent.servers, ["github"]);
-        assert_eq!(agent.allow, ["github__*"]);
-        assert_eq!(agent.deny, ["github__delete_*"]);
-        assert_eq!(agent.tool_list_ttl, Some(Duration::from_secs(60)));
-        assert_eq!(agent.parallel, Some(2));
-        assert_eq!(agent.max_results, Some(64 << 10));
+        let tool_loop = config
+            .plugins
+            .tool_loop
+            .unwrap_or_else(|| panic!("tool_loop"));
+        assert_eq!(tool_loop.servers, ["github"]);
+        assert_eq!(tool_loop.allow, ["github__*"]);
+        assert_eq!(tool_loop.deny, ["github__delete_*"]);
+        assert_eq!(tool_loop.tool_list_ttl, Some(Duration::from_secs(60)));
+        assert_eq!(tool_loop.parallel, Some(2));
+        assert_eq!(tool_loop.max_results, Some(64 << 10));
         assert!(config.cors.is_some_and(|c| c.origins.len() == 1));
+    }
+
+    #[test]
+    fn plugins_parse_under_their_names() {
+        let yaml = "plugins:
+  routing: { models: [{ prefix: llama, provider: groq }], default: openai }
+  fallback: { after: { openai: [anthropic] }, tries: 2, backoff: 100ms, until: end }
+  hedge: { after: { openai: [openai-eu] }, stagger: 300ms }";
+        let plugins = Config::parse(yaml)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .plugins;
+        assert_eq!(plugins.routing.models[0].provider, "groq");
+        assert_eq!(plugins.routing.default.as_deref(), Some("openai"));
+        let fallback = plugins.fallback.unwrap_or_else(|| panic!("fallback"));
+        assert_eq!(fallback.after["openai"], ["anthropic"]);
+        assert_eq!(fallback.tries, Some(2));
+        assert_eq!(fallback.backoff, Some(Duration::from_millis(100)));
+        assert_eq!(fallback.until, Commit::End);
+        let hedge = plugins.hedge.unwrap_or_else(|| panic!("hedge"));
+        assert_eq!(hedge.stagger, Some(Duration::from_millis(300)));
+        assert_eq!(hedge.until, Commit::Head);
+        let defaults = Config::parse("{}")
+            .unwrap_or_else(|e| panic!("{e}"))
+            .plugins;
+        assert!(defaults.fallback.is_none() && defaults.hedge.is_none());
     }
 
     #[test]
@@ -968,15 +1101,15 @@ cors: { origins: ['https://app.example.com'] }";
     }
 
     #[test]
-    fn proxy_is_one_provider_of_the_chat_format_and_passthrough_at_the_origin() {
+    fn proxy_is_one_provider_of_the_chat_format_and_passthrough_at_its_api_base() {
         let config = Config::proxy(ProxyVendor::OpenAi, Some("http://h.test/v1/"));
         let provider = &config.providers["openai"];
-        assert_eq!(provider.base_url.as_deref(), Some("http://h.test"));
+        assert_eq!(provider.base_url.as_deref(), Some("http://h.test/v1"));
         assert_eq!(
             provider.formats.as_deref(),
             Some(&["openai-chat".to_owned(), "passthrough".to_owned()][..])
         );
-        assert!(config.raw_relay);
+        assert!(config.relay);
         assert_eq!(config.source().to_string(), "proxy");
     }
 }

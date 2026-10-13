@@ -2,10 +2,11 @@
 
 use super::*;
 
-// Only a relay carries the client's headers: a translated call says
-// Anthropic's default version, a relay the client's.
+// A call of the client's own format carries the headers of its spec: a
+// translated call says Anthropic's default version, one of Anthropic's own
+// the client's.
 #[tokio::test]
-async fn only_a_relay_carries_the_clients_anthropic_version() {
+async fn only_a_call_of_the_clients_format_carries_its_anthropic_version() {
     let h = Harness::new(Vec::new()).await;
     let version = HeaderValue::from_static("2099-01-01");
     let messages = json!({
@@ -26,7 +27,7 @@ async fn only_a_relay_carries_the_clients_anthropic_version() {
     let sent = h.sent();
     let said = |i: usize| sent[i].headers.get("anthropic-version").cloned();
     assert_eq!(said(0), Some(HeaderValue::from_static("2023-06-01")));
-    assert_eq!(said(1), Some(HeaderValue::from_static("2023-06-01")));
+    assert_eq!(said(1), Some(version));
 }
 
 // The kernel sets the private relay marker on a call that relays the client's
@@ -113,7 +114,7 @@ async fn the_clients_query_is_kept_within_one_format_only() {
     let openai = h.openai.requests();
     assert_eq!((anthropic.len(), openai.len()), (1, 1));
     assert_eq!(anthropic[0].path, "/v1/messages");
-    assert!(anthropic[0].query.is_empty());
+    assert!(!anthropic[0].query.is_empty(), "its spec's `beta`");
     assert_eq!(openai[0].path, "/v1/chat/completions");
     assert!(openai[0].query.is_empty());
 }
@@ -139,7 +140,7 @@ async fn anthropic_beta_features_reach_anthropic() {
 
     let sent = h.sent();
     let beta: Vec<_> = sent[0].headers.get_all("anthropic-beta").iter().collect();
-    assert!(beta.is_empty());
+    assert_eq!(beta, ["context-1m-2025-08-07", "files-api-2025-04-14"]);
 }
 
 #[tokio::test]

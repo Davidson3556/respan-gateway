@@ -8,12 +8,17 @@ protocols and adapters all depend on it directly.
 - `Gateway`: built by value (`Gateway::new().provider(..)?.client(..)?
   .plugin(..).target(..)?`) and handed one transport at a time
   (`handle(io, extensions)`); `idle()` waits for every request and end hook.
+- `Provider`: a provider to add, as a value: `Provider::new(name, format,
+  transport)`, with its own plugins (`.plugin(..)`).
 - `Format<T, R, W>`: a protocol bound to an owned transport `T`; `bind`
   returns a `Connection`, the receive future of `R` and the `EventSink` of
   `W`. Registration decides the edge: a client format receives a kind's
   `Input` and sends its `Output`, a provider format the reverse.
 - `Plugin`: `on_client` and `on_client_end` once per request,
   `on_provider` and `on_provider_end` once per call, in registration order.
+  `Provider::plugin` gives one to a single provider instead: its
+  provider-edge hooks run on that provider's calls alone, after the
+  gateway's plugins, as part of the provider (a vendor's quirks).
 - `Filter<T>`: edits a kind's inputs or outputs as they stream; its type
   says which. `ClientContext::wrap` is for work that awaits.
 - `Call` / `Response`: a plugin's call to a provider (`cx.call`), and what

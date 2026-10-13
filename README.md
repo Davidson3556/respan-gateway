@@ -132,15 +132,30 @@ needs `client_keys`. Without `cors`, nothing changes.
 
 **Configuration** is one YAML file, every setting shown in
 [`gateway.example.yaml`](gateway.example.yaml): providers (vendor presets or
-spelled out), `formats` served, `client_keys`, `default`, `plugins` (model
-prefixes), `mcp` servers, `mcp_aggregate`, `agent`, `cors`, `listen`, `log`,
-`ui`, `admin_writes`, `body_limit`, `ws_message_limit`, `request_history`
-(`request_history_file` keeps it across restarts, rotated at
-`request_history_file_max`; `/ui/api/requests/export` downloads it; `prices`
-adds a cost to each request), `shutdown_grace`. Routing order: `name/model` goes to
-provider `name`; else the `models` plugin's prefixes; else the vendors'
-prefixes (longest wins); else the kind's default
-([routing](docs/ARCHITECTURE.md#routing)).
+spelled out), `formats` served, `client_keys`, `mcp` servers, `cors`,
+`listen`, `log`, `ui`, `admin_writes`, `body_limit`, `ws_message_limit`,
+`prices` (adds a cost to each request), `shutdown_grace`, and `plugins`. Each
+compiled-in plugin is configured under its own name in `plugins`, and the
+gateway runs them in a fixed order whatever the file's:
+
+```yaml
+plugins:
+  routing: { models: [{ prefix: llama, provider: groq }], default: openai }
+  fallback: { after: { openai: [openai-eu] }, tries: 2 }   # off unless set
+  hedge: { after: { openai: [openai-eu] }, stagger: 200ms } # off unless set
+  request_log: { history: 1000, file: ./requests.jsonl }   # file: across restarts
+  mcp_aggregate: {}                                        # off unless set
+  tool_loop: { servers: [github] }                         # off unless set
+```
+
+Routing order: `name/model` goes to provider `name`; else `routing.models`
+(the first listed prefix a model matches); else the vendors' prefixes
+(longest wins); else `routing.default`, or the kind's first provider
+([routing](docs/ARCHITECTURE.md#routing)). Fallback retries a provider listed
+under `after` (as `Retry-After` asks), then tries each of its chain in turn;
+hedge races them instead, each started `stagger` after the last. The request
+log's file is rotated at `file_max`, and `/ui/api/requests/export` downloads
+the history.
 
 **Reloading**: `kill -HUP <pid>`, `POST /ui/api/reload` (with a client key if
 keys are set) or `--watch` (on a change of the file) re-read the config and
@@ -155,9 +170,9 @@ admin?, tools? }`. The admin API (`/ui/api/*`: every client's request records,
 reload, the config) is for admin keys: while no entry sets `admin: true`,
 every key is one (single-user setups just work); once any entry does, only
 those keys reach it and the others get `403` there (`admin: false` always
-excludes a key). `tools` limits the agent tools (`server__tool` globs, as
-`agent.allow`) a key's requests are offered, within the global `allow` and
-`deny`, on the `/mcp` aggregate as for the agent.
+excludes a key). `tools` limits the tool-loop tools (`server__tool` globs, as
+`plugins.tool_loop.allow`) a key's requests are offered, within the global `allow` and
+`deny`, on the `/mcp` aggregate as for the tool loop.
 
 **Admin config** (needs an admin key, like the rest of `/ui/api/`):
 `GET /ui/api/config` shows the config file as on disk with every secret
@@ -243,16 +258,17 @@ The browser flow (authorization code with PKCE, with a person to approve it)
 is not supported: for such a server use a personal access token as `key`, or
 authorize elsewhere and set the `refresh_token` it gives you.
 
-**One endpoint for all of them.** `mcp_aggregate:` turns on `/mcp`, which
+**One endpoint for all of them.** `plugins: mcp_aggregate` turns on `/mcp`, which
 fronts the `mcp:` servers as a single MCP server, so a client configures one
 URL:
 
 ```yaml
-mcp_aggregate: {}                 # every mcp: server that has no forward_auth
-# mcp_aggregate:
-#   servers: [github, files]      # or name them; lists show them in this order
-#   allow: ["github__search_*"]   # tool patterns, as agent: has them (default: all)
-#   deny: ["files__write_*"]      # wins over allow
+plugins:
+  mcp_aggregate: {}                 # every mcp: server that has no forward_auth
+  # mcp_aggregate:
+  #   servers: [github, files]      # or name them; lists show them in this order
+  #   allow: ["github__search_*"]   # tool patterns, as tool_loop has them (default: all)
+  #   deny: ["files__write_*"]      # wins over allow
 ```
 
 A client has one session, owned by its key like any other; the gateway holds
@@ -283,24 +299,25 @@ the client's `DELETE`; one that never comes is left to each server's idle
 timeout. Servers with `forward_auth` cannot be fronted (the sessions are the
 gateway's own). Each server stays at `/mcp/{name}` too.
 
-### Agent loop
+### Tool loop
 
-With `agent:` the gateway runs MCP tools for the model, so a client that knows
+With `plugins: tool_loop` the gateway runs MCP tools for the model, so a client that knows
 nothing of MCP gets answers that used them. It is off unless configured:
 
 ```yaml
-agent:
-  servers: [github, files]  # mcp: servers whose tools the gateway offers and runs
-  # allow: ["github__search_*", "files__read_file"]  # only these tools (default: all)
-  # deny: ["files__write_*"]   # never these; wins over allow
-  models: [gpt, claude]     # optional model prefixes; default: every chat model
-  max_steps: 8              # most calls to the model per request
-  # timeout: 5m             # wall clock of one request's loop
-  # tool_timeout: 60s       # one tool call
-  # tool_list_ttl: 5m       # how long a server's tool list is kept
-  # parallel: 4             # most tool calls of one step that run at once
-  # max_result: 64KiB       # most bytes of one tool answer the model sees
-  # max_results: 256KiB     # most bytes of tool answers in one request
+plugins:
+  tool_loop:
+    servers: [github, files]  # mcp: servers whose tools the gateway offers and runs
+    # allow: ["github__search_*", "files__read_file"]  # only these tools (default: all)
+    # deny: ["files__write_*"]   # never these; wins over allow
+    models: [gpt, claude]     # optional model prefixes; default: every chat model
+    max_steps: 8              # most calls to the model per request
+    # timeout: 5m             # wall clock of one request's loop
+    # tool_timeout: 60s       # one tool call
+    # tool_list_ttl: 5m       # how long a server's tool list is kept
+    # parallel: 4             # most tool calls of one step that run at once
+    # max_result: 64KiB       # most bytes of one tool answer the model sees
+    # max_results: 256KiB     # most bytes of tool answers in one request
 ```
 
 `allow` and `deny` name tools as the model has them, `<server>__<tool>` with
@@ -317,13 +334,13 @@ adds the servers' tools to the request, named `<server>__<tool>` (such as
 those tools it runs them (in parallel), appends the calls and results and
 calls again. The client sees one reply: the final step's, with the usage of
 every step summed. A client can leave the loop out of one request with the
-header `x-respan-agent: off`.
+header `x-respan-tool-loop: off`.
 
 - It stops at a reply that calls no gateway tool; at a reply that calls one of
   the client's *own* tools (the client runs those; the gateway's calls in that
   reply are left out of what it sees); at `max_steps`, where the last call
   forbids tools and a model that still asks for one fails the request (502,
-  `agent_max_steps`); and at `timeout` (504, `agent_timeout`).
+  `tool_loop_max_steps`); and at `timeout` (504, `tool_loop_timeout`).
 - A tool's failure, a timeout, an unreachable server or malformed arguments
   is a tool result the model reads (flagged as an error where the provider's
   format has the flag, else text beginning `Error:`), not a failed request.
@@ -417,10 +434,10 @@ runnable, tested [`examples/`](examples/README.md) of the
 |---|---|
 | `crates/core/` | The neutral kernel and plugin API: typed streams, plugins, lifecycle, faults |
 | `crates/kinds/` | Event types per kind: `conversation`, `media`, `realtime`, `mcp` |
-| `crates/wires/` | Bytes at both edges, no kind: `http` (bodies, credentials, passthrough, Reqwest transport), `ws` |
+| `crates/wires/` | Bytes at both edges, no kind: `http` (bodies, credentials), `http-transport` (Reqwest), `http-faults`, `http-syntax`, `sse`, `ws` |
 | `crates/formats/` | A kind over a wire, no vendor: `conversation-http`, `media-http`, `realtime-ws`, `mcp-http` |
 | `crates/providers/` | Every vendor, a file each: URL, key, models, formats, quirks |
-| `crates/plugins/` | Model routing, fallback, race, backoff |
+| `crates/plugins/routing`, `fallback`, `tool-loop` | First-party plugins: model routing; retry, fallback and race; the tool loop |
 | `crates/serve/` | Hosting: one Axum router for HTTP and WebSocket sessions |
 | `apps/gateway/` | The binary and its library: config, composition, client keys, `/v1/models`, request log, admin API |
 | `apps/ui/` | The web UI (React, shadcn/ui), embedded in the binary |
@@ -446,7 +463,7 @@ tests, and a 10-minute plugin really takes 10 minutes.
 | M6 Hard cases | Realtime translation, video jobs, PII rewriting, admission | done |
 | M7 0.1 release | Release binaries, Docker image and PyPI wheels are built by tag workflows; first tag pending | open |
 | M8 MCP gateway | `mcp:` servers (streamable HTTP or stdio) served at `/mcp/{name}` with client keys, the request log and the web UI | done |
-| M9 Agent loop | `agent:` runs the tools of `mcp:` servers inside chat requests, for every chat format and provider | done |
+| M9 Tool loop | `plugins: tool_loop` runs the tools of `mcp:` servers inside chat requests, for every chat format and provider | done |
 
 ## License
 

@@ -3,20 +3,19 @@
 
 use respan_gateway_core::futures::channel::mpsc;
 use respan_gateway_core::futures::stream::{self, PollNext};
-use respan_gateway_core::futures::{StreamExt, future};
+use respan_gateway_core::futures::{FutureExt, StreamExt, future};
 use respan_gateway_core::{BadRequest, Connection, EventStream, Fault, NativeValue, Upstream};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing;
 use respan_gateway_http::http::header::{CONTENT_TYPE, SEC_WEBSOCKET_PROTOCOL, UPGRADE};
 use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri};
-use respan_gateway_http::{self as h, ClientIo, Encoder, ProviderIo};
+use respan_gateway_http::{self as h, ClientIo, Decoder, Encoder, ProviderIo};
 use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::WsTransport;
 use serde_json::Value;
 
 /// Reads one frame as zero or more events.
-pub(crate) type Read<T> = Box<dyn FnMut(Bytes, &mut Vec<T>) -> Result<(), Fault> + Send>;
+pub(crate) type Read<T> = Box<dyn Decoder<T>>;
 
 /// Where a provider's writer says what answers an input rather than a
 /// frame, such as an update it need not send: its events reach the client
@@ -49,9 +48,9 @@ impl Spec {
     pub(crate) fn matches(&self, io: &ClientIo) -> bool {
         let head = io.request();
         head.method() == Method::GET
-            && h::header_tokens(head.headers(), UPGRADE)
+            && respan_gateway_http_syntax::header_tokens(head.headers(), UPGRADE)
                 .any(|v| v.eq_ignore_ascii_case("websocket"))
-            && framing::path_ends_with(head.uri(), self.path)
+            && respan_gateway_http_syntax::path_ends_with(head.uri(), self.path)
     }
 
     /// A transport to its provider at `base_url`, taking binary text if the
@@ -70,8 +69,8 @@ impl Spec {
         write: Box<dyn Encoder<Output>>,
     ) -> Connection<Input, Output> {
         let protocol = self.protocol.map(HeaderValue::from_static);
-        io.bind(
-            move |request| frames(request.into_body(), read),
+        io.with_error(refusal).bind(
+            move |_| read,
             move |reply| {
                 let mut head = reply.head();
                 if head.status == StatusCode::OK {
@@ -81,15 +80,16 @@ impl Spec {
                 }
                 if let Some(protocol) = protocol {
                     head.headers.remove(SEC_WEBSOCKET_PROTOCOL);
-                    let mut offers =
-                        h::header_tokens(reply.request().headers(), SEC_WEBSOCKET_PROTOCOL);
+                    let mut offers = respan_gateway_http_syntax::header_tokens(
+                        reply.request().headers(),
+                        SEC_WEBSOCKET_PROTOCOL,
+                    );
                     if offers.any(|v| v.as_bytes() == protocol.as_bytes()) {
                         head.headers.insert(SEC_WEBSOCKET_PROTOCOL, protocol);
                     }
                 }
-                Ok(reply.open(head, Bytes::new(), write))
+                Ok(reply.open(head, write))
             },
-            refusal,
         )
     }
 
@@ -105,13 +105,13 @@ impl Spec {
         read: Read<Output>,
         said: Option<Said>,
     ) -> Connection<Output, Input> {
-        let (name, path) = (self.name, self.path);
+        let path = self.path;
         let protocol = self.protocol;
-        let wire = io.extensions().get::<h::Wire>().cloned();
+        let wire = io.extensions().get::<h::raw::Original>().cloned();
         // Only the handshake's 101 is a success: a 2xx is no session.
         let upgraded =
             |answer: &ResponseHead, _: &_| answer.status == StatusCode::SWITCHING_PROTOCOLS;
-        io.with_success(upgraded).bind(
+        let (opening, sink) = io.with_success(upgraded).bind(
             move |head, input: Option<&Input>| {
                 if input.is_some() {
                     return Err(Fault::config(
@@ -129,20 +129,22 @@ impl Spec {
                 head.headers
                     .insert(UPGRADE, HeaderValue::from_static("websocket"));
                 if let Some(protocol) = protocol {
-                    let client = wire.as_ref().and_then(h::Wire::get);
+                    let client = wire.as_ref().and_then(h::raw::Original::get);
                     offer_beside_the_clients(&mut head.headers, client.map(Request::headers), protocol)?;
                 }
                 Ok(write)
             },
-            move |answer, _call| {
-                let frames = frames(answer.into_body(), read);
-                match said {
-                    Some(said) => among(said, frames),
-                    None => frames,
-                }
-            },
-            move |answer| h::provider_fault(name, answer),
-        )
+            move |_, _| Some(read),
+        );
+        // What the writer says itself reaches the client as soon as said,
+        // not with the provider's next frame.
+        let opening = match said {
+            Some(said) => opening
+                .map(|opened| opened.map(|frames| among(said, frames)))
+                .boxed(),
+            None => opening,
+        };
+        (opening, sink)
     }
 }
 
@@ -151,11 +153,6 @@ pub(crate) fn model_at(uri: &Uri) -> Option<String> {
     let query = uri.query()?;
     let model = query.split('&').find_map(|p| p.strip_prefix("model="))?;
     (!model.is_empty()).then(|| model.to_owned())
-}
-
-/// The events of a session's frames, each read by `read`.
-fn frames<T: Send + 'static>(body: h::Body, read: Read<T>) -> EventStream<T> {
-    framing::parse(body, read, |read, raw, out| read(raw, out), |_, end, _| end)
 }
 
 /// The events of `frames`, with what was `said` first whenever there is
@@ -171,11 +168,11 @@ fn among(said: Said, frames: EventStream<Output>) -> EventStream<Output> {
 }
 
 /// A refused handshake's answer: text/plain, with the fault's error code
-/// ([`error_code`](h::error_code)), never its message.
+/// ([`error_code`](respan_gateway_http_faults::error_code)), never its message.
 fn refusal(fault: &Fault, _request: &Request<Bytes>, head: &mut ResponseHead) -> Bytes {
     let text = HeaderValue::from_static("text/plain; charset=utf-8");
     head.headers.insert(CONTENT_TYPE, text);
-    Bytes::from(h::error_code(fault).to_owned())
+    Bytes::from(respan_gateway_http_faults::error_code(fault).to_owned())
 }
 
 /// Offer `protocol` in `headers` beside the subprotocols the client
@@ -185,9 +182,9 @@ fn offer_beside_the_clients(
     client: Option<&HeaderMap>,
     protocol: &str,
 ) -> Result<(), Fault> {
-    let offered = client
-        .into_iter()
-        .flat_map(|client| h::header_tokens(client, SEC_WEBSOCKET_PROTOCOL));
+    let offered = client.into_iter().flat_map(|client| {
+        respan_gateway_http_syntax::header_tokens(client, SEC_WEBSOCKET_PROTOCOL)
+    });
     let mut offers: Vec<&str> = offered.filter(|offer| !offer.is_empty()).collect();
     if !offers.contains(&protocol) {
         offers.push(protocol);
@@ -208,28 +205,34 @@ pub(crate) fn native_client(name: &'static str) -> (Read<Input>, Box<dyn Encoder
         out.push(Input::native(name, json));
         Ok(())
     };
-    let write = framing::each(move |event: &Output| match event {
-        Output::Native(native) => written(name, Some(native)),
-        _ => written(name, None),
-    });
-    (Box::new(read), write)
+    let write = move |event: &Output, out: &mut Vec<Bytes>| {
+        out.push(match event {
+            Output::Native(native) => written(name, Some(native))?,
+            _ => written(name, None)?,
+        });
+        Ok(())
+    };
+    (Box::new(read), Box::new(write))
 }
 
 /// A provider's session of `name`'s native events alone: only
 /// `Input::Native` of `name` written, and each frame one `Output::Native`. A
 /// frame that is not JSON is the provider's fault, `upstream`.
 pub(crate) fn native_provider(name: &'static str) -> (Box<dyn Encoder<Input>>, Read<Output>) {
-    let write = framing::each(move |event: &Input| match event {
-        Input::Native(native) => written(name, Some(native)),
-        _ => written(name, None),
-    });
+    let write = move |event: &Input, out: &mut Vec<Bytes>| {
+        out.push(match event {
+            Input::Native(native) => written(name, Some(native))?,
+            _ => written(name, None)?,
+        });
+        Ok(())
+    };
     let read = move |raw: Bytes, out: &mut Vec<Output>| {
         let json: Value = serde_json::from_slice(&raw)
             .map_err(|_| Upstream::fault("a provider's frame is not a JSON event"))?;
         out.push(Output::native(name, json));
         Ok(())
     };
-    (write, Box::new(read))
+    (Box::new(write), Box::new(read))
 }
 
 /// A native event's JSON as its frame. An event of another format, or one

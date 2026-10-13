@@ -31,22 +31,34 @@ fn request(opening: Opening) -> Request<h::Body> {
 
 async fn preparation_failure(opening: Opening, panic: bool) {
     let (io, answer) = h::ClientIo::accept(request(opening), h::Framing::Whole, LIMIT);
-    let (read, mut sink) = io.bind(
-        |_| EventStream::single(String::new()),
-        move |reply| {
-            let head = respan_gateway_http::http::Response::new(()).into_parts().0;
-            let encoder = h::framing::each(|_: &u8| Ok(Bytes::new()));
-            let _sink = match opening {
-                Opening::Delayed | Opening::Empty => reply.write(head, encoder),
-                Opening::Immediate => reply.open(head, Bytes::from_static(b"premature"), encoder),
-            };
-            if panic {
-                panic!("preparation panic after constructing a sink");
-            }
-            Err::<EventSink<u8>, _>(BadRequest::fault("preparation failed"))
-        },
-        |fault, _, _| Bytes::from(fault.message().to_owned()),
-    );
+    let (read, mut sink) = io
+        .with_error(|fault, _, _| Bytes::from(fault.message().to_owned()))
+        .bind(
+            |_| {
+                Box::new(|_: Bytes, out: &mut Vec<String>| {
+                    out.push(String::new());
+                    Ok(())
+                })
+            },
+            move |reply| {
+                let head = respan_gateway_http::http::Response::new(()).into_parts().0;
+                let encoder = Box::new(|_: &u8, out: &mut Vec<Bytes>| {
+                    out.push(Bytes::new());
+                    Ok(())
+                });
+                let _sink = match opening {
+                    Opening::Delayed | Opening::Empty => reply.write(head, encoder),
+                    Opening::Immediate => {
+                        let premature = Bytes::from_static(b"premature");
+                        reply.open(head, Box::new(Prefixed(premature, encoder)))
+                    }
+                };
+                if panic {
+                    panic!("preparation panic after constructing a sink");
+                }
+                Err::<EventSink<u8>, _>(BadRequest::fault("preparation failed"))
+            },
+        );
     let _input = read.await.expect("incoming request opens");
     let mut source = EventStream::single(1_u8);
     sink.prepare(&mut source).expect("prepare response sink");
@@ -68,12 +80,12 @@ async fn preparation_failure(opening: Opening, panic: bool) {
 
     let expected = if panic { "internal" } else { "bad_request" };
     assert_eq!(
-        h::error_code(&delivery.expect_err("delivery must fail")),
+        respan_gateway_http_faults::error_code(&delivery.expect_err("delivery must fail")),
         expected,
         "{opening:?}"
     );
     assert_eq!(
-        h::error_code(&completion.expect_err("delivery must fail")),
+        respan_gateway_http_faults::error_code(&completion.expect_err("delivery must fail")),
         expected,
         "{opening:?}"
     );
@@ -112,15 +124,27 @@ async fn preparation_panic_wins_after_constructing_each_response_sink() {
 async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
     for opening in [Opening::Delayed, Opening::Empty] {
         let (io, answer) = h::ClientIo::accept(request(opening), h::Framing::Whole, LIMIT);
-        let (read, mut sink) = io.bind(
-            |_| EventStream::single(String::new()),
-            move |reply| {
-                drop(answer);
-                let head = respan_gateway_http::http::Response::new(()).into_parts().0;
-                Ok(reply.write(head, h::framing::each(|_: &u8| Ok(Bytes::new()))))
-            },
-            |fault, _, _| Bytes::from(fault.message().to_owned()),
-        );
+        let (read, mut sink) = io
+            .with_error(|fault, _, _| Bytes::from(fault.message().to_owned()))
+            .bind(
+                |_| {
+                    Box::new(|_: Bytes, out: &mut Vec<String>| {
+                        out.push(String::new());
+                        Ok(())
+                    })
+                },
+                move |reply| {
+                    drop(answer);
+                    let head = respan_gateway_http::http::Response::new(()).into_parts().0;
+                    Ok(reply.write(
+                        head,
+                        Box::new(|_: &u8, out: &mut Vec<Bytes>| {
+                            out.push(Bytes::new());
+                            Ok(())
+                        }),
+                    ))
+                },
+            );
         let _input = read.await.expect("incoming request opens");
         let mut source = EventStream::empty();
         sink.prepare(&mut source).expect("prepare response sink");
@@ -128,7 +152,7 @@ async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
             .await
             .expect("cancelled response handoff must not hang");
         assert_eq!(
-            h::error_code(&result.expect_err("delivery must fail")),
+            respan_gateway_http_faults::error_code(&result.expect_err("delivery must fail")),
             "abandoned"
         );
     }
@@ -139,22 +163,61 @@ async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
 #[tokio::test]
 async fn a_response_prepared_before_its_request_was_read_fails() {
     let (io, _answer) = h::ClientIo::accept(request(Opening::Delayed), h::Framing::Whole, LIMIT);
-    let (_read, mut sink) = io.bind(
-        |_| EventStream::single(String::new()),
+    let (_read, mut sink) = io.with_error(h::rules::plain).bind(
+        |_| {
+            Box::new(|_: Bytes, out: &mut Vec<String>| {
+                out.push(String::new());
+                Ok(())
+            })
+        },
         |reply| {
             let head = reply.head();
-            Ok(reply.write(head, h::framing::each(|_: &u8| Ok(Bytes::new()))))
+            Ok(reply.write(
+                head,
+                Box::new(|_: &u8, out: &mut Vec<Bytes>| {
+                    out.push(Bytes::new());
+                    Ok(())
+                }),
+            ))
         },
-        h::plain,
     );
     let fault = sink
         .prepare(&mut EventStream::single(1_u8))
         .expect_err("unread request");
     assert_eq!(
-        (h::error_code(&fault), fault.message()),
+        (
+            respan_gateway_http_faults::error_code(&fault),
+            fault.message()
+        ),
         (
             "internal",
             "a response was prepared before its request was read"
         )
     );
+}
+
+/// An encoder that starts with `0`, then encodes as `1` does.
+struct Prefixed<T>(Bytes, Box<dyn respan_gateway_http::Encoder<T>>);
+
+impl<T: 'static> respan_gateway_http::Encoder<T> for Prefixed<T> {
+    fn start(&mut self, out: &mut Vec<Bytes>) -> Result<(), respan_gateway_core::Fault> {
+        out.push(self.0.clone());
+        self.1.start(out)
+    }
+
+    fn encode(
+        &mut self,
+        value: &T,
+        out: &mut Vec<Bytes>,
+    ) -> Result<(), respan_gateway_core::Fault> {
+        self.1.encode(value, out)
+    }
+
+    fn end(
+        &mut self,
+        end: Result<(), respan_gateway_core::Fault>,
+        out: &mut Vec<Bytes>,
+    ) -> Result<(), respan_gateway_core::Fault> {
+        self.1.end(end, out)
+    }
 }

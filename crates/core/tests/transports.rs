@@ -10,7 +10,7 @@ use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::{
     ClientContext, Connection, EventSink, EventStream, Extensions, Fault, Format, Gateway, Plugin,
-    ProviderContext, Response, async_trait,
+    Provider, ProviderContext, Response, async_trait,
 };
 
 #[derive(Clone)]
@@ -214,9 +214,11 @@ async fn same_format_sends_plain_typed_input_across_different_transports() {
         .unwrap()
         .client::<Input, Output, Second>(Messages)
         .unwrap()
-        .provider::<Input, _, _>("p", Messages, move |extensions| {
-            Second(attempt(&factories, extensions, false))
-        })
+        .provider(Provider::new::<Input, _, _>(
+            "p",
+            Messages,
+            move |extensions| Second(attempt(&factories, extensions, false)),
+        ))
         .unwrap()
         .plugin(hooks(&trace))
         .target("p")
@@ -253,9 +255,11 @@ async fn same_transport_sends_filtered_typed_input() {
     let gateway = Gateway::new()
         .client::<Input, Output, First>(Messages)
         .unwrap()
-        .provider::<Input, _, _>("p", Messages, move |extensions| {
-            First(attempt(&factories, extensions, false), Cell::new(0))
-        })
+        .provider(Provider::new::<Input, _, _>(
+            "p",
+            Messages,
+            move |extensions| First(attempt(&factories, extensions, false), Cell::new(0)),
+        ))
         .unwrap()
         .plugin(plugin)
         .target("p")
@@ -281,9 +285,11 @@ async fn own_input_reaches_a_provider_on_the_same_transport() {
     let gateway = Gateway::new()
         .client::<Input, Output, First>(Messages)
         .unwrap()
-        .provider::<Input, _, _>("p", Messages, move |extensions| {
-            First(attempt(&factories, extensions, false), Cell::new(0))
-        })
+        .provider(Provider::new::<Input, _, _>(
+            "p",
+            Messages,
+            move |extensions| First(attempt(&factories, extensions, false), Cell::new(0)),
+        ))
         .unwrap()
         .plugin(plugin)
         .target("p")
@@ -309,9 +315,11 @@ async fn retries_create_distinct_transports_after_each_attempts_hooks() {
     let gateway = Gateway::new()
         .client::<Input, Output, First>(Messages)
         .unwrap()
-        .provider::<Input, _, _>("p", Messages, move |extensions| {
-            First(attempt(&factories, extensions, true), Cell::new(0))
-        })
+        .provider(Provider::new::<Input, _, _>(
+            "p",
+            Messages,
+            move |extensions| First(attempt(&factories, extensions, true), Cell::new(0)),
+        ))
         .unwrap()
         .plugin(plugin)
         .target("p")
@@ -338,9 +346,11 @@ async fn rejected_provider_hook_does_not_create_a_transport() {
     let gateway = Gateway::new()
         .client::<Input, Output, First>(Messages)
         .unwrap()
-        .provider::<Input, _, _>("p", Messages, move |extensions| {
-            First(attempt(&factories, extensions, false), Cell::new(0))
-        })
+        .provider(Provider::new::<Input, _, _>(
+            "p",
+            Messages,
+            move |extensions| First(attempt(&factories, extensions, false), Cell::new(0)),
+        ))
         .unwrap()
         .plugin(plugin)
         .target("p")
@@ -365,7 +375,9 @@ async fn a_panicking_transport_factory_is_an_unsent_internal_failure() {
     let gateway = Gateway::new()
         .client::<Input, Output, First>(Messages)
         .unwrap()
-        .provider::<Input, _, _>("p", Messages, |_| -> First { panic!("factory failed") })
+        .provider(Provider::new::<Input, _, _>("p", Messages, |_| -> First {
+            panic!("factory failed")
+        }))
         .unwrap()
         .plugin(hooks(&trace))
         .target("p")
@@ -390,9 +402,11 @@ fn registration_checks_the_kind_after_assigning_the_edge_role() {
     // This selects the receive-Input/send-Output implementation for an
     // outgoing call: the gateway must interpret its kind in reverse.
     let fault = gateway
-        .provider::<Output, Input, First>("backwards", Messages, |_| {
-            panic!("registration must not construct I/O")
-        })
+        .provider(Provider::new::<Output, Input, First>(
+            "backwards",
+            Messages,
+            |_| panic!("registration must not construct I/O"),
+        ))
         .unwrap_err();
     assert_eq!(faults::code(&fault), "config");
     assert_eq!(

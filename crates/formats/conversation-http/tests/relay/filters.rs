@@ -200,7 +200,9 @@ async fn a_stream_guardrail_refuses_before_any_bytes_and_fails_the_stream_after(
     assert_eq!(status, StatusCode::FORBIDDEN);
     // Its fault has the status.
     let end = h.log.only();
-    assert!(matches!(end, Err(f) if respan_gateway_http::status(&f) == StatusCode::FORBIDDEN));
+    assert!(
+        matches!(end, Err(f) if respan_gateway_http_faults::status(&f) == StatusCode::FORBIDDEN)
+    );
 
     let world =
         |e: &Output| matches!(e, Output::Delta { delta, .. } if delta.as_str().contains("world"));
@@ -264,7 +266,9 @@ async fn a_unary_guardrail_refuses_with_its_status() {
     assert!(body.contains("\"code\":\"blocked\""), "{body}");
     // Its fault has the status.
     let end = h.log.only();
-    assert!(matches!(end, Err(f) if respan_gateway_http::status(&f) == StatusCode::FORBIDDEN));
+    assert!(
+        matches!(end, Err(f) if respan_gateway_http_faults::status(&f) == StatusCode::FORBIDDEN)
+    );
 }
 
 #[tokio::test]

@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_conversation::{Block, Content, Delta, Input, Output, ToolChoice};
 use respan_gateway_core::{Fault, Filter};
-use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
+use respan_gateway_http_faults::Status;
 use serde_json::{self, Map, Value};
 
 /// The code of a refusal of content that cannot be read.

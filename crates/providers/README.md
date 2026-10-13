@@ -14,8 +14,10 @@ departing from a spec it speaks, and its file handles it:
   (`model_id_prefix`);
 - as a plugin, `Provider::plugin`, such as `groq::GroqQuirks`, which turns
   what the vendor sends beyond the spec into the kind's events and back.
-  The binary runs it on the calls of providers of that vendor alone, after
-  every other plugin's hooks, so each of theirs sees the kind's events.
+  Each core provider of that vendor carries it as its own plugin
+  (`respan_gateway_core::Provider::plugin`), so it runs on their calls
+  alone, after the gateway's plugins, and each of those sees the kind's
+  events. It is part of the provider, not something to turn off.
 
 What a spec itself says, such as OpenAI Realtime's subprotocol, is its
 format's (`OpenAiRealtime`), not a quirk. Each quirk is

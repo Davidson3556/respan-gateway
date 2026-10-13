@@ -14,7 +14,7 @@ mod stdio;
 mod streamable;
 
 pub use stdio::{Owner, StdioTransport};
-pub use streamable::{SESSION, StreamableHttp};
+pub use streamable::{FORMAT, SESSION, StreamableHttp};
 
 /// JSON-RPC 2.0 (5.1): "Invalid JSON was received by the server".
 const PARSE_ERROR: RpcCode = RpcCode(-32700);

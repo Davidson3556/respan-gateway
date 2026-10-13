@@ -10,23 +10,26 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use respan_gateway_core::futures::{StreamExt, stream};
-use respan_gateway_core::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response};
+use respan_gateway_core::{
+    ClientContext, Extensions, Fault, Format, Gateway, Plugin, Provider, Response,
+};
 use respan_gateway_core::{RetryAfter, Truncated, Upstream, async_trait};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
-    Body, ClientIo, Completion, Credential, Framing, ProviderIo, credentials, error_code,
-    strip_origin_headers,
+    Body, ClientIo, Completion, Credential, Framing, ProviderIo, call::credentials,
+    call::strip_origin_headers,
 };
+use respan_gateway_http_faults::error_code;
 use respan_gateway_mcp::{Input, Output};
 #[cfg(unix)]
 use respan_gateway_mcp_http::StdioTransport;
 use respan_gateway_mcp_http::{Owner, SESSION, StreamableHttp};
 use serde_json::{Value, json};
 
-use respan_gateway_http::Relay;
+use respan_gateway_plugin_relay::Relay;
 
 const AT: &str = "http://mcp.test";
 
@@ -42,7 +45,7 @@ fn gateway(
     transport: impl Fn(Extensions) -> ProviderIo + Send + Sync + 'static,
     plugin: Option<Touch>,
 ) -> Gateway {
-    let gw = Gateway::new().provider::<Input, _, _>("mcp", StreamableHttp::default(), transport);
+    let gw = Gateway::new().provider(Provider::new("mcp", StreamableHttp::default(), transport));
     let gw = gw.and_then(|g| g.client::<Input, _, _>(StreamableHttp::default()));
     let gw = match plugin {
         Some(p) => gw.map(|g| g.plugin(p)),
@@ -58,7 +61,7 @@ fn relayed(
     transport: impl Fn(Extensions) -> ProviderIo + Send + Sync + 'static,
     plugin: Option<Touch>,
 ) -> Gateway {
-    gateway(transport, plugin).plugin(Relay::RAW)
+    gateway(transport, plugin).plugin(Relay)
 }
 
 /// Filters every input and output, changing them only if `edit`.
@@ -820,13 +823,17 @@ async fn a_non_success_event_stream_is_refused_with_retry_after_and_can_fall_bac
     let gw = Gateway::new()
         .client::<Input, _, _>(StreamableHttp::default())
         .expect("client")
-        .provider::<Input, _, _>("first", StreamableHttp::default(), first.clone().connect())
+        .provider(Provider::new(
+            "first",
+            StreamableHttp::default(),
+            first.clone().connect(),
+        ))
         .expect("first")
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "second",
             StreamableHttp::default(),
             second.clone().connect(),
-        )
+        ))
         .expect("second")
         .plugin(Fallback)
         .plugin(probe.clone());
@@ -870,7 +877,7 @@ impl Quiet {
                 let resp = http::Response::builder()
                     .header("content-type", "text/event-stream")
                     .body(Body::stream(stream::pending()))
-                    .map_err(respan_gateway_http::built_wrong)?;
+                    .map_err(respan_gateway_http_faults::built_wrong)?;
                 Ok((resp, None))
             },
             LIMIT,
@@ -1089,11 +1096,11 @@ impl Plugin for Authenticates {
 #[tokio::test]
 async fn a_session_belongs_to_the_owner_a_plugin_sets() -> Result<(), Fault> {
     let gw = Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "mcp",
             StreamableHttp::default(),
             StdioTransport::new("sh", ["-c", ECHO]).connect(),
-        )?
+        ))?
         .client::<Input, _, _>(StreamableHttp::default())?
         .plugin(Authenticates)
         .target("mcp")?;

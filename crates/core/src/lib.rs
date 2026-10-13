@@ -7,18 +7,18 @@
 //! [`futures::Sink`]; codecs and byte I/O live outside the kernel.
 
 mod call;
+mod client_output;
 mod context;
 mod events;
 mod extensions;
-mod facts;
 mod fault;
 mod format;
 mod gateway;
 mod input;
-mod leg;
+mod layers;
 mod lifecycle;
+mod live_inputs;
 mod native;
-mod outflow;
 mod plugin;
 mod provider;
 mod response;
@@ -28,13 +28,15 @@ pub use call::Call;
 pub use context::ClientContext;
 pub use events::{EventSink, EventStream};
 pub use extensions::Extensions;
-pub use facts::{BadRequest, Details, ErrorCode, RetryAfter, Truncated, Upstream};
-pub use fault::{Abandoned, Config, Fault, Internal, NotFound};
+pub use fault::{
+    Abandoned, BadRequest, Config, Details, ErrorCode, Fault, Internal, NotFound, RetryAfter,
+    Truncated, Upstream,
+};
 pub use format::{Connection, Format};
 pub use gateway::Gateway;
 pub use native::{FormatId, NativeFields, NativeValue};
 pub use plugin::{Filter, Plugin};
-pub use provider::ProviderContext;
+pub use provider::{Provider, ProviderContext};
 pub use response::Response;
 
 /// A gateway operation that may fail with a [`Fault`].

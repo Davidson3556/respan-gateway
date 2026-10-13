@@ -15,6 +15,9 @@ pub(crate) trait Edge: Send + Sync + 'static {
     /// The request, whose runtime runs the end hooks.
     fn client(&self) -> &ClientContext;
 
+    /// The plugins whose hooks run on this edge, in order.
+    fn plugins(&self) -> impl Iterator<Item = &Arc<dyn Plugin>> + Send;
+
     /// `plugin`'s end hook on this edge.
     fn hook<'a>(&'a self, plugin: &'a dyn Plugin, end: &'a Result<()>) -> BoxFuture<'a, ()>;
 
@@ -84,7 +87,7 @@ impl<E: Edge> EndHooks<E> {
             if let Some(first) = after {
                 first.idle().await;
             }
-            for plugin in cx.client().gateway.plugins.iter().take(ran) {
+            for plugin in cx.plugins().take(ran) {
                 // One plugin's panic must not cost the others their hook.
                 let hook = AssertUnwindSafe(cx.hook(&**plugin, &end));
                 let _ = hook.catch_unwind().await;

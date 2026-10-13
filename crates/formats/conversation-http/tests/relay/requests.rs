@@ -33,8 +33,8 @@ async fn plugins_see_the_request_and_change_its_model() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let asked = cx
                 .extensions()
-                .get::<Wire>()
-                .and_then(Wire::get)
+                .get::<Original>()
+                .and_then(Original::get)
                 .map(|a| a.method().clone());
             assert_eq!(asked, Some(http::Method::POST));
             // The client's request, as it said it.
@@ -526,7 +526,7 @@ async fn a_response_goes_only_to_the_request_whose_call_it_answers() {
     #[async_trait]
     impl Plugin for Swap {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+            let asked = cx.extensions().get::<Original>().and_then(Original::get);
             match asked.is_some_and(|a| a.headers().contains_key("x-keep")) {
                 true => {
                     let resp = cx.call("backup").await?;

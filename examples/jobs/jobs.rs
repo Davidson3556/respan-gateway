@@ -40,10 +40,10 @@ use mockllm::FakeOpenAi;
 use respan_gateway_conversation::{Input, Output};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream, stream::BoxStream};
-use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Provider, Response, async_trait};
 use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, HeaderValue, header::AUTHORIZATION};
-use respan_gateway_http::{Credential, Wire};
+use respan_gateway_http::{Credential, raw::Original};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -288,7 +288,7 @@ struct Idempotent<S>(Arc<S>);
 #[async_trait]
 impl<S: Store> Plugin for Idempotent<S> {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+        let asked = cx.extensions().get::<Original>().and_then(Original::get);
         let header = asked.and_then(|a| a.headers().get("idempotency-key")?.to_str().ok());
         let stores = cx.is_kind::<Input>() && cx.extensions().get::<NoContent>().is_none();
         let Some(key) = header.filter(|_| stores) else {
@@ -296,7 +296,7 @@ impl<S: Store> Plugin for Idempotent<S> {
         };
         // The body as the client sent it, which the HTTP adapter publishes:
         // stable across restarts and versions, unlike any in-memory form.
-        let wire = cx.extensions().get::<respan_gateway_http::Wire>();
+        let wire = cx.extensions().get::<respan_gateway_http::raw::Original>();
         let body = wire
             .and_then(|w| w.get())
             .map_or(&[][..], |r| &r.body()[..]);
@@ -366,11 +366,11 @@ impl<S: Store> Plugin for Idempotent<S> {
 }
 
 fn gateway<S: Store>(
-    transport: respan_gateway_http::HttpTransport,
+    transport: respan_gateway_http_transport::HttpTransport,
     store: &Arc<S>,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(
@@ -380,7 +380,7 @@ fn gateway<S: Store>(
                 }),
                 LIMIT,
             ),
-        )?
+        ))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(Idempotent(store.clone()))
         .target("openai")

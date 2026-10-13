@@ -11,8 +11,9 @@ use futures::{FutureExt, StreamExt, stream};
 
 use crate::fault::{PANICKED, guarded};
 use crate::input::Input;
-use crate::leg::{Later, cut, inputs, locked};
+use crate::layers::{cut, locked};
 use crate::lifecycle::{EndHooks, Latch};
+use crate::live_inputs::{Later, inputs};
 use crate::provider::Provider;
 use crate::values::AnyEvents;
 use crate::{ClientContext, EventStream, Extensions, Fault, ProviderContext, Response, Result};
@@ -173,6 +174,7 @@ async fn send(
         client,
         format: p.format.clone(),
         provider,
+        plugins: p.plugins.clone(),
         live: later.is_some(),
         input,
         outputs: Arc::default(),
@@ -373,10 +375,12 @@ impl CallEdge {
         call
     }
 
-    /// Run each plugin's `on_provider` until one refuses.
+    /// Run each plugin's `on_provider`, the gateway's then its provider's
+    /// own, until one refuses.
     pub(crate) async fn start(&mut self) -> Result<()> {
         let gateway = self.cx().client.gateway.clone();
-        for plugin in &gateway.plugins {
+        let own = self.cx().plugins.clone();
+        for plugin in gateway.plugins.iter().chain(own.iter()) {
             plugin.on_provider(self.begin()).await?;
         }
         Ok(())

@@ -1,27 +1,28 @@
 use super::*;
 
-use crate::schema::Decoder;
+use respan_gateway_http::{Decoder, Sse};
 
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 
 use crate::anthropic::AnthropicMessages;
-use crate::schema::OutputParser;
+use crate::schema::Held;
 use respan_gateway_conversation::{Content, Message, Tool, ToolChoice};
 use respan_gateway_core::NativeFields;
 use respan_gateway_core::{Details, ErrorCode};
 
-use respan_gateway_http::{Status, http::StatusCode};
+use respan_gateway_http::http::StatusCode;
+use respan_gateway_http_faults::Status;
 
 /// The events of `chunks`, and how the stream ended.
 fn decode_all(chunks: &[&str]) -> (Vec<Output>, Result<(), Fault>) {
-    let mut d = OutputParser::new(OpenAiChat.decoder(), false, None);
+    let mut d = Sse::new(OpenAiChat.decoder());
     let mut out = Vec::new();
     for c in chunks {
-        if let Err(f) = d.push(Bytes::from(c.to_string()), &mut out) {
+        if let Err(f) = d.decode(Bytes::from(c.to_string()), &mut out) {
             return (out, Err(f));
         }
     }
-    let end = d.finish(&mut out);
+    let end = d.end(Ok(()), &mut out);
     (out, end)
 }
 
@@ -41,9 +42,9 @@ fn stream_of(replies: &[Output], usage: bool) -> Result<String, Fault> {
     let mut enc = Chunks::new(usage);
     let mut out = BytesMut::new();
     for reply in replies {
-        enc.encode(reply, &mut out)?;
+        enc.encode_into(reply, &mut out)?;
     }
-    enc.end(&Ok(()), &mut out)?;
+    enc.end_into(&Ok(()), &mut out)?;
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
@@ -84,12 +85,12 @@ fn a_start_is_pushed_only_with_the_first_content_and_dropped_at_a_failure() {
         "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n";
     let error = "data: {\"error\":{\"message\":\"Overloaded\"}}\n\n";
     let batches = |events: &[&str]| {
-        let mut d = OutputParser::new(OpenAiChat.decoder(), true, None);
+        let mut d = Sse::new(Held::new(OpenAiChat.decoder()));
         let batches: Vec<(Vec<Output>, bool)> = events
             .iter()
             .map(|e| {
                 let mut out = Vec::new();
-                let failed = d.push(Bytes::from(e.to_string()), &mut out).is_err();
+                let failed = d.decode(Bytes::from(e.to_string()), &mut out).is_err();
                 (out, failed)
             })
             .collect();
@@ -366,7 +367,7 @@ fn the_terminator_completes_the_response_and_nothing_after_it_is_read() {
     let (_, end) = decode_all(&["data: {\"choices\":[]}\n\n"]);
     assert_eq!(
         end.err()
-            .map(|f| respan_gateway_http::error_code(&f).to_owned())
+            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
             .as_deref(),
         Some("truncated")
     );
@@ -379,7 +380,7 @@ fn a_provider_error_event_ends_the_stream_with_its_code() {
     ]);
     assert!(matches!(
         end,
-        Err(f) if respan_gateway_http::error_code(&f) == "server_error" && f.message() == "overloaded"
+        Err(f) if respan_gateway_http_faults::error_code(&f) == "server_error" && f.message() == "overloaded"
     ));
 }
 
@@ -389,7 +390,7 @@ fn a_provider_error_event_goes_out_as_it_came_in_the_same_format() {
     let (_, end) = decode_all(&[error]);
     let mut bytes = BytesMut::new();
     let mut enc = Chunks::new(false);
-    assert!(enc.end(&end, &mut bytes).is_ok());
+    assert!(enc.end_into(&end, &mut bytes).is_ok());
     // Its fields are the format's, so it is written as it came.
     assert_eq!(&bytes[..], error.as_bytes());
 }
@@ -915,7 +916,7 @@ fn what_a_conversation_cannot_hold_is_kept_or_refused() {
     // To another format it is refused; to OpenAI it is kept.
     let err = AnthropicMessages.encode_request(&chat).err();
     assert_eq!(
-        err.map(|e| respan_gateway_http::status(&e).as_u16()),
+        err.map(|e| respan_gateway_http_faults::status(&e).as_u16()),
         Some(400)
     );
     assert_eq!(written(body.clone(), |_| {}).ok(), Some(body));

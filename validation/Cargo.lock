@@ -1287,11 +1287,20 @@ dependencies = [
  "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http",
+ "respan-gateway-http-faults",
+ "respan-gateway-http-syntax",
+ "respan-gateway-http-transport",
  "respan-gateway-mcp",
  "respan-gateway-mcp-http",
  "respan-gateway-media",
  "respan-gateway-media-http",
- "respan-gateway-plugins",
+ "respan-gateway-passthrough-http",
+ "respan-gateway-plugin-credentials",
+ "respan-gateway-plugin-fallback",
+ "respan-gateway-plugin-mcp-aggregate",
+ "respan-gateway-plugin-relay",
+ "respan-gateway-plugin-routing",
+ "respan-gateway-plugin-tool-loop",
  "respan-gateway-providers",
  "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
@@ -1321,6 +1330,9 @@ dependencies = [
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
+ "respan-gateway-http-faults",
+ "respan-gateway-http-syntax",
+ "respan-gateway-sse",
  "serde",
  "serde_json",
 ]
@@ -1344,11 +1356,43 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "reqwest",
  "respan-gateway-core",
+ "respan-gateway-http-faults",
+ "respan-gateway-http-syntax",
+ "respan-gateway-sse",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "respan-gateway-http-faults"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
+ "respan-gateway-core",
+]
+
+[[package]]
+name = "respan-gateway-http-syntax"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "respan-gateway-core",
+]
+
+[[package]]
+name = "respan-gateway-http-transport"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body-util",
+ "reqwest",
+ "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-http-syntax",
 ]
 
 [[package]]
@@ -1369,7 +1413,10 @@ dependencies = [
  "libc",
  "respan-gateway-core",
  "respan-gateway-http",
+ "respan-gateway-http-faults",
+ "respan-gateway-http-syntax",
  "respan-gateway-mcp",
+ "respan-gateway-sse",
  "serde_json",
  "tokio",
 ]
@@ -1395,17 +1442,81 @@ dependencies = [
  "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http",
+ "respan-gateway-http-faults",
+ "respan-gateway-http-syntax",
  "respan-gateway-media",
+ "respan-gateway-sse",
  "serde_json",
 ]
 
 [[package]]
-name = "respan-gateway-plugins"
+name = "respan-gateway-passthrough-http"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-http-faults",
+ "respan-gateway-http-syntax",
+]
+
+[[package]]
+name = "respan-gateway-plugin-credentials"
+version = "0.1.0"
+dependencies = [
+ "respan-gateway-core",
+ "respan-gateway-http",
+]
+
+[[package]]
+name = "respan-gateway-plugin-fallback"
+version = "0.1.0"
+dependencies = [
+ "respan-gateway-core",
+ "respan-gateway-http-faults",
+ "tokio",
+]
+
+[[package]]
+name = "respan-gateway-plugin-mcp-aggregate"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "indexmap",
+ "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-http-faults",
+ "respan-gateway-http-syntax",
+ "respan-gateway-mcp",
+ "respan-gateway-mcp-http",
+ "respan-gateway-plugin-tool-loop",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "respan-gateway-plugin-relay"
+version = "0.1.0"
+dependencies = [
+ "respan-gateway-core",
+ "respan-gateway-http",
+]
+
+[[package]]
+name = "respan-gateway-plugin-routing"
+version = "0.1.0"
+dependencies = [
+ "respan-gateway-core",
+]
+
+[[package]]
+name = "respan-gateway-plugin-tool-loop"
 version = "0.1.0"
 dependencies = [
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
+ "respan-gateway-http-faults",
  "serde_json",
  "tokio",
 ]
@@ -1441,6 +1552,8 @@ dependencies = [
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
+ "respan-gateway-http-faults",
+ "respan-gateway-http-syntax",
  "respan-gateway-realtime",
  "respan-gateway-ws",
  "serde_json",
@@ -1460,6 +1573,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "respan-gateway-sse"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "respan-gateway-core",
+ "serde_json",
+]
+
+[[package]]
 name = "respan-gateway-validation"
 version = "0.0.0"
 dependencies = [
@@ -1473,9 +1595,12 @@ dependencies = [
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
+ "respan-gateway-http-faults",
+ "respan-gateway-http-transport",
  "respan-gateway-mcp",
  "respan-gateway-mcp-http",
- "respan-gateway-plugins",
+ "respan-gateway-passthrough-http",
+ "respan-gateway-plugin-relay",
  "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
  "respan-gateway-serve",
@@ -1494,6 +1619,8 @@ dependencies = [
  "reqwest",
  "respan-gateway-core",
  "respan-gateway-http",
+ "respan-gateway-http-faults",
+ "respan-gateway-http-syntax",
  "rustls",
  "rustls-native-certs",
  "serde_json",

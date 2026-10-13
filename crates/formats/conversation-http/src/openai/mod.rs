@@ -167,6 +167,8 @@ const USAGE: UsageFields = UsageFields {
 impl Schema for OpenAiChat {
     const NAME: &'static str = OPENAI;
     const PATH: &'static str = "/chat/completions";
+    const CARRIED: &'static [&'static str] =
+        &["openai-beta", "openai-organization", "openai-project"];
     /// The two spellings of a response's token limit, and the structured
     /// output requirement.
     const OWN: &'static [&'static str] = &[
@@ -179,6 +181,10 @@ impl Schema for OpenAiChat {
 
     fn decoder(&self) -> OpenAiDecoder {
         OpenAiDecoder::new()
+    }
+
+    fn decode_body(&self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
+        self.decoder().body(v, out)
     }
 
     fn decode_json(&self, v: &Value) -> Input {
@@ -225,7 +231,7 @@ impl Schema for OpenAiChat {
             && chat.native.fields().get("n").is_some_and(several)
         {
             return Err(BadRequest::fault(
-                "several choices (n > 1) cannot be represented; a raw relay can send them",
+                "several choices (n > 1) cannot be represented",
             ));
         }
         let mut v = Map::new();
@@ -357,7 +363,7 @@ impl Schema for OpenAiChat {
     }
 
     fn error_body(fault: &Fault) -> Value {
-        let code = respan_gateway_http::error_code(fault);
+        let code = respan_gateway_http_faults::error_code(fault);
         let error =
             json!({ "message": fault.message(), "type": code, "param": null, "code": code });
         json!({ "error": merge_details(error, fault) })

@@ -25,7 +25,7 @@ listen: 127.0.0.1:8080
 #                 reload, the config). Unless some key sets `admin: true`,
 #                 every key does; once one does, only those keys do and the
 #                 others get 403 there. `admin: false` always excludes.
-#   tools: [..]   the agent tools (`server__tool`, `*` globs, as `agent.allow`)
+#   tools: [..]   the tool-loop tools (`server__tool`, `*` globs, as `plugins.tool_loop.allow`)
 #                 this key's requests may be offered, within the global
 #                 `allow`/`deny`; all if unset.
 # client_keys:
@@ -175,34 +175,10 @@ providers:
 # and every session format some provider speaks.
 # formats: [openai-chat, anthropic-messages, openai-responses, gemini-generate]
 
-# Compiled-in plugins, run on every request in the order listed; a plugin
-# is the one field that configures it. `models` routes model names to
-# providers, before the presets' own names, for every kind the provider
-# serves (a `whisper-` prefix to a transcription provider, say); a later
-# plugin's match wins.
-# plugins:
-#   - models:
-#       - { prefix: llama, provider: groq }
-
-# The default provider of each kind it serves, for requests nothing else
-# routes; unset, the first provider serving the kind.
-# default: openai
-
-# Limits. request_history is how many finished requests the in-memory request
-# history (the web UI's) keeps; shutdown_grace is how long open responses and end
-# hooks get, together, after a stop signal before they are cut (seconds, or
-# 30s, 2m, 500ms); ws_message_limit is the largest WebSocket message of a
-# session, from either side, as a size like body_limit.
-# request_history: 1000
-
-# Keep the history across restarts: append each finished request (the same
-# record the admin API shows: no bodies, no keys) to a JSON-lines file, read the
-# last request_history of them back at start, and move the file to <file>.1 at
-# request_history_file_max (a size; 64MiB if unset). A disk error is a warning,
-# never a failed request. GET /ui/api/requests/export?format=jsonl|csv downloads
-# the history, with the UI's filters (kind, status, provider, model, since).
-# request_history_file: ./requests.jsonl
-# request_history_file_max: 64MiB
+# Limits. shutdown_grace is how long open responses and end hooks get,
+# together, after a stop signal before they are cut (seconds, or 30s, 2m,
+# 500ms); ws_message_limit is the largest WebSocket message of a session,
+# from either side, as a size like body_limit.
 
 # What models cost, in dollars per million tokens, by model prefix (the longest
 # match wins). Set, each request gets a cost_usd and the overview's totals their
@@ -250,14 +226,6 @@ providers:
 #       scopes: [read, write]
 #       # refresh_token: env:CRM_REFRESH_TOKEN
 
-# One MCP endpoint, /mcp, for every mcp: server: tools and prompts are
-# named {server}__{name}, resources are mcp://{server}/{uri}, lists merge,
-# and the session is the client's own. Off unless set.
-# mcp_aggregate:
-#   servers: [github, files]      # default: every server without forward_auth
-#   allow: ["github__search_*"]   # tool patterns (default: all)
-#   deny: ["files__write_*"]      # wins over allow
-
 # Browser apps on other origins (MCP Inspector, a chat front end) are refused
 # unless listed here: their preflight is answered without a key, and their
 # requests may read the answers (the mcp-session-id header too). Their requests
@@ -266,31 +234,97 @@ providers:
 # cors:
 #   origins: ["https://app.example.com"]
 
-# The agent loop: run the tools of mcp: servers inside chat requests, so a
-# client that knows nothing of MCP gets answers that used them. Off unless
-# set. The gateway adds the servers' tools to a chat request of any chat
-# format (named <server>__<tool>, such as github__search), calls the model,
-# runs the tools it calls with each server's own credentials (never a
-# client's; a `forward_auth` server cannot be listed), and calls again until
-# the model answers or calls a tool of the client's own, which goes back to
-# the client. The client sees one reply, with the usage of every step summed.
-# `mcp` must be served (the default; or listed in `formats`). A request can
-# leave the loop out with the header `x-respan-agent: off`.
-# agent:
-#   servers: [github, files]  # mcp: servers whose tools are offered and run
-#   # Which of their tools: names as the model has them (<server>__<tool>, any
-#   # other character of a tool's name is _), * for any characters. All of the
-#   # servers' tools if allow is unset; deny wins. Any client can make the
-#   # model call any tool offered, with the servers' own credentials.
-#   allow: ["github__search_*", "files__read_file"]
-#   deny: ["files__write_*"]
-#   models: [gpt, claude]   # optional model prefixes; every chat model if unset
-#   max_steps: 8            # most calls to the model per request (1 to 64)
-#   timeout: 5m             # wall clock of one request's loop
-#   tool_timeout: 60s       # one tool call; past it the model gets an error
-#   max_result: 64KiB       # most bytes of one tool answer the model sees
-#   tool_list_ttl: 5m       # how long a server's tool list is kept
-#   parallel: 4             # most tool calls of one step that run at once
-#   max_results: 256KiB     # most bytes of tool answers in one request
-# Tool descriptions and answers are untrusted input to the model.
-# `check --online` lists the tools that would be offered.
+# Compiled-in plugins, each configured under its own name. The order here
+# does not matter: the gateway runs them in a fixed order (the request log,
+# routing, MCP, video jobs, the tool loop, hedge, then fallback). A plugin
+# left out keeps its defaults, which leave the optional ones (fallback,
+# hedge, mcp_aggregate, tool_loop) off. Video jobs (a job's id names the
+# provider that made it) are always on, and each vendor's quirks are part of
+# its providers, not a plugin.
+# plugins:
+#
+#   # Routing: which provider a request goes to. `models` routes model names
+#   # to providers, before the presets' own names, for every kind the provider
+#   # serves (a `whisper-` prefix to a transcription provider, say); the first
+#   # listed prefix a model matches wins. `default` is the provider of each
+#   # kind it serves for requests nothing else routes; unset, the first
+#   # provider serving the kind.
+#   routing:
+#     models:
+#       - { prefix: llama, provider: groq }
+#     default: openai
+#
+#   # Fallback: a request to a provider listed under `after` is tried as
+#   # `tries` says (with Retry-After honoured, up to max_backoff), then sent to
+#   # each provider of its chain in turn; the client gets the first success.
+#   # A provider of the chain gets the request in its own format if it speaks
+#   # it, else translated; the model name is sent as is, so chain providers
+#   # that serve the same models (another deployment, another region). An
+#   # answer counts once its head arrives (`until: head`), or once it ends
+#   # cleanly (`until: end`, which holds it whole); nothing is retried after.
+#   fallback:
+#     after: { openai: [openai-eu] }
+#     tries: 2                # per provider, retries included (1 to 10)
+#     backoff: 250ms          # the first wait before a retry, doubled after
+#     max_backoff: 10s        # the longest wait; a longer Retry-After: no retry
+#     until: head
+#
+#   # Hedge: a request to a provider listed under `after` also goes to each
+#   # provider of its chain, `stagger` after the one before (at once when
+#   # every one started has failed); the first success wins and the others
+#   # are dropped. A request the tool loop runs is not hedged, and a hedged
+#   # one is not retried by fallback.
+#   hedge:
+#     after: { openai: [openai-eu] }
+#     stagger: 200ms
+#     until: head
+#
+#   # The request log, which the web UI and the admin API read: `history`
+#   # finished requests are kept in memory. With `file`, each one is also
+#   # appended to a JSON-lines file (the record the admin API shows: no
+#   # bodies, no keys), the last `history` of them are read back at start,
+#   # and the file moves to <file>.1 at `file_max`. A disk error is a warning,
+#   # never a failed request. GET /ui/api/requests/export?format=jsonl|csv
+#   # downloads the history, with the UI's filters (kind, status, provider,
+#   # model, since).
+#   request_log:
+#     history: 1000
+#     file: ./requests.jsonl
+#     file_max: 64MiB
+#
+#   # One MCP endpoint, /mcp, for every mcp: server: tools and prompts are
+#   # named {server}__{name}, resources are mcp://{server}/{uri}, lists merge,
+#   # and the session is the client's own. Off unless set.
+#   mcp_aggregate:
+#     servers: [github, files]      # default: every server without forward_auth
+#     allow: ["github__search_*"]   # tool patterns (default: all)
+#     deny: ["files__write_*"]      # wins over allow
+#
+#   # The tool loop: run the tools of mcp: servers inside chat requests, so a
+#   # client that knows nothing of MCP gets answers that used them. Off unless
+#   # set. The gateway adds the servers' tools to a chat request of any chat
+#   # format (named <server>__<tool>, such as github__search), calls the model,
+#   # runs the tools it calls with each server's own credentials (never a
+#   # client's; a `forward_auth` server cannot be listed), and calls again until
+#   # the model answers or calls a tool of the client's own, which goes back to
+#   # the client. The client sees one reply, with the usage of every step summed.
+#   # `mcp` must be served (the default; or listed in `formats`). A request can
+#   # leave the loop out with the header `x-respan-tool-loop: off`.
+#   tool_loop:
+#     servers: [github, files]  # mcp: servers whose tools are offered and run
+#     # Which of their tools: names as the model has them (<server>__<tool>, any
+#     # other character of a tool's name is _), * for any characters. All of the
+#     # servers' tools if allow is unset; deny wins. Any client can make the
+#     # model call any tool offered, with the servers' own credentials.
+#     allow: ["github__search_*", "files__read_file"]
+#     deny: ["files__write_*"]
+#     models: [gpt, claude]   # optional model prefixes; every chat model if unset
+#     max_steps: 8            # most calls to the model per request (1 to 64)
+#     timeout: 5m             # wall clock of one request's loop
+#     tool_timeout: 60s       # one tool call; past it the model gets an error
+#     max_result: 64KiB       # most bytes of one tool answer the model sees
+#     tool_list_ttl: 5m       # how long a server's tool list is kept
+#     parallel: 4             # most tool calls of one step that run at once
+#     max_results: 256KiB     # most bytes of tool answers in one request
+#   # Tool descriptions and answers are untrusted input to the model.
+#   # `check --online` lists the tools that would be offered.

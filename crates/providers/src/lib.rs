@@ -83,8 +83,10 @@ pub struct Provider {
     /// How it departs from the specs it speaks, each tested in
     /// `tests/<id>.rs` by a test named for it.
     pub quirks: &'static [Quirk],
-    /// The plugin of its quirks, run on its providers' calls alone, before
-    /// any other plugin sees their events.
+    /// The plugin of its quirks, a plugin of each of its providers
+    /// ([`Provider::plugin`](respan_gateway_core::Provider::plugin)): run on
+    /// their calls alone, after the gateway's plugins, so those see the
+    /// kind's events. Not optional: a provider of this vendor needs it.
     pub plugin: Option<&'static dyn Plugin>,
 }
 

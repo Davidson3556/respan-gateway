@@ -17,9 +17,18 @@ async fn a_live_upload_keeps_feeding_a_retained_reader_without_completion() {
         LIMIT,
     );
     let (read, mut sink) = connect(Extensions::default()).bind(
-        |_, _: Option<&u8>| Ok(h::framing::each(|value: &u8| Ok(Bytes::from(vec![*value])))),
-        |response, _| EventStream::stream(response.into_body().map_ok(|bytes| bytes[0])),
-        |answer| h::provider_fault("echo", answer),
+        |_, _: Option<&u8>| {
+            Ok(Box::new(|value: &u8, out: &mut Vec<Bytes>| {
+                out.push(Bytes::from(vec![*value]));
+                Ok(())
+            }))
+        },
+        |_, _| {
+            Some(Box::new(|bytes: Bytes, out: &mut Vec<u8>| {
+                out.push(bytes[0]);
+                Ok(())
+            }))
+        },
     );
     let mut source = EventStream::stream(stream::iter([Ok(7_u8), Ok(9_u8)]));
     sink.prepare(&mut source).expect("prepare native upload");

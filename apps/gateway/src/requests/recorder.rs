@@ -1,5 +1,5 @@
 //! The plugin that fills in what the gateway knows of a request, and the
-//! sink that records an agent loop's steps.
+//! sink that records a tool loop's steps.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -7,8 +7,8 @@ use std::sync::atomic::Ordering;
 
 use respan_gateway_conversation as conversation;
 use respan_gateway_core::{Abandoned, ClientContext, Fault, Plugin, ProviderContext, async_trait};
-use respan_gateway_plugins::agent::{Sink, StepReport, ToolHop};
-use respan_gateway_plugins::{Kind, Model};
+use respan_gateway_plugin_routing::{Kind, Model};
+use respan_gateway_plugin_tool_loop::{Sink, StepReport, ToolHop};
 
 use super::count;
 use super::log::{RequestLog, Tracked};
@@ -105,7 +105,7 @@ impl Plugin for Recorder {
     }
 }
 
-/// Where the agent loop reports a request's steps: into its entry in `log`.
+/// Where the tool loop reports a request's steps: into its entry in `log`.
 pub fn steps(log: Arc<RequestLog>) -> impl Fn(&ClientContext) -> Option<Sink> + Send + Sync {
     move |cx| {
         let Tracked(entry) = cx.extensions().get::<Tracked>().cloned()?;

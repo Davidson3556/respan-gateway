@@ -16,11 +16,11 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 /// the other entries stay; so is the entry after a bare such name
 /// (`token, <key>`), whose name stays.
 ///
-/// No transport copies it ([`credentials`](crate::credentials)): a plugin
-/// that relays the client's key restores it on the call's head
-/// ([`restore`](Self::restore)), as [`Relay::RAW`](crate::Relay::RAW)
-/// does; a plugin that authenticates the client with the gateway's own key
-/// removes it.
+/// No transport copies it ([`credentials`](crate::call::credentials)): a plugin
+/// that relays the client's key gives it to the call
+/// ([`CallHeaders`](crate::call::CallHeaders)) or restores it on a head it
+/// writes ([`restore`](Self::restore)); a plugin that authenticates the
+/// client with the gateway's own key removes it.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Credential {
     headers: HeaderMap,
@@ -102,7 +102,7 @@ impl Credential {
         let before = self.query.len();
         self.query.retain(|param| {
             let value = param.split_once('=').map_or("", |(_, v)| v);
-            !is_key(&crate::percent_decode(value))
+            !is_key(&respan_gateway_http_syntax::percent_decode(value))
         });
         let mut taken = self.query.len() != before;
         let entries: Vec<String> = self
@@ -253,7 +253,7 @@ pub(crate) fn take_protocol_keys(headers: &mut HeaderMap, markers: bool) -> Opti
 /// Whether a header or query parameter `name` names a credential. The
 /// WebSocket handshake's own `Sec-WebSocket-*` headers (its `Key` nonce, its
 /// `Accept`) are the connection's, not a secret.
-pub(crate) fn is_credential(name: &str) -> bool {
+pub fn is_credential(name: &str) -> bool {
     const CREDENTIALS: [&str; 9] = [
         "authorization",
         "auth",
@@ -265,7 +265,7 @@ pub(crate) fn is_credential(name: &str) -> bool {
         "credential",
         "credentials",
     ];
-    let name = crate::percent_decode(name).to_ascii_lowercase();
+    let name = respan_gateway_http_syntax::percent_decode(name).to_ascii_lowercase();
     let last = name.rsplit(['-', '_']).next().unwrap_or_default();
     !name.contains("idempotency")
         && !name.starts_with("sec-websocket-")

@@ -10,16 +10,15 @@ use super::{
     whole_json, write_field,
 };
 use crate::edge::{bind_provider, content};
-use respan_gateway_core::{
-    BadRequest, Connection, ErrorCode, EventStream, Fault, Format, Upstream,
-};
+use respan_gateway_core::{BadRequest, Connection, ErrorCode, Fault, Format, Upstream};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::{self, forwarded_path, whole};
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{
     self, HeaderValue, Method, Uri, request::Parts as RequestHead, response::Parts as ResponseHead,
 };
-use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo, percent_decode};
+use respan_gateway_http::{ClientIo, Decoder, Encoder, ProviderIo, Whole};
+use respan_gateway_http_syntax::forwarded_path;
+use respan_gateway_http_syntax::percent_decode;
 use respan_gateway_media::video::{Create, Input, Job, JobError, Jobs, Output, Status, Variant};
 use serde_json::{Map, Value, json};
 
@@ -65,8 +64,8 @@ impl Format<ProviderIo, Output, Input> for OpenAiVideos {
     }
 
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
-        Ok(bind_provider(io, NAME, call, |response, sent| {
-            read_response(response, &sent)
+        Ok(bind_provider(io, NAME, call, |_, sent| {
+            Some(read_response(sent))
         }))
     }
 }
@@ -303,14 +302,10 @@ fn create_body(create: &Create) -> Result<(Bytes, String), Fault> {
 
 /// A provider's answer to the call `sent`: content, chunk by chunk as it
 /// comes, or one JSON body.
-fn read_response(
-    response: http::Response<Body>,
-    sent: &http::Request<Bytes>,
-) -> EventStream<Output> {
-    let body = response.into_body();
+fn read_response(sent: &http::Request<Bytes>) -> Box<dyn Decoder<Output>> {
     match route(sent.method(), sent.uri()) {
-        Some(Route::Content(_)) => content(body),
-        _ => whole::read(body, decode_whole),
+        Some(Route::Content(_)) => content(),
+        _ => Box::new(Whole::new(decode_whole)),
     }
 }
 
@@ -409,7 +404,7 @@ fn response_encoder(
         Some(Route::Content(_))
     ) {
         super::content_type(head, "application/json");
-        return whole::collect(encode_whole);
+        return Box::new(Whole::new(encode_whole));
     }
     super::content_type(
         head,
@@ -420,11 +415,14 @@ fn response_encoder(
             _ => "application/octet-stream",
         },
     );
-    framing::each(|event: &Output| match event {
-        Output::Content(bytes) => Ok(bytes.clone()),
-        Output::Native(n) if &*n.format != NAME => Err(foreign(NAME, n)),
-        // The content's bytes have no place for anything else.
-        _ => Ok(Bytes::new()),
+    Box::new(|event: &Output, out: &mut Vec<Bytes>| {
+        match event {
+            Output::Content(bytes) => out.push(bytes.clone()),
+            Output::Native(n) if &*n.format != NAME => return Err(foreign(NAME, n)),
+            // The content's bytes have no place for anything else.
+            _ => {}
+        }
+        Ok(())
     })
 }
 
@@ -451,7 +449,9 @@ fn encode_whole(events: &[Output]) -> Result<Bytes, Fault> {
 fn unwritable_status(what: &str) -> Fault {
     Fault::new(format!("a video status {what} cannot be written in {NAME}"))
         .with(ErrorCode("untranslatable".into()))
-        .with(respan_gateway_http::Status(http::StatusCode::BAD_GATEWAY))
+        .with(respan_gateway_http_faults::Status(
+            http::StatusCode::BAD_GATEWAY,
+        ))
 }
 
 /// A job object, its fields all present, `null` where the job says none.

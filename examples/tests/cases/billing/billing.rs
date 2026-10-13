@@ -1,6 +1,6 @@
 use super::*;
 use respan_gateway_conversation::Input;
-use respan_gateway_core::BadRequest;
+use respan_gateway_core::{BadRequest, Provider};
 
 #[tokio::test]
 async fn each_call_is_billed_at_its_models_price() -> Result<(), Fault> {
@@ -62,11 +62,11 @@ async fn a_filter_registered_earlier_cannot_hide_usage_from_billing() -> Result<
     let (openai, store) = (FakeOpenAi::start().await, Memory::default());
     let prices = HashMap::from([(SMALL, Price::new(150_000, 600_000))]);
     let gw = Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "openai",
             OpenAiChat,
             provider_support::openai(&openai.base_url())?.connect(),
-        )?
+        ))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(Refuses)
         .plugin(Billing {

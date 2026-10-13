@@ -1,0 +1,21 @@
+[package]
+name = "respan-gateway-http-transport"
+description = "A pooled Reqwest backend for outbound HTTP provider calls."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+respan-gateway-http-syntax.workspace = true
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+reqwest.workspace = true
+respan-gateway-core.workspace = true
+respan-gateway-http.workspace = true

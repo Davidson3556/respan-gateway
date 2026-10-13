@@ -17,11 +17,11 @@ fn gateway_of(rec: &Rec) -> Gateway {
     Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>(
+        .provider(Provider::new::<In, _, _>(
             "a",
             Toy,
             connect(fnt(|_| async { Ok(ok_resp(vec!["a", "DONE"])) }.boxed())),
-        )
+        ))
         .unwrap()
         .target("a")
         .unwrap()
@@ -74,7 +74,7 @@ async fn a_rebuilt_gateway_counts_only_its_own_requests() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("a", Toy, connect(t))
+        .provider(Provider::new::<In, _, _>("a", Toy, connect(t)))
         .unwrap()
         .target("a")
         .unwrap();
@@ -152,7 +152,7 @@ async fn original_and_explicit_input_both_use_typed_values() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("a", Toy, connect(noting(&seen)))
+        .provider(Provider::new::<In, _, _>("a", Toy, connect(noting(&seen))))
         .unwrap()
         .plugin(TwoCalls);
     let (res, _) = handle(&gw, req(vec!["q"])).await;

@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_core::Provider;
 
 #[tokio::test]
 async fn clients_see_and_call_only_the_allowed_tools() -> Result<(), Fault> {
@@ -52,13 +53,13 @@ async fn a_mock_llm_tool_round_trip_uses_mcp_and_keeps_the_provider_call_id() ->
     headers.insert("x-api-key", HeaderValue::from_static("sk-ant-test"));
     let chat = Gateway::new()
         .client::<Input, _, _>(OpenAiChat)?
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "llm",
             AnthropicMessages,
             HttpTransport::new(llm.base_url())?
                 .with_headers(headers)?
                 .connect(),
-        )?
+        ))?
         .target("llm")?;
     let mut body = json!({"model":"claude-haiku-4-5","max_tokens":128,"messages":[{"role":"user","content":"Echo this string using the tool."}],"tools":offered});
     let (response, ended) = serve(&chat, post("/v1/chat/completions", body.to_string())).await;

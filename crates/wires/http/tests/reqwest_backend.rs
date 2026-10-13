@@ -1,6 +1,6 @@
-#![cfg(feature = "reqwest")]
+use respan_gateway_http::http;
 
-use respan_gateway_http::{HttpTransport, http};
+use respan_gateway_http_transport::HttpTransport;
 
 #[test]
 fn a_base_url_needs_http_or_https_and_a_host() {

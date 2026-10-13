@@ -10,8 +10,9 @@ use crate::call::OpenCalls;
 use crate::format::{AnyFormat, is_input};
 use crate::gateway::Registry;
 use crate::input::Input;
-use crate::leg::{Later, Layer, inputs, locked};
+use crate::layers::{Layer, locked};
 use crate::lifecycle::{Edge, InFlight, Latch};
+use crate::live_inputs::{Later, inputs};
 use crate::plugin::Filters;
 use crate::values::{AnyBatches, AnyEvents, Value, erase, take_value, typed};
 use crate::{Call, EventStream, Extensions, Fault, Filter, Gateway, Plugin, Result};
@@ -92,6 +93,10 @@ impl std::fmt::Debug for ClientContext {
 impl Edge for ClientContext {
     fn client(&self) -> &ClientContext {
         self
+    }
+
+    fn plugins(&self) -> impl Iterator<Item = &Arc<dyn Plugin>> + Send {
+        self.gateway.plugins.iter()
     }
 
     fn hook<'a>(&'a self, plugin: &'a dyn Plugin, end: &'a Result<()>) -> BoxFuture<'a, ()> {

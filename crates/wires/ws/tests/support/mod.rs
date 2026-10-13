@@ -10,11 +10,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use respan_gateway_core::{Connection, Fault, Format, Gateway};
+use respan_gateway_core::{Connection, Fault, Format, Gateway, Provider};
 use respan_gateway_http::http::header::UPGRADE;
 use respan_gateway_http::http::{HeaderMap, Method};
-use respan_gateway_http::passthrough;
 use respan_gateway_http::{self as h, ClientIo, ProviderIo};
+use respan_gateway_passthrough_http as passthrough;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -43,10 +43,9 @@ impl Format<ClientIo, passthrough::Input<Raw>, passthrough::Output<Raw>> for Raw
         &self,
         io: ClientIo,
     ) -> Result<Connection<passthrough::Input<Raw>, passthrough::Output<Raw>>, Fault> {
-        Ok(io.bind(
+        Ok(io.with_error(h::rules::plain).bind(
             passthrough::read_request::<Raw>,
             passthrough::write_response::<Raw>,
-            h::plain,
         ))
     }
 }
@@ -59,11 +58,8 @@ impl Format<ProviderIo, passthrough::Output<Raw>, passthrough::Input<Raw>> for R
         &self,
         io: ProviderIo,
     ) -> Result<Connection<passthrough::Output<Raw>, passthrough::Input<Raw>>, Fault> {
-        Ok(io.bind(
-            passthrough::write_request::<Raw>,
-            passthrough::read_response::<Raw>,
-            |answer| h::provider_fault("raw", answer),
-        ))
+        let write = passthrough::request_writer::<Raw>(&io);
+        Ok(io.bind(write, passthrough::read_response::<Raw>))
     }
 }
 
@@ -81,10 +77,10 @@ impl Drop for Server {
 }
 
 #[allow(unused_imports)]
-pub use respan_gateway_http::Relay;
+pub use respan_gateway_plugin_relay::Relay;
 /// Serve `gateway` on a free local port with the adapter's router.
 pub async fn serve(gateway: Gateway) -> Server {
-    serve_typed(gateway.plugin(Relay::RAW)).await
+    serve_typed(gateway.plugin(Relay)).await
 }
 
 pub async fn serve_typed(gateway: Gateway) -> Server {
@@ -604,7 +600,7 @@ pub fn relay(base: &str) -> (Gateway, Outcomes, Calls) {
     let gateway = Gateway::new()
         .client::<passthrough::Input<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<passthrough::Input<Raw>, _, _>("p", Raw, transport.connect())
+        .provider(Provider::new("p", Raw, transport.connect()))
         .unwrap()
         .plugin(ends.clone())
         .plugin(calls.clone())
@@ -614,7 +610,7 @@ pub fn relay(base: &str) -> (Gateway, Outcomes, Calls) {
 }
 
 /// How a test's sessions reach the provider: relayed unread, as `Raw`
-/// with [`Relay::RAW`], or typed, as OpenAI Realtime's events
+/// with [`Relay`], or typed, as OpenAI Realtime's events
 /// ([`OpenAiRealtime`]) with no relay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Via {
@@ -631,7 +627,7 @@ impl Via {
         match self {
             Via::Relay => {
                 let (gateway, ends, calls) = relay(base);
-                (gateway.plugin(Relay::RAW), ends, calls)
+                (gateway.plugin(Relay), ends, calls)
             }
             Via::Typed => {
                 let (ends, calls) = (Outcomes::default(), Calls::default());
@@ -639,7 +635,7 @@ impl Via {
                 let gateway = Gateway::new()
                     .client::<Input, _, _>(OpenAiRealtime)
                     .unwrap()
-                    .provider::<Input, _, _>("p", OpenAiRealtime, transport.connect())
+                    .provider(Provider::new("p", OpenAiRealtime, transport.connect()))
                     .unwrap()
                     .plugin(ends.clone())
                     .plugin(calls.clone())
@@ -655,6 +651,6 @@ impl Via {
 pub fn code(end: &Result<(), Fault>) -> String {
     match end {
         Ok(()) => "ok".to_owned(),
-        Err(fault) => respan_gateway_http::error_code(fault).to_owned(),
+        Err(fault) => respan_gateway_http_faults::error_code(fault).to_owned(),
     }
 }

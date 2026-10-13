@@ -13,7 +13,7 @@ use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::Upstream;
 use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Fault, Gateway, Plugin, Provider, ProviderContext, Response, async_trait,
 };
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
 use respan_gateway_http::{Body, Completion, http::response::Parts as ResponseHead};
@@ -63,7 +63,8 @@ const BAD: &str = r#"{"error":{"message":"bad model","type":"invalid_request_err
 type Marks = Arc<Mutex<Vec<bool>>>;
 type WireResult = Result<(http::Response<Body>, Option<Completion>), Fault>;
 
-/// A native sender that records each call's relay provenance.
+/// A native sender that records whether each call was relayed, to a
+/// provider of its client's own format.
 fn marking(
     at: scripted::ScriptedAt,
     marks: Marks,
@@ -75,7 +76,7 @@ fn marking(
             request
                 .extensions()
                 .get::<respan_gateway_core::Extensions>()
-                .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some()),
+                .is_some_and(|e| e.get::<respan_gateway_http::raw::Relayed>().is_some()),
         );
         let at = at.clone();
         async move { at.send(request).await }.boxed()
@@ -130,17 +131,17 @@ impl Harness {
         let openai = marking(mock.at(OPENAI), marks.clone());
         let anthropic = marking(mock.at(ANTHROPIC), marks.clone());
         let gw = Gateway::new()
-            .provider::<Input, _, _>(
+            .provider(Provider::new(
                 "openai",
                 OpenAiChat,
                 respan_gateway_http::connect(openai, LIMIT),
-            )
+            ))
             .and_then(|g| {
-                g.provider::<Input, _, _>(
+                g.provider(Provider::new(
                     "anthropic",
                     AnthropicMessages,
                     respan_gateway_http::connect(anthropic, LIMIT),
-                )
+                ))
             })
             .and_then(|g| {
                 g.client::<Input, _, _>(OpenAiChat)?
@@ -175,7 +176,7 @@ impl Harness {
             .collect();
         let body = body
             .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .map_err(|f| respan_gateway_http::error_code(&f).to_owned());
+            .map_err(|f| respan_gateway_http_faults::error_code(&f).to_owned());
         Got {
             status: status.as_u16(),
             headers,
@@ -187,7 +188,7 @@ impl Harness {
     fn ends(&self) -> Vec<String> {
         let code = |e: &Result<(), Fault>| {
             e.as_ref().map_or_else(
-                |f| respan_gateway_http::error_code(f).to_owned(),
+                |f| respan_gateway_http_faults::error_code(f).to_owned(),
                 |()| "ok".into(),
             )
         };
@@ -436,7 +437,7 @@ async fn each_scenario_gives_what_it_should() {
 }
 
 #[tokio::test]
-async fn a_relay_sends_the_request_as_it_came_and_answers_both_ways() {
+async fn a_relay_round_trips_the_request_and_answers_both_ways() {
     let h = Harness::new();
     h.mock.reply(OPENAI, json(StatusCode::OK, UNARY));
     h.mock.reply(OPENAI, sse(STREAM));
@@ -456,8 +457,13 @@ async fn a_relay_sends_the_request_as_it_came_and_answers_both_ways() {
     }
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
     let sent = h.mock.sent();
-    assert_eq!(sent[0].body(), UNARY_REQ, "the client's bytes, unread");
-    assert_eq!(sent[1].body(), STREAM_REQ);
+    let same = |sent: &[u8], came: &str| {
+        let sent: serde_json::Value = serde_json::from_slice(sent).unwrap();
+        let came: serde_json::Value = serde_json::from_str(came).unwrap();
+        assert_eq!(sent, came, "the client's request, round-tripped");
+    };
+    same(sent[0].body(), UNARY_REQ);
+    same(sent[1].body(), STREAM_REQ);
     assert_eq!(h.ends(), ["ok", "ok"]);
 }
 
@@ -523,21 +529,13 @@ async fn a_429_keeps_its_retry_after_relayed_or_translated() {
 }
 
 #[tokio::test]
-async fn the_clients_key_reaches_a_provider_on_a_relay_alone() {
+async fn a_relay_is_a_call_to_a_provider_of_the_clients_format_alone() {
     let h = Harness::new();
     h.mock.reply(OPENAI, json(StatusCode::OK, UNARY));
     h.mock.reply(OPENAI, json(StatusCode::OK, OPENAI_WHOLE));
     let _ = h.send(post_keyed(CHAT, UNARY_REQ)).await;
     let _ = h.send(post_keyed(MESSAGES, ANTHROPIC_REQ)).await;
-    assert_eq!(
-        *lock(&h.marks),
-        [true, false],
-        "native request relay provenance"
-    );
-    let sent = h.mock.sent();
-    let key = |i: usize| sent[i].headers().get("authorization").cloned();
-    assert_eq!(key(0), Some(HeaderValue::from_static("Bearer sk-client")));
-    assert_eq!(key(1), None, "a translated call carries none");
+    assert_eq!(*lock(&h.marks), [true, false], "relayed, then translated");
 }
 
 /// A provider that refuses with a 429 whose body comes after a while, as
@@ -576,16 +574,19 @@ impl SlowRefusal {
 async fn a_slow_refusal_is_refused() {
     let head_only = HeadOnly::default();
     let gw = Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(
                 |request| async move { SlowRefusal.send(request).await },
                 LIMIT,
             ),
-        )
+        ))
         .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
-        .map(|g| g.plugin(head_only.clone()).plugin(explicit::Relay::RAW))
+        .map(|g| {
+            g.plugin(head_only.clone())
+                .plugin(respan_gateway_plugin_relay::Relay)
+        })
         .and_then(|g| g.target("openai"))
         .unwrap();
     let resp = serve(&gw, post_keyed(CHAT, UNARY_REQ)).await;
@@ -628,14 +629,14 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
         let head_only = HeadOnly::default();
         let outcomes = Outcomes::default();
         let gw = Gateway::new()
-            .provider::<Input, _, _>(
+            .provider(Provider::new(
                 "openai",
                 OpenAiChat,
                 respan_gateway_http::connect(
                     |request| async move { HugeRefusal.send(request).await },
                     LIMIT,
                 ),
-            )
+            ))
             .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
             .map(|g| g.plugin(outcomes.clone()))
             .map(|g| g.plugin(head_only.clone()))
@@ -648,7 +649,7 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
         let ends: Vec<_> = outcomes
             .all()
             .into_iter()
-            .map(|e| e.map_err(|f| respan_gateway_http::error_code(&f).to_owned()))
+            .map(|e| e.map_err(|f| respan_gateway_http_faults::error_code(&f).to_owned()))
             .collect();
         assert_eq!(
             (status.as_u16(), lock(&head_only.0).clone()),
@@ -658,7 +659,6 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
     }
 }
 
-use respan_gateway_http as explicit;
 struct RelaySame;
 #[async_trait]
 impl Plugin for RelaySame {
@@ -666,7 +666,7 @@ impl Plugin for RelaySame {
         let same = (cx.format() == "openai-chat" && cx.target() == Some("openai"))
             || (cx.format() == "anthropic-messages" && cx.target() == Some("anthropic"));
         if same {
-            explicit::Relay::RAW.on_client(cx).await
+            respan_gateway_plugin_relay::Relay.on_client(cx).await
         } else {
             Ok(None)
         }
@@ -675,14 +675,9 @@ impl Plugin for RelaySame {
         &self,
         px: &mut respan_gateway_core::ProviderContext,
     ) -> Result<(), Fault> {
-        if px
-            .extensions()
-            .get::<respan_gateway_http::SendRaw>()
-            .is_some()
-        {
-            explicit::Relay::RAW.on_provider(px).await
-        } else {
-            Ok(())
+        match px.format() == px.client().format() {
+            true => respan_gateway_plugin_relay::Relay.on_provider(px).await,
+            false => Ok(()),
         }
     }
 }

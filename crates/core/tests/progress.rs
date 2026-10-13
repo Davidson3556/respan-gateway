@@ -7,7 +7,7 @@ use futures::channel::oneshot;
 use futures::{FutureExt, Sink, StreamExt, stream};
 use respan_gateway_core::{
     ClientContext, Connection, EventSink, EventStream, Extensions, Fault, Filter, Format, Gateway,
-    Plugin, Response, Result, async_trait,
+    Plugin, Provider, Response, Result, async_trait,
 };
 use std::pin::Pin;
 use std::sync::{
@@ -122,7 +122,11 @@ async fn first_content_does_not_drain_every_ready_event() {
     let gateway = Gateway::new()
         .client::<Input, Output, _>(Protocol(read.clone(), false))
         .unwrap()
-        .provider::<Input, Output, _>("p", Protocol(read.clone(), false), |_| Io)
+        .provider(Provider::new::<Input, Output, _>(
+            "p",
+            Protocol(read.clone(), false),
+            |_| Io,
+        ))
         .unwrap()
         .plugin(Inspect {
             read,
@@ -207,7 +211,11 @@ async fn failed_delivery_preparation_does_not_drain_provider() {
     let gateway = Gateway::new()
         .client(RejectDelivery)
         .unwrap()
-        .provider::<Input, Output, _>("p", Protocol(read.clone(), false), |_| Io)
+        .provider(Provider::new::<Input, Output, _>(
+            "p",
+            Protocol(read.clone(), false),
+            |_| Io,
+        ))
         .unwrap()
         .target("p")
         .unwrap();
@@ -260,7 +268,11 @@ async fn batch_boundaries_preserve_order_filtering_and_the_final_outcome() {
         let gateway = Gateway::new()
             .client::<Input, Output, _>(Protocol(read.clone(), false))
             .unwrap()
-            .provider::<Input, Output, _>("p", Protocol(read, fail), |_| Io)
+            .provider(Provider::new::<Input, Output, _>(
+                "p",
+                Protocol(read, fail),
+                |_| Io,
+            ))
             .unwrap()
             .plugin(observe.clone());
         gateway.handle(Io, Extensions::new()).await.unwrap();
@@ -306,7 +318,11 @@ async fn cancelling_borrowed_hold_replays_the_full_provider_batch() {
     let gw = Gateway::new()
         .client::<Input, Output, _>(Protocol(reads.clone(), false))
         .unwrap()
-        .provider::<Input, Output, _>("p", Protocol(reads, false), |_| Io)
+        .provider(Provider::new::<Input, Output, _>(
+            "p",
+            Protocol(reads, false),
+            |_| Io,
+        ))
         .unwrap()
         .plugin(CancelHold(seen.clone()));
     gw.handle(Io, Extensions::new()).await.unwrap();
@@ -357,7 +373,11 @@ async fn collecting_hot_outputs_yields_even_when_filters_suppress_all_values() {
         let gateway = Gateway::new()
             .client::<Input, Output, _>(Protocol(count.clone(), false))
             .unwrap()
-            .provider::<Input, Output, _>("p", Protocol(count.clone(), false), |_| Io)
+            .provider(Provider::new::<Input, Output, _>(
+                "p",
+                Protocol(count.clone(), false),
+                |_| Io,
+            ))
             .unwrap()
             .plugin(CollectHot {
                 count: count.clone(),
@@ -375,7 +395,11 @@ async fn a_hot_stream_yields_before_delivery_finishes_and_can_be_cancelled() {
     let gateway = Gateway::new()
         .client::<Input, Output, _>(Protocol(read.clone(), false))
         .unwrap()
-        .provider::<Input, Output, _>("p", Protocol(read.clone(), false), |_| Io)
+        .provider(Provider::new::<Input, Output, _>(
+            "p",
+            Protocol(read.clone(), false),
+            |_| Io,
+        ))
         .unwrap()
         .target("p")
         .unwrap();
@@ -532,7 +556,11 @@ async fn delivery_failure_keeps_precedence_over_a_full_batch_filter_failure() {
     let gateway = Gateway::new()
         .client(RejectDelivery)
         .unwrap()
-        .provider::<Input, Output, _>("p", Protocol(read, false), |_| Io)
+        .provider(Provider::new::<Input, Output, _>(
+            "p",
+            Protocol(read, false),
+            |_| Io,
+        ))
         .unwrap()
         .plugin(FailAtBoundary(ends.clone()))
         .target("p")
@@ -562,7 +590,11 @@ async fn a_buffered_filter_result_does_not_override_delivery_failure() {
     let gateway = Gateway::new()
         .client(RejectDelivery)
         .unwrap()
-        .provider::<Input, Output, _>("p", Protocol(Arc::new(AtomicUsize::new(0)), false), |_| Io)
+        .provider(Provider::new::<Input, Output, _>(
+            "p",
+            Protocol(Arc::new(AtomicUsize::new(0)), false),
+            |_| Io,
+        ))
         .unwrap()
         .plugin(FailAtBoundary(ends.clone()))
         .plugin(BufferBeforeDelivery);

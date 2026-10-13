@@ -75,9 +75,9 @@ impl Default for Limits {
 /// the client edge sends as its Close in place of 1011: a plugin's
 /// `Fault::new(msg).with(CloseCode(1008))`. A provider's own code is a
 /// [`ProviderClose`], which reaches the client only as this: set by a
-/// plugin, or by [`WsTransport`] on a call relayed with
-/// [`RawErrors`](respan_gateway_http::RawErrors), as
-/// [`Relay`](respan_gateway_http::Relay) relays one.
+/// plugin, or by [`WsTransport`] on a call
+/// [`Relayed`](respan_gateway_http::raw::Relayed), as
+/// `respan_gateway_plugin_relay::Relay` marks one.
 ///
 /// [`Fault::with`]: respan_gateway_core::Fault::with
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

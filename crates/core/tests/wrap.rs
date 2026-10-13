@@ -134,9 +134,17 @@ fn gateway(body: &Body, read: usize, checked: &Arc<AtomicUsize>, plugin: impl Pl
     Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("p", Toy, connect(body.provider(read)))
+        .provider(Provider::new::<In, _, _>(
+            "p",
+            Toy,
+            connect(body.provider(read)),
+        ))
         .unwrap()
-        .provider::<In, _, _>("classifier", Toy, connect(classifier(checked.clone())))
+        .provider(Provider::new::<In, _, _>(
+            "classifier",
+            Toy,
+            connect(classifier(checked.clone())),
+        ))
         .unwrap()
         .plugin(plugin)
         .target("p")
@@ -168,9 +176,17 @@ async fn a_flagged_input_is_refused_and_ends_the_call_with_that_fault() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("p", Toy, connect(body.provider(10)))
+        .provider(Provider::new::<In, _, _>(
+            "p",
+            Toy,
+            connect(body.provider(10)),
+        ))
         .unwrap()
-        .provider::<In, _, _>("classifier", Toy, connect(classifier(Arc::clone(&checked))))
+        .provider(Provider::new::<In, _, _>(
+            "classifier",
+            Toy,
+            connect(classifier(Arc::clone(&checked))),
+        ))
         .unwrap()
         .plugin(rec.clone())
         .plugin(Guard)
@@ -373,7 +389,11 @@ async fn a_panicking_stream_is_a_failure_and_hooks_end_once() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("p", Toy, connect(seen.transport(true, done)))
+        .provider(Provider::new::<In, _, _>(
+            "p",
+            Toy,
+            connect(seen.transport(true, done)),
+        ))
         .unwrap()
         .plugin(rec.clone())
         .plugin(Panics)
@@ -439,9 +459,13 @@ async fn a_fallback_gets_the_wrapped_inputs_the_refused_call_never_read() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("refuses", Toy, connect(refuses))
+        .provider(Provider::new::<In, _, _>("refuses", Toy, connect(refuses)))
         .unwrap()
-        .provider::<In, _, _>("p", Toy, connect(body.provider(10)))
+        .provider(Provider::new::<In, _, _>(
+            "p",
+            Toy,
+            connect(body.provider(10)),
+        ))
         .unwrap()
         .plugin(Fallback);
     let (tx, req) = upload();
@@ -498,7 +522,11 @@ async fn a_retry_after_every_wrapped_input_was_read_is_not_a_clean_empty_upload(
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("p", Toy, connect(reads_then_refuses_first(bodies.clone())))
+        .provider(Provider::new::<In, _, _>(
+            "p",
+            Toy,
+            connect(reads_then_refuses_first(bodies.clone())),
+        ))
         .unwrap()
         .plugin(Retry);
     let (tx, req) = upload();
@@ -521,9 +549,17 @@ async fn a_gate_and_a_deadline_compose_and_the_relay_is_kept() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("p", Toy, connect(body.provider(10)))
+        .provider(Provider::new::<In, _, _>(
+            "p",
+            Toy,
+            connect(body.provider(10)),
+        ))
         .unwrap()
-        .provider::<In, _, _>("classifier", Toy, connect(classifier(Arc::clone(&checked))))
+        .provider(Provider::new::<In, _, _>(
+            "classifier",
+            Toy,
+            connect(classifier(Arc::clone(&checked))),
+        ))
         .unwrap()
         .plugin(rec.clone())
         .plugin(Guard)
@@ -571,7 +607,11 @@ async fn a_cut_with_a_fault_of_its_own_ends_the_call_with_it() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("p", Toy, connect(body.provider(10)))
+        .provider(Provider::new::<In, _, _>(
+            "p",
+            Toy,
+            connect(body.provider(10)),
+        ))
         .unwrap()
         .plugin(rec.clone())
         .plugin(Cut)
@@ -635,7 +675,7 @@ async fn a_refusal_before_the_providers_head_is_the_refusal() {
         let gw = Gateway::new()
             .client::<In, _, _>(Toy)
             .unwrap()
-            .provider::<In, _, _>("p", Toy, connect(dialer))
+            .provider(Provider::new::<In, _, _>("p", Toy, connect(dialer)))
             .unwrap()
             .plugin(rec.clone())
             .plugin(Gate)
@@ -702,7 +742,11 @@ async fn wraps_and_filters_apply_in_plugin_order() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("p", Toy, connect(seen.transport(true, done)))
+        .provider(Provider::new::<In, _, _>(
+            "p",
+            Toy,
+            connect(seen.transport(true, done)),
+        ))
         .unwrap()
         .plugin(Tag("1", false))
         .plugin(Tag("2", true))
@@ -731,7 +775,11 @@ async fn a_wrap_that_panics_fails_the_reply_internal() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("p", Toy, connect(seen.transport(false, done)))
+        .provider(Provider::new::<In, _, _>(
+            "p",
+            Toy,
+            connect(seen.transport(false, done)),
+        ))
         .unwrap()
         .plugin(rec.clone())
         .plugin(Panics)
@@ -767,9 +815,17 @@ async fn wrapped_requests_end_once_when_dropped_at_every_await() {
                 .unwrap()
                 // Answers once it read the body, so the drops land while
                 // checked inputs flow.
-                .provider::<In, _, _>("p", Toy, connect(seen.transport(true, done)))
+                .provider(Provider::new::<In, _, _>(
+                    "p",
+                    Toy,
+                    connect(seen.transport(true, done)),
+                ))
                 .unwrap()
-                .provider::<In, _, _>("classifier", Toy, connect(fnt(move |call| c(call))))
+                .provider(Provider::new::<In, _, _>(
+                    "classifier",
+                    Toy,
+                    connect(fnt(move |call| c(call))),
+                ))
                 .unwrap()
                 .plugin(rec.clone())
                 .plugin(Guard)

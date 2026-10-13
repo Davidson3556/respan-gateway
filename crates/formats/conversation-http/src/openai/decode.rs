@@ -1,13 +1,13 @@
 //! OpenAI Chat, streamed or whole, as events: the decoder.
 
 use crate::schema::{
-    Decoder, Totals, ended, error_event, native_fields, remainder, says, says_error,
-    unreadable_event, unsupported_fields,
+    Totals, ended, error_event, native_fields, remainder, says, says_error, unreadable_event,
+    unsupported_fields,
 };
 use respan_gateway_conversation::{Block, Delta, Finish, Output, Start};
 use respan_gateway_core::{Fault, Upstream};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::sse::event_data;
+use respan_gateway_sse::event_data;
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
@@ -258,8 +258,9 @@ impl OpenAiDecoder {
     }
 }
 
-impl Decoder for OpenAiDecoder {
-    fn event(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
+impl OpenAiDecoder {
+    /// The events of one stream event, `raw`.
+    pub(crate) fn event(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
         if self.done {
             return Ok(());
         }
@@ -278,20 +279,33 @@ impl Decoder for OpenAiDecoder {
             return Ok(());
         };
         if says_error(&v) {
-            return Err(error_event(OPENAI, &raw, &v));
+            return Err(error_event(&raw, &v));
         }
         self.chunk(&v, "delta", out)
     }
 
-    fn end(&mut self, _out: &mut Vec<Output>) -> Result<(), Fault> {
+    /// The events of a stream that ended well.
+    fn end_stream(&mut self, _out: &mut Vec<Output>) -> Result<(), Fault> {
         ended(self.done)
     }
 
-    fn body(&mut self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
+    /// The events of one whole response body `v`.
+    pub(crate) fn body(&mut self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
         self.chunk(v, "message", out)?;
         self.close(out);
         self.done = true;
         Ok(())
+    }
+}
+
+impl respan_gateway_http::Decoder<Output> for OpenAiDecoder {
+    fn decode(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
+        self.event(raw, out)
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
+        end?;
+        self.end_stream(out)
     }
 }
 

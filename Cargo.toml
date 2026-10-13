@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "crates/core",
-    "crates/plugins",
+    "crates/plugins/*",
     "crates/kinds/*",
     "crates/wires/*",
     "crates/formats/*",
@@ -28,13 +28,23 @@ respan-gateway-core = { path = "crates/core" }
 respan-gateway-conversation = { path = "crates/kinds/conversation" }
 respan-gateway-media = { path = "crates/kinds/media" }
 respan-gateway-http = { path = "crates/wires/http" }
-respan-gateway-plugins = { path = "crates/plugins" }
+respan-gateway-http-faults = { path = "crates/wires/http-faults" }
+respan-gateway-http-syntax = { path = "crates/wires/http-syntax" }
+respan-gateway-http-transport = { path = "crates/wires/http-transport" }
+respan-gateway-plugin-relay = { path = "crates/plugins/relay" }
+respan-gateway-plugin-credentials = { path = "crates/plugins/credentials" }
+respan-gateway-sse = { path = "crates/wires/sse" }
+respan-gateway-plugin-routing = { path = "crates/plugins/routing" }
+respan-gateway-plugin-fallback = { path = "crates/plugins/fallback" }
+respan-gateway-plugin-tool-loop = { path = "crates/plugins/tool-loop" }
+respan-gateway-plugin-mcp-aggregate = { path = "crates/plugins/mcp-aggregate" }
 respan-gateway-mcp = { path = "crates/kinds/mcp" }
 respan-gateway-ws = { path = "crates/wires/ws" }
 respan-gateway-conversation-http = { path = "crates/formats/conversation-http" }
 respan-gateway-media-http = { path = "crates/formats/media-http" }
 respan-gateway-realtime-ws = { path = "crates/formats/realtime-ws" }
 respan-gateway-mcp-http = { path = "crates/formats/mcp-http" }
+respan-gateway-passthrough-http = { path = "crates/formats/passthrough-http" }
 respan-gateway-providers = { path = "crates/providers" }
 respan-gateway-serve = { path = "crates/serve" }
 async-trait = "0.1"

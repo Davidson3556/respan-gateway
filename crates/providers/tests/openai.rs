@@ -5,23 +5,13 @@
 mod realtime;
 
 use respan_gateway_core::futures::{SinkExt, StreamExt};
-use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, async_trait};
+use respan_gateway_core::{Gateway, Provider};
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
 use respan_gateway_providers::openai::OpenAiQuirks;
 use respan_gateway_realtime::Input;
 use respan_gateway_realtime_ws::{GeminiLive, OpenAiRealtime};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
-
-/// OpenAI's plugin, run on every call.
-struct Quirks;
-
-#[async_trait]
-impl Plugin for Quirks {
-    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        OpenAiQuirks.on_provider(px).await
-    }
-}
 
 /// What OpenAI is sent of a Gemini Live client's `setup`.
 async fn sent_of(setup: Value) -> Value {
@@ -34,10 +24,12 @@ async fn sent_of(setup: Value) -> Value {
         .expect("a transport");
     let gateway = Gateway::new()
         .client::<Input, _, _>(GeminiLive)
-        .and_then(|g| g.provider::<Input, _, _>("openai", OpenAiRealtime, transport.connect()))
+        .and_then(|g| {
+            let openai = Provider::new("openai", OpenAiRealtime, transport.connect());
+            g.provider(openai.plugin(&OpenAiQuirks))
+        })
         .and_then(|g| g.target("openai"))
-        .expect("a gateway")
-        .plugin(Quirks);
+        .expect("a gateway");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listen");

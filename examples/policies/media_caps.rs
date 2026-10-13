@@ -21,11 +21,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation::MediaSource;
 use respan_gateway_core::{
-    ClientContext, ErrorCode, Fault, Gateway, Plugin, Response, async_trait,
+    ClientContext, ErrorCode, Fault, Gateway, Plugin, Provider, Response, async_trait,
 };
 use respan_gateway_http::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use respan_gateway_http::http::{HeaderValue, Request, StatusCode};
-use respan_gateway_http::{Body, Credential, ProviderIo, Status};
+use respan_gateway_http::{Body, Credential, ProviderIo};
+use respan_gateway_http_faults::Status;
 use respan_gateway_media::{embedding, image, transcription};
 use respan_gateway_media_http::openai::{OpenAiEmbeddings, OpenAiImages, OpenAiTranscriptions};
 #[allow(dead_code)]
@@ -189,13 +190,21 @@ fn gateway(
     caps: MediaCaps,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<image::Input, _, _>("openai:images", OpenAiImages, transport.clone())?
-        .provider::<transcription::Input, _, _>(
+        .provider(Provider::new(
+            "openai:images",
+            OpenAiImages,
+            transport.clone(),
+        ))?
+        .provider(Provider::new(
             "openai:transcriptions",
             OpenAiTranscriptions,
             transport.clone(),
-        )?
-        .provider::<embedding::Input, _, _>("openai:embeddings", OpenAiEmbeddings, transport)?
+        ))?
+        .provider(Provider::new(
+            "openai:embeddings",
+            OpenAiEmbeddings,
+            transport,
+        ))?
         .client::<image::Input, _, _>(OpenAiImages)?
         .client::<transcription::Input, _, _>(OpenAiTranscriptions)?
         .client::<embedding::Input, _, _>(OpenAiEmbeddings)?

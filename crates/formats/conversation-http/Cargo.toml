@@ -12,6 +12,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+respan-gateway-sse.workspace = true
+respan-gateway-http-syntax.workspace = true
+respan-gateway-http-faults.workspace = true
 base64.workspace = true
 respan-gateway-conversation.workspace = true
 respan-gateway-core.workspace = true
@@ -20,10 +23,9 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+respan-gateway-plugin-relay.workspace = true
 futures.workspace = true
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
-respan-gateway-http = { workspace = true, features = ["reqwest"] }
+respan-gateway-http.workspace = true
+respan-gateway-http-transport.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "sync", "test-util"] }
-
-[[bench]]
-name = "relay"

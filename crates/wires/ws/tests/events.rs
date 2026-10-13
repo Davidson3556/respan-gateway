@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use http_support::LIMIT;
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_core::{
-    ClientContext, Config, ErrorCode, Fault, Filter, Gateway, Plugin, ProviderContext, Response,
-    async_trait,
+    ClientContext, Config, ErrorCode, Fault, Filter, Gateway, Plugin, Provider, ProviderContext,
+    Response, async_trait,
 };
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_realtime::{Input, Modality, Output};
@@ -44,11 +44,11 @@ fn gateway_of(base: &str, plugins: Vec<Arc<dyn Plugin>>) -> (Gateway, Outcomes, 
     let mut gateway = Gateway::new()
         .client::<Input, _, _>(OpenAiRealtime)
         .unwrap()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "p",
             OpenAiRealtime,
             WsTransport::new(base).unwrap().connect(),
-        )
+        ))
         .unwrap()
         .plugin(ends.clone())
         .plugin(calls.clone());
@@ -59,8 +59,7 @@ fn gateway_of(base: &str, plugins: Vec<Arc<dyn Plugin>>) -> (Gateway, Outcomes, 
 }
 
 fn ws_base(openai: &FakeOpenAi) -> String {
-    let base = openai.base_url().replace("http://", "ws://");
-    base.trim_end_matches("/v1").to_owned()
+    openai.base_url().replace("http://", "ws://")
 }
 
 /// Send `turn` (a `response.create`) and hear its events.
@@ -392,7 +391,7 @@ async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
 // reached.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plugin_can_refuse_a_session_before_the_upgrade() {
-    use respan_gateway_http::Status;
+    use respan_gateway_http_faults::Status;
     let probe = Probe::start().await;
     let refuse = OnClient(|_: &mut ClientContext| {
         Err(Fault::new("too many sessions")

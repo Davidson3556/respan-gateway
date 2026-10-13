@@ -8,7 +8,7 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use axum::body::Body as Wire;
+use axum::body::Body as Original;
 use futures::StreamExt;
 use respan_gateway_core::Extensions;
 use respan_gateway_http::ProviderIo;
@@ -53,7 +53,7 @@ impl Videos {
             seen: seen.clone(),
             jobs: Mutex::new(Vec::new()),
         });
-        let app = axum::Router::new().fallback(move |request: http::Request<Wire>| {
+        let app = axum::Router::new().fallback(move |request: http::Request<Original>| {
             let state = state.clone();
             async move { Ok::<_, Infallible>(answer(request, &state).await) }
         });
@@ -94,7 +94,7 @@ pub fn video_chunks() -> Vec<Bytes> {
 /// The thumbnail a fake serves.
 pub const THUMBNAIL: &[u8] = b"RIFF\0\0\0\0WEBPVP8 thumbnail";
 
-fn not_found(id: &str) -> http::Response<Wire> {
+fn not_found(id: &str) -> http::Response<Original> {
     let message = format!("Video with id '{id}' not found.");
     error(StatusCode::NOT_FOUND, &message, None, "not_found")
 }
@@ -103,7 +103,7 @@ fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-async fn answer(request: http::Request<Wire>, state: &State) -> http::Response<Wire> {
+async fn answer(request: http::Request<Original>, state: &State) -> http::Response<Original> {
     let (head, body) = request.into_parts();
     let auth = head.headers.get(http::header::AUTHORIZATION);
     if auth.and_then(|v| v.to_str().ok()) != Some(&format!("Bearer {KEY}")) {
@@ -184,7 +184,7 @@ fn new_job(state: &State, model: &str, seconds: &str, size: &str) -> Value {
     job
 }
 
-fn create(call: &Seen, state: &State) -> http::Response<Wire> {
+fn create(call: &Seen, state: &State) -> http::Response<Original> {
     let known = ["model", "prompt", "seconds", "size", "input_reference"];
     if let Some(field) = unknown(call, &known, &state.rules) {
         return unrecognized(field);
@@ -220,7 +220,7 @@ fn create(call: &Seen, state: &State) -> http::Response<Wire> {
 }
 
 /// The job `id`, finished once polled.
-fn retrieve(id: &str, state: &State) -> http::Response<Wire> {
+fn retrieve(id: &str, state: &State) -> http::Response<Original> {
     let mut jobs = locked(&state.jobs);
     let Some(job) = jobs.iter_mut().find(|j| j["id"] == id) else {
         return not_found(id);
@@ -232,7 +232,7 @@ fn retrieve(id: &str, state: &State) -> http::Response<Wire> {
     json_answer(job.clone(), &state.rules)
 }
 
-fn delete(id: &str, state: &State) -> http::Response<Wire> {
+fn delete(id: &str, state: &State) -> http::Response<Original> {
     let mut jobs = locked(&state.jobs);
     let Some(at) = jobs.iter().position(|j| j["id"] == id) else {
         return not_found(id);
@@ -249,7 +249,7 @@ fn list(
     after: Option<String>,
     limit: Option<String>,
     order: Option<String>,
-) -> http::Response<Wire> {
+) -> http::Response<Original> {
     let mut jobs = locked(&state.jobs).clone();
     match order.as_deref() {
         None | Some("desc") => jobs.reverse(),
@@ -277,7 +277,7 @@ fn list(
     )
 }
 
-fn content(id: &str, variant: Option<String>, state: &State) -> http::Response<Wire> {
+fn content(id: &str, variant: Option<String>, state: &State) -> http::Response<Original> {
     let jobs = locked(&state.jobs);
     let Some(job) = jobs.iter().find(|j| j["id"] == id) else {
         return not_found(id);
@@ -294,14 +294,14 @@ fn content(id: &str, variant: Option<String>, state: &State) -> http::Response<W
                 tokio::time::sleep(Duration::from_millis(5)).await;
                 Ok::<_, Infallible>(chunk)
             });
-            answered("video/mp4", Wire::from_stream(paced))
+            answered("video/mp4", Original::from_stream(paced))
         }
         Some("thumbnail") => answered("image/webp", THUMBNAIL),
         Some(_) => bad("Invalid value for 'variant'.", Some("variant")),
     }
 }
 
-fn remix(id: &str, call: &Seen, state: &State) -> http::Response<Wire> {
+fn remix(id: &str, call: &Seen, state: &State) -> http::Response<Original> {
     if !call.files.is_empty() || call.content_type != "application/json" {
         return bad("We could not parse the JSON body of your request.", None);
     }

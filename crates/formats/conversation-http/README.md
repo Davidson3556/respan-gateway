@@ -28,8 +28,10 @@ for the HTTP formats of other JSON kinds, such as the media kinds'.
 
 What a format has no form for stays native to it (`NativeFields`,
 `Content::Native`, `Output::Native`), is written only by that format, and is
-refused in translation where it could change the answer. Only an explicit
-raw relay ([`Relay::RAW`](../../wires/http/src/raw.rs)) sends a client's own bytes.
+refused in translation where it could change the answer. A call to a
+provider of the client's own format carries the client's spec headers and
+query parameters too (`Schema::CARRIED`, such as `anthropic-beta` and
+`?beta=true`): the request round-trips, and no bytes of it are reused.
 
 ## OpenAI Chat Completions
 

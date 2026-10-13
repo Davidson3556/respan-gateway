@@ -13,11 +13,14 @@ use respan_gateway_conversation::Usage;
 use respan_gateway_conversation::{Block, Content, Finish, Input, Message, Output, Role, Tool};
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
-use respan_gateway_core::{ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait};
+use respan_gateway_core::{
+    ClientContext, Fault, Filter, Gateway, Plugin, Provider, Response, async_trait,
+};
 use respan_gateway_core::{ErrorCode, Upstream};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_http::{HttpTransport, Status};
+use respan_gateway_http_faults::Status;
+use respan_gateway_http_transport::HttpTransport;
 use serde_json::{self, json};
 use support::run_filter as run;
 use text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE, partial_match};
@@ -177,7 +180,7 @@ fn a_match_across_deltas_is_seen_whole() {
     let out = run(&mut Holdback::new(Terms), said(0, &["a bo", "m", "b!"]));
     assert_eq!(
         out.err()
-            .map(|f| respan_gateway_http::error_code(&f).to_owned())
+            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
             .as_deref(),
         Some("blocked")
     );
@@ -229,7 +232,7 @@ fn content_that_cannot_be_read_is_refused() {
     assert_eq!(
         chat.read_all()
             .err()
-            .map(|f| respan_gateway_http::error_code(&f).to_owned())
+            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
             .as_deref(),
         Some(UNREADABLE)
     );
@@ -436,8 +439,8 @@ fn gateway_with(
     plugin: impl Plugin,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, openai)?
-        .provider::<Input, _, _>("anthropic", AnthropicMessages, anthropic)?
+        .provider(Provider::new("openai", OpenAiChat, openai))?
+        .provider(Provider::new("anthropic", AnthropicMessages, anthropic))?
         .client::<Input, _, _>(OpenAiChat)?
         .client::<Input, _, _>(AnthropicMessages)?
         .plugin(plugin)
@@ -650,7 +653,7 @@ async fn a_violation_in_the_held_start_is_refused_before_any_byte() -> Result<()
             outcome
                 .await
                 .err()
-                .map(|f| respan_gateway_http::error_code(&f).to_owned())
+                .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
                 .as_deref(),
             Some("blocked")
         );

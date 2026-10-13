@@ -7,7 +7,9 @@ use std::time::Duration;
 use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::channel::mpsc;
 use respan_gateway_core::futures::{SinkExt, StreamExt};
-use respan_gateway_core::{Connection, EventSink, EventStream, Extensions, Fault, Format, Gateway};
+use respan_gateway_core::{
+    Connection, EventSink, EventStream, Extensions, Fault, Format, Gateway, Provider,
+};
 
 #[derive(Clone, Debug)]
 struct Input(u32);
@@ -76,7 +78,7 @@ async fn both_directions_progress_before_either_is_closed() {
         let gateway = Gateway::new()
             .client::<Input, _, _>(Echo)
             .unwrap()
-            .provider::<Input, _, _>("echo", Echo, |_| Io::Provider)
+            .provider(Provider::new::<Input, _, _>("echo", Echo, |_| Io::Provider))
             .unwrap()
             .target("echo")
             .unwrap();

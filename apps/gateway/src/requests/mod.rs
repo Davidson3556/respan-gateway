@@ -15,5 +15,5 @@ pub use record::{RequestRecord, Usage, rfc3339};
 pub use recorder::{Recorder, steps};
 
 /// How many finished requests are kept unless the config's
-/// `request_history` says.
+/// `request_log.history` says.
 pub const KEPT: usize = 1000;

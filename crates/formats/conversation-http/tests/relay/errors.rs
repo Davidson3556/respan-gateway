@@ -4,7 +4,10 @@ use super::*;
 
 #[tokio::test]
 async fn an_error_page_is_relayed_as_it_is() {
-    let h = Harness::new(vec![Arc::new(explicit::Relay::HEADS)], Some("openai"));
+    let h = Harness::new(
+        vec![Arc::new(respan_gateway_plugin_relay::Relay)],
+        Some("openai"),
+    );
     let page = "<html>bad gateway</html>";
     h.sites
         .openai
@@ -17,7 +20,7 @@ async fn an_error_page_is_relayed_as_it_is() {
     // The provider answered with the failure, which the end carries.
     let o = h.log.only();
     assert!(
-        matches!(o, Err(f) if respan_gateway_http::status(&f) == StatusCode::BAD_GATEWAY && f.get::<respan_gateway_http::ProviderError>().map(|e| &e.response).is_some())
+        matches!(o, Err(f) if respan_gateway_http_faults::status(&f) == StatusCode::BAD_GATEWAY && f.get::<respan_gateway_http_faults::ProviderError>().map(|e| &e.0).is_some())
     );
 }
 
@@ -160,7 +163,10 @@ async fn a_reframed_stream_that_fails_is_refused_in_the_clients_words() {
 
 #[tokio::test]
 async fn a_relayed_redirect_passes_as_it_came_and_is_no_answer() {
-    let h = Harness::new(vec![Arc::new(explicit::Relay::HEADS)], Some("openai"));
+    let h = Harness::new(
+        vec![Arc::new(respan_gateway_plugin_relay::Relay)],
+        Some("openai"),
+    );
     let moved = http::Response::builder()
         .status(StatusCode::FOUND)
         .header("location", "http://elsewhere/")
@@ -180,19 +186,22 @@ async fn a_relayed_redirect_passes_as_it_came_and_is_no_answer() {
     // carries the provider's answer.
     let end = h.log.only().err();
     assert_eq!(
-        end.as_ref().map(respan_gateway_http::status),
+        end.as_ref().map(respan_gateway_http_faults::status),
         Some(StatusCode::BAD_GATEWAY)
     );
     let answer = end.as_ref().and_then(|f| {
-        f.get::<respan_gateway_http::ProviderError>()
-            .map(|e| &e.response)
+        f.get::<respan_gateway_http_faults::ProviderError>()
+            .map(|e| &e.0)
     });
     assert_eq!(answer.map(|a| a.status()), Some(StatusCode::FOUND));
 }
 
 #[tokio::test]
 async fn a_failure_labelled_as_a_stream_is_still_a_failure() {
-    let h = Harness::new(vec![Arc::new(explicit::Relay::HEADS)], Some("openai"));
+    let h = Harness::new(
+        vec![Arc::new(respan_gateway_plugin_relay::Relay)],
+        Some("openai"),
+    );
     let failed = || {
         http::Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -211,7 +220,10 @@ async fn a_failure_labelled_as_a_stream_is_still_a_failure() {
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body.ok().as_deref(), Some(STREAM.concat().as_bytes()));
-    let end = h.log.only().map_err(|f| respan_gateway_http::status(&f));
+    let end = h
+        .log
+        .only()
+        .map_err(|f| respan_gateway_http_faults::status(&f));
     assert_eq!(end, Err(StatusCode::SERVICE_UNAVAILABLE));
 }
 
@@ -252,7 +264,7 @@ async fn a_failure_of_several_events_keeps_the_providers_words() {
                 Some("overloaded_error")
             );
             assert_eq!(
-                fault.map(|f| respan_gateway_http::status(&f).as_u16()),
+                fault.map(|f| respan_gateway_http_faults::status(&f).as_u16()),
                 Some(529)
             );
             Ok(None)
@@ -296,7 +308,7 @@ async fn an_error_in_a_success_says_what_the_provider_answered() {
         .map(|o| {
             o.map_err(|f| {
                 (
-                    respan_gateway_http::status(&f),
+                    respan_gateway_http_faults::status(&f),
                     fault_code(&f),
                     f.message().to_owned(),
                 )
@@ -340,7 +352,10 @@ async fn a_providers_error_event_in_a_stream_goes_out_as_it_came() {
 // format, fields its format lacks and all.
 #[tokio::test]
 async fn a_providers_error_event_mid_stream_goes_as_it_came_to_its_format() {
-    let h = Harness::new(vec![Arc::new(explicit::Relay::HEADS)], Some("openai"));
+    let h = Harness::new(
+        vec![Arc::new(respan_gateway_plugin_relay::Relay)],
+        Some("openai"),
+    );
     let error = "data: {\"error\":{\"code\":502,\"message\":\"Provider returned error\",\"metadata\":{\"raw\":\"x\"}}}\n\n";
     let content =
         "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n";
@@ -357,7 +372,10 @@ async fn a_providers_error_event_mid_stream_goes_as_it_came_to_its_format() {
 // A provider's error inside a 200 goes as it came to a client of its format.
 #[tokio::test]
 async fn a_providers_error_in_a_success_goes_as_it_came_to_its_format() {
-    let h = Harness::new(vec![Arc::new(explicit::Relay::HEADS)], Some("openai"));
+    let h = Harness::new(
+        vec![Arc::new(respan_gateway_plugin_relay::Relay)],
+        Some("openai"),
+    );
     let error = r#"{"error": {"code": 502, "message": "Provider returned error", "metadata": {"raw": "x"}}}"#;
     h.sites.openai.reply(fixture::json(StatusCode::OK, error));
 
@@ -437,7 +455,7 @@ async fn the_relay_grants_raw_errors_only_within_one_format() {
     let seen = RawPermission::default();
     let same = providers([provider(&sites.openai, "openai", None)]).and_then(|g| {
         g.client::<Input, _, _>(OpenAiChat)?
-            .plugin(explicit::Relay::HEADS)
+            .plugin(respan_gateway_plugin_relay::Relay)
             .plugin(seen.clone())
             .target("openai")
     });
@@ -449,7 +467,7 @@ async fn the_relay_grants_raw_errors_only_within_one_format() {
     let other = add_provider("anthropic", AnthropicMessages, sites.claude.plain());
     let other = providers([other]).and_then(|g| {
         g.client::<Input, _, _>(OpenAiChat)?
-            .plugin(explicit::Relay::HEADS)
+            .plugin(respan_gateway_plugin_relay::Relay)
             .plugin(seen.clone())
             .target("anthropic")
     });
@@ -473,7 +491,7 @@ async fn the_relay_grants_raw_errors_only_within_one_format() {
 #[tokio::test]
 async fn relayed_heads_and_errors_stay_within_one_format() {
     let sites = Sites::default();
-    let gw = translating(&sites, explicit::Relay::HEADS);
+    let gw = translating(&sites, respan_gateway_plugin_relay::Relay);
     let raw = r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#;
     let mut refused = fixture::json(StatusCode::BAD_REQUEST, raw);
     refused

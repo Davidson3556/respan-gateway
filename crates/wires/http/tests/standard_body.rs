@@ -19,20 +19,30 @@ async fn open(
     decoded: Arc<AtomicUsize>,
 ) -> Result<EventStream<Bytes>, Fault> {
     let (incoming, _answer) = h::ClientIo::accept(request, h::Framing::Whole, LIMIT);
-    let (opening, _sink) = incoming.bind(
-        move |request| {
-            h::messages(request, move |_, bytes| {
-                decoded.fetch_add(1, Ordering::SeqCst);
-                Ok(bytes)
-            })
+    let (opening, _sink) = incoming.with_error(h::rules::plain).bind(
+        move |_request| {
+            {
+                Box::new(move |bytes: Bytes, out: &mut Vec<_>| {
+                    let value: Result<_, Fault> = {
+                        {
+                            decoded.fetch_add(1, Ordering::SeqCst);
+                            Ok(bytes)
+                        }
+                    };
+                    out.push(value?);
+                    Ok(())
+                })
+            }
         },
         |reply| {
             Ok(reply.write(
                 Response::new(()).into_parts().0,
-                h::framing::each(|_: &()| Ok(Bytes::new())),
+                Box::new(|_: &(), out: &mut Vec<Bytes>| {
+                    out.push(Bytes::new());
+                    Ok(())
+                }),
             ))
         },
-        h::plain,
     );
     opening.await
 }
@@ -87,7 +97,7 @@ async fn standard_body_collection_keeps_wire_failure_out_of_semantic_decoding() 
     )
     .await;
     let fault = result.expect_err("wire failure must fail opening");
-    assert_eq!(h::error_code(&fault), "upstream");
+    assert_eq!(respan_gateway_http_faults::error_code(&fault), "upstream");
     assert_eq!(fault.message(), "broken native body");
     assert_eq!(decoded.load(Ordering::SeqCst), 0);
 }

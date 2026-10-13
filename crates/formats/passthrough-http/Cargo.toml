@@ -1,0 +1,22 @@
+[package]
+name = "respan-gateway-passthrough-http"
+description = "The passthrough format: HTTP traffic of no kind, relayed unread."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+respan-gateway-http-syntax.workspace = true
+respan-gateway-http-faults.workspace = true
+futures.workspace = true
+respan-gateway-core.workspace = true
+respan-gateway-http.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

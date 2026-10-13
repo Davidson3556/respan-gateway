@@ -44,7 +44,7 @@ async fn a_provider_failure_is_an_outcome_not_a_panic() -> Result<(), Fault> {
     assert_eq!(
         outcome
             .err()
-            .map(|f| respan_gateway_http::error_code(&f).to_owned()),
+            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned()),
         Some("server_error".into())
     );
     assert_eq!(openai.requests().len(), 1);

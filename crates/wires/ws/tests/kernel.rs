@@ -5,8 +5,8 @@
 mod support;
 
 use respan_gateway_core::Fault;
-use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
+use respan_gateway_http_faults::Status;
 #[allow(dead_code, unused_imports)]
 #[path = "../../../../tests/support/http.rs"]
 mod http_helpers;
@@ -50,7 +50,7 @@ fn upgrade() -> respan_gateway_http::http::Request<respan_gateway_http::Body> {
 async fn a_refused_upgrade_is_a_complete_answer() {
     let refusing = refusing().await;
     let (gateway, ..) = relay(&format!("ws://{refusing}"));
-    let gateway = gateway.plugin(Relay::RAW);
+    let gateway = gateway.plugin(Relay);
     let (resp, _) = serve_http(&gateway, upgrade()).await;
     let (status, _, body) = read_whole(resp).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -64,7 +64,7 @@ async fn a_refused_upgrade_is_a_complete_answer() {
 async fn a_refused_upgrade_is_the_providers_answer_as_it_came() {
     let refusing = refusing().await;
     let (gateway, ends, _) = relay(&format!("ws://{refusing}"));
-    let gateway = gateway.plugin(Relay::RAW);
+    let gateway = gateway.plugin(Relay);
     let (resp, _) = serve_http(&gateway, upgrade()).await;
     let (status, _, body) = read_whole(resp).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -103,7 +103,7 @@ async fn a_refusal_over_max_message_is_a_500() {
         max_message: 8,
         ..Default::default()
     };
-    let server = serve_with(gateway.plugin(Relay::RAW), limits, std::future::pending()).await;
+    let server = serve_with(gateway.plugin(Relay), limits, std::future::pending()).await;
     let refused = connect(server.addr, "/v1/realtime", &[]).await;
     let Err(tokio_tungstenite::tungstenite::Error::Http(resp)) = refused else {
         panic!("expected an HTTP answer to the handshake")

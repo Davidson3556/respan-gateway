@@ -13,7 +13,7 @@ mod budget;
 mod serve;
 use budget::{Budget, OUTPUT};
 use respan_gateway_core::futures::{StreamExt, TryStreamExt};
-use respan_gateway_core::{BadRequest, ErrorCode, NativeFields};
+use respan_gateway_core::{BadRequest, ErrorCode, NativeFields, Provider};
 use respan_gateway_core::{
     ClientContext, EventStream, Fault, Gateway, Plugin, Response, async_trait,
 };
@@ -180,7 +180,7 @@ impl Plugin for Sessions {
 fn gateway(transport: WsTransport, sessions: Sessions) -> Result<Gateway, Fault> {
     Gateway::new()
         .client::<Input, _, _>(GeminiLive)?
-        .provider::<Input, _, _>("gemini", GeminiLive, transport.connect())?
+        .provider(Provider::new("gemini", GeminiLive, transport.connect()))?
         .plugin(sessions)
         .target("gemini")
 }

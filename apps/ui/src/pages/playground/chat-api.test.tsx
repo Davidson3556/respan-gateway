@@ -69,7 +69,7 @@ describe("ChatTab API selector", () => {
     expect(await screen.findByText("Bonjour")).toBeInTheDocument();
     expect(calls.some((c) => c.key === "POST /v1/chat/completions")).toBe(false);
 
-    // Who served it, that it was translated, and the tools the agent loop used.
+    // Who served it, that it was translated, and the tools the tool loop used.
     expect(await screen.findByText(/translated from Anthropic Messages/)).toBeInTheDocument();
     expect(screen.getByText("openai")).toBeInTheDocument();
     expect(screen.getByText("Used 1 tool")).toBeInTheDocument();

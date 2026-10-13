@@ -73,7 +73,7 @@ def test_export_requests_filters_and_costs(fake, tmp_path):
     history = tmp_path / "requests.jsonl"
     config = {
         **config_for(fake),
-        "request_history_file": str(history),
+        "plugins": {"request_log": {"file": str(history)}},
         "prices": {"fake": {"input": 1_000_000, "output": 1_000_000}},
     }
     with rg.Gateway(config=config) as gw:

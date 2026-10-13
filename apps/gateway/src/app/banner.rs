@@ -57,7 +57,7 @@ impl Built {
             .filter_map(|name| self.formats.iter().find(|f| f.name == *name))
             .flat_map(|f| f.endpoints.iter().map(|e| (*e).to_owned()))
             .collect();
-        if !self.config.raw_relay {
+        if !self.config.relay {
             endpoints.push("GET /v1/models".to_owned());
             if self.plan.serves("gemini-generate") {
                 endpoints.push("GET /v1beta/models".to_owned());

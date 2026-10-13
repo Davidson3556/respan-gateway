@@ -4,7 +4,7 @@
 use crate::path_support::{CHAT_REPLY, record_lines, send_post};
 use crate::support::Gateway;
 
-use respan_gateway_http::percent_decode as decode;
+use respan_gateway_http_syntax::percent_decode as decode;
 
 fn dots(segs: impl Iterator<Item = String>) -> String {
     let mut kept: Vec<String> = Vec::new();
@@ -31,7 +31,7 @@ async fn no_front_end_reads_a_passthrough_call_as_chat() {
   p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
   any: {{ formats: passthrough, base_url: '{base}/pt' }}
 formats: [openai-chat, passthrough]
-default: p
+plugins: {{ routing: {{ default: p }} }}
 "
     ))
     .await;

@@ -15,6 +15,9 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+respan-gateway-http-syntax.workspace = true
+respan-gateway-http-faults.workspace = true
+respan-gateway-passthrough-http.workspace = true
 respan-gateway-realtime.workspace = true
 respan-gateway-realtime-ws.workspace = true
 respan-gateway-providers.workspace = true
@@ -22,7 +25,7 @@ respan-gateway-conversation.workspace = true
 respan-gateway-conversation-http.workspace = true
 respan-gateway-media.workspace = true
 respan-gateway-media-http.workspace = true
-respan-gateway-plugins.workspace = true
+respan-gateway-plugin-fallback.workspace = true
 respan-gateway-core.workspace = true
 respan-gateway-http.workspace = true
 serde_json.workspace = true
@@ -30,11 +33,13 @@ rusqlite = { version = "0.32.1", features = ["bundled"] }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
+respan-gateway-plugin-relay.workspace = true
 sha2 = "0.10"
 hmac = "0.12"
 getrandom = "0.3"
 reqwest.workspace = true
-respan-gateway-http = { workspace = true, features = ["reqwest"] }
+respan-gateway-http.workspace = true
+respan-gateway-http-transport.workspace = true
 respan-gateway-mcp.workspace = true
 respan-gateway-mcp-http.workspace = true
 respan-gateway-ws.workspace = true

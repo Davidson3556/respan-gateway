@@ -12,6 +12,7 @@
 //! provider that made the job, which the id alone says only by its spelling
 //! ([`Input::job_id`]). Some providers serve a finished job's content only at
 //! the URLs it names ([`Job::videos`]); [`LocateContent`] finds them first.
+//! [`VideoJobs`] sends a follow-up to its job's provider.
 
 use bytes::Bytes;
 use respan_gateway_conversation::{Media, MediaSource};
@@ -372,5 +373,184 @@ impl Plugin for LocateContent {
             Ok(())
         })?;
         Ok(None)
+    }
+}
+
+/// What wraps a job's id in its provider's name: `<provider>~<id>`.
+const SEPARATOR: char = '~';
+
+/// A core provider of a video format, of [`VideoJobs`].
+#[derive(Debug, Clone)]
+struct Maker {
+    provider: String,
+    internal: String,
+    /// What its jobs' ids start with.
+    spelling: String,
+    /// Whether another provider's ids are spelled alike.
+    shared: bool,
+}
+
+/// Sends a job's follow-up (`Retrieve`, `Content`, `Remix`, `Delete`) to
+/// the provider that made the job, which only the job's id says: by its
+/// spelling (OpenAI's start `video_`, Veo's `veo_`), or, when several
+/// providers spell their ids alike, by the provider's name it wraps them in
+/// on the way out, `<provider>~<id>`, and unwraps on the way in. An id
+/// spelled as several providers' goes to the target if it is one of them,
+/// else to the first. Register it after the router that picks the target.
+#[derive(Debug, Clone, Default)]
+pub struct VideoJobs {
+    makers: Vec<Maker>,
+}
+
+impl VideoJobs {
+    /// For no provider yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// For `internal` too, a core provider of the provider named `provider`
+    /// (the name a wrapped id carries), whose jobs' ids start with
+    /// `spelling`.
+    pub fn provider(
+        mut self,
+        provider: impl Into<String>,
+        internal: impl Into<String>,
+        spelling: impl Into<String>,
+    ) -> Self {
+        self.makers.push(Maker {
+            provider: provider.into(),
+            internal: internal.into(),
+            spelling: spelling.into(),
+            shared: false,
+        });
+        let spellings: Vec<String> = self.makers.iter().map(|m| m.spelling.clone()).collect();
+        for maker in &mut self.makers {
+            maker.shared = spellings.iter().filter(|s| **s == maker.spelling).count() > 1;
+        }
+        self
+    }
+
+    /// Who made job `id`, and its id as they know it: the provider it is
+    /// wrapped in, else the target if it spells ids so, else the first that
+    /// does.
+    fn maker<'a>(&self, id: &'a str, target: Option<&str>) -> Option<(&Maker, &'a str)> {
+        if let Some((provider, inner)) = id.split_once(SEPARATOR)
+            && let Some(maker) = self.makers.iter().find(|m| m.provider == provider)
+        {
+            return Some((maker, inner));
+        }
+        let mut spelled = self
+            .makers
+            .iter()
+            .filter(|m| id.starts_with(m.spelling.as_str()));
+        let targeted = spelled
+            .clone()
+            .find(|m| target == Some(m.internal.as_str()));
+        targeted.or_else(|| spelled.next()).map(|m| (m, id))
+    }
+}
+
+#[async_trait]
+impl Plugin for VideoJobs {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let Ok(input) = cx.input::<Input>() else {
+            return Ok(None);
+        };
+        let found = input.job_id().and_then(|id| {
+            let (maker, inner) = self.maker(id, cx.target())?;
+            Some((
+                maker.internal.clone(),
+                (inner != id).then(|| inner.to_owned()),
+            ))
+        });
+        if let Some((internal, unwrapped)) = found {
+            cx.set_target(internal);
+            if let Some(inner) = unwrapped {
+                cx.filter(move |input: &mut Input| {
+                    set_job_id(input, &inner);
+                    Ok(())
+                })?;
+            }
+        }
+        let target = cx.target();
+        let maker = self.makers.iter().find(|m| target == Some(&m.internal));
+        if let Some(maker) = maker.filter(|m| m.shared) {
+            let provider = maker.provider.clone();
+            cx.filter(move |output: &mut Output| {
+                wrap_ids(output, &provider);
+                Ok(())
+            })?;
+        }
+        Ok(None)
+    }
+}
+
+fn set_job_id(input: &mut Input, inner: &str) {
+    match input {
+        Input::Remix { id, .. }
+        | Input::Retrieve { id, .. }
+        | Input::Content { id, .. }
+        | Input::Delete { id, .. } => *id = inner.to_owned(),
+        _ => {}
+    }
+}
+
+fn wrap_ids(output: &mut Output, provider: &str) {
+    let wrap = |id: &mut String| *id = format!("{provider}{SEPARATOR}{id}");
+    match output {
+        Output::Job(job) => wrap(&mut job.id),
+        Output::Jobs(jobs) => jobs.jobs.iter_mut().for_each(|job| wrap(&mut job.id)),
+        Output::Deleted(id) => wrap(id),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn jobs() -> VideoJobs {
+        VideoJobs::new()
+            .provider("east", "east:openai-videos", "video_")
+            .provider("west", "west:openai-videos", "video_")
+            .provider("gemini", "gemini:gemini-veo", "veo_")
+    }
+
+    fn maker(id: &str, target: Option<&str>) -> Option<(String, String)> {
+        let jobs = jobs();
+        let (maker, inner) = jobs.maker(id, target)?;
+        Some((maker.provider.clone(), inner.to_owned()))
+    }
+
+    #[test]
+    fn a_job_goes_to_its_maker() {
+        let to = |provider: &str, id: &str| Some((provider.to_owned(), id.to_owned()));
+        assert_eq!(maker("west~video_1", None), to("west", "video_1"));
+        assert_eq!(maker("veo_abc", Some("east")), to("gemini", "veo_abc"));
+        assert_eq!(maker("video_1", None), to("east", "video_1"));
+        assert_eq!(
+            maker("video_1", Some("west:openai-videos")),
+            to("west", "video_1")
+        );
+        assert_eq!(maker("nobody~video_1", None), None);
+        assert_eq!(maker("file_1", None), None);
+    }
+
+    #[test]
+    fn only_ids_spelled_alike_are_wrapped() {
+        let shared: Vec<_> = jobs().makers.iter().map(|m| m.shared).collect();
+        assert_eq!(shared, [true, true, false]);
+    }
+
+    #[test]
+    fn ids_are_wrapped_in_their_provider() {
+        let mut deleted = Output::Deleted("video_1".into());
+        wrap_ids(&mut deleted, "east");
+        assert_eq!(deleted, Output::Deleted("east~video_1".into()));
+        let mut input = Input::Retrieve {
+            id: "east~video_1".into(),
+        };
+        set_job_id(&mut input, "video_1");
+        assert_eq!(input.job_id(), Some("video_1"));
     }
 }

@@ -197,7 +197,13 @@ async fn a_history_file_keeps_the_history_across_a_restart() {
     let file = scratch("kept.jsonl");
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("hello"));
-    let yaml = config(&up, &format!("request_history_file: '{}'", file.display()));
+    let yaml = config(
+        &up,
+        &format!(
+            "plugins: {{ request_log: {{ file: '{}' }} }}",
+            file.display()
+        ),
+    );
 
     let mut first = Gateway::start(&yaml).await;
     for model in ["gpt-4o", "o3"] {
@@ -244,7 +250,7 @@ async fn only_the_last_request_history_records_are_read_back() {
     let yaml = config(
         &up,
         &format!(
-            "request_history_file: '{}'\nrequest_history: 2",
+            "plugins: {{ request_log: {{ file: '{}', history: 2 }} }}",
             file.display()
         ),
     );
@@ -272,7 +278,7 @@ async fn the_file_is_rotated_by_size_keeping_one_old_file() {
     let yaml = config(
         &up,
         &format!(
-            "request_history_file: '{}'\nrequest_history_file_max: 3KiB",
+            "plugins: {{ request_log: {{ file: '{}', file_max: 3KiB }} }}",
             file.display()
         ),
     );
@@ -310,7 +316,13 @@ async fn a_file_that_cannot_be_written_does_not_fail_requests() {
     let file = parent.join("requests.jsonl");
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("hello"));
-    let yaml = config(&up, &format!("request_history_file: '{}'", file.display()));
+    let yaml = config(
+        &up,
+        &format!(
+            "plugins: {{ request_log: {{ file: '{}' }} }}",
+            file.display()
+        ),
+    );
     let gw = Gateway::start(&yaml).await;
     for _ in 0..3 {
         assert_eq!(chat(&gw, "gpt-4o").await, 200);
@@ -369,7 +381,7 @@ async fn bad_prices_and_sizes_are_refused() {
     for yaml in [
         "prices: { gpt-4o: { input: -1, output: 1 } }",
         "prices: { gpt-4o: { input: 1 } }",
-        "request_history_file_max: 0",
+        "plugins: { request_log: { file_max: 0 } }",
     ] {
         let path = support::write_config(&format!("listen: 127.0.0.1:0\n{yaml}\n"));
         let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
@@ -451,7 +463,13 @@ async fn the_history_file_is_private() {
     let file = scratch("private.jsonl");
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("hello"));
-    let yaml = config(&up, &format!("request_history_file: '{}'", file.display()));
+    let yaml = config(
+        &up,
+        &format!(
+            "plugins: {{ request_log: {{ file: '{}' }} }}",
+            file.display()
+        ),
+    );
     let gw = Gateway::start(&yaml).await;
     assert_eq!(chat(&gw, "gpt-4o").await, 200);
     lines_in(&file, 1).await;

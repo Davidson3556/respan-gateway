@@ -30,8 +30,8 @@ async fn nested_accounts_reserve_all_or_nothing() {
         .await;
     let fault = refused.err().map(|f| {
         (
-            respan_gateway_http::status(&f).as_u16(),
-            respan_gateway_http::error_code(&f).to_owned(),
+            respan_gateway_http_faults::status(&f).as_u16(),
+            respan_gateway_http_faults::error_code(&f).to_owned(),
         )
     });
     assert_eq!(fault, Some((402, INSUFFICIENT_FUNDS.to_owned())));
@@ -100,7 +100,7 @@ async fn an_unknown_account_is_refused() {
     assert_eq!(
         refused
             .err()
-            .map(|f| respan_gateway_http::status(&f).as_u16()),
+            .map(|f| respan_gateway_http_faults::status(&f).as_u16()),
         Some(401)
     );
 }

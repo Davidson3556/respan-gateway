@@ -479,8 +479,8 @@ async fn a_call_the_transport_fails_ends_with_its_fault() {
     // This one is no answer.
     assert!(ended_with(&bill, "upstream"));
     assert!(bill.ended()[0].1.as_ref().is_err_and(|f| {
-        f.get::<respan_gateway_http::ProviderError>()
-            .map(|e| &e.response)
+        f.get::<respan_gateway_http_faults::ProviderError>()
+            .map(|e| &e.0)
             .is_none()
     }));
 }
@@ -944,14 +944,22 @@ async fn a_client_edge_failure_ends_the_call_however_its_bytes_were_split() {
 }
 
 #[tokio::test]
-async fn a_raw_relay_sends_an_unedited_request_as_it_came() {
-    let h = Harness::new(vec![Arc::new(explicit::Relay::RAW)], Some("openai"));
+async fn a_relay_round_trips_the_request() {
+    let h = Harness::new(
+        vec![Arc::new(respan_gateway_plugin_relay::Relay)],
+        Some("openai"),
+    );
     h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
 
     let (status, _, _) = h.send(unary_chat()).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(&h.sites.sent.sent()[0].body()[..], UNARY_REQ.as_bytes());
+    let json = |raw: &[u8]| serde_json::from_slice::<serde_json::Value>(raw).ok();
+    assert_eq!(
+        json(&h.sites.sent.sent()[0].body()[..]),
+        json(UNARY_REQ.as_bytes()),
+        "written again, it says what the client's did"
+    );
 }
 
 #[tokio::test]

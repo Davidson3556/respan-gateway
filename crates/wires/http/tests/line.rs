@@ -4,7 +4,7 @@
 //! provider-edge filter, so these tests show what such a filter sees.
 
 use respan_gateway_conversation::Input;
-use respan_gateway_core::{BadRequest, ErrorCode, Truncated, Upstream};
+use respan_gateway_core::{BadRequest, ErrorCode, Provider, Truncated, Upstream};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -15,16 +15,15 @@ use http_body_util::BodyExt;
 use respan_gateway_conversation::Usage;
 use respan_gateway_core::futures;
 use respan_gateway_core::{
-    Call, ClientContext, EventStream, Fault, Filter, Gateway, Plugin, ProviderContext, Response,
-    async_trait,
+    Call, ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_http::Body;
 use respan_gateway_http::Encoder;
-use respan_gateway_http::Status;
-use respan_gateway_http::bodiless;
 use respan_gateway_http::bytes;
 use respan_gateway_http::http::request::Parts as RequestHead;
+use respan_gateway_http::rules::bodiless;
 use respan_gateway_http::{http, http_body_util};
+use respan_gateway_http_faults::Status;
 #[allow(dead_code, unused_imports)]
 #[path = "../../../../tests/support/http.rs"]
 mod http_helpers;
@@ -62,27 +61,34 @@ impl respan_gateway_core::Format<respan_gateway_http::ClientIo, LIn, LOut> for L
         &self,
         io: respan_gateway_http::ClientIo,
     ) -> Result<respan_gateway_core::Connection<LIn, LOut>, Fault> {
-        Ok(io.bind(
-            |request| {
-                respan_gateway_http::messages(request, |_, raw| {
-                    let text = String::from_utf8_lossy(&raw).into_owned();
-                    Ok(LIn(text))
-                })
-            },
-            |reply| {
-                let head = reply.head();
-                if reply.request().method() == http::Method::GET {
-                    Ok(reply.open(
-                        head,
-                        Bytes::from(respan_gateway_http::framing::sse::comment("open")),
-                        Box::new(LineEncoder(None)),
-                    ))
-                } else {
-                    Ok(reply.write(head, Box::new(LineEncoder(None))))
-                }
-            },
-            |fault, _, _| Bytes::from(format!("x:{}\n", fault.message())),
-        ))
+        Ok(io
+            .with_error(|fault, _, _| Bytes::from(format!("x:{}\n", fault.message())))
+            .bind(
+                |_request| {
+                    {
+                        Box::new(move |raw: Bytes, out: &mut Vec<_>| {
+                            let value: Result<_, Fault> = {
+                                {
+                                    let text = String::from_utf8_lossy(&raw).into_owned();
+                                    Ok(LIn(text))
+                                }
+                            };
+                            out.push(value?);
+                            Ok(())
+                        })
+                    }
+                },
+                |reply| {
+                    let head = reply.head();
+                    if reply.request().method() == http::Method::GET {
+                        let comment = Bytes::from(respan_gateway_sse::comment("open"));
+                        let encoder = Prefixed(comment, Box::new(LineEncoder(None)));
+                        Ok(reply.open(head, Box::new(encoder)))
+                    } else {
+                        Ok(reply.write(head, Box::new(LineEncoder(None))))
+                    }
+                },
+            ))
     }
 }
 
@@ -94,37 +100,52 @@ impl respan_gateway_core::Format<respan_gateway_http::ProviderIo, LOut, LIn> for
         &self,
         io: respan_gateway_http::ProviderIo,
     ) -> Result<respan_gateway_core::Connection<LOut, LIn>, Fault> {
-        Ok(io.bind(line_call, line_outputs, line_refused))
+        // A client's `HEAD` stays one: its answer has no body to read.
+        let head_only = io
+            .extensions()
+            .get::<respan_gateway_http::raw::Original>()
+            .and_then(|w| w.get())
+            .is_some_and(|r| r.method() == http::Method::HEAD);
+        let call = move |head: &mut RequestHead, input: Option<&LIn>| {
+            if head_only {
+                head.method = http::Method::HEAD;
+            }
+            line_call(head, input)
+        };
+        Ok(io.with_refusal(line_refused).bind(call, line_outputs))
     }
 }
 
 fn line_outputs(
-    response: http::Response<Body>,
-    request: http::Request<Bytes>,
-) -> EventStream<LOut> {
-    if bodiless(request.method(), response.status()) {
-        return EventStream::empty();
+    head: &http::response::Parts,
+    request: &http::Request<Bytes>,
+) -> Option<Box<dyn respan_gateway_http::Decoder<LOut>>> {
+    if bodiless(request.method(), head.status) {
+        return None;
     }
-    respan_gateway_http::framing::parse(
-        response.into_body(),
-        LineDecoder::default(),
-        |state, bytes, out| state.decode(bytes, out),
-        |state, end, out| {
-            end?;
-            state.end(out)
-        },
-    )
+    Some(Box::new(LineDecoder::default()))
+}
+
+impl respan_gateway_http::Decoder<LOut> for LineDecoder {
+    fn decode(&mut self, bytes: Bytes, out: &mut Vec<LOut>) -> Result<(), Fault> {
+        LineDecoder::decode(self, bytes, out)
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<LOut>) -> Result<(), Fault> {
+        end?;
+        LineDecoder::end(self, out)
+    }
 }
 
 /// A call as Line writes it: at `/line`, each input as its text.
 fn line_call(head: &mut RequestHead, _: Option<&LIn>) -> Result<Box<dyn Encoder<LIn>>, Fault> {
-    respan_gateway_http::framing::set_path(head, "/line")?;
+    respan_gateway_http_syntax::set_path(head, "/line")?;
     Ok(Box::new(Lines))
 }
 
 /// A refused answer: the provider's fault, with the failure its lines say.
 fn line_refused(answer: http::Response<Bytes>) -> Fault {
-    let fault = respan_gateway_http::provider_fault(LINE, answer.clone());
+    let fault = respan_gateway_http_faults::provider_fault(answer.clone());
     let mut lines = LineDecoder::default();
     match lines.decode(answer.into_body(), &mut Vec::new()) {
         Err(said) => said,
@@ -135,13 +156,37 @@ fn line_refused(answer: http::Response<Bytes>) -> Fault {
 /// Writes each input as its text.
 struct Lines;
 
-impl Encoder<LIn> for Lines {
-    fn encode(&mut self, input: &LIn, out: &mut BytesMut) -> Result<(), Fault> {
+impl Lines {
+    fn encode_into(&mut self, input: &LIn, out: &mut BytesMut) -> Result<(), Fault> {
         out.extend_from_slice(input.0.as_bytes());
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+}
+
+impl Encoder<LIn> for Lines {
+    fn encode(
+        &mut self,
+        value: &LIn,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.encode_into(value, &mut out)?;
+        frames.push(out.freeze());
+        Ok(())
+    }
+
+    fn end(
+        &mut self,
+        end: Result<(), Fault>,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.end_into(&end, &mut out)?;
+        frames.extend((!out.is_empty()).then(|| out.freeze()));
         Ok(())
     }
 }
@@ -198,8 +243,8 @@ impl LineEncoder {
     }
 }
 
-impl Encoder<LOut> for LineEncoder {
-    fn encode(&mut self, o: &LOut, out: &mut BytesMut) -> Result<(), Fault> {
+impl LineEncoder {
+    fn encode_into(&mut self, o: &LOut, out: &mut BytesMut) -> Result<(), Fault> {
         if !o.1.is_empty() {
             *self.0.get_or_insert_default() += &o.1;
         }
@@ -210,7 +255,7 @@ impl Encoder<LOut> for LineEncoder {
         Ok(())
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         match end {
             Ok(()) => {
                 self.release(out);
@@ -218,6 +263,30 @@ impl Encoder<LOut> for LineEncoder {
             }
             Err(f) => out.extend_from_slice(format!("x:{}\n", f.message()).as_bytes()),
         }
+        Ok(())
+    }
+}
+
+impl Encoder<LOut> for LineEncoder {
+    fn encode(
+        &mut self,
+        value: &LOut,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.encode_into(value, &mut out)?;
+        frames.push(out.freeze());
+        Ok(())
+    }
+
+    fn end(
+        &mut self,
+        end: Result<(), Fault>,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.end_into(&end, &mut out)?;
+        frames.extend((!out.is_empty()).then(|| out.freeze()));
         Ok(())
     }
 }
@@ -350,11 +419,11 @@ impl Plugin for Log {
 
 fn gateway(script: Script, log: &Log, plugin: impl Plugin) -> Gateway {
     Gateway::new()
-        .provider::<LIn, _, _>(
+        .provider(Provider::new(
             "p",
             Line,
             respan_gateway_http::connect(script.into_sender(), LIMIT),
-        )
+        ))
         .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("p"))
         .map(|g| g.plugin(log.clone()))
@@ -449,7 +518,7 @@ async fn f2_usage_is_metered_on_the_call_though_the_client_edge_failed_first() {
 async fn f3_a_head_whose_provider_sends_no_body_passes_its_head() {
     let log = Log::default();
     let script = Script::default().then(StatusCode::OK, vec![]);
-    let gw = gateway(script, &log, Log::default()).plugin(explicit::Relay::RAW);
+    let gw = gateway(script, &log, Log::default()).plugin(respan_gateway_plugin_relay::Relay);
     let (status, body) = run(&gw, req(http::Method::HEAD)).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert!(log.calls()[0].is_ok());
@@ -472,11 +541,11 @@ async fn f3b_a_translated_204_is_a_success_of_the_clients_format() {
         ))
     };
     let gw = Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "anthropic",
             AnthropicMessages,
             respan_gateway_http::connect(transport, LIMIT),
-        )
+        ))
         .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .and_then(|g| g.target("anthropic"))
         .unwrap_or_else(|e| panic!("{e}"));
@@ -556,7 +625,7 @@ async fn f5_until_content_then_drop_ends_the_call_at_the_bodys_end_only() {
         let end = until_content_then_drop(frames).await;
         assert_eq!(
             end.err()
-                .map(|f| respan_gateway_http::error_code(&f).to_owned())
+                .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
                 .as_deref(),
             Some("abandoned")
         );
@@ -583,7 +652,7 @@ async fn f6_a_refused_head_request_ends_with_its_fault() {
     let end = log.clients()[0].clone();
     assert_eq!(
         end.err()
-            .map(|f| respan_gateway_http::error_code(&f).to_owned())
+            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
             .as_deref(),
         Some("bad_request")
     );
@@ -640,13 +709,13 @@ async fn f8_a_client_edge_panic_ends_the_call_internal() {
     assert_eq!(
         client
             .err()
-            .map(|f| respan_gateway_http::error_code(&f).to_owned())
+            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
             .as_deref(),
         Some("internal")
     );
     assert_eq!(
         call.err()
-            .map(|f| respan_gateway_http::error_code(&f).to_owned())
+            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
             .as_deref(),
         Some("internal")
     );
@@ -661,13 +730,13 @@ async fn f8_a_client_edge_panic_ends_the_call_internal() {
 async fn f9_a_101_to_a_whole_request_is_refused_whoever_sent_it() {
     let log = Log::default();
     let script = Script::default().then(StatusCode::SWITCHING_PROTOCOLS, vec!["e\n"]);
-    let gw = gateway(script, &log, Log::default()).plugin(explicit::Relay::HEADS);
+    let gw = gateway(script, &log, Log::default()).plugin(respan_gateway_plugin_relay::Relay);
     let (status, _) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     let end = log.clients()[0].clone();
     assert_eq!(
         end.err().map(|f| (
-            respan_gateway_http::error_code(&f).to_owned(),
+            respan_gateway_http_faults::error_code(&f).to_owned(),
             f.message().to_owned()
         )),
         Some((
@@ -806,7 +875,7 @@ async fn r8_3_a_panic_before_the_head_ends_the_call_internal_not_abandoned() {
     let code = calls[0]
         .as_ref()
         .err()
-        .map(|f| respan_gateway_http::error_code(f).to_owned());
+        .map(|f| respan_gateway_http_faults::error_code(f).to_owned());
     assert_eq!(code.as_deref(), Some("internal"), "{:?}", calls[0]);
 }
 
@@ -887,17 +956,8 @@ struct Fallback;
 #[async_trait]
 impl Plugin for Fallback {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let head = respan_gateway_http::ProviderHead::default();
-        let mut call = cx.call("p").with_extension(head.clone());
-        if let Some(wire) = cx.extensions().get::<respan_gateway_http::Wire>()
-            && wire.get().is_some_and(|r| r.method() == http::Method::HEAD)
-        {
-            call = call.with_extension(respan_gateway_http::SendRaw(wire.clone()));
-        }
-        let mut resp = call.await?;
-        if let Some(client) = cx.extensions().get::<respan_gateway_http::ClientHead>() {
-            client.set(head.get());
-        }
+        let relayed = respan_gateway_http::raw::Relayed;
+        let mut resp = cx.call("p").with_extension(relayed).await?;
 
         match resp.buffer_until(|out: &LOut| !out.0.is_empty()).await {
             Ok(()) => Ok(Some(resp)),
@@ -1116,7 +1176,7 @@ async fn r9_4b_an_abandoned_call_stays_abandoned() {
     let end = log.calls()[0].clone();
     assert_eq!(
         end.err()
-            .map(|f| respan_gateway_http::error_code(&f).to_owned())
+            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
             .as_deref(),
         Some("abandoned")
     );
@@ -1319,18 +1379,17 @@ impl respan_gateway_core::Format<respan_gateway_http::ProviderIo, LOut, LIn> for
         &self,
         io: respan_gateway_http::ProviderIo,
     ) -> Result<respan_gateway_core::Connection<LOut, LIn>, Fault> {
-        Ok(io.bind(
+        Ok(io.with_refusal(line_refused).bind(
             move |head: &mut RequestHead, input: Option<&LIn>| {
                 // A model of several words is escaped: its head is written
                 // before its body says whether it can be.
                 let model = input.map_or("none", |input| input.0.as_str());
                 let model = model.replace(' ', "%20");
                 head.method = http::Method::POST;
-                respan_gateway_http::framing::set_path(head, &format!("/models/{model}"))?;
+                respan_gateway_http_syntax::set_path(head, &format!("/models/{model}"))?;
                 Ok(Box::new(Untranslatable) as Box<dyn Encoder<LIn>>)
             },
             line_outputs,
-            line_refused,
         ))
     }
 }
@@ -1339,14 +1398,14 @@ impl respan_gateway_core::Format<respan_gateway_http::ProviderIo, LOut, LIn> for
 struct Untranslatable;
 
 impl Encoder<LIn> for Untranslatable {
-    fn encode(&mut self, input: &LIn, out: &mut BytesMut) -> Result<(), Fault> {
+    fn encode(&mut self, input: &LIn, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         match input.0.contains("untranslatable") {
             true => Err(BadRequest::fault("pathed cannot say it")),
             false => Lines.encode(input, out),
         }
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         Lines.end(end, out)
     }
 }
@@ -1398,11 +1457,11 @@ impl Plugin for Model {
 
 fn pathed(paths: &Paths, model: Option<&'static str>) -> Gateway {
     Gateway::new()
-        .provider::<LIn, _, _>(
+        .provider(Provider::new(
             "pathed",
             Pathed,
             respan_gateway_http::connect(paths.clone().into_sender(), LIMIT),
-        )
+        ))
         .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("pathed"))
         .map(|g| g.plugin(Model(model)))
@@ -1454,11 +1513,11 @@ async fn v9_1_untranslatable_content_is_a_bad_request_edited_or_not() {
     }
 
     let gw = Gateway::new()
-        .provider::<LIn, _, _>(
+        .provider(Provider::new(
             "pathed",
             Pathed,
             respan_gateway_http::connect(paths.clone().into_sender(), LIMIT),
-        )
+        ))
         .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("pathed"))
         .map(|g| g.plugin(Tag))
@@ -1545,7 +1604,7 @@ async fn r10_2_a_204_dropped_after_until_content_ends_ok() {
     let code = |e: &Result<(), Fault>| {
         e.as_ref()
             .err()
-            .map(|f| respan_gateway_http::error_code(f).to_owned())
+            .map(|f| respan_gateway_http_faults::error_code(f).to_owned())
     };
     assert_eq!(code(&ends[0]).as_deref(), Some("abandoned"));
     assert!(ends[1].is_ok());
@@ -1581,7 +1640,7 @@ async fn r10_3_a_panic_while_closing_ends_the_edge_internal() {
     // The end is known at close, so a panic changes it no more than a failure.
     assert_eq!(
         end.err()
-            .map(|f| respan_gateway_http::error_code(&f).to_owned())
+            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
             .as_deref(),
         Some("bad_request")
     );
@@ -1600,13 +1659,12 @@ impl respan_gateway_core::Format<respan_gateway_http::ProviderIo, LOut, LIn> for
         &self,
         io: respan_gateway_http::ProviderIo,
     ) -> Result<respan_gateway_core::Connection<LOut, LIn>, Fault> {
-        Ok(io.bind(
+        Ok(io.with_refusal(line_refused).bind(
             move |head: &mut RequestHead, input: Option<&LIn>| {
                 head.method = http::Method::POST;
                 line_call(head, input)
             },
             line_outputs,
-            line_refused,
         ))
     }
 }
@@ -1631,11 +1689,11 @@ async fn r10_4_until_content_judges_a_head_as_the_provider_sent_it() {
     let log = Log::default();
     let script = Script::default().then(StatusCode::OK, vec!["x:boom\n"]);
     let gw = Gateway::new()
-        .provider::<LIn, _, _>(
+        .provider(Provider::new(
             "posted",
             Posted,
             respan_gateway_http::connect(script.clone().into_sender(), LIMIT),
-        )
+        ))
         .and_then(|g| g.client::<LIn, _, _>(Line))
         .map(|g| g.plugin(log.clone()))
         .map(|g| g.plugin(Fallback(log.clone())))
@@ -1658,13 +1716,12 @@ impl respan_gateway_core::Format<respan_gateway_http::ProviderIo, LOut, LIn> for
         io: respan_gateway_http::ProviderIo,
     ) -> Result<respan_gateway_core::Connection<LOut, LIn>, Fault> {
         let seen = self.0.clone();
-        Ok(io.bind(
+        Ok(io.with_refusal(line_refused).bind(
             move |head: &mut RequestHead, input: Option<&LIn>| {
                 lock(&seen).push(input.is_some());
                 line_call(head, input)
             },
             line_outputs,
-            line_refused,
         ))
     }
 }
@@ -1693,11 +1750,11 @@ async fn r10_6_first_is_always_a_value() {
     for to in [None, Some("hi"), Some("m2")] {
         let script = Script::default().then(StatusCode::OK, vec!["i:ok\ne\n"]);
         let gw = Gateway::new()
-            .provider::<LIn, _, _>(
+            .provider(Provider::new(
                 "p",
                 Seen(seen.clone()),
                 respan_gateway_http::connect(script.into_sender(), LIMIT),
-            )
+            ))
             .and_then(|g| g.client::<LIn, _, _>(Line))
             .and_then(|g| g.target("p"))
             .map(|g| g.plugin(Touch(to)))
@@ -1760,11 +1817,11 @@ async fn r11_a_heads_post_call_ends_abandoned_unread() {
     let log = Log::default();
     let script = Script::default().then(StatusCode::OK, vec!["i:hi\n", "u:5\ne\n"]);
     let gw = Gateway::new()
-        .provider::<LIn, _, _>(
+        .provider(Provider::new(
             "posted",
             Posted,
             respan_gateway_http::connect(script.into_sender(), LIMIT),
-        )
+        ))
         .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("posted"))
         .map(|g| g.plugin(log.clone()))
@@ -1775,7 +1832,7 @@ async fn r11_a_heads_post_call_ends_abandoned_unread() {
     let call = &log.calls()[0];
     let end = call
         .clone()
-        .map_err(|f| respan_gateway_http::error_code(&f).to_owned());
+        .map_err(|f| respan_gateway_http_faults::error_code(&f).to_owned());
     assert_eq!(
         (t(&log.metered()[0]), end),
         (None, Err("abandoned".to_owned()))
@@ -1797,14 +1854,13 @@ impl respan_gateway_core::Format<respan_gateway_http::ProviderIo, LOut, LIn> for
         io: respan_gateway_http::ProviderIo,
     ) -> Result<respan_gateway_core::Connection<LOut, LIn>, Fault> {
         let seen = self.0.clone();
-        Ok(io.bind(
+        Ok(io.with_refusal(line_refused).bind(
             move |head: &mut RequestHead, input: Option<&LIn>| {
                 let first = input.map(|first| first.0.clone());
                 lock(&seen).push((first.is_some(), first.unwrap_or_default()));
                 line_call(head, input)
             },
             line_outputs,
-            line_refused,
         ))
     }
 }
@@ -1828,11 +1884,11 @@ async fn r11_first_is_the_changed_input() {
     let seen = Shared::default();
     let script = Script::default().then(StatusCode::OK, vec!["i:ok\ne\n"]);
     let gw = Gateway::new()
-        .provider::<LIn, _, _>(
+        .provider(Provider::new(
             "p",
             InPath(seen.clone()),
             respan_gateway_http::connect(script.into_sender(), LIMIT),
-        )
+        ))
         .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("p"))
         .map(|g| g.plugin(Change))
@@ -1863,8 +1919,24 @@ async fn r11_a_filter_that_panics_fails_the_call_internal() {
     let call = &log.calls()[0];
     let internal = call
         .as_ref()
-        .is_err_and(|f| respan_gateway_http::error_code(f) == "internal");
+        .is_err_and(|f| respan_gateway_http_faults::error_code(f) == "internal");
     assert_eq!((t(&log.metered()[0]), internal), (None, true));
 }
 
-use respan_gateway_http as explicit;
+/// An encoder that starts with `0`, then encodes as `1` does.
+struct Prefixed<T>(Bytes, Box<dyn Encoder<T>>);
+
+impl<T: 'static> Encoder<T> for Prefixed<T> {
+    fn start(&mut self, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+        out.push(self.0.clone());
+        self.1.start(out)
+    }
+
+    fn encode(&mut self, value: &T, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+        self.1.encode(value, out)
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+        self.1.end(end, out)
+    }
+}

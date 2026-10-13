@@ -15,7 +15,7 @@ the vendors that speak them
 
 - `WsTransport::new(base_url)`: an outbound native HTTP sender to a `ws://` or
   `wss://` provider. It prepares a call as `HttpTransport` does
-  (`respan_gateway_http::prepare_call`), so a client's key passes only where
+  (`respan_gateway_http::call::prepare_call`), so a client's key passes only where
   a plugin put it back. `.with_headers(map)` sets the transport's own keys,
   `.with_limits(limits)` its `Limits`, `.with_handshake_timeout(d)` how long
   the provider has to answer the upgrade (default 10 s), and
@@ -28,8 +28,8 @@ the vendors that speak them
   1015, outside 1000 to 4999) is sent as 1011 (`CloseCode::sendable`).
 - `ProviderClose(u16)`: the code a provider closed with, other than 1000, on
   the `upstream` fault the transport ends the answer with. The client is told
-  it only as a `CloseCode`, which the transport adds on a call relayed with
-  `RawErrors` (`Relay`), or a plugin sets.
+  it only as a `CloseCode`, which the transport adds on a call `Relayed`
+  (`Relay`), or a plugin sets.
 - `Limits { max_message, close_wait, close_send, ping_after }`: what an edge
   takes, with defaults and their reasons on the type: 16 MiB messages, 5 s
   for the other side's part of a close, 1 s for a Close to leave, a ping

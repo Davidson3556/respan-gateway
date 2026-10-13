@@ -192,11 +192,17 @@ impl Schema for AnthropicMessages {
     const PATH: &'static str = "/v1/messages";
     /// The API version sent when the client names none.
     const HEADERS: &'static [(&'static str, &'static str)] = &[("anthropic-version", "2023-06-01")];
+    const CARRIED: &'static [&'static str] = &["anthropic-version", "anthropic-beta"];
+    const CARRIED_QUERY: &'static [&'static str] = &["beta"];
     const OWN: &'static [&'static str] = &["metadata", "output_config", "thinking"];
     type Decoding = AnthropicDecoder;
 
     fn decoder(&self) -> AnthropicDecoder {
         AnthropicDecoder::default()
+    }
+
+    fn decode_body(&self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
+        self.decoder().body(v, out)
     }
 
     fn decode_part(p: &Value) -> Option<Content> {
@@ -213,9 +219,10 @@ impl Schema for AnthropicMessages {
 
     /// Anthropic's 529 (`overloaded_error`) says what HTTP's 503 does: the
     /// service is overloaded, try later. So it reads as a 503, which retry
-    /// ([`retryable`](respan_gateway_http::retryable)), routing and a client
+    /// ([`retryable`](respan_gateway_http_faults::retryable)), routing and a client
     /// of any format understand; the answer as it came, 529, stays for a
-    /// raw relay ([`ProviderError`](respan_gateway_http::ProviderError)).
+    /// relay of its error body
+    /// ([`ProviderError`](respan_gateway_http_faults::ProviderError)).
     fn status(status: http::StatusCode) -> http::StatusCode {
         match status.as_u16() {
             529 => http::StatusCode::SERVICE_UNAVAILABLE,
@@ -459,8 +466,7 @@ impl Schema for AnthropicMessages {
     }
 
     fn error_body(fault: &Fault) -> Value {
-        let error =
-            json!({ "type": respan_gateway_http::error_code(fault), "message": fault.message() });
+        let error = json!({ "type": respan_gateway_http_faults::error_code(fault), "message": fault.message() });
         json!({ "type": "error", "error": merge_details(error, fault) })
     }
 }

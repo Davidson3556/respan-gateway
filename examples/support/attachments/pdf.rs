@@ -2,8 +2,8 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use respan_gateway_core::{BadRequest, ErrorCode, Fault};
-use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
+use respan_gateway_http_faults::Status;
 
 /// Poppler runs outside the gateway process and is killed on timeout or
 /// cancellation. Input and extracted text are bounded independently.

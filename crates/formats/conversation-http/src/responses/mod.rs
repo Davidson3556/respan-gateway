@@ -139,12 +139,18 @@ const USAGE: UsageFields = UsageFields {
 impl Schema for OpenAiResponses {
     const NAME: &'static str = RESPONSES;
     const PATH: &'static str = "/responses";
+    const CARRIED: &'static [&'static str] =
+        &["openai-beta", "openai-organization", "openai-project"];
     /// The structured output requirement is in `text`.
     const OWN: &'static [&'static str] = &["text", "reasoning"];
     type Decoding = ResponsesDecoder;
 
     fn decoder(&self) -> ResponsesDecoder {
         ResponsesDecoder::default()
+    }
+
+    fn decode_body(&self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
+        self.decoder().body(v, out)
     }
 
     fn decode_json(&self, v: &Value) -> Input {
@@ -213,7 +219,7 @@ impl Schema for OpenAiResponses {
     }
 
     fn error_body(fault: &Fault) -> Value {
-        let code = respan_gateway_http::error_code(fault);
+        let code = respan_gateway_http_faults::error_code(fault);
         let error =
             json!({ "message": fault.message(), "type": code, "param": null, "code": code });
         json!({ "error": merge_details(error, fault) })

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use respan_gateway_conversation::{Input, Output};
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
-use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, async_trait};
+use respan_gateway_core::{Gateway, Plugin, Provider};
 use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, header::CONTENT_TYPE};
 use respan_gateway_http::http_body_util::BodyExt;
@@ -20,17 +20,7 @@ use serde_json::Value;
 
 pub use serde_json::json;
 
-/// A vendor's plugin, run on every call.
-struct Quirks(&'static dyn Plugin);
-
-#[async_trait]
-impl Plugin for Quirks {
-    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        self.0.on_provider(px).await
-    }
-}
-
-/// A gateway whose provider, with `plugin`, answers every call with `body`
+/// A gateway whose provider, with `plugin` as its own, answers every call with `body`
 /// of `content_type`, and the requests it was sent.
 pub struct Vendor {
     gateway: Gateway,
@@ -69,12 +59,11 @@ impl Vendor {
         };
         let transport = respan_gateway_http::connect(answer, http_support::LIMIT);
         let gateway = Gateway::new()
-            .provider::<Input, _, _>("p", format, transport)
+            .provider(Provider::new("p", format, transport).plugin(plugin))
             .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
             .and_then(|g| g.client::<Input, _, _>(AnthropicMessages))
             .and_then(|g| g.target("p"))
-            .expect("a gateway")
-            .plugin(Quirks(plugin));
+            .expect("a gateway");
         Self { gateway, sent }
     }
 

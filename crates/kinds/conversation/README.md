@@ -51,9 +51,9 @@ or `Start`, or in a `Content::Native(NativeValue)` or `Output::Native(NativeValu
 it, and translating it is refused if it could change the answer.
 
 Input values are plain data: they keep nothing of the bytes they were
-decoded from, and compare by what they say. Only an explicit raw relay
-(`respan_gateway_http::Relay::RAW`) sends a request's own bytes, and a
-response is always written again from its events.
+decoded from, and compare by what they say. A request is always written
+again from its value, and a response from its events: a format's promise is
+that a request of its own round-trips.
 
 `Input.options: GenerationOptions` groups the output token limit, sampling
 (`temperature`, `top_p`, `top_k`), stop sequences, tool selection, parallel

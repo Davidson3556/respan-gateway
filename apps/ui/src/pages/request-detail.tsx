@@ -3,7 +3,7 @@ import { CircleAlert, Ghost } from "lucide-react";
 import type { ReactNode } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { CodeBlock } from "@/components/code-block";
-import { AgentSteps } from "@/components/agent-steps";
+import { ToolLoopSteps } from "@/components/tool-loop-steps";
 import { CopyButton } from "@/components/copy-button";
 import { EmptyState } from "@/components/empty-state";
 import { KindBadge, StatusBadge } from "@/components/request-badges";
@@ -167,8 +167,8 @@ function Detail({ record }: { record: RequestRecord }) {
         <Usage record={record} />
       </Section>
       {record.steps && record.steps.length > 0 && (
-        <Section title="Agent loop">
-          <AgentSteps steps={record.steps} />
+        <Section title="Tool loop">
+          <ToolLoopSteps steps={record.steps} />
         </Section>
       )}
       <Section title="Request">

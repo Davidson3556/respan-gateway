@@ -354,7 +354,7 @@ function fakeTraffic(at) {
     duration: between(180, chat ? (model.startsWith("llama") ? 900 : 3200) : 4500),
     usage: failed ? null : usage,
   };
-  // Now and then a chat request is an agent loop: the gateway ran tools.
+  // Now and then a chat request is a tool loop: the gateway ran tools.
   if (chat && !failed && Math.random() < 0.2) {
     const tools = [{ name: "files__read", duration_ms: between(8, 120), error: false, bytes: between(200, 9000) }];
     if (Math.random() < 0.3) tools.push({ name: "github__search", duration_ms: between(80, 900), error: Math.random() < 0.3, bytes: between(100, 4000) });
@@ -646,8 +646,8 @@ async function chat(req, res, format = "openai-chat") {
   const usage = { in: between(20, 80), out: reply.split(/\s+/).length };
   const ctx = { id: `chatcmpl-${record.id}`, model, usage };
   const done = () => {
-    // Asking for tools or files makes this an agent loop the gateway ran.
-    const agent = /tool|file/i.test(String(api.last(body, url) ?? ""));
+    // Asking for tools or files makes this a tool loop the gateway ran.
+    const toolLoop = /tool|file/i.test(String(api.last(body, url) ?? ""));
     const step = (index, finish, tools) => ({
       index, duration_ms: between(300, 900), input_tokens: usage.in, output_tokens: usage.out, finish, tools,
     });
@@ -655,7 +655,7 @@ async function chat(req, res, format = "openai-chat") {
       status: 200,
       duration: Date.now() - started,
       usage: { input_tokens: usage.in, output_tokens: usage.out },
-      ...(agent && {
+      ...(toolLoop && {
         steps: [
           step(1, "tool_use", [
             { name: "files__read_file", duration_ms: between(8, 90), error: false, bytes: between(300, 6000) },

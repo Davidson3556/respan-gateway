@@ -1,9 +1,11 @@
 //! Use case 12, a local proxy in front of Claude Code: no config file, one
 //! Anthropic provider, and the client's own credentials (API key or
-//! subscription token) passed through, since the transport sets no headers
-//! of its own. Beta headers and the request body relay byte for byte (an
-//! explicit `Relay::RAW`); a response is decoded into events and written
-//! again, so an unknown response event survives, not its bytes.
+//! subscription token) passed on by `Relay`, since the transport sets no
+//! headers of its own. The request is decoded and written again in its own
+//! format, which carries its spec's beta headers and query and the fields it
+//! has no form for; a response is decoded into events and written again, so
+//! an unknown response event survives, not its bytes. `Relay` also gives
+//! the vendor's response head and error bodies back.
 //! The binary does the same with no config file, and also relays the
 //! vendor's other endpoints (`count_tokens`): `respan-gateway proxy
 //! --anthropic`.
@@ -16,14 +18,14 @@
 
 use respan_gateway_conversation::Input;
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
-use respan_gateway_core::{Fault, Gateway, futures::TryStreamExt};
+use respan_gateway_core::{Fault, Gateway, Provider, futures::TryStreamExt};
 use respan_gateway_examples::LIMIT;
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_http::HttpTransport;
+use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_serve::router;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
@@ -47,7 +49,7 @@ fn fixture(
         move |mut call| {
             let (body, sent) = (body.clone(), Arc::clone(&sent));
             async move {
-                respan_gateway_http::credentials(&mut call, &HeaderMap::new());
+                respan_gateway_http::call::credentials(&mut call, &HeaderMap::new());
                 let (head, body_in) = call.into_parts();
                 let chunks: Vec<Bytes> = body_in.try_collect().await?;
                 let mut bytes = Vec::new();
@@ -84,10 +86,10 @@ fn gateway(
     + 'static,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Input, _, _>("anthropic", AnthropicMessages, transport)?
+        .provider(Provider::new("anthropic", AnthropicMessages, transport))?
         .client::<Input, _, _>(AnthropicMessages)?
         .target("anthropic")
-        .map(|g| g.plugin(Relay::RAW))
+        .map(|g| g.plugin(Relay))
 }
 
 fn serve_address(args: &[String]) -> Result<Option<&str>, &'static str> {
@@ -145,7 +147,7 @@ const REQUEST: &str = r#"{"model":"claude-sonnet-4-5", "max_tokens":1024,"stream
  "thinking":{"type":"enabled","budget_tokens":2048}, "future_field":[1, 2.50]}"#;
 
 fn request() -> http::Request<respan_gateway_http::Body> {
-    let mut req = post("/v1/messages", REQUEST);
+    let mut req = post("/v1/messages?beta=true", REQUEST);
     let headers = req.headers_mut();
     for (name, value) in [
         ("authorization", "Bearer sk-ant-oat-subscription"),
@@ -173,4 +175,4 @@ const STREAM: &[&str] = &[
 #[path = "../tests/cases/hosting/local_proxy.rs"]
 mod tests;
 
-use respan_gateway_http::Relay;
+use respan_gateway_plugin_relay::Relay;

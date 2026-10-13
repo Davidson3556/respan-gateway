@@ -10,10 +10,10 @@
 
 use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::{each, set_path};
 use respan_gateway_http::http::{Method, request::Parts as RequestHead};
-use respan_gateway_http::passthrough;
-use respan_gateway_http::{self as h, ClientIo, Encoder, ProviderIo};
+use respan_gateway_http::{ClientIo, Encoder, ProviderIo};
+use respan_gateway_http_syntax::set_path;
+use respan_gateway_passthrough_http as passthrough;
 
 /// The API named `name` at paths starting with `prefix`.
 #[derive(Clone, Debug)]
@@ -34,7 +34,7 @@ impl Rest {
 pub struct Ask {
     /// The HTTP method.
     pub method: Method,
-    /// The path; the query stays as it came (`Wire` has it).
+    /// The path; the query stays as it came (`Original` has it).
     pub path: String,
     /// Query parameters retained independently of path edits.
     pub query: Option<String>,
@@ -64,7 +64,10 @@ fn request(head: &mut RequestHead, ask: Option<&Ask>) -> Result<Box<dyn Encoder<
         Some(query) => set_path(head, &format!("{}?{query}", ask.path))?,
         None => set_path(head, &ask.path)?,
     }
-    Ok(each(|ask: &Ask| Ok(ask.body.clone())))
+    Ok(Box::new(|ask: &Ask, out: &mut Vec<Bytes>| {
+        out.push(ask.body.clone());
+        Ok(())
+    }))
 }
 
 impl Format<ClientIo, Ask, passthrough::Output<Rest>> for Rest {
@@ -78,18 +81,19 @@ impl Format<ClientIo, Ask, passthrough::Output<Rest>> for Rest {
 
     fn bind(&self, io: ClientIo) -> Result<Connection<Ask, passthrough::Output<Rest>>, Fault> {
         Ok(io.bind(
-            |request| {
-                h::messages(request, |head, body| {
-                    Ok(Ask {
+            |head| {
+                let head = head.clone();
+                Box::new(move |body: Bytes, out: &mut Vec<Ask>| {
+                    out.push(Ask {
                         method: head.method.clone(),
                         path: head.uri.path().to_owned(),
                         query: head.uri.query().map(str::to_owned),
                         body,
-                    })
+                    });
+                    Ok(())
                 })
             },
             passthrough::write_response,
-            h::plain,
         ))
     }
 }
@@ -100,10 +104,7 @@ impl Format<ProviderIo, passthrough::Output<Rest>, Ask> for Rest {
     }
 
     fn bind(&self, io: ProviderIo) -> Result<Connection<passthrough::Output<Rest>, Ask>, Fault> {
-        let name = self.name;
-        Ok(io.bind(request, passthrough::read_response, move |answer| {
-            h::provider_fault(name, answer)
-        }))
+        Ok(io.bind(request, passthrough::read_response))
     }
 }
 
@@ -113,7 +114,7 @@ mod tests {
 
     #[test]
     fn a_rest_call_requires_one_finite_ask_and_preserves_its_method_and_path() {
-        let mut head = h::http::Request::new(()).into_parts().0;
+        let mut head = respan_gateway_http::http::Request::new(()).into_parts().0;
         assert!(
             request(&mut head, None).is_err(),
             "live input has no Ask head to encode"

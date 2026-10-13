@@ -3,40 +3,45 @@
 //! client's response, streamed or as one whole body.
 //!
 //! Nothing here reuses the bytes a value was decoded from: values are plain
-//! data, and an encoder writes what a value says. Only an explicit raw relay
-//! sends the client's bytes ([`respan_gateway_http::SendRaw`]).
+//! data, and an encoder writes what a value says. A call to a provider of
+//! the client's own format carries the client's spec headers and query
+//! parameters ([`Schema::CARRIED`]).
 
 use std::sync::Arc;
 
 use respan_gateway_conversation::Usage;
 use respan_gateway_conversation::{Assembled, Input, Output};
-use respan_gateway_core::{BadRequest, EventStream, Fault, Upstream};
+use respan_gateway_core::{BadRequest, Fault, Upstream};
 use respan_gateway_http::bytes::{BufMut, Bytes, BytesMut};
-use respan_gateway_http::framing::sse::{self, content_type, event_data, is_stream};
-use respan_gateway_http::framing::{self, whole};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{
-    Body, Encoder, RawReply, Wire, bodiless, http::request::Parts as RequestHead,
+    Decoder, Encoder, Sse, Whole,
+    http::request::Parts as RequestHead,
     http::response::Parts as ResponseHead,
+    raw::{Original, RawReply},
+    rules::bodiless,
 };
+use respan_gateway_http::{framing::sse::content_type, framing::sse::is_stream};
+use respan_gateway_sse::event_data;
 use serde_json::{Map, Value};
 
 use super::errors::{answer, failure_json, said_error, says_error};
 use super::values::{shows, unwritable_content};
-use super::{Decoder, Schema, StreamResponse};
+use super::{Schema, StreamResponse};
 
 /// The call of `input` in `schema`'s format, a JSON `POST` to
 /// [`Schema::PATH`] with the format's headers ([`Schema::HEADERS`]), and its
 /// encoder ([`RequestEncoder`]). It asks for a stream as the call's
 /// [`StreamResponse`] says, else as the client's original request
-/// ([`Wire`]) did, else for one; the client's request, if of this format,
-/// gives its spelling of a field the format spells two ways
-/// ([`Schema::respell`]). `Err` with `config` for live input.
+/// ([`Original`]) did, else for one. The client's request, if of this format,
+/// carries its spec's headers and query parameters ([`Schema::CARRIED`],
+/// [`Schema::CARRIED_QUERY`]) and gives its spelling of a field the format
+/// spells two ways ([`Schema::respell`]). `Err` with `config` for live input.
 pub(crate) fn post<C: Schema>(
     schema: C,
     head: &mut RequestHead,
     input: Option<&Input>,
-    wire: Option<&Wire>,
+    wire: Option<&Original>,
     stream: Option<StreamResponse>,
 ) -> Result<Box<dyn Encoder<Input>>, Fault> {
     if input.is_none() {
@@ -48,11 +53,22 @@ pub(crate) fn post<C: Schema>(
     head.method = http::Method::POST;
     head.headers
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    // The client's request, if of this format: its spec's headers and query
+    // parameters go on, and it spells what the format spells two ways.
+    let original = wire
+        .and_then(Original::get)
+        .filter(|r| r.uri().path().ends_with(C::PATH));
+    if let Some(original) = original {
+        for name in C::CARRIED {
+            for value in original.headers().get_all(*name) {
+                head.headers.append(*name, value.clone());
+            }
+        }
+    }
     for (name, value) in C::HEADERS {
         let value = HeaderValue::from_static(value);
         head.headers.entry(*name).or_insert(value);
     }
-    let original = wire.and_then(Wire::get);
     let stream = stream.map(|s| s.0).unwrap_or_else(|| {
         let asked = wire.and_then(|w| w.memo(|r| probe(r.body())));
         asked.is_none_or(|asked| asked.stream)
@@ -64,11 +80,18 @@ pub(crate) fn post<C: Schema>(
                 Fault::internal(format!("a call's path {target:?} is no path")).with_source(e)
             })?;
         }
-        None => framing::set_path(head, C::PATH)?,
+        None => respan_gateway_http_syntax::set_path(head, C::PATH)?,
     }
-    let original = original
-        .filter(|r| r.uri().path().ends_with(C::PATH))
-        .map(|r| serde_json::from_slice(r.body()).unwrap_or(Value::Null));
+    if let Some(query) = original.and_then(|r| carried_query::<C>(r.uri())) {
+        let at = match head.uri.query() {
+            Some(own) => format!("{}?{own}&{query}", head.uri.path()),
+            None => format!("{}?{query}", head.uri.path()),
+        };
+        head.uri = at.parse().map_err(|e| {
+            Fault::internal(format!("a call's path {at:?} is no path")).with_source(e)
+        })?;
+    }
+    let original = original.map(|r| serde_json::from_slice(r.body()).unwrap_or(Value::Null));
     Ok(Box::new(RequestEncoder {
         schema,
         stream,
@@ -87,8 +110,8 @@ struct RequestEncoder<C> {
     original: Option<Value>,
 }
 
-impl<C: Schema> Encoder<Input> for RequestEncoder<C> {
-    fn encode(&mut self, chat: &Input, out: &mut BytesMut) -> Result<(), Fault> {
+impl<C: Schema> RequestEncoder<C> {
+    pub(crate) fn encode_into(&mut self, chat: &Input, out: &mut BytesMut) -> Result<(), Fault> {
         let mut v = self
             .schema
             .encode_request(chat)
@@ -106,6 +129,26 @@ impl<C: Schema> Encoder<Input> for RequestEncoder<C> {
         out.extend_from_slice(&to_bytes(&v)?);
         Ok(())
     }
+}
+
+impl<C: Schema> Encoder<Input> for RequestEncoder<C> {
+    fn encode(&mut self, chat: &Input, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        crate::schema::frame(frames, |out| self.encode_into(chat, out))
+    }
+}
+
+/// The parameters of `uri`'s query that `C`'s spec names
+/// ([`Schema::CARRIED_QUERY`]), as they were spelled; `None` if none.
+fn carried_query<C: Schema>(uri: &http::Uri) -> Option<String> {
+    let kept: Vec<&str> = uri
+        .query()?
+        .split('&')
+        .filter(|p| {
+            let name = p.split_once('=').map_or(*p, |(name, _)| name);
+            C::CARRIED_QUERY.contains(&name)
+        })
+        .collect();
+    (!kept.is_empty()).then(|| kept.join("&"))
 }
 
 /// `v` as JSON bytes.
@@ -136,7 +179,7 @@ pub(crate) fn asked<C: Schema>(request: &http::Request<Bytes>) -> Asked {
 
 /// Keep what the client of format `C` asked of its response with its
 /// request's wire, for the provider's edge to read.
-pub(crate) fn seed_asked<C: Schema>(wire: &Wire) {
+pub(crate) fn seed_asked<C: Schema>(wire: &Original) {
     wire.memo(asked::<C>);
 }
 
@@ -158,37 +201,32 @@ pub(crate) fn probe(raw: &[u8]) -> Asked {
     }
 }
 
-/// A response of `schema`'s format to the call `call`: nothing if it has no
-/// body, else the events of a stream, else those of one JSON message, or
-/// the provider's error if it is no success ([`answer`]).
+/// The decoder of a response of `schema`'s format, of `head`, to a call of
+/// `method`: none if it has no body, else one of a stream's events, else
+/// one of a whole JSON message, which reads a failure's as the provider's
+/// error ([`answer`]).
 pub(crate) fn read_response<C: Schema>(
     schema: C,
-    response: http::Response<Body>,
-    call: &RequestHead,
-) -> EventStream<Output> {
-    let (head, body) = response.into_parts();
-    if head.status.is_success() && bodiless(&call.method, head.status) {
-        return EventStream::empty();
+    head: &ResponseHead,
+    method: &http::Method,
+) -> Option<Box<dyn Decoder<Output>>> {
+    if head.status.is_success() && bodiless(method, head.status) {
+        return None;
     }
-    if is_stream(&head) {
-        let parser = OutputParser::new(schema.decoder(), true, body.limit());
-        return framing::parse(
-            body,
-            parser,
-            |parser, bytes, out| parser.push(bytes, out),
-            |parser, wire, out| {
-                wire?;
-                parser.finish(out)
-            },
-        );
+    if is_stream(head) {
+        return Some(Box::new(Sse::new(Held::new(schema.decoder()))));
     }
-    whole::read(body, move |raw, out| {
-        if !head.status.is_success() {
-            return Err(answer(&schema, http::Response::from_parts(head, raw)));
-        }
-        out.extend(unary_reply(schema, head.status, raw)?);
-        Ok(())
-    })
+    let head = head.clone();
+    Some(Box::new(Whole::new(
+        move |raw: Bytes, out: &mut Vec<Output>| {
+            if !head.status.is_success() {
+                let answer = http::Response::from_parts(head.clone(), raw);
+                return Err(super::errors::answer(&schema, answer));
+            }
+            out.extend(unary_reply(schema, head.status, raw)?);
+            Ok(())
+        },
+    )))
 }
 
 /// [`read_response`] of a finite answer, synchronously.
@@ -202,10 +240,10 @@ pub(crate) fn decode_response<C: Schema>(
         return Ok(Vec::new());
     }
     if is_stream(&head) {
-        let mut parser = OutputParser::new(schema.decoder(), true, None);
+        let mut events = Sse::new(Held::new(schema.decoder()));
         let mut out = Vec::new();
-        parser.push(bytes, &mut out)?;
-        parser.finish(&mut out)?;
+        events.decode(bytes, &mut out)?;
+        events.end(Ok(()), &mut out)?;
         return Ok(out);
     }
     if !head.status.is_success() {
@@ -220,11 +258,11 @@ fn unary_reply<C: Schema>(schema: C, status: StatusCode, raw: Bytes) -> Result<V
     let v = serde_json::from_slice::<Value>(&raw).ok();
     if let Some(v) = v.as_ref().filter(|v| C::is_response(v)) {
         let mut out = Vec::new();
-        schema.decoder().body(v, &mut out)?;
+        schema.decode_body(v, &mut out)?;
         return Ok(out);
     }
     Err(match failure_json(&raw).filter(says_error) {
-        Some(v) => said_error(C::NAME, status, raw, &v),
+        Some(v) => said_error(status, raw, &v),
         None => Upstream::fault("the provider's success is not a response of its format"),
     })
 }
@@ -285,16 +323,30 @@ struct UnaryEncoder<C> {
     schema: C,
 }
 
-impl<C: Schema> Encoder<Output> for UnaryEncoder<C> {
-    fn encode(&mut self, reply: &Output, _out: &mut BytesMut) -> Result<(), Fault> {
+impl<C: Schema> UnaryEncoder<C> {
+    pub(crate) fn encode_into(&mut self, reply: &Output, _out: &mut BytesMut) -> Result<(), Fault> {
         self.whole.push(reply).map_err(|_| unwritable_content())
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    pub(crate) fn end_into(
+        &mut self,
+        end: &Result<(), Fault>,
+        out: &mut BytesMut,
+    ) -> Result<(), Fault> {
         end.clone()?;
         let body = self.schema.encode_whole(&self.whole)?;
         out.extend_from_slice(body.to_string().as_bytes());
         Ok(())
+    }
+}
+
+impl<C: Schema> Encoder<Output> for UnaryEncoder<C> {
+    fn encode(&mut self, reply: &Output, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        crate::schema::frame(frames, |out| self.encode_into(reply, out))
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        crate::schema::frame(frames, |out| self.end_into(&end, out))
     }
 }
 
@@ -325,56 +377,48 @@ impl Gate {
     }
 }
 
-/// Incremental provider response parsing, shared by streaming and finite reads.
-/// Semantic failures retain held usage; wire failures never finalize the parser.
+/// A decoder of a streamed response's events that keeps its start, and
+/// what comes before its first content, back until that content comes, so a
+/// failure before it leaves nothing started. A failure keeps the usage held.
 #[derive(Debug)]
-pub(crate) struct OutputParser<R> {
-    frames: sse::Parser,
-    reading: R,
+pub(crate) struct Held<D> {
+    reading: D,
     held: Vec<Output>,
     through: bool,
 }
 
-impl<R: Decoder> OutputParser<R> {
-    /// A parser by `reading` that, if `hold_start`, keeps a response's start
-    /// and what comes before its first content back until that content
-    /// comes, so a failure before it leaves nothing started; it holds up to
-    /// `limit` bytes of an event ([`sse::Parser::new`]).
-    pub fn new(reading: R, hold_start: bool, limit: Option<usize>) -> Self {
+impl<D> Held<D> {
+    /// The events `reading` decodes, their start held.
+    pub fn new(reading: D) -> Self {
         Self {
-            frames: sse::Parser::new(limit),
             reading,
             held: Vec::new(),
-            through: !hold_start,
+            through: false,
         }
     }
+}
 
-    /// The events of the stream's next `bytes`.
-    pub fn push(&mut self, bytes: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
+impl<D: Decoder<Output>> Decoder<Output> for Held<D> {
+    fn decode(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
         let from = out.len();
-        let result = self.frames.push(bytes).and_then(|events| {
-            events
-                .into_iter()
-                .try_for_each(|raw| self.reading.event(raw, out))
-        });
+        let result = self.reading.decode(raw, out);
         self.hold(out, from, result.is_err());
         result
     }
 
-    /// The events of the stream's end, and all that is held.
-    pub fn finish(&mut self, out: &mut Vec<Output>) -> Result<(), Fault> {
+    /// A broken stream ends at once; one that ended well gives what its
+    /// reader holds, then all that is held.
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
+        end?;
         let from = out.len();
-        let result = self
-            .frames
-            .finish()
-            .into_iter()
-            .try_for_each(|raw| self.reading.event(raw, out))
-            .and_then(|()| self.reading.end(out));
+        let result = self.reading.end(Ok(()), out);
         self.hold(out, from, result.is_err());
         out.append(&mut self.held);
         result
     }
+}
 
+impl<D> Held<D> {
     fn hold(&mut self, out: &mut Vec<Output>, from: usize, failed: bool) {
         for reply in out.split_off(from) {
             match reply {
@@ -413,7 +457,7 @@ pub(crate) fn unreadable_event(format: &Arc<str>, raw: &Bytes, out: &mut Vec<Out
 
 /// The fault of a provider's error event `v`, in a response of format
 /// `name`, whose data goes as it came to a client of this format.
-pub(crate) fn error_event(name: &str, raw: &[u8], v: &Value) -> Fault {
+pub(crate) fn error_event(raw: &[u8], v: &Value) -> Fault {
     let data = Bytes::from(event_data(raw).unwrap_or_default());
-    said_error(name, StatusCode::OK, data, v)
+    said_error(StatusCode::OK, data, v)
 }

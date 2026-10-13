@@ -59,8 +59,8 @@ class McpConfig(TypedDict, total=False):
     cwd: str
 
 
-class AgentConfig(TypedDict, total=False):
-    """The agent loop: the gateway runs the tools of `mcp` servers inside chat requests."""
+class ToolLoopConfig(TypedDict, total=False):
+    """The tool loop: the gateway runs the tools of `mcp` servers inside chat requests."""
 
     servers: List[str]  # the `mcp` servers whose tools are offered
     allow: List[str]  # tool names as the model has them, "github__*"; all if unset
@@ -81,8 +81,48 @@ class CorsConfig(TypedDict):
     origins: List[str]  # "https://app.example.com"; "*" needs client_keys
 
 
-class PluginConfig(TypedDict, total=False):
-    models: List[Dict[str, str]]  # [{"prefix": "claude-", "provider": "anthropic"}]
+class RoutingConfig(TypedDict, total=False):
+    """Which provider each request goes to."""
+
+    models: List[Dict[str, str]]  # [{"prefix": "claude-", "provider": "anthropic"}]; first match wins
+    default: str  # the provider for requests nothing else routes
+
+
+class FallbackConfig(TypedDict, total=False):
+    """Retry a provider, then try each provider of its chain in turn."""
+
+    after: Dict[str, List[str]]  # {"openai": ["openai-eu"]}
+    tries: int  # per provider, retries included; 1 to 10
+    backoff: Union[int, float, str]  # the first wait before a retry; "250ms"
+    max_backoff: Union[int, float, str]  # the longest wait; "10s"
+    until: str  # "head" or "end": how far an answer is read before it counts
+
+
+class HedgeConfig(TypedDict, total=False):
+    """Race a provider against its chain, each started `stagger` after the last."""
+
+    after: Dict[str, List[str]]
+    stagger: Union[int, float, str]  # "200ms"
+    until: str  # "head" or "end"
+
+
+class RequestLogConfig(TypedDict, total=False):
+    """The request history the web UI and admin API read."""
+
+    history: int  # finished requests kept in memory
+    file: str  # append each finished request as a JSON line; reloaded at start
+    file_max: Union[int, str]  # bytes, or "64MiB": rotated to `<file>.1` at this size
+
+
+class PluginsConfig(TypedDict, total=False):
+    """The compiled-in plugins, each under its name; the gateway orders them."""
+
+    routing: RoutingConfig
+    fallback: FallbackConfig
+    hedge: HedgeConfig
+    tool_loop: ToolLoopConfig
+    mcp_aggregate: McpAggregateConfig
+    request_log: RequestLogConfig
 
 
 class _Rates(TypedDict):
@@ -105,7 +145,7 @@ class NamedClientKey(_NamedKey, total=False):
     # Whether the key reaches the admin API (`/ui/api/*`). Unset on every key:
     # all keys do. Once any key sets True, only the keys that do.
     admin: bool
-    # The agent and aggregate tools (`server__tool` globs) this key's requests
+    # The tool loop and aggregate tools (`server__tool` globs) this key's requests
     # may use, within the global allow/deny; all if unset.
     tools: List[str]
 
@@ -115,21 +155,15 @@ class GatewayConfig(TypedDict, total=False):
 
     providers: Dict[str, ProviderConfig]
     formats: List[str]  # the formats served to clients
-    default: str  # the default provider
     client_keys: List[Union[str, NamedClientKey]]  # when set, every request needs one; a bare key is named key-1, key-2...
-    plugins: List[PluginConfig]
+    plugins: PluginsConfig
     listen: str
     body_limit: Union[int, str]  # bytes, or a size such as "32MiB"
     log: str  # "text", "json" or "off"
     ws_message_limit: Union[int, str]  # bytes, or a size such as "16MiB"
-    request_history: int  # finished requests the web UI keeps
-    request_history_file: str  # append each finished request as a JSON line; reloaded at start
-    request_history_file_max: Union[int, str]  # bytes, or "64MiB": rotated to `<file>.1` at this size
     prices: Dict[str, Price]  # by model prefix; requests then get a `cost_usd`
     shutdown_grace: Union[int, float, str]  # seconds, or "30s", "2m", "500ms"
     mcp: Dict[str, McpConfig]
-    mcp_aggregate: McpAggregateConfig
-    agent: AgentConfig
     cors: CorsConfig
     admin_writes: bool  # let the admin API and web UI rewrite the config file; needs a client key with admin: True
     ui: bool  # False also turns off the admin API behind models()/requests()/providers()

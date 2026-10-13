@@ -31,14 +31,14 @@ pub struct RequestRecord {
     /// price for its model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
-    /// The calls to the model the agent loop made for it and the tools it
+    /// The calls to the model the tool loop made for it and the tools it
     /// ran, in order; none without the loop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
     pub error: Option<String>,
 }
 
-/// One call to the model in an agent loop, and the tools it asked for.
+/// One call to the model in a tool loop, and the tools it asked for.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
     pub index: u32,

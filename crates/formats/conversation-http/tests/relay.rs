@@ -1,7 +1,6 @@
 //! The kernel's promises, driven through the OpenAI format.
 
 use respan_gateway_conversation_http::Schema;
-use respan_gateway_http as explicit;
 #[allow(dead_code)]
 #[path = "../../../../tests/support/hooks.rs"]
 mod hooks;
@@ -13,9 +12,9 @@ mod support;
 use futures::TryStreamExt;
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_core::futures;
-use respan_gateway_http::Status;
 use respan_gateway_http::bytes;
 use respan_gateway_http::{http, http_body, http_body_util};
+use respan_gateway_http_faults::Status;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -37,8 +36,9 @@ use respan_gateway_core::{
     ProviderContext, Response, Upstream,
 };
 use respan_gateway_http::Body;
-use respan_gateway_http::Wire;
-use respan_gateway_http::{ClientIo, Completion, Encoder, HttpTransport};
+use respan_gateway_http::raw::Original;
+use respan_gateway_http::{ClientIo, Completion, Encoder};
+use respan_gateway_http_transport::HttpTransport;
 use serde_json::json;
 use support::{
     Adds, Call, Disclaimer, Flip, Footer, HoldAll, Metered, Nameless, SendRequest, Shout, Silence,
@@ -199,7 +199,7 @@ impl Local {
             let headers = headers.clone();
             async move {
                 let mut call = call;
-                respan_gateway_http::credentials(&mut call, &headers);
+                respan_gateway_http::call::credentials(&mut call, &headers);
                 let (mut head, body) = call.into_parts();
                 let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
                 head.uri = format!("{}{path}", site.base)
@@ -219,7 +219,7 @@ impl Local {
                     .pop_front()
                     .ok_or_else(|| Upstream::fault("no scripted provider response"))?;
                 let (mut head, frames) = answer.into_parts();
-                respan_gateway_http::strip_origin_headers(&mut head.headers);
+                respan_gateway_http::call::strip_origin_headers(&mut head.headers);
                 Ok((
                     http::Response::from_parts(head, Body::stream(futures::stream::iter(frames))),
                     None,
@@ -814,24 +814,25 @@ impl Format<ClientIo, Input, Output> for Fragile {
         <OpenAiChat as Format<ClientIo, Input, Output>>::matches(&OpenAiChat, io)
     }
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
-        Ok(io.bind(
-            |request| OpenAiChat.read_request(request),
-            move |reply| {
-                let mut head = reply.head();
-                let encoder = OpenAiChat.response_encoder(&mut head, reply.request());
-                Ok(reply.write(head, Box::new(Garbling(encoder))))
-            },
-            |fault, request, head| OpenAiChat.refusal(fault, request, head),
-        ))
+        Ok(io
+            .with_error(|fault, request, head| OpenAiChat.refusal(fault, request, head))
+            .bind(
+                |request| OpenAiChat.read_request(request),
+                move |reply| {
+                    let mut head = reply.head();
+                    let encoder = OpenAiChat.response_encoder(&mut head, reply.request());
+                    Ok(reply.write(head, Box::new(Garbling(encoder))))
+                },
+            ))
     }
 }
 
 struct Garbling(Box<dyn Encoder<Output>>);
 
 impl Encoder<Output> for Garbling {
-    fn encode(&mut self, reply: &Output, out: &mut bytes::BytesMut) -> Result<(), Fault> {
+    fn encode(&mut self, reply: &Output, out: &mut Vec<bytes::Bytes>) -> Result<(), Fault> {
         if matches!(reply, Output::Delta { delta, .. } if delta.as_str() == "bad") {
-            out.extend_from_slice(b"GARBAGE");
+            out.push(bytes::Bytes::from_static(b"GARBAGE"));
             return Err(Fault::new("cannot write it")
                 .with(ErrorCode("unwritable".into()))
                 .with(Status(StatusCode::UNPROCESSABLE_ENTITY)));
@@ -839,7 +840,7 @@ impl Encoder<Output> for Garbling {
         self.0.encode(reply, out)
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut bytes::BytesMut) -> Result<(), Fault> {
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<bytes::Bytes>) -> Result<(), Fault> {
         self.0.end(end, out)
     }
 }
@@ -866,7 +867,7 @@ impl Plugin for PanicFilter {
 
 /// An OpenAI client's gateway whose target is an Anthropic provider, with
 /// `relay` registered.
-fn translating(sites: &Sites, relay: explicit::Relay) -> Gateway {
+fn translating(sites: &Sites, relay: respan_gateway_plugin_relay::Relay) -> Gateway {
     let p = add_provider("anthropic", AnthropicMessages, sites.claude.plain());
     let gw = providers([p]).and_then(|g| {
         g.client::<Input, _, _>(OpenAiChat)?
@@ -876,7 +877,7 @@ fn translating(sites: &Sites, relay: explicit::Relay) -> Gateway {
     gw.unwrap_or_else(|e| panic!("gateway: {e}"))
 }
 
-/// Notes whether each call carried the relay's permission for raw errors.
+/// Notes whether each call was relayed.
 #[derive(Clone, Default)]
 struct RawPermission(Arc<Mutex<Vec<bool>>>);
 
@@ -885,7 +886,7 @@ impl Plugin for RawPermission {
     async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
         let granted = px
             .extensions()
-            .get::<respan_gateway_http::RawErrors>()
+            .get::<respan_gateway_http::raw::Relayed>()
             .is_some();
         self.0
             .lock()

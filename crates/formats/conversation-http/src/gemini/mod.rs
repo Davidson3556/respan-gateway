@@ -235,16 +235,23 @@ impl Schema for GeminiGenerate {
         GeminiDecoder::default()
     }
 
+    fn decode_body(&self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
+        self.decoder().body(v, out)
+    }
+
     fn accepts<B>(&self, request: &http::Request<B>) -> bool {
         request.method() == http::Method::POST && call_of(request.uri()).is_some()
     }
 
     fn read_request(
         &self,
-        request: http::Request<respan_gateway_http::Body>,
-    ) -> respan_gateway_core::EventStream<Input> {
-        let schema = *self;
-        respan_gateway_http::messages(request, move |head, raw| schema.decode_call(head, raw))
+        head: &http::request::Parts,
+    ) -> Box<dyn respan_gateway_http::Decoder<Input>> {
+        let (schema, head) = (*self, head.clone());
+        Box::new(move |raw: Bytes, out: &mut Vec<Input>| {
+            out.push(schema.decode_call(&head, raw)?);
+            Ok(())
+        })
     }
 
     /// The model is in the path, not in the body.
@@ -392,7 +399,7 @@ impl Schema for GeminiGenerate {
     }
 
     fn error_body(fault: &Fault) -> Value {
-        let status = respan_gateway_http::status(fault);
+        let status = respan_gateway_http_faults::status(fault);
         let error = json!({
             "code": status.as_u16(),
             "message": fault.message(),

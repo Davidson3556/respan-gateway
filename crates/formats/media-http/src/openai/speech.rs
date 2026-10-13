@@ -6,12 +6,14 @@ use super::{
     json_bytes, kept, merge_missing, missing, native_of, post_to, read_usage, sends, set,
     sse_event, streams, take_number, take_string, unb64, unreadable, usage_extras, write_usage,
 };
+use crate::edge::ended_events;
 use respan_gateway_conversation::Usage;
-use respan_gateway_core::{Connection, EventStream, Fault, Format, NativeValue, Truncated};
+use respan_gateway_core::{Connection, Fault, Format, NativeValue};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::framing::{self, path_ends_with, sse};
+use respan_gateway_http::framing::sse;
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
-use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo};
+use respan_gateway_http::{ClientIo, Decoder, Encoder, ProviderIo};
+use respan_gateway_http_syntax::path_ends_with;
 use respan_gateway_media::speech::{Input, Output};
 use serde_json::{Map, Value};
 
@@ -62,7 +64,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiSpeech {
             io,
             NAME,
             move |head, input| post(head, input, stream),
-            |response, _| read_response(response),
+            |head, _| Some(read_response(head)),
         ))
     }
 }
@@ -113,30 +115,16 @@ fn post(
     Ok(sends(json_bytes(&v)?))
 }
 
-/// A provider's answer: a stream of events, or the audio's bytes, a chunk
-/// per frame as it comes.
-fn read_response(response: http::Response<Body>) -> EventStream<Output> {
-    let (head, body) = response.into_parts();
-    if sse::is_stream(&head) {
-        return sse::read(
-            body,
-            false,
-            |done, raw, out| stream_event(done, &raw, out),
-            |done, wire, _| match wire? {
-                () if *done => Ok(()),
-                () => Err(Truncated::fault()),
-            },
-        );
+/// The decoder of a provider's answer of `head`: a stream of events, or the
+/// audio's bytes, a chunk per frame as it comes.
+fn read_response(head: &http::response::Parts) -> Box<dyn Decoder<Output>> {
+    if sse::is_stream(head) {
+        return ended_events(stream_event);
     }
-    framing::parse(
-        body,
-        (),
-        |(), bytes, out| {
-            out.push(Output::Audio(bytes));
-            Ok(())
-        },
-        |(), wire, _| wire,
-    )
+    Box::new(|bytes: Bytes, out: &mut Vec<Output>| {
+        out.push(Output::Audio(bytes));
+        Ok(())
+    })
 }
 
 /// The events of one stream event; `done` once it said its end.
@@ -176,11 +164,14 @@ fn response_encoder(
     }
     let format = asked.get("response_format").and_then(Value::as_str);
     super::content_type(head, audio_type(format.unwrap_or("mp3")));
-    framing::each(|event: &Output| match event {
-        Output::Audio(bytes) => Ok(bytes.clone()),
-        Output::Native(n) if &*n.format != NAME => Err(foreign(NAME, n)),
-        // Raw audio has no place for anything else.
-        _ => Ok(Bytes::new()),
+    Box::new(|event: &Output, out: &mut Vec<Bytes>| {
+        match event {
+            Output::Audio(bytes) => out.push(bytes.clone()),
+            Output::Native(n) if &*n.format != NAME => return Err(foreign(NAME, n)),
+            // Raw audio has no place for anything else.
+            _ => {}
+        }
+        Ok(())
     })
 }
 
@@ -205,8 +196,8 @@ struct StreamEncoder {
     extras: Map<String, Value>,
 }
 
-impl Encoder<Output> for StreamEncoder {
-    fn encode(&mut self, event: &Output, out: &mut BytesMut) -> Result<(), Fault> {
+impl StreamEncoder {
+    fn encode_into(&mut self, event: &Output, out: &mut BytesMut) -> Result<(), Fault> {
         let v = match event {
             Output::Audio(bytes) => {
                 let mut v = Map::new();
@@ -232,7 +223,7 @@ impl Encoder<Output> for StreamEncoder {
         Ok(())
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         end.clone()?;
         let mut v = Map::new();
         v.insert("type".into(), "speech.audio.done".into());
@@ -243,5 +234,15 @@ impl Encoder<Output> for StreamEncoder {
         }
         out.extend_from_slice(sse_event(&v.into()).as_bytes());
         Ok(())
+    }
+}
+
+impl Encoder<Output> for StreamEncoder {
+    fn encode(&mut self, event: &Output, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        crate::edge::frame(frames, |out| self.encode_into(event, out))
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        crate::edge::frame(frames, |out| self.end_into(&end, out))
     }
 }

@@ -13,8 +13,9 @@
 
 use serde_json::Value;
 
+pub mod fields;
 mod schema;
-pub use schema::{Asked, Decoder, Schema, StreamResponse, merge_details, read_provider_error};
+pub use schema::{Asked, Schema, StreamResponse, merge_details, read_provider_error};
 
 pub mod anthropic;
 pub mod gemini;

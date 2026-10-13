@@ -8,13 +8,14 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use axum::body::Body as Wire;
+use axum::body::Body as Original;
 use futures::StreamExt;
-use respan_gateway_core::{Extensions, Gateway};
+use respan_gateway_core::{Extensions, Gateway, Provider};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{Body, HttpTransport, ProviderIo};
+use respan_gateway_http::{Body, ProviderIo};
+use respan_gateway_http_transport::HttpTransport;
 use serde_json::{Map, Value, json};
 
 use crate::http_support::{read_whole, serve};
@@ -81,7 +82,7 @@ impl Fake {
         let address = listener.local_addr().expect("an address");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let state = (seen.clone(), Arc::new(rules));
-        let app = axum::Router::new().fallback(move |request: http::Request<Wire>| {
+        let app = axum::Router::new().fallback(move |request: http::Request<Original>| {
             let (seen, rules) = state.clone();
             async move { Ok::<_, Infallible>(answer(request, &seen, &rules).await) }
         });
@@ -125,11 +126,11 @@ fn error(
     message: &str,
     param: Option<&str>,
     code: &str,
-) -> http::Response<Wire> {
+) -> http::Response<Original> {
     let body = json!({"error": {
         "message": message, "type": "invalid_request_error", "param": param, "code": code,
     }});
-    let mut response = http::Response::new(Wire::from(body.to_string()));
+    let mut response = http::Response::new(Original::from(body.to_string()));
     *response.status_mut() = status;
     response.headers_mut().insert(
         http::header::CONTENT_TYPE,
@@ -138,12 +139,12 @@ fn error(
     response
 }
 
-fn bad(message: &str, param: Option<&str>) -> http::Response<Wire> {
+fn bad(message: &str, param: Option<&str>) -> http::Response<Original> {
     error(StatusCode::BAD_REQUEST, message, param, "invalid_value")
 }
 
 /// An answer of `content_type` and `body`.
-fn answered(content_type: &str, body: impl Into<Wire>) -> http::Response<Wire> {
+fn answered(content_type: &str, body: impl Into<Original>) -> http::Response<Original> {
     let mut response = http::Response::new(body.into());
     let value = HeaderValue::from_str(content_type).expect("a content type");
     response
@@ -152,7 +153,7 @@ fn answered(content_type: &str, body: impl Into<Wire>) -> http::Response<Wire> {
     response
 }
 
-fn json_answer(mut v: Value, rules: &Rules) -> http::Response<Wire> {
+fn json_answer(mut v: Value, rules: &Rules) -> http::Response<Original> {
     if let Some(o) = v.as_object_mut() {
         o.extend(rules.extra_answer.clone());
     }
@@ -160,7 +161,7 @@ fn json_answer(mut v: Value, rules: &Rules) -> http::Response<Wire> {
 }
 
 /// Server-sent events, each with its `event:` name, as OpenAI writes them.
-fn events(events: Vec<Value>) -> http::Response<Wire> {
+fn events(events: Vec<Value>) -> http::Response<Original> {
     let body: String = events
         .iter()
         .map(|e| {
@@ -174,10 +175,10 @@ fn events(events: Vec<Value>) -> http::Response<Wire> {
 }
 
 async fn answer(
-    request: http::Request<Wire>,
+    request: http::Request<Original>,
     seen: &Mutex<Vec<Seen>>,
     rules: &Rules,
-) -> http::Response<Wire> {
+) -> http::Response<Original> {
     let (head, body) = request.into_parts();
     let auth = head.headers.get(http::header::AUTHORIZATION);
     if auth.and_then(|v| v.to_str().ok()) != Some(&format!("Bearer {KEY}")) {
@@ -272,12 +273,12 @@ fn unknown<'a>(call: &'a Seen, known: &[&str], rules: &Rules) -> Option<&'a str>
         .find(|k| !known.contains(k) && !rules.extra_fields.contains(k))
 }
 
-fn unrecognized(field: &str) -> http::Response<Wire> {
+fn unrecognized(field: &str) -> http::Response<Original> {
     let message = format!("Unrecognized request argument supplied: {field}");
     bad(&message, Some(field))
 }
 
-fn missing(param: &str) -> http::Response<Wire> {
+fn missing(param: &str) -> http::Response<Original> {
     let message = format!("Missing required parameter: '{param}'.");
     error(
         StatusCode::BAD_REQUEST,
@@ -303,7 +304,7 @@ fn number(call: &Seen, key: &str) -> Option<u64> {
     }
 }
 
-fn no_model(model: &str) -> http::Response<Wire> {
+fn no_model(model: &str) -> http::Response<Original> {
     let message = format!("The model `{model}` does not exist or you do not have access to it.");
     error(StatusCode::NOT_FOUND, &message, None, "model_not_found")
 }
@@ -318,7 +319,7 @@ fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn images(call: &Seen, rules: &Rules, edit: bool) -> http::Response<Wire> {
+fn images(call: &Seen, rules: &Rules, edit: bool) -> http::Response<Original> {
     let mut known = vec![
         "model",
         "prompt",
@@ -439,7 +440,7 @@ pub const SPOKEN: &str = "Hello there. General Kenobi.";
 /// The SubRip a fake answers with.
 pub const SUBRIP: &str = "1\n00:00:00,000 --> 00:00:01,500\nHello there.\n\n2\n00:00:01,500 --> 00:00:03,000\nGeneral Kenobi.\n\n";
 
-fn transcriptions(call: &Seen, rules: &Rules, translate: bool) -> http::Response<Wire> {
+fn transcriptions(call: &Seen, rules: &Rules, translate: bool) -> http::Response<Original> {
     let mut known = vec!["file", "model", "prompt", "response_format", "temperature"];
     if !translate {
         known.extend([
@@ -542,7 +543,7 @@ pub fn spoken_audio() -> Vec<Bytes> {
         .collect()
 }
 
-fn speech(call: &Seen, rules: &Rules) -> http::Response<Wire> {
+fn speech(call: &Seen, rules: &Rules) -> http::Response<Original> {
     let known = [
         "model",
         "input",
@@ -592,7 +593,7 @@ fn speech(call: &Seen, rules: &Rules) -> http::Response<Wire> {
         tokio::time::sleep(Duration::from_millis(5)).await;
         Ok::<_, Infallible>(chunk)
     });
-    answered(mime, Wire::from_stream(paced))
+    answered(mime, Original::from_stream(paced))
 }
 
 /// The vector a fake answers with for item `index`: `dimensions` numbers
@@ -603,7 +604,7 @@ pub fn embedding_vector(index: usize, dimensions: usize) -> Vec<f32> {
         .collect()
 }
 
-fn embeddings(call: &Seen, rules: &Rules) -> http::Response<Wire> {
+fn embeddings(call: &Seen, rules: &Rules) -> http::Response<Original> {
     let known = ["model", "input", "encoding_format", "dimensions", "user"];
     if let Some(field) = unknown(call, &known, rules) {
         return unrecognized(field);
@@ -692,7 +693,7 @@ where
         + Copy,
 {
     Gateway::new()
-        .provider("openai", format, fake.transport())
+        .provider(Provider::new("openai", format, fake.transport()))
         .and_then(|g| g.client::<I, O, respan_gateway_http::ClientIo>(format))
         .and_then(|g| g.target("openai"))
         .expect("a gateway")

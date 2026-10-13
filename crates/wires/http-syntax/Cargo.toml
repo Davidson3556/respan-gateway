@@ -1,0 +1,16 @@
+[package]
+name = "respan-gateway-http-syntax"
+description = "How HTTP's paths and headers are read, with no I/O: percent-decoding, path matching and forwarding, and header tokens."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+http.workspace = true
+respan-gateway-core.workspace = true

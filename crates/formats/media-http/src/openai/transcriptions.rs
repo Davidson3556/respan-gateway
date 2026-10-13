@@ -10,14 +10,14 @@ use super::{
     read_usage, rest_of, seconds_json, sends, set, sse_event, streams, take_number, take_string,
     unreadable, usage_extras, whole_json, write_field, write_usage,
 };
+use crate::edge::ended_events;
 use respan_gateway_conversation::Usage;
-use respan_gateway_core::{
-    BadRequest, Connection, EventStream, Fault, Format, NativeValue, Truncated,
-};
+use respan_gateway_core::{BadRequest, Connection, Fault, Format, NativeValue};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::framing::{path_ends_with, sse, whole};
+use respan_gateway_http::framing::sse;
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
-use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo};
+use respan_gateway_http::{ClientIo, Decoder, Encoder, ProviderIo, Whole};
+use respan_gateway_http_syntax::path_ends_with;
 use respan_gateway_media::transcription::{Delta, Input, Output, Segment, Task, Transcript, Word};
 use serde_json::{Map, Value};
 
@@ -80,7 +80,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiTranscriptions {
             io,
             NAME,
             move |head, input| post(head, input, stream),
-            |response, _| read_response(response),
+            |head, _| Some(read_response(head)),
         ))
     }
 }
@@ -139,29 +139,23 @@ fn post(
     Ok(sends(form.finish()))
 }
 
-/// A provider's answer: a stream of events, a JSON body, or rendered text.
-fn read_response(response: http::Response<Body>) -> EventStream<Output> {
-    let (head, body) = response.into_parts();
-    if sse::is_stream(&head) {
-        return sse::read(
-            body,
-            false,
-            |done, raw, out| stream_event(done, &raw, out),
-            |done, wire, _| match wire? {
-                () if *done => Ok(()),
-                () => Err(Truncated::fault()),
-            },
-        );
+/// The decoder of a provider's answer of `head`: a stream of events, a JSON
+/// body, or rendered text.
+fn read_response(head: &http::response::Parts) -> Box<dyn Decoder<Output>> {
+    if sse::is_stream(head) {
+        return ended_events(stream_event);
     }
-    let content_type = sse::content_type(&head).unwrap_or_default();
+    let content_type = sse::content_type(head).unwrap_or_default();
     let json = content_type.to_ascii_lowercase().contains("json");
-    whole::read(body, move |raw, out| match json {
-        true => decode_json(raw, out),
-        false => {
-            out.push(Output::Rendered(String::from_utf8_lossy(&raw).into_owned()));
-            Ok(())
-        }
-    })
+    Box::new(Whole::new(
+        move |raw: Bytes, out: &mut Vec<Output>| match json {
+            true => decode_json(raw, out),
+            false => {
+                out.push(Output::Rendered(String::from_utf8_lossy(&raw).into_owned()));
+                Ok(())
+            }
+        },
+    ))
 }
 
 /// The events of a whole JSON body.
@@ -265,11 +259,11 @@ fn response_encoder(
         Some(format @ ("text" | "srt" | "vtt")) => {
             let format = format.to_owned();
             super::content_type(head, "text/plain; charset=utf-8");
-            whole::collect(move |events: &[Output]| render(events, &format))
+            Box::new(Whole::new(move |events: &[Output]| render(events, &format)))
         }
         _ => {
             super::content_type(head, "application/json");
-            whole::collect(encode_json)
+            Box::new(Whole::new(encode_json))
         }
     }
 }
@@ -445,8 +439,8 @@ struct StreamEncoder {
     folded: Folded,
 }
 
-impl Encoder<Output> for StreamEncoder {
-    fn encode(&mut self, event: &Output, out: &mut BytesMut) -> Result<(), Fault> {
+impl StreamEncoder {
+    fn encode_into(&mut self, event: &Output, out: &mut BytesMut) -> Result<(), Fault> {
         match event {
             Output::Delta(delta) => {
                 let mut v = Map::new();
@@ -463,7 +457,7 @@ impl Encoder<Output> for StreamEncoder {
         self.folded.push(event)
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         end.clone()?;
         let mut v = Map::new();
         v.insert("type".into(), "transcript.text.done".into());
@@ -474,6 +468,16 @@ impl Encoder<Output> for StreamEncoder {
         }
         out.extend_from_slice(sse_event(&v.into()).as_bytes());
         Ok(())
+    }
+}
+
+impl Encoder<Output> for StreamEncoder {
+    fn encode(&mut self, event: &Output, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        crate::edge::frame(frames, |out| self.encode_into(event, out))
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        crate::edge::frame(frames, |out| self.end_into(&end, out))
     }
 }
 

@@ -3,6 +3,7 @@ use mockllm::Answer;
 use respan_gateway_conversation::Input;
 use respan_gateway_conversation::{Message, Role};
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
+use respan_gateway_core::Provider;
 
 #[test]
 fn hides_addresses_only() {
@@ -129,7 +130,7 @@ async fn an_agent_request_is_redacted_and_its_tool_call_restored() -> Result<(),
 }
 
 /// The kind has one choice: a request for several is refused, and an answer
-/// with several (a raw relay can send `n`) is refused unread, whole or
+/// with several, which a provider may send unasked, is refused unread, whole or
 /// streamed, rather than passed with its other choices unrestored.
 #[tokio::test]
 async fn several_choices_are_refused_rather_than_passed_unread() -> Result<(), Fault> {
@@ -412,11 +413,11 @@ async fn a_placeholder_split_across_anthropic_tool_input_is_restored() -> Result
         &chunks.iter().map(String::as_str).collect::<Vec<_>>(),
     ));
     let gw = Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "anthropic",
             AnthropicMessages,
             provider_support::anthropic(&fake.base_url())?.connect(),
-        )?
+        ))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(Pii)
         .plugin(PiiInput)
@@ -436,11 +437,11 @@ async fn anthropic_tool_history_is_redacted_and_its_reply_restored() -> Result<(
     fake.answer(Answer::raw(r#"{"id":"m","type":"message","role":"assistant","model":"c","content":[{"type":"text","text":"<EMAIL_1>"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#));
     let gateway = Gateway::new()
         .client::<Input, _, _>(AnthropicMessages)?
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "p",
             AnthropicMessages,
             provider_support::anthropic(&fake.base_url())?.connect(),
-        )?
+        ))?
         .plugin(Pii)
         .plugin(PiiInput)
         .target("p")?;

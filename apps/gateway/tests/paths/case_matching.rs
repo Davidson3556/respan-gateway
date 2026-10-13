@@ -16,7 +16,7 @@ async fn no_case_insensitive_vendor_reads_a_passthrough_call_as_chat() {
   p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
   any: {{ formats: passthrough, base_url: '{base}/pt' }}
 formats: [openai-chat, passthrough]
-default: p
+plugins: {{ routing: {{ default: p }} }}
 "
     ))
     .await;

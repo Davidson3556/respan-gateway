@@ -6,7 +6,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example wallet`
 
-use respan_gateway_core::{BadRequest, ErrorCode};
+use respan_gateway_core::{BadRequest, ErrorCode, Provider};
 use std::collections::HashMap;
 
 use mockllm::{Answer, FakeOpenAi};
@@ -14,8 +14,8 @@ use respan_gateway_core::{Fault, Gateway, ProviderContext, futures};
 use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_http::Credential;
-use respan_gateway_http::Status;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
+use respan_gateway_http_faults::Status;
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
@@ -104,7 +104,7 @@ fn gateway(
     let prices = prices();
     let accounting = Accounting::new(ledger, move |px, tally| quote(px, tally, &prices));
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
+        .provider(Provider::new("openai", OpenAiChat, transport))?
         .client::<Input, _, _>(OpenAiChat)?
         // Register it last, so it prices the call as other plugins left it.
         .plugin(accounting)
@@ -121,7 +121,7 @@ fn answer() -> Answer {
 async fn send(gw: &Gateway, key: &str, body: &'static str) -> Result<StatusCode, Fault> {
     let mut req = post("/v1/chat/completions", body);
     let auth = HeaderValue::from_str(&format!("Bearer {key}"))
-        .map_err(|e| respan_gateway_http::built_wrong(e.into()))?;
+        .map_err(|e| respan_gateway_http_faults::built_wrong(e.into()))?;
     req.headers_mut().insert("authorization", auth);
     let (status, _, _) = read_whole(serve(gw, req).await.0).await;
     gw.idle().await;

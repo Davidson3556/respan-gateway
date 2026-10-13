@@ -33,7 +33,7 @@ pub use gemini::GeminiLive;
 pub use openai::OpenAiRealtime;
 pub use responses::ResponsesWs;
 
-use respan_gateway_http::Wire;
+use respan_gateway_http::raw::Original;
 
 /// The model routing chose for a session, in a call's extensions: a format
 /// whose provider takes its model at connect, as OpenAI's does at
@@ -49,6 +49,6 @@ pub struct SessionModel(pub String);
 /// Realtime's, and, by the gateway's convention, any realtime client's, as
 /// a Gemini Live client names its model only in its setup, after its
 /// session is routed.
-pub fn requested_model(wire: &Wire) -> Option<String> {
+pub fn requested_model(wire: &Original) -> Option<String> {
     session::model_at(wire.get()?.uri())
 }

@@ -352,8 +352,8 @@ async fn a_translated_redirect_is_a_bad_gateway() {
     assert!(matches!(&ends[..], [o] if o.as_ref().is_err_and(|f| fault_code(f) == "upstream")));
     let answer = ends[0].as_ref().err();
     let answer = answer.and_then(|f| {
-        f.get::<respan_gateway_http::ProviderError>()
-            .map(|e| &e.response)
+        f.get::<respan_gateway_http_faults::ProviderError>()
+            .map(|e| &e.0)
     });
     assert_eq!(answer.map(|a| a.status()), Some(StatusCode::FOUND));
 }
@@ -380,7 +380,7 @@ async fn a_translated_failure_labelled_as_a_stream_is_still_a_failure() {
     let end = h
         .log
         .only()
-        .map_err(|f| respan_gateway_http::status(&f).as_u16());
+        .map_err(|f| respan_gateway_http_faults::status(&f).as_u16());
     assert_eq!(end, Err(503));
 }
 

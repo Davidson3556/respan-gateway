@@ -7,7 +7,6 @@
 //! Clients' own provider keys go only to a provider of their format that
 //! has none of its own.
 
-use std::collections::HashSet;
 use std::hash::{BuildHasher, RandomState};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, OnceLock};
@@ -15,54 +14,16 @@ use std::sync::{Arc, OnceLock};
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use respan_gateway_core::{Extensions, Fault, Plugin, ProviderContext, async_trait};
-use respan_gateway_http::http::header::{
-    AUTHORIZATION, HOST, HeaderName, ORIGIN, SEC_WEBSOCKET_PROTOCOL, UPGRADE,
-};
+use respan_gateway_core::Extensions;
+use respan_gateway_http::Credential;
+use respan_gateway_http::http::header::{AUTHORIZATION, HOST, HeaderName, ORIGIN, UPGRADE};
 use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, StatusCode};
-use respan_gateway_http::{CallHeaders, Credential};
 use respan_gateway_mcp_http::Owner;
-
-use crate::agent::ToolScope;
+use respan_gateway_plugin_tool_loop::ToolScope;
 
 const X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
 const X_GOOG_API_KEY: HeaderName = HeaderName::from_static("x-goog-api-key");
 const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
-
-/// Sends a client's own credential headers on a call to a provider of the
-/// client's format that has no key of its own, as the client would have
-/// sent them to the vendor. No key crosses a translation.
-#[derive(Debug)]
-pub struct ClientCredentials {
-    /// The core providers without a key of their own.
-    keyless: HashSet<String>,
-}
-
-impl ClientCredentials {
-    pub fn new(keyless: HashSet<String>) -> Self {
-        Self { keyless }
-    }
-}
-
-#[async_trait]
-impl Plugin for ClientCredentials {
-    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        let own_format = px.format() == px.client().format();
-        if !own_format || !self.keyless.contains(px.provider()) {
-            return Ok(());
-        }
-        let Some(credential) = px.extensions().get::<Credential>() else {
-            return Ok(());
-        };
-        let mut headers = credential.headers().clone();
-        // A subprotocol is the session's to offer, keys and all.
-        headers.remove(SEC_WEBSOCKET_PROTOCOL);
-        if !headers.is_empty() {
-            px.extensions_mut().insert(CallHeaders(headers));
-        }
-        Ok(())
-    }
-}
 
 /// A client key, read, and the name its requests are logged under.
 #[derive(Clone, PartialEq, Eq)]
@@ -335,7 +296,7 @@ pub struct Cors {
 /// keys, the SDKs' own, and MCP's.
 const ALLOWED_HEADERS: &str = "Authorization, x-api-key, x-goog-api-key, anthropic-version, \
     anthropic-beta, openai-beta, content-type, mcp-session-id, mcp-protocol-version, \
-    last-event-id, x-respan-agent";
+    last-event-id, x-respan-tool-loop";
 /// The headers a page may read.
 const EXPOSED_HEADERS: &str = "mcp-session-id, mcp-protocol-version, retry-after";
 const ALLOWED_METHODS: &str = "GET, POST, PUT, DELETE, OPTIONS";
@@ -766,7 +727,7 @@ mod tests {
         assert_eq!(status(&keys, request("/v1/models", false)).await, 401);
         // Nothing a remote client sends is the mark.
         let mut forged = request("/ui/api/x", false);
-        for name in ["trusted", "x-respan-trusted", "x-respan-agent", "host"] {
+        for name in ["trusted", "x-respan-trusted", "x-respan-tool-loop", "host"] {
             let value = HeaderValue::from_static("respan-gateway");
             forged.headers_mut().insert(name, value);
         }

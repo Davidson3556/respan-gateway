@@ -6,13 +6,15 @@
 mod http_support;
 
 use respan_gateway_http::{
-    Body, HttpTransport,
+    Body,
     http::{self, Method, StatusCode},
     http_body_util::BodyExt,
 };
+
+use respan_gateway_core::{Fault, Gateway, Provider};
+use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_mcp::Input;
 use respan_gateway_mcp_http::{SESSION, StdioTransport, StreamableHttp};
-use respan_gateway_core::{Fault, Gateway};
 use serde_json::{Value, json};
 use std::process::Stdio;
 use std::time::Duration;
@@ -67,7 +69,11 @@ async fn official_stdio_server_initializes_lists_calls_and_deletes() -> Result<(
     let transport = StdioTransport::new("npx", ["--yes", SERVER]).timeout(Duration::from_secs(30));
     let gw = Gateway::new()
         .client::<Input, _, _>(StreamableHttp::default())?
-        .provider::<Input, _, _>("mcp", StreamableHttp::default(), transport.connect())?
+        .provider(Provider::new(
+            "mcp",
+            StreamableHttp::default(),
+            transport.connect(),
+        ))?
         .target("mcp")?;
     exercise(gw).await;
     Ok(())
@@ -130,11 +136,11 @@ async fn official_http_server_initializes_lists_calls_and_deletes() -> Result<()
     .expect("MCP HTTP server startup deadline");
     let gw = Gateway::new()
         .client::<Input, _, _>(StreamableHttp::default())?
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "mcp",
             StreamableHttp::default(),
             HttpTransport::new(format!("http://{addr}"))?.connect(),
-        )?
+        ))?
         .target("mcp")?;
     exercise(gw).await;
     child.start_kill().expect("stop reference server");

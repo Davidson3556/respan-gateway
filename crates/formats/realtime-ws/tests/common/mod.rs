@@ -8,7 +8,9 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use respan_gateway_core::futures::{SinkExt, StreamExt};
-use respan_gateway_core::{ClientContext, Fault, Format, Gateway, Plugin, Response, async_trait};
+use respan_gateway_core::{
+    ClientContext, Fault, Format, Gateway, Plugin, Provider, Response, async_trait,
+};
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
 use respan_gateway_http::{ClientIo, ProviderIo};
 use respan_gateway_realtime::{Input, Output};
@@ -76,7 +78,7 @@ where
     let gateway = Gateway::new()
         .client::<Input, _, _>(client)
         .unwrap()
-        .provider::<Input, _, _>("p", provider, transport.connect())
+        .provider(Provider::new("p", provider, transport.connect()))
         .unwrap()
         .plugin(seen.clone())
         .target("p")

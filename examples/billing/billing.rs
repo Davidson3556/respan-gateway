@@ -22,10 +22,10 @@ use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation::Input;
 use respan_gateway_conversation::Usage;
 use respan_gateway_conversation_http::openai::OpenAiChat;
-use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, async_trait};
+use respan_gateway_core::{Fault, Gateway, Plugin, Provider, ProviderContext, async_trait};
 use respan_gateway_examples::{CallUsage, Price, meter};
-use respan_gateway_http::Wire;
 use respan_gateway_http::http::HeaderValue;
+use respan_gateway_http::raw::Original;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -105,7 +105,7 @@ impl<S: UsageStore> Plugin for Billing<S> {
             return;
         };
         // Who pays: here a header an auth plugin vouched for.
-        let asked = px.extensions().get::<Wire>().and_then(Wire::get);
+        let asked = px.extensions().get::<Original>().and_then(Original::get);
         let header = asked.and_then(|a| a.headers().get("x-account")?.to_str().ok());
         let account = header.unwrap_or("anonymous");
         // The model this call asked for, as every plugin left it.
@@ -140,7 +140,7 @@ fn gateway(
         (LARGE, Price::new(2_500_000, 10_000_000)),
     ]);
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, provider)?
+        .provider(Provider::new("openai", OpenAiChat, provider))?
         .client::<Input, _, _>(OpenAiChat)?
         // Last, so its filter sees each reply first.
         .plugin(Billing { prices, store })

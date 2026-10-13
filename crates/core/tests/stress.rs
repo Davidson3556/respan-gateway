@@ -95,7 +95,7 @@ async fn a_big_body_decodes_once() {
     let gw = Gateway::new()
         .client::<In, _, _>(Counted(decodes.clone()))
         .unwrap()
-        .provider::<In, _, _>("a", Toy, connect(t))
+        .provider(Provider::new::<In, _, _>("a", Toy, connect(t)))
         .unwrap()
         .target("a")
         .unwrap();
@@ -156,7 +156,11 @@ async fn wrapped_sessions_dropped_at_random_end_once() {
         let gw = Gateway::new()
             .client::<In, _, _>(Toy)
             .unwrap()
-            .provider::<In, _, _>("p", Toy, connect(seen.transport(false, endless)))
+            .provider(Provider::new::<In, _, _>(
+                "p",
+                Toy,
+                connect(seen.transport(false, endless)),
+            ))
             .unwrap()
             .plugin(rec.clone())
             .plugin(Both)

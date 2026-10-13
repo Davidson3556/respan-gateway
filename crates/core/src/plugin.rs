@@ -102,6 +102,27 @@ impl<P: Plugin + ?Sized> Plugin for Arc<P> {
     }
 }
 
+/// A plugin that lives as long as the program, such as a `static`; it
+/// forwards every method.
+#[async_trait]
+impl<P: Plugin + ?Sized> Plugin for &'static P {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
+        (**self).on_client(cx).await
+    }
+
+    async fn on_client_end(&self, cx: &ClientContext, end: &Result<()>) {
+        (**self).on_client_end(cx, end).await;
+    }
+
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
+        (**self).on_provider(px).await
+    }
+
+    async fn on_provider_end(&self, px: &ProviderContext, end: &Result<()>) {
+        (**self).on_provider_end(px, end).await;
+    }
+}
+
 /// Edits inputs or outputs of `T` as they stream: change, drop, keep back or
 /// insert values. Every value reaches it, a keep-alive too, so pass on at
 /// once what it has no reason to hold. A panic is an internal fault.

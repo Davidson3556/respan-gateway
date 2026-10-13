@@ -8,8 +8,9 @@ use respan_gateway_core::{Extensions, Fault, Truncated, Upstream};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http::{self, HeaderMap, StatusCode};
-use respan_gateway_http::{Body, Completion, Frames, RawErrors};
-use respan_gateway_http::{is_connection_header, prepare_call, strip_origin_headers};
+use respan_gateway_http::{Body, Completion, Frames, raw::Relayed};
+use respan_gateway_http::{call::prepare_call, call::strip_origin_headers};
+use respan_gateway_http_syntax::is_connection_header;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
@@ -17,7 +18,7 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 
 use crate::Limits;
 use crate::session::{Edge, inbound, pump};
-use respan_gateway_http::{header_tokens, is_token};
+use respan_gateway_http_syntax::{header_tokens, is_token};
 
 /// How long a provider has to answer the upgrade by default: connecting
 /// takes well under a second to a reachable host, and 10 s spans TCP's
@@ -39,9 +40,9 @@ fn is_handshake(name: &HeaderName) -> bool {
 }
 
 /// Reaches one provider over WebSocket at a base URL (`ws` or `wss`), which
-/// each call's path and query extend, as [`HttpTransport`] does for HTTP.
+/// each call's path and query extend, as `HttpTransport` does for HTTP.
 ///
-/// A call is prepared as [`HttpTransport`] prepares one ([`prepare_call`]):
+/// A call is prepared as `HttpTransport` prepares one ([`prepare_call`]):
 /// stripped, and given keys, so a client's key passes only where a plugin
 /// put it back; the handshake's own headers are the WebSocket library's.
 /// The answer is the provider's `101` (its origin headers,
@@ -69,15 +70,13 @@ fn is_handshake(name: &HeaderName) -> bool {
 /// - The provider sends Close with no code or 1000: the answer ends clean.
 ///   With another code: an `Upstream` fault with that
 ///   [`ProviderClose`](crate::ProviderClose), and, on a call with
-///   [`RawErrors`] (the [`Relay`](respan_gateway_http::Relay)'s
-///   permission to pass the provider's errors on), that `CloseCode` too.
+///   [`Relayed`] (as `respan_gateway_plugin_relay::Relay` marks a call to a
+///   provider of its client's own format), that `CloseCode` too.
 /// - The provider's connection breaks with no Close, or it is silent
 ///   through a ping: `Err(truncated)`.
 /// - A provider's binary frame, unless [`Self::with_binary_text`] enables
 ///   UTF-8 normalization (invalid UTF-8 remains a fault), or a message over
 ///   `max_message`: `upstream`, and the provider is sent Close 1003 or 1009.
-///
-/// [`HttpTransport`]: respan_gateway_http::HttpTransport
 #[derive(Clone)]
 pub struct WsTransport {
     client: reqwest::Client,
@@ -104,13 +103,13 @@ impl std::fmt::Debug for WsTransport {
 
 impl WsTransport {
     /// A transport to `base_url`: `ws` or `wss`
-    /// ([`base_url`](respan_gateway_http::base_url)), else `Err` with
+    /// ([`base_url`](respan_gateway_http::call::base_url)), else `Err` with
     /// `config`. It takes [`Limits::default`], gives the provider 10 s to
     /// answer the upgrade, and shares one client, until told otherwise.
     pub fn new(base_url: impl Into<String>) -> Result<Self, Fault> {
         Ok(Self {
             client: shared_client()?,
-            base: respan_gateway_http::base_url(&base_url.into(), &["ws", "wss"])?,
+            base: respan_gateway_http::call::base_url(&base_url.into(), &["ws", "wss"])?,
             headers: HeaderMap::new(),
             limits: Limits::default(),
             binary_text: false,
@@ -120,7 +119,7 @@ impl WsTransport {
 
     /// Send `headers`, such as the API key, with every call, replacing any
     /// set before, in place of the client's
-    /// ([`credentials`](respan_gateway_http::credentials)). `Err` with
+    /// ([`credentials`](respan_gateway_http::call::credentials)). `Err` with
     /// `config` for a header of the connection or the handshake.
     pub fn with_headers(mut self, headers: HeaderMap) -> Result<Self, Fault> {
         if let Some(name) = headers.keys().find(|k| is_handshake(k)) {
@@ -281,7 +280,7 @@ impl WsTransport {
         let relayed = call
             .extensions()
             .get::<Extensions>()
-            .is_some_and(|e| e.get::<RawErrors>().is_some());
+            .is_some_and(|e| e.get::<Relayed>().is_some());
         prepare_call(&mut call, &self.base, &self.headers)?;
         let (head, body) = call.into_parts();
         let body = body.boxed();

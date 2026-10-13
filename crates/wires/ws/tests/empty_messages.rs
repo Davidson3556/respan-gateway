@@ -2,11 +2,9 @@
 #![allow(clippy::unwrap_used)]
 
 use futures::{SinkExt, StreamExt};
-use respan_gateway_core::Gateway;
-use respan_gateway_http::{
-    Relay,
-    passthrough::{Input, Passthrough},
-};
+use respan_gateway_core::{Gateway, Provider};
+use respan_gateway_passthrough_http::{Input, Passthrough};
+use respan_gateway_plugin_relay::Relay;
 use respan_gateway_ws::WsTransport;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
@@ -31,9 +29,9 @@ async fn empty_text_messages_cross_both_ways() {
     let gateway = Gateway::new()
         .client::<Input<Passthrough>, _, _>(Passthrough)
         .unwrap()
-        .provider::<Input<Passthrough>, _, _>("p", Passthrough, transport.connect())
+        .provider(Provider::new("p", Passthrough, transport.connect()))
         .unwrap()
-        .plugin(Relay::RAW)
+        .plugin(Relay)
         .target("p")
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

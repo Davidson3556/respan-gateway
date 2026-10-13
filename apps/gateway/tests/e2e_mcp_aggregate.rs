@@ -1,5 +1,5 @@
 //! End-to-end tests of the shipped binary's aggregate MCP endpoint (`/mcp`,
-//! `mcp_aggregate:`) and of OAuth for an HTTP MCP server (`oauth:`).
+//! `plugins: mcp_aggregate`) and of OAuth for an HTTP MCP server (`oauth:`).
 //!
 //! The upstream servers and the token endpoint are small strict fakes in
 //! this file. Run: `cargo test -p respan-gateway --test e2e_mcp_aggregate`.
@@ -462,7 +462,11 @@ fn aggregate_config(alpha: &Fake, beta: &Fake, extra: &str) -> String {
 async fn one_endpoint_fronts_every_server() {
     let alpha = Fake::start("alpha", true, None).await;
     let beta = Fake::start("beta", false, None).await;
-    let config = aggregate_config(&alpha, &beta, "mcp_aggregate: { deny: ['beta__secret'] }\n");
+    let config = aggregate_config(
+        &alpha,
+        &beta,
+        "plugins: { mcp_aggregate: { deny: ['beta__secret'] } }\n",
+    );
     let gw = Gateway::start(&config).await;
 
     // Behind the client keys.
@@ -663,7 +667,7 @@ async fn a_client_keys_tools_limit_what_the_aggregate_lists_and_calls() {
     let alpha = Fake::start("alpha", false, None).await;
     let beta = Fake::start("beta", false, None).await;
     let config = format!(
-        "client_keys:\n  - {{ name: wide, key: {KEY} }}\n  - {{ name: narrow, key: {OTHER}, tools: ['beta__*'] }}\nmcp:\n  alpha: {{ url: '{}' }}\n  beta: {{ url: '{}' }}\nmcp_aggregate: {{}}\n",
+        "client_keys:\n  - {{ name: wide, key: {KEY} }}\n  - {{ name: narrow, key: {OTHER}, tools: ['beta__*'] }}\nmcp:\n  alpha: {{ url: '{}' }}\n  beta: {{ url: '{}' }}\nplugins: {{ mcp_aggregate: {{}} }}\n",
         alpha.url(),
         beta.url()
     );
@@ -714,7 +718,7 @@ async fn a_client_keys_tools_limit_what_the_aggregate_lists_and_calls() {
 async fn a_reload_ends_the_old_builds_sessions_with_the_servers() {
     let alpha = Fake::start("alpha", false, None).await;
     let beta = Fake::start("beta", false, None).await;
-    let config = aggregate_config(&alpha, &beta, "mcp_aggregate: {}\n");
+    let config = aggregate_config(&alpha, &beta, "plugins: { mcp_aggregate: {} }\n");
     let path = support::write_config(&format!("listen: 127.0.0.1:0\n{config}"));
     let gw = Gateway::run(&["--config", path.to_str().unwrap()]).await;
 
@@ -758,7 +762,11 @@ async fn a_reload_ends_the_old_builds_sessions_with_the_servers() {
 async fn the_aggregate_names_a_subset_and_refuses_what_it_cannot_front() {
     let alpha = Fake::start("alpha", false, None).await;
     let beta = Fake::start("beta", false, None).await;
-    let config = aggregate_config(&alpha, &beta, "mcp_aggregate: { servers: [beta] }\n");
+    let config = aggregate_config(
+        &alpha,
+        &beta,
+        "plugins: { mcp_aggregate: { servers: [beta] } }\n",
+    );
     let gw = Gateway::start(&config).await;
     let (session, _) = open(&gw, KEY).await;
     let list = ask(&gw, &session, 2, "tools/list", json!({})).await;
@@ -786,11 +794,14 @@ async fn the_aggregate_names_a_subset_and_refuses_what_it_cannot_front() {
 
     for (extra, said) in [
         (
-            "mcp_aggregate: { servers: [nope] }",
+            "plugins: { mcp_aggregate: { servers: [nope] } }",
             "unknown mcp server 'nope'",
         ),
-        ("mcp_aggregate: { servers: [alpha, alpha] }", "listed twice"),
-        ("mcp_aggregate: { deny: [''] }", "pattern"),
+        (
+            "plugins: { mcp_aggregate: { servers: [alpha, alpha] } }",
+            "listed twice",
+        ),
+        ("plugins: { mcp_aggregate: { deny: [''] } }", "pattern"),
     ] {
         let config = aggregate_config(&alpha, &beta, extra);
         let path = support::write_config(&format!("listen: 127.0.0.1:0\n{config}"));

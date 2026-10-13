@@ -2,11 +2,10 @@
 //! protocols, fails for the client instead of ending as a clean session.
 #![allow(clippy::unwrap_used)]
 
-use respan_gateway_core::Gateway;
-use respan_gateway_http::{
-    HttpTransport, Relay,
-    passthrough::{Input, Passthrough},
-};
+use respan_gateway_core::{Gateway, Provider};
+use respan_gateway_http_transport::HttpTransport;
+use respan_gateway_passthrough_http::{Input, Passthrough};
+use respan_gateway_plugin_relay::Relay;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, handshake::derive_accept_key};
 
@@ -36,9 +35,9 @@ async fn an_upgrade_over_http_is_refused_to_the_client() {
     let gateway = Gateway::new()
         .client::<Input<Passthrough>, _, _>(Passthrough)
         .unwrap()
-        .provider::<Input<Passthrough>, _, _>("p", Passthrough, transport.connect())
+        .provider(Provider::new("p", Passthrough, transport.connect()))
         .unwrap()
-        .plugin(Relay::RAW)
+        .plugin(Relay)
         .target("p")
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

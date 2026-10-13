@@ -13,7 +13,10 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{Body, Completion, credentials, strip_origin_headers};
+use respan_gateway_http::{
+    Body, Completion,
+    call::{credentials, strip_origin_headers},
+};
 
 pub type Reply = http::Response<Vec<Result<Bytes, Fault>>>;
 type WireResult = Result<(http::Response<Body>, Option<Completion>), Fault>;

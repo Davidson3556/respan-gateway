@@ -8,11 +8,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use respan_gateway_core::futures::{SinkExt, Stream, StreamExt, stream};
-use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, Upstream, async_trait};
+use respan_gateway_core::{
+    Fault, Gateway, Plugin, Provider, ProviderContext, Upstream, async_trait,
+};
+use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, StatusCode, header};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{Body, ProviderError};
+use respan_gateway_http_faults::ProviderError;
 use respan_gateway_realtime::Input;
 use respan_gateway_realtime_ws::OpenAiRealtime;
 use respan_gateway_ws::{Limits, WsTransport};
@@ -175,7 +178,7 @@ async fn session_through(
     let ended = Ended::default();
     let limit = transport.limits().max_message;
     let gateway = Gateway::new()
-        .provider::<Input, _, _>("ws", OpenAiRealtime, transport.connect())
+        .provider(Provider::new("ws", OpenAiRealtime, transport.connect()))
         .and_then(|g| g.client::<Input, _, _>(OpenAiRealtime))
         .map(|g| g.plugin(ended.clone()))
         .and_then(|g| g.target("ws"))
@@ -232,7 +235,7 @@ async fn non_upgrade_200_and_204_are_original_refusals_without_waiting_for_uploa
         let fault = end.expect_err("refused call");
         let original = fault
             .get::<ProviderError>()
-            .map(|e| &e.response)
+            .map(|e| &e.0)
             .expect("fault retains original answer");
         assert_eq!(
             (
@@ -294,8 +297,8 @@ async fn a_refusal_body_is_read_up_to_the_message_limit() {
         match fault.get::<ProviderError>() {
             Some(original) => {
                 assert_eq!(size, 1024);
-                assert_eq!(original.response.status(), StatusCode::FORBIDDEN);
-                assert_eq!(original.response.body().len(), 1024);
+                assert_eq!(original.0.status(), StatusCode::FORBIDDEN);
+                assert_eq!(original.0.body().len(), 1024);
             }
             None => {
                 assert_eq!(size, 1025);

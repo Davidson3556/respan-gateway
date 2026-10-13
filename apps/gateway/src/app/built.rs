@@ -9,27 +9,29 @@ use axum::middleware::{from_fn_with_state, map_response};
 use axum::response::Response;
 use axum::routing::{MethodRouter, get};
 use respan_gateway_core::Gateway;
-use respan_gateway_http::Relay;
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http::header::CONTENT_TYPE;
-use respan_gateway_media::video::LocateContent;
+use respan_gateway_media::video::{LocateContent, VideoJobs};
 use respan_gateway_media_http::gemini::GeminiVeo;
-use respan_gateway_plugins::Routing;
+use respan_gateway_plugin_credentials::ClientCredentials;
+use respan_gateway_plugin_fallback::{Fallback, Hedge};
+use respan_gateway_plugin_mcp_aggregate::{Aggregate, Closer as AggregateCloser};
+use respan_gateway_plugin_relay::Relay;
+use respan_gateway_plugin_routing::Routing;
 use respan_gateway_ws::Limits;
 use tokio::sync::watch;
 
 use super::{BODY_LIMIT, DEFAULT_LISTEN, Process};
 use crate::admin::{self, Admin};
-use crate::agent;
-use crate::auth::{self, ClientCredentials, ClientKeys, Cors, LocalOnly};
+use crate::attempts;
+use crate::auth::{self, ClientKeys, Cors, LocalOnly};
 use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{KnownFormat, formats, kind};
-use crate::jobs::VideoJobs;
 use crate::mcp::{self, McpRoute};
-use crate::mcp_aggregate::{self, Aggregate};
+use crate::mcp_aggregate;
 use crate::models::{self, Models};
-use crate::quirks::with_quirks;
 use crate::requests::{self, Recorder, RequestLog};
+use crate::tool_loop;
 use crate::{Config, Error};
 
 /// One config's gateway and application.
@@ -41,10 +43,10 @@ pub(super) struct Built {
     pub(super) router: Router,
     /// Without client keys, what keeps it local.
     pub(super) local: Option<Arc<LocalOnly>>,
-    /// Ends the agent's sessions with its tool servers.
-    pub(super) closer: Option<agent::Closer>,
+    /// Ends the tool loop's sessions with its tool servers.
+    pub(super) closer: Option<tool_loop::Closer>,
     /// Ends the aggregate's sessions with its servers.
-    pub(super) aggregate: Option<mcp_aggregate::Closer>,
+    pub(super) aggregate: Option<AggregateCloser>,
 }
 
 impl Built {
@@ -62,22 +64,37 @@ impl Built {
         if !mcp.is_empty() {
             formats.push(mcp::known(
                 mcp.clone(),
-                config.mcp_aggregate.is_some(),
+                config.plugins.mcp_aggregate.is_some(),
                 limit,
             ));
         }
-        let aggregate = match &config.mcp_aggregate {
+        let aggregate = match &config.plugins.mcp_aggregate {
             Some(a) => Some(mcp_aggregate::check(a, &mcp)?),
             None => None,
         };
         let (gateway, mut plan) = compose(&config, &formats)?;
         plan.mcp = mcp;
-        if let Some(agent) = &config.agent {
+        if let Some(tool_loop) = &config.plugins.tool_loop {
             let serving = plan.serves(mcp::FORMAT);
-            agent::check(agent, &plan.mcp, serving)?;
+            tool_loop::check(tool_loop, &plan.mcp, serving)?;
         }
-        let (gateway, closer, aggregate) =
-            with_plugins(gateway, &config, aggregate, &plan, &formats, &process.log);
+        let attempts = Attempts {
+            fallback: (config.plugins.fallback.as_ref())
+                .map(|c| attempts::fallback(c, &plan.upstreams))
+                .transpose()?,
+            hedge: (config.plugins.hedge.as_ref())
+                .map(|c| attempts::hedge(c, &plan.upstreams))
+                .transpose()?,
+        };
+        let (gateway, closer, aggregate) = with_plugins(
+            gateway,
+            &config,
+            aggregate,
+            attempts,
+            &plan,
+            &formats,
+            &process.log,
+        );
         let keys = ClientKeys::new(plan.keys.clone());
         let relay = relay(
             &gateway,
@@ -121,7 +138,7 @@ impl Built {
 
     pub(super) fn open_refusal(&self, addr: SocketAddr) -> Option<String> {
         let open = self.plan.keys.is_empty() && !addr.ip().is_loopback();
-        (open && !self.config.raw_relay).then(|| {
+        (open && !self.config.relay).then(|| {
             format!(
                 "refusing to listen on {addr} with no client keys: anyone who can reach it \
                  would spend your provider keys, and without keys it answers only to \
@@ -143,19 +160,24 @@ fn routing(plan: &Plan, formats: &[KnownFormat]) -> Routing {
 }
 
 /// The gateway with the binary's plugins, and what ends the sessions of the
-/// agent and of the aggregate.
-type Plugins = (
-    Gateway,
-    Option<agent::Closer>,
-    Option<mcp_aggregate::Closer>,
-);
+/// tool loop and of the aggregate.
+type Plugins = (Gateway, Option<tool_loop::Closer>, Option<AggregateCloser>);
 
-/// The gateway with the binary's plugins: the request log, routing, video
-/// jobs, whose credentials go where, and last the vendors' quirks.
+/// The fallback and hedge plugins the config asks for.
+struct Attempts {
+    fallback: Option<Fallback>,
+    hedge: Option<Hedge>,
+}
+
+/// The gateway with the binary's plugins, in a fixed order whatever the
+/// config's: the request log, routing, MCP, video jobs, whose credentials go
+/// where, the tool loop, then hedge and fallback. The vendors' quirks are
+/// the gateway's plugins: they are their providers' own ([`compose`]).
 fn with_plugins(
     gateway: Gateway,
     config: &Config,
     aggregate: Option<Vec<String>>,
+    attempts: Attempts,
     plan: &Plan,
     formats: &[KnownFormat],
     log: &Arc<RequestLog>,
@@ -174,22 +196,22 @@ fn with_plugins(
     let veo = plan.upstreams.iter().flat_map(|u| &u.entries);
     let veo = veo.filter(|e| e.format == GeminiVeo::NAME);
     let locate = veo.fold(LocateContent::new(), |l, e| l.provider(&e.internal));
-    // The agent answers the request itself, so it comes after every plugin
+    // The tool loop answers the request itself, so it comes after every plugin
     // that routes or edits it; what ends its sessions comes before them all.
-    let agent = config.agent.as_ref().map(|config| {
+    let tool_loop = config.plugins.tool_loop.as_ref().map(|config| {
         let flags: HashSet<String> = (plan.upstreams.iter())
             .flat_map(|u| &u.entries)
             .filter(|e| e.format == "anthropic-messages")
             .map(|e| e.internal.clone())
             .collect();
-        agent::plugin(config, move |provider| flags.contains(provider))
+        tool_loop::plugin(config, move |provider| flags.contains(provider))
     });
-    let gateway = match &agent {
+    let gateway = match &tool_loop {
         Some((_, closer)) => gateway.plugin(closer.plugin()),
         None => gateway,
     };
-    let aggregate = match (&config.mcp_aggregate, aggregate) {
-        (Some(config), Some(servers)) => Some(Aggregate::new(config, servers)),
+    let aggregate = match (&config.plugins.mcp_aggregate, aggregate) {
+        (Some(config), Some(servers)) => Some(mcp_aggregate::aggregate(config, servers)),
         _ => None,
     };
     let aggregate_closer = aggregate.as_ref().map(Aggregate::closer);
@@ -205,31 +227,48 @@ fn with_plugins(
         Some(aggregate) => gateway.plugin(aggregate),
         None => gateway,
     };
-    let gateway = gateway
-        .plugin(McpRoute)
-        .plugin(VideoJobs::new(&plan.upstreams, formats))
-        .plugin(locate);
-    // A raw relay sends each client's credentials itself.
-    let mut gateway = match config.raw_relay {
-        true => gateway.plugin(Relay::RAW),
-        false => {
-            let keyless = plan.upstreams.iter().filter(|u| !u.own_key);
-            let keyless = keyless.flat_map(|u| u.entries.iter().map(|e| e.internal.clone()));
-            // An MCP server gets a client's credentials only if it says so.
-            let forwarded = plan.mcp.iter().filter(|s| s.forward_auth);
-            let forwarded = forwarded.map(|s| s.name.clone());
-            gateway.plugin(ClientCredentials::new(keyless.chain(forwarded).collect()))
-        }
+    let gateway = gateway.plugin(McpRoute);
+    let gateway = gateway.plugin(video_jobs(plan, formats)).plugin(locate);
+    // A provider without a key of its own gets the client's.
+    let keyless = plan.upstreams.iter().filter(|u| !u.own_key);
+    let keyless = keyless.flat_map(|u| u.entries.iter().map(|e| e.internal.clone()));
+    // An MCP server gets a client's credentials only if it says so.
+    let forwarded = plan.mcp.iter().filter(|s| s.forward_auth);
+    let forwarded = forwarded.map(|s| s.name.clone());
+    let gateway = gateway.plugin(ClientCredentials::new(keyless.chain(forwarded)));
+    // A relay gives its vendor's response heads and error bodies back.
+    let mut gateway = match config.relay {
+        true => gateway.plugin(Relay),
+        false => gateway,
     };
-    let closer = agent.as_ref().map(|(_, closer)| closer.clone());
-    if let Some((agent, _)) = agent {
-        gateway = gateway.plugin(agent.observe(requests::steps(log.clone())));
+    let closer = tool_loop.as_ref().map(|(_, closer)| closer.clone());
+    if let Some((tool_loop, _)) = tool_loop {
+        gateway = gateway.plugin(tool_loop.observe(requests::steps(log.clone())));
     }
-    (
-        with_quirks(gateway, &plan.upstreams),
-        closer,
-        aggregate_closer,
-    )
+    // Each answers the request itself: a request the tool loop runs is not
+    // hedged or retried, and a hedged one is not retried.
+    if let Some(hedge) = attempts.hedge {
+        gateway = gateway.plugin(hedge);
+    }
+    if let Some(fallback) = attempts.fallback {
+        gateway = gateway.plugin(fallback);
+    }
+    (gateway, closer, aggregate_closer)
+}
+
+/// Video jobs' follow-ups, to the provider of each format whose job ids
+/// the format spells.
+fn video_jobs(plan: &Plan, formats: &[KnownFormat]) -> VideoJobs {
+    let spelling = |format: &str| {
+        let known = formats.iter().find(|f| f.name == format);
+        known.and_then(|f| f.job_ids)
+    };
+    let entries = plan.upstreams.iter();
+    let entries = entries.flat_map(|u| u.entries.iter().map(move |e| (u, e)));
+    entries.fold(VideoJobs::new(), |jobs, (u, e)| match spelling(&e.format) {
+        Some(spelling) => jobs.provider(&u.name, &e.internal, spelling),
+        None => jobs,
+    })
 }
 
 /// The router of the formats served: a WebSocket upgrade is a session if a
@@ -274,8 +313,8 @@ fn routes(
     cors: Option<Arc<Cors>>,
 ) -> Router {
     let mut router = Router::new().route("/healthz", get(|| async { "ok" }));
-    // A raw relay lets its vendor answer, with the client's credentials.
-    if !config.raw_relay {
+    // A relay lets its vendor answer, with the client's credentials.
+    if !config.relay {
         let models = Arc::new(Models::new(&plan.upstreams, plan.routes.clone()));
         let list = get(models::list).with_state(models.clone());
         let list = list.layer(from_fn_with_state(keys.clone(), auth::require));

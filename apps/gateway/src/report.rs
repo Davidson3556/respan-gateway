@@ -50,22 +50,22 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
         row(&mut lines, "mcp", servers.flatten().collect());
     }
 
-    if let Some(agent) = &config.agent {
-        let mut about = vec![format!("tools of {}", agent.servers.join(", "))];
-        for (label, patterns) in [("allow", &agent.allow), ("deny", &agent.deny)] {
+    if let Some(tool_loop) = &config.plugins.tool_loop {
+        let mut about = vec![format!("tools of {}", tool_loop.servers.join(", "))];
+        for (label, patterns) in [("allow", &tool_loop.allow), ("deny", &tool_loop.deny)] {
             if !patterns.is_empty() {
                 about.push(format!("  {label:<7} {}", patterns.join(", ")));
             }
         }
-        if !agent.models.is_empty() {
-            about.push(format!("  models  {}", agent.models.join(", ")));
+        if !tool_loop.models.is_empty() {
+            about.push(format!("  models  {}", tool_loop.models.join(", ")));
         }
-        let steps = agent.max_steps.unwrap_or(8);
-        let parallel = agent.parallel.unwrap_or(4);
+        let steps = tool_loop.max_steps.unwrap_or(8);
+        let parallel = tool_loop.parallel.unwrap_or(4);
         about.push(format!(
             "  limits  {steps} steps per request, {parallel} tool calls at once"
         ));
-        row(&mut lines, "agent", about);
+        row(&mut lines, "tool_loop", about);
     }
 
     let mut endpoints: Vec<String> = plan
@@ -74,7 +74,7 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
         .filter_map(|name| formats.iter().find(|f| f.name == *name))
         .flat_map(|f| f.endpoints.iter().map(|e| (*e).to_owned()))
         .collect();
-    if !config.raw_relay {
+    if !config.relay {
         endpoints.push("GET /v1/models".to_owned());
     }
     endpoints.push("GET /healthz".to_owned());
@@ -131,7 +131,7 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
 }
 
 /// What `check --online` prints: how each provider answered a call made
-/// with its key, and the tools the agent would offer, if it has any. No
+/// with its key, and the tools the tool loop would offer, if it has any. No
 /// key, and no URL, is named.
 pub fn online(probes: &[Probe], tools: Option<&[String]>) -> String {
     let width = probes.iter().map(|p| p.provider.len()).max().unwrap_or(0);
@@ -155,7 +155,7 @@ pub fn online(probes: &[Probe], tools: Option<&[String]>) -> String {
     }
     if let Some(tools) = tools {
         lines.push(String::new());
-        lines.push("agent tools (as the model is offered them)".to_owned());
+        lines.push("tool loop tools (as the model is offered them)".to_owned());
         if tools.is_empty() {
             lines.push(
                 "  none: no server listed a tool, or `allow` and `deny` leave none".to_owned(),

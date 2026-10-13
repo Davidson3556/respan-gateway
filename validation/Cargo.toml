@@ -22,10 +22,11 @@ respan-gateway-realtime = { path = "../crates/kinds/realtime" }
 respan-gateway-realtime-ws = { path = "../crates/formats/realtime-ws" }
 respan-gateway-conversation = { path = "../crates/kinds/conversation" }
 respan-gateway-core = { path = "../crates/core" }
-respan-gateway-http = { path = "../crates/wires/http", features = ["reqwest"] }
-respan-gateway-plugins = { path = "../crates/plugins" }
+respan-gateway-http = { path = "../crates/wires/http" }
+respan-gateway-http-transport = { path = "../crates/wires/http-transport" }
 respan-gateway-mcp = { path = "../crates/kinds/mcp" }
 respan-gateway-mcp-http = { path = "../crates/formats/mcp-http" }
+respan-gateway-passthrough-http = { path = "../crates/formats/passthrough-http" }
 respan-gateway-ws = { path = "../crates/wires/ws" }
 respan-gateway-serve = { path = "../crates/serve" }
 axum = "0.8"
@@ -37,6 +38,9 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "s
 tokio = { version = "1", features = ["full", "test-util"] }
 
 [dev-dependencies]
+respan-gateway-http-faults = { path = "../crates/wires/http-faults" }
+respan-gateway-plugin-relay = { path = "../crates/plugins/relay" }
+respan-gateway-http-transport = { path = "../crates/wires/http-transport" }
 base64 = "0.22"
 bytes = "1"
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-native-roots"] }

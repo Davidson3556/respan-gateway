@@ -12,14 +12,14 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use respan_gateway_core::futures::future::join_all;
 use respan_gateway_http::http::{HeaderMap, StatusCode};
-use respan_gateway_http::reqwest;
+use respan_gateway_http_transport::reqwest;
 use serde_json::{Value, json};
 
 use crate::auth;
 use crate::compose::{Entry, Upstream};
 use crate::formats::{first_of_each_kind, kind, unreachable};
 use crate::requests::rfc3339;
-use respan_gateway_plugins::{Kind, Routes};
+use respan_gateway_plugin_routing::{Kind, Routes};
 use respan_gateway_providers::Provider;
 
 /// How long a provider may take to list its models.

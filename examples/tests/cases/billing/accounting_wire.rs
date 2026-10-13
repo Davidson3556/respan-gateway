@@ -2,7 +2,7 @@
 //! edge contract itself, with no bytes and no heads. The ledger reads
 //! neither, so it settles here by the same rules as over HTTP.
 
-use respan_gateway_core::{BadRequest, ErrorCode, Upstream};
+use respan_gateway_core::{BadRequest, ErrorCode, Provider, Upstream};
 use std::sync::{Arc, Mutex};
 
 use crate::accounting::{Accounting, Quote, Tally};
@@ -14,7 +14,7 @@ use respan_gateway_core::futures::{sink, stream};
 use respan_gateway_core::{
     Connection, EventSink, EventStream, Extensions, Fault, Format, Gateway, ProviderContext,
 };
-use respan_gateway_http::Status;
+use respan_gateway_http_faults::Status;
 
 const RESERVE: Amount = 100;
 
@@ -167,7 +167,9 @@ async fn accounting_settles_on_a_wire_of_its_own() {
         let accounting = Accounting::new(ledger.clone(), quote);
         let gw = Gateway::new().client::<Question, _, _>(Pipe);
         let gw = gw.and_then(|g| {
-            g.provider::<Question, _, _>("p", Pipe, move |_| Io::Provider(transport.clone()))
+            g.provider(Provider::new::<Question, _, _>("p", Pipe, move |_| {
+                Io::Provider(transport.clone())
+            }))
         });
         let gw = gw.and_then(|g| g.target("p"));
         let gw = gw.map(|g| g.plugin(accounting));

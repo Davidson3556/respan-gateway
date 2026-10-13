@@ -12,7 +12,7 @@ use respan_gateway_core::futures::Sink;
 use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::{
     ClientContext, Connection, EventSink, EventStream, Extensions, Fault, Format, Gateway, Plugin,
-    ProviderContext, Response, async_trait,
+    Provider, ProviderContext, Response, async_trait,
 };
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -152,13 +152,13 @@ fn gateway_with(
     Gateway::new()
         .client::<Input, _, _>(Protocol)
         .unwrap()
-        .provider::<Input, _, _>("provider", Protocol, {
+        .provider(Provider::new::<Input, _, _>("provider", Protocol, {
             let dialer = Arc::new(Dialer {
                 writing: Mutex::new(Some(writing)),
                 incoming: Mutex::new(Some(incoming)),
             });
             move |_| Io::Provider(dialer.clone())
-        })
+        }))
         .unwrap()
         .plugin(record.clone())
         .target("provider")
@@ -413,7 +413,7 @@ async fn synchronous_preparation_controls_sent_status_while_delivery_progresses(
         let gw = Gateway::new()
             .client::<Input, _, _>(Protocol)
             .unwrap()
-            .provider::<Input, _, _>("provider", protocol, |_| Io::Ready)
+            .provider(Provider::new("provider", protocol, |_| Io::Ready))
             .unwrap()
             .plugin(record.clone())
             .target("provider")

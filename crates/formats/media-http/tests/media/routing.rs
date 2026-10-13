@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use respan_gateway_core::Gateway;
+use respan_gateway_core::{Gateway, Provider};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_media::{image, speech, transcription};
 use respan_gateway_media_http::openai::{OpenAiImages, OpenAiSpeech, OpenAiTranscriptions};
-use respan_gateway_plugins::{Kind, Model, Routes, Routing, Speaks};
+use respan_gateway_plugin_routing::{Kind, Model, Routes, Routing, Speaks};
 use serde_json::json;
 
 use crate::support::{Fake, Form, json_request, send};
@@ -70,12 +70,36 @@ async fn routing_sends_each_kind_to_its_models_provider() {
             Model::of(speech::Input::model, speech::Input::set_model),
         );
     let gateway = Gateway::new()
-        .provider("main-images", OpenAiImages, main.transport())
-        .and_then(|g| g.provider("other-images", OpenAiImages, other.transport()))
-        .and_then(|g| g.provider("main-audio", OpenAiTranscriptions, main.transport()))
-        .and_then(|g| g.provider("other-audio", OpenAiTranscriptions, other.transport()))
-        .and_then(|g| g.provider("main-speech", OpenAiSpeech, main.transport()))
-        .and_then(|g| g.provider("other-speech", OpenAiSpeech, other.transport()))
+        .provider(Provider::new("main-images", OpenAiImages, main.transport()))
+        .and_then(|g| {
+            g.provider(Provider::new(
+                "other-images",
+                OpenAiImages,
+                other.transport(),
+            ))
+        })
+        .and_then(|g| {
+            g.provider(Provider::new(
+                "main-audio",
+                OpenAiTranscriptions,
+                main.transport(),
+            ))
+        })
+        .and_then(|g| {
+            g.provider(Provider::new(
+                "other-audio",
+                OpenAiTranscriptions,
+                other.transport(),
+            ))
+        })
+        .and_then(|g| g.provider(Provider::new("main-speech", OpenAiSpeech, main.transport())))
+        .and_then(|g| {
+            g.provider(Provider::new(
+                "other-speech",
+                OpenAiSpeech,
+                other.transport(),
+            ))
+        })
         .and_then(|g| g.client::<image::Input, _, _>(OpenAiImages))
         .and_then(|g| g.client::<transcription::Input, _, _>(OpenAiTranscriptions))
         .and_then(|g| g.client::<speech::Input, _, _>(OpenAiSpeech))
@@ -155,8 +179,8 @@ async fn a_video_goes_to_its_models_provider_and_a_follow_up_to_its_jobs() {
     );
     let routing = Routing::new(Arc::new(routes)).format(OpenAiVideos::NAME, VIDEO, model);
     let gateway = Gateway::new()
-        .provider("openai", OpenAiVideos, openai.transport())
-        .and_then(|g| g.provider("veo", GeminiVeo, veo.transport()))
+        .provider(Provider::new("openai", OpenAiVideos, openai.transport()))
+        .and_then(|g| g.provider(Provider::new("veo", GeminiVeo, veo.transport())))
         .and_then(|g| g.client::<video::Input, _, _>(OpenAiVideos))
         .expect("a gateway")
         .plugin(routing)

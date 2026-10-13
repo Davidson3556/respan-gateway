@@ -16,7 +16,7 @@ async fn passthrough_keeps_a_vendors_path_segments() {
   p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
   any: {{ formats: passthrough, base_url: '{base}/pt' }}
 formats: [openai-chat, passthrough]
-default: p
+plugins: {{ routing: {{ default: p }} }}
 "
     ))
     .await;

@@ -24,7 +24,8 @@ use http_support::{post, read_whole, serve};
 
 mod support;
 use respan_gateway_core::Filter;
-use respan_gateway_http::{Body, Completion, HttpTransport};
+use respan_gateway_http::{Body, Completion};
+use respan_gateway_http_transport::HttpTransport;
 use serde_json::{Value, json};
 use support::{
     Adds, CHAT, Call, Disclaimer, Flip, Footer, HoldAll, MESSAGES, Metered, Nameless, Shout,
@@ -333,7 +334,7 @@ impl Marks<SendRequest> {
         let relayed = call
             .extensions()
             .get::<respan_gateway_core::Extensions>()
-            .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some());
+            .is_some_and(|e| e.get::<respan_gateway_http::raw::Relayed>().is_some());
         self.1
             .lock()
             .unwrap_or_else(|e| e.into_inner())

@@ -20,13 +20,13 @@ use std::sync::{Arc, PoisonError, RwLock};
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Fault, Gateway, Plugin, Provider, ProviderContext, Response, async_trait,
 };
-use respan_gateway_http::HttpTransport;
-use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_http::{CallHeaders, Credential};
+use respan_gateway_http::{Credential, call::CallHeaders};
+use respan_gateway_http_faults::Status;
+use respan_gateway_http_transport::HttpTransport;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -115,15 +115,15 @@ fn gateway(
     tenants: Tenants,
 ) -> Result<Gateway, Fault> {
     Ok(Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, openai)?
-        .provider::<Input, _, _>("azure", OpenAiChat, azure)?
+        .provider(Provider::new("openai", OpenAiChat, openai))?
+        .provider(Provider::new("azure", OpenAiChat, azure))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(tenants))
 }
 
 fn bearer(key: &str) -> Result<HeaderValue, Fault> {
     HeaderValue::from_str(&format!("Bearer {key}"))
-        .map_err(|e| respan_gateway_http::built_wrong(e.into()))
+        .map_err(|e| respan_gateway_http_faults::built_wrong(e.into()))
 }
 
 fn tenant(version: u64, target: &str, key: &str) -> Result<Tenant, Fault> {

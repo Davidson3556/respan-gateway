@@ -7,14 +7,11 @@ use crate::edge::{bind_provider, content, kept, sends};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use respan_gateway_conversation::{Media, MediaSource};
-use respan_gateway_core::{
-    BadRequest, Connection, ErrorCode, EventStream, Fault, Format, Upstream,
-};
+use respan_gateway_core::{BadRequest, Connection, ErrorCode, Fault, Format, Upstream};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::whole;
 use respan_gateway_http::http::header::CONTENT_TYPE;
-use respan_gateway_http::http::{self, HeaderValue, Method, Uri, request::Parts as RequestHead};
-use respan_gateway_http::{Body, Encoder, ProviderIo};
+use respan_gateway_http::http::{HeaderValue, Method, Uri, request::Parts as RequestHead};
+use respan_gateway_http::{Decoder, Encoder, ProviderIo, Whole};
 use serde_json::{Map, Value, json};
 use std::sync::{Arc, OnceLock};
 
@@ -94,7 +91,7 @@ impl Format<ProviderIo, Output, Input> for GeminiVeo {
                 _ = seen.set(call);
                 Ok(encoder)
             },
-            move |response, _| read_response(response, sent.get()),
+            move |_, _| Some(read_response(sent.get())),
         ))
     }
 }
@@ -266,21 +263,20 @@ fn is_version(segment: &str) -> bool {
 
 /// A provider's answer to the call `sent`: an operation, read whole, or
 /// content, chunk by chunk as it comes.
-fn read_response(response: http::Response<Body>, sent: Option<&Call>) -> EventStream<Output> {
-    let body = response.into_body();
+fn read_response(sent: Option<&Call>) -> Box<dyn Decoder<Output>> {
     match sent {
-        Some(Call::Content) => content(body),
+        Some(Call::Content) => content(),
         Some(Call::Create(parameters)) => {
             let parameters = parameters.clone();
-            whole::read(body, move |raw, out| {
+            Box::new(Whole::new(move |raw: Bytes, out: &mut Vec<Output>| {
                 out.push(Output::Job(job_of(&raw, &parameters)?));
                 Ok(())
-            })
+            }))
         }
-        _ => whole::read(body, |raw, out| {
+        _ => Box::new(Whole::new(|raw: Bytes, out: &mut Vec<Output>| {
             out.push(Output::Job(job_of(&raw, &Value::Null)?));
             Ok(())
-        }),
+        })),
     }
 }
 

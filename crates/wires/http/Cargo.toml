@@ -11,13 +11,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[features]
-default = []
-reqwest = ["dep:reqwest"]
-
 [dependencies]
 respan-gateway-core.workspace = true
-reqwest = { workspace = true, optional = true }
+respan-gateway-http-faults.workspace = true
+respan-gateway-http-syntax.workspace = true
+respan-gateway-sse.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
 bytes.workspace = true
 futures.workspace = true
@@ -28,10 +26,13 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+respan-gateway-http-transport.workspace = true
+respan-gateway-plugin-relay.workspace = true
+respan-gateway-passthrough-http.workspace = true
 tower = { version = "0.5", features = ["util"] }
 respan-gateway-conversation.workspace = true
 respan-gateway-conversation-http.workspace = true
-respan-gateway-plugins.workspace = true
+respan-gateway-plugin-routing.workspace = true
 respan-gateway-core.workspace = true
 serde_json.workspace = true
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }

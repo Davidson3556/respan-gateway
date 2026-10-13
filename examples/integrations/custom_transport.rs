@@ -19,7 +19,7 @@ use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::{sink, stream};
-use respan_gateway_core::{Connection, EventSink, EventStream, Fault, Format, Gateway};
+use respan_gateway_core::{Connection, EventSink, EventStream, Fault, Format, Gateway, Provider};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -85,7 +85,7 @@ impl Format<Model, Output, Input> for Local {
 fn gateway() -> Result<Gateway, Fault> {
     let model: Model = Arc::new(echo);
     Gateway::new()
-        .provider::<Input, _, _>("local", Local, move |_| model.clone())?
+        .provider(Provider::new("local", Local, move |_| model.clone()))?
         .client::<Input, _, _>(OpenAiChat)?
         .target("local")
 }

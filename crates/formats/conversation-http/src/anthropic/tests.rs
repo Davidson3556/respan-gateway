@@ -1,6 +1,5 @@
 use super::*;
 
-use crate::schema::Decoder;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 
 use respan_gateway_conversation::ToolChoice;
@@ -31,9 +30,9 @@ fn stream_of(replies: &[Output]) -> Result<String, Fault> {
     let mut enc = EventStream::default();
     let mut out = BytesMut::new();
     for reply in replies {
-        enc.encode(reply, &mut out)?;
+        enc.encode_into(reply, &mut out)?;
     }
-    enc.end(&Ok(()), &mut out)?;
+    enc.end_into(&Ok(()), &mut out)?;
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
@@ -847,9 +846,9 @@ fn a_stream_error_after_the_finish_keeps_the_finish_and_ends_last() {
     replies.extend(text_events(0, "hi"));
     replies.push(Output::finished(Finish::Stop));
     for reply in &replies {
-        assert!(enc.encode(reply, &mut out).is_ok());
+        assert!(enc.encode_into(reply, &mut out).is_ok());
     }
-    let _ = enc.end(&Err(respan_gateway_core::Upstream::fault("boom")), &mut out);
+    let _ = enc.end_into(&Err(respan_gateway_core::Upstream::fault("boom")), &mut out);
     let text = String::from_utf8_lossy(&out);
     let delta = text.find("message_delta").unwrap_or(usize::MAX);
     let error = text.find("event: error").unwrap_or(0);

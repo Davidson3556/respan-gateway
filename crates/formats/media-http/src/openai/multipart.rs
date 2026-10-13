@@ -172,7 +172,7 @@ fn extended(value: &str) -> Option<String> {
     let (_, encoded) = rest.split_once('\'')?;
     charset
         .eq_ignore_ascii_case("utf-8")
-        .then(|| respan_gateway_http::percent_decode(encoded))
+        .then(|| respan_gateway_http_syntax::percent_decode(encoded))
 }
 
 /// A 400 for a body that `what`.

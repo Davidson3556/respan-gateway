@@ -43,7 +43,7 @@ async fn run(
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("a", Toy, connect(t))
+        .provider(Provider::new::<In, _, _>("a", Toy, connect(t)))
         .unwrap()
         .plugin(rec.clone())
         .plugin(Mode(mode));
@@ -139,7 +139,7 @@ async fn buffer_until_holds_a_response_without_content_to_its_end() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("a", Toy, connect(t))
+        .provider(Provider::new::<In, _, _>("a", Toy, connect(t)))
         .unwrap()
         .plugin(Probe(reads.clone(), at_return.clone()));
     let (res, _) = handle(&gw, req(vec!["q"])).await;
@@ -170,7 +170,7 @@ async fn a_buffer_predicate_panic_settles_both_edges_as_internal() {
     let gateway = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("a", Toy, connect(transport))
+        .provider(Provider::new::<In, _, _>("a", Toy, connect(transport)))
         .unwrap()
         .plugin(rec.clone())
         .plugin(Panic);
@@ -245,7 +245,7 @@ async fn buffered_filter_end_is_known_before_hooks_and_replayed_once() {
             let gateway = Gateway::new()
                 .client::<In, _, _>(Toy)
                 .unwrap()
-                .provider::<In, _, _>("a", Toy, connect(transport))
+                .provider(Provider::new::<In, _, _>("a", Toy, connect(transport)))
                 .unwrap()
                 .plugin(rec.clone())
                 .plugin(Buffer {

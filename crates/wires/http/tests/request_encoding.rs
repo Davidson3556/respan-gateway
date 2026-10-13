@@ -26,8 +26,8 @@ struct Writes {
     fail_encode: bool,
     fail_end: bool,
 }
-impl Encoder<u8> for Writes {
-    fn encode(&mut self, value: &u8, out: &mut BytesMut) -> Result<(), Fault> {
+impl Writes {
+    fn encode_into(&mut self, value: &u8, out: &mut BytesMut) -> Result<(), Fault> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_encode {
             return Err(Fault::config("encode"));
@@ -35,13 +35,37 @@ impl Encoder<u8> for Writes {
         out.extend_from_slice(&[*value]);
         Ok(())
     }
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         self.ends.fetch_add(1, Ordering::SeqCst);
         end.clone()?;
         if self.fail_end {
             return Err(Fault::config("end"));
         }
         out.extend_from_slice(b"!");
+        Ok(())
+    }
+}
+
+impl Encoder<u8> for Writes {
+    fn encode(
+        &mut self,
+        value: &u8,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.encode_into(value, &mut out)?;
+        frames.push(out.freeze());
+        Ok(())
+    }
+
+    fn end(
+        &mut self,
+        end: Result<(), Fault>,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.end_into(&end, &mut out)?;
+        frames.extend((!out.is_empty()).then(|| out.freeze()));
         Ok(())
     }
 }
@@ -54,9 +78,23 @@ fn writer(fail_encode: bool, fail_end: bool) -> Writes {
     }
 }
 
-/// A body read and discarded, keeping its wire failure.
-fn nothing(body: Body) -> EventStream<u8> {
-    h::framing::parse(body, (), |_, _, _| Ok(()), |_, wire, _| wire)
+/// A decoder that reads a body and discards it, keeping its wire failure.
+fn nothing() -> Option<Box<dyn h::Decoder<u8>>> {
+    Some(Box::new(|_: Bytes, _: &mut Vec<u8>| Ok(())))
+}
+
+/// Reads nothing of a body, and fails once it ended well.
+struct LateFailure;
+
+impl h::Decoder<u8> for LateFailure {
+    fn decode(&mut self, _: Bytes, _: &mut Vec<u8>) -> Result<(), Fault> {
+        Ok(())
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, _: &mut Vec<u8>) -> Result<(), Fault> {
+        end?;
+        Err(Upstream::fault("late failure"))
+    }
 }
 
 /// Where a transport keeps the request it was sent.
@@ -74,11 +112,9 @@ fn dial<T: Clone + Send + Sync + 'static>(encoder: Box<dyn Encoder<T>>) -> (Sent
         },
         LIMIT,
     );
-    let (_read, sink) = send(Extensions::new()).bind(
-        move |_, _| Ok(encoder),
-        |response, _| nothing(response.into_body()),
-        |_| Fault::new("refused"),
-    );
+    let (_read, sink) = send(Extensions::new())
+        .with_refusal(|_| Fault::new("refused"))
+        .bind(move |_, _| Ok(encoder), |_, _| nothing());
     (sent, sink)
 }
 
@@ -95,13 +131,23 @@ fn sent<T: 'static>(sent: &Sent, sink: &mut EventSink<T>) -> Request<Body> {
 async fn default_request_decodes_encodes_and_finalizes_one_initial_body() {
     let request = Request::new(Body::full("raw"));
     let (incoming, _answer) = h::ClientIo::accept(request, h::Framing::Whole, LIMIT);
-    let (read, _sink) = incoming.bind(
-        |request| h::messages(request, |_, _| -> Result<u8, Fault> { Ok(b'r') }),
+    let (read, _sink) = incoming.with_error(h::rules::plain).bind(
+        |_| {
+            Box::new(|_: Bytes, out: &mut Vec<u8>| {
+                out.push(b'r');
+                Ok(())
+            })
+        },
         |reply| {
             let head = reply.head();
-            Ok(reply.write(head, h::framing::each(|_: &u8| Ok(Bytes::new()))))
+            Ok(reply.write(
+                head,
+                Box::new(|_: &u8, out: &mut Vec<Bytes>| {
+                    out.push(Bytes::new());
+                    Ok(())
+                }),
+            ))
         },
-        h::plain,
     );
     let mut source = read.await.expect("expected value");
     let encode = writer(false, false);
@@ -161,11 +207,14 @@ fn value_fails_synchronously_on_encoding_or_end_and_live_consumes_nothing() {
 #[test]
 fn encode_all_writes_values_end_and_propagates_end_failure() {
     assert_eq!(
-        h::encode_all(Box::new(writer(false, false)), &[1, 2]).expect("expected value"),
+        (Box::new(writer(false, false)) as Box<dyn h::Encoder<u8>>)
+            .encode_all(&[1, 2])
+            .expect("expected value"),
         Bytes::from_static(b"\x01\x02!")
     );
     assert_eq!(
-        h::encode_all(Box::new(writer(false, true)), &[1])
+        (Box::new(writer(false, true)) as Box<dyn h::Encoder<u8>>)
+            .encode_all(&[1])
             .expect_err("expected failure")
             .message(),
         "end"
@@ -185,15 +234,20 @@ async fn a_bodiless_response_does_not_encode_and_open_keeps_prefix_through_decor
         let encode = writer(false, false);
         let calls = encode.calls.clone();
         let ends = encode.ends.clone();
-        let (read, mut sink) = incoming.bind(
-            |request| h::messages(request, |_, _| Ok(0_u8)),
+        let (read, mut sink) = incoming.with_error(h::rules::plain).bind(
+            |_| {
+                Box::new(move |_: Bytes, out: &mut Vec<_>| {
+                    out.push(0_u8);
+                    Ok(())
+                })
+            },
             move |reply| {
                 let mut head = reply.head();
                 head.status = h::http::StatusCode::from_u16(status).expect("status");
-                let sink = reply.open(head, Bytes::from_static(b"prefix:"), Box::new(encode));
+                let prefix = Bytes::from_static(b"prefix:");
+                let sink = reply.open(head, Box::new(Prefixed(prefix, Box::new(encode))));
                 Ok(EventSink::new(sink.sink_map_err(|fault| fault)))
             },
-            h::plain,
         );
         read.await.expect("expected value");
         let mut source = EventStream::single(1_u8);
@@ -243,18 +297,19 @@ async fn an_encoders_failure_is_not_hidden_by_transport_completion() {
         },
         LIMIT,
     );
-    let (_read, mut sink) = send(Extensions::new()).bind(
-        |_, _| Ok(Box::new(writer(true, false)) as Box<dyn Encoder<u8>>),
-        |response, _| nothing(response.into_body()),
-        |_| Fault::new("refused"),
-    );
+    let (_read, mut sink) = send(Extensions::new())
+        .with_refusal(|_| Fault::new("refused"))
+        .bind(
+            |_, _| Ok(Box::new(writer(true, false)) as Box<dyn Encoder<u8>>),
+            |_, _| nothing(),
+        );
     sink.prepare(&mut EventStream::stream(stream::pending()))
         .expect("expected value");
     let error = tokio::time::timeout(Duration::from_secs(1), sink.send(Ok(1)))
         .await
         .expect("expected value")
         .expect_err("expected failure");
-    assert_eq!(h::error_code(&error), "config");
+    assert_eq!(respan_gateway_http_faults::error_code(&error), "config");
 }
 
 #[tokio::test]
@@ -263,11 +318,17 @@ async fn transport_failure_ends_the_call() {
         |_| async { Err(Upstream::fault("transport failed")) },
         LIMIT,
     );
-    let (_read, mut sink) = send(Extensions::new()).bind(
-        |_, _| Ok(h::framing::each(|v: &u8| Ok(Bytes::copy_from_slice(&[*v])))),
-        |response, _| nothing(response.into_body()),
-        |_| Fault::new("refused"),
-    );
+    let (_read, mut sink) = send(Extensions::new())
+        .with_refusal(|_| Fault::new("refused"))
+        .bind(
+            |_, _| {
+                Ok(Box::new(|v: &u8, out: &mut Vec<Bytes>| {
+                    out.push(Bytes::copy_from_slice(&[*v]));
+                    Ok(())
+                }))
+            },
+            |_, _| nothing(),
+        );
     sink.prepare(&mut EventStream::single(0))
         .expect("expected value");
     let error = tokio::time::timeout(Duration::from_secs(1), sink.close())
@@ -295,11 +356,12 @@ async fn a_live_body_failure_survives_a_successful_transport() {
         },
         LIMIT,
     );
-    let (_read, mut sink) = send(Extensions::new()).bind(
-        |_, _| Ok(Box::new(writer(true, false)) as Box<dyn Encoder<u8>>),
-        |response, _| nothing(response.into_body()),
-        |_| Fault::new("refused"),
-    );
+    let (_read, mut sink) = send(Extensions::new())
+        .with_refusal(|_| Fault::new("refused"))
+        .bind(
+            |_, _| Ok(Box::new(writer(true, false)) as Box<dyn Encoder<u8>>),
+            |_, _| nothing(),
+        );
     sink.prepare(&mut EventStream::<u8>::stream(stream::pending()))
         .expect("expected value");
     let sent = async {
@@ -340,11 +402,17 @@ async fn authoritative_completion_releases_an_unconsumed_encoded_frame() {
         },
         LIMIT,
     );
-    let (_read, mut sink) = send(Extensions::new()).bind(
-        |_, _| Ok(h::framing::each(|v: &u8| Ok(Bytes::copy_from_slice(&[*v])))),
-        |response, _| nothing(response.into_body()),
-        |_| Fault::new("refused"),
-    );
+    let (_read, mut sink) = send(Extensions::new())
+        .with_refusal(|_| Fault::new("refused"))
+        .bind(
+            |_, _| {
+                Ok(Box::new(|v: &u8, out: &mut Vec<Bytes>| {
+                    out.push(Bytes::copy_from_slice(&[*v]));
+                    Ok(())
+                }))
+            },
+            |_, _| nothing(),
+        );
     sink.prepare(&mut EventStream::stream(stream::pending()))
         .expect("expected value");
     future::poll_fn(|cx| Pin::new(&mut sink).poll_ready(cx))
@@ -383,21 +451,17 @@ async fn a_late_error_in_a_success_fails_the_opened_answer() {
         },
         LIMIT,
     );
-    let (read, mut sink) = send(Extensions::new()).bind(
-        |_, _| Ok(h::framing::each(|_: &u8| Ok(Bytes::new()))),
-        |response, _| {
-            h::framing::parse::<u8, _, _, _>(
-                response.into_body(),
-                (),
-                |_, _, _| Ok(()),
-                |_, wire, _| {
-                    wire?;
-                    Err(Upstream::fault("late failure"))
-                },
-            )
-        },
-        |_| Fault::new("refused"),
-    );
+    let (read, mut sink) = send(Extensions::new())
+        .with_refusal(|_| Fault::new("refused"))
+        .bind(
+            |_, _| {
+                Ok(Box::new(|_: &u8, out: &mut Vec<Bytes>| {
+                    out.push(Bytes::new());
+                    Ok(())
+                }))
+            },
+            |_, _| Some(Box::new(LateFailure)),
+        );
     sink.prepare(&mut EventStream::single(0))
         .expect("expected value");
     let (end, output) = future::join(sink.close(), read).await;
@@ -434,9 +498,13 @@ async fn empty_error_frames_yield_even_though_the_byte_cap_is_not_reached() {
         LIMIT,
     );
     let (_read, mut sink) = send(Extensions::new()).bind(
-        |_, _| Ok(h::framing::each(|_: &u8| Ok(Bytes::new()))),
-        |response, _| nothing(response.into_body()),
-        |answer| h::provider_fault("test", answer),
+        |_, _| {
+            Ok(Box::new(|_: &u8, out: &mut Vec<Bytes>| {
+                out.push(Bytes::new());
+                Ok(())
+            }))
+        },
+        |_, _| nothing(),
     );
     sink.prepare(&mut EventStream::single(0))
         .expect("expected value");
@@ -453,7 +521,7 @@ async fn ignored_incoming_frames_cannot_spin_in_one_poll() {
         seen.fetch_add(1, Ordering::SeqCst);
         Ok(Bytes::new())
     }));
-    let mut read = h::framing::parse::<u8, _, _, _>(body, (), |_, _, _| Ok(()), |_, wire, _| wire);
+    let mut read = body.decode(Box::new(|_: Bytes, _: &mut Vec<u8>| Ok(())));
     assert!(read.next().now_or_never().is_none());
     assert_eq!(count.load(Ordering::SeqCst), 128);
 }
@@ -481,9 +549,13 @@ async fn a_refused_answer_is_read_whole_into_the_error_readers_fault() {
     let (read, mut sink) = send(Extensions::new())
         .with_success(|answer, _| answer.status == h::http::StatusCode::SWITCHING_PROTOCOLS)
         .bind(
-            |_, _| Ok(h::framing::each(|_: &u8| Ok(Bytes::new()))),
-            |_, _| -> EventStream<u8> { panic!("a refusal reached the decoder") },
-            |answer| h::provider_fault("strict", answer),
+            |_, _| {
+                Ok(Box::new(|_: &u8, out: &mut Vec<Bytes>| {
+                    out.push(Bytes::new());
+                    Ok(())
+                }))
+            },
+            |_, _| -> Option<Box<dyn h::Decoder<u8>>> { panic!("a refusal reached the decoder") },
         );
     sink.prepare(&mut EventStream::single(0))
         .expect("expected value");
@@ -493,16 +565,18 @@ async fn a_refused_answer_is_read_whole_into_the_error_readers_fault() {
     assert!(fault.is::<Upstream>());
     assert_eq!(
         fault.get(),
-        Some(&h::Status(h::http::StatusCode::BAD_GATEWAY))
+        Some(&respan_gateway_http_faults::Status(
+            h::http::StatusCode::BAD_GATEWAY
+        ))
     );
     assert_eq!(
         fault.get(),
         Some(&respan_gateway_core::RetryAfter(Duration::from_secs(3)))
     );
     let answer = &fault
-        .get::<h::ProviderError>()
+        .get::<respan_gateway_http_faults::ProviderError>()
         .expect("the answer")
-        .response;
+        .0;
     assert_eq!(
         (answer.status().as_u16(), &answer.body()[..]),
         (200, &b"not up"[..])
@@ -522,15 +596,38 @@ async fn a_passthrough_refuses_a_101_no_one_asked_for() {
         },
         LIMIT,
     );
-    let (read, mut sink) = h::passthrough::Passthrough
+    let (read, mut sink) = respan_gateway_passthrough_http::Passthrough
         .bind(send(Extensions::new()))
         .expect("bound");
-    let input = h::passthrough::Input::new("x");
+    let input = respan_gateway_passthrough_http::Input::new("x");
     sink.prepare(&mut EventStream::single(input))
         .expect("expected value");
     let (_, output) = future::join(sink.close(), read).await;
     let output = output.expect("an answer");
     let fault = output.refusal().expect("refused");
     assert!(fault.is::<Upstream>());
-    assert!(fault.get::<h::ProviderError>().is_none(), "never relayed");
+    assert!(
+        fault
+            .get::<respan_gateway_http_faults::ProviderError>()
+            .is_none(),
+        "never relayed"
+    );
+}
+
+/// An encoder that starts with `0`, then encodes as `1` does.
+struct Prefixed<T>(Bytes, Box<dyn Encoder<T>>);
+
+impl<T: 'static> Encoder<T> for Prefixed<T> {
+    fn start(&mut self, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+        out.push(self.0.clone());
+        self.1.start(out)
+    }
+
+    fn encode(&mut self, value: &T, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+        self.1.encode(value, out)
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+        self.1.end(end, out)
+    }
 }

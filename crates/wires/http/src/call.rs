@@ -1,27 +1,18 @@
 //! What a call to a provider is made of, and what a transport does to it and
 //! to its response.
 
-use bytes::Bytes;
 use futures::future::BoxFuture;
-use futures::stream::BoxStream;
 use http::header::{self, CONNECTION, HeaderName, UPGRADE};
 use http::{HeaderMap, HeaderValue, request::Parts as RequestHead};
 use respan_gateway_core::{BadRequest, Extensions, Fault};
 
-use crate::Body;
-use crate::credential::{is_credential, take_protocol_keys, take_query};
+use crate::credential::{take_protocol_keys, take_query};
 use crate::rules::{HOP_BY_HOP, remove_if, strip_named};
+use crate::{Body, Completion};
 use futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::Upstream;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// A body, its bytes one item per data frame, ending with an `Err` if it
-/// broke off.
-pub type Frames = BoxStream<'static, Result<Bytes, Fault>>;
-
-/// Actual completion of an outgoing transfer, independent of response headers.
-pub type Completion = BoxFuture<'static, Result<(), Fault>>;
 
 /// `url` as a transport's base URL, without a trailing `/`: one of
 /// `schemes`, a host (a name, an IPv4 address, or an IPv6 one in brackets)
@@ -91,7 +82,7 @@ pub fn prepare_call(
 
 /// Whether `path` has a `.` or `..` segment, after one percent-decoding.
 fn has_dot_segment(path: &str) -> bool {
-    crate::percent_decode(path)
+    respan_gateway_http_syntax::percent_decode(path)
         .split(['/', '\\'])
         .any(|segment| matches!(segment, "." | ".."))
 }
@@ -129,15 +120,12 @@ fn passes(name: &HeaderName) -> bool {
     !hop && !denied && !name.starts_with("if-")
 }
 
-/// Whether `name` is the connection's, never a transport's to send: a hop's
-/// own, `Expect` or `Host`.
-pub fn is_connection_header(name: &HeaderName) -> bool {
-    HOP_BY_HOP.contains(name) || name == header::EXPECT || name == header::HOST
-}
+pub use crate::credential::is_credential;
+use respan_gateway_http_syntax::is_connection_header;
 
 /// Remove from a call the headers of the gateway's origin: `Cookie`,
 /// `Forwarded`, `Via`, `X-Forwarded-*` and `X-Real-IP`. Plugins still see
-/// them ([`Wire`](crate::Wire)); a call's [`CallHeaders`] may set them.
+/// them ([`Original`](crate::raw::Original)); a call's [`CallHeaders`] may set them.
 pub(crate) fn strip_client_origin_headers(headers: &mut HeaderMap) {
     remove_if(headers, |name| {
         let name = name.as_str();
@@ -173,8 +161,9 @@ impl std::fmt::Debug for CallHeaders {
 
 /// Decide whose keys `call` carries: its [`CallHeaders`] over the
 /// transport's own `headers`, replacing credentials already in the head.
-/// With neither, preserve only credentials explicitly supplied in the head.
-/// The exchange's `Credential` extension is never copied automatically.
+/// With neither, the client's `Credential` if the call is
+/// [`Relayed`](crate::raw::Relayed), else only credentials explicitly
+/// supplied in the head: the exchange's `Credential` is never copied unasked.
 pub fn credentials(call: &mut http::Request<crate::Body>, headers: &HeaderMap) {
     let extensions = call
         .extensions()
@@ -200,7 +189,13 @@ pub(crate) fn keys(head: &mut RequestHead, extensions: &Extensions, headers: &He
     }
     if own.is_empty() {
         // The only credentials already present are deliberately supplied by
-        // the caller (for example in SendRaw); exchange Credential is ignored.
+        // the caller (for example a format's own head); exchange Credential
+        // goes only where the call asks.
+        if extensions.get::<crate::raw::Relayed>().is_some()
+            && let Some(credential) = extensions.get::<crate::Credential>()
+        {
+            credential.restore(head);
+        }
         return;
     }
     remove_if(&mut head.headers, |n| is_credential(n.as_str()));
@@ -262,6 +257,7 @@ mod tests {
 
     use super::*;
     use crate::Credential;
+    use bytes::Bytes;
 
     fn head(headers: &[(&'static str, &'static str)]) -> http::request::Parts {
         let mut req = http::Request::new(());

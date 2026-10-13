@@ -2,11 +2,11 @@ use super::*;
 
 use crate::anthropic::AnthropicMessages;
 use crate::openai::OpenAiChat;
-use crate::schema::{Decoder, OutputParser};
 use respan_gateway_conversation::{Block, Message, ResponseFormat, Role, Tool, ToolChoice};
 use respan_gateway_core::NativeFields;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::framing::sse::event_json;
+use respan_gateway_http::{Decoder, Sse};
+use respan_gateway_sse::event_json;
 
 fn decode_request(v: &Value) -> Input {
     let mut chat = OpenAiResponses.decode_json(v);
@@ -28,14 +28,14 @@ fn frames(events: &[Value]) -> Vec<String> {
 
 /// The events of a stream of `events`, and how it ended.
 fn decode_stream(events: &[Value]) -> (Vec<Output>, Result<(), Fault>) {
-    let mut d = OutputParser::new(ResponsesDecoder::default(), false, None);
+    let mut d = Sse::new(ResponsesDecoder::default());
     let mut out = Vec::new();
     for frame in frames(events) {
-        if let Err(f) = d.push(Bytes::from(frame), &mut out) {
+        if let Err(f) = d.decode(Bytes::from(frame), &mut out) {
             return (out, Err(f));
         }
     }
-    let end = d.finish(&mut out);
+    let end = d.end(Ok(()), &mut out);
     (out, end)
 }
 
@@ -52,9 +52,9 @@ fn stream_of(replies: &[Output]) -> Result<Vec<Value>, Fault> {
     let mut enc = encode::Events::default();
     let mut out = BytesMut::new();
     for reply in replies {
-        enc.encode(reply, &mut out)?;
+        enc.encode_into(reply, &mut out)?;
     }
-    enc.end(&Ok(()), &mut out)?;
+    enc.end_into(&Ok(()), &mut out)?;
     let text = String::from_utf8_lossy(&out).into_owned();
     Ok(text
         .split("\n\n")
@@ -527,7 +527,7 @@ fn a_failed_response_and_an_error_event_are_failures() {
     let (_, end) = decode_stream(&[failed]);
     let f = end.expect_err("failed");
     assert_eq!(f.message(), "boom");
-    assert_eq!(respan_gateway_http::error_code(&f), "server_error");
+    assert_eq!(respan_gateway_http_faults::error_code(&f), "server_error");
 
     let error = json!({ "type": "error", "code": "rate_limit_exceeded", "message": "slow", "param": null, "sequence_number": 3 });
     let (_, end) = decode_stream(&[error]);
@@ -844,9 +844,9 @@ fn an_error_after_content_ends_the_stream_with_an_error_event() {
         Output::block_start(0, Block::Text),
         Output::text(0, "Hi"),
     ] {
-        enc.encode(&reply, &mut out).expect("events");
+        enc.encode_into(&reply, &mut out).expect("events");
     }
-    enc.end(
+    enc.end_into(
         &Err(Fault::new("lost").with(respan_gateway_core::ErrorCode("upstream".into()))),
         &mut out,
     )

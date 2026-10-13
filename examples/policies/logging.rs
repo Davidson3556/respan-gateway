@@ -28,11 +28,11 @@ use respan_gateway_conversation::{Delta, Input, Message, Output};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::Extensions;
 use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Fault, Gateway, Plugin, Provider, ProviderContext, Response, async_trait,
 };
 use respan_gateway_examples::{CallUsage, meter};
-use respan_gateway_http::Wire;
 use respan_gateway_http::http::HeaderValue;
+use respan_gateway_http::raw::Original;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -103,9 +103,9 @@ impl Record {
             status: end
                 .as_ref()
                 .err()
-                .map(|f| respan_gateway_http::status(f).as_u16()),
+                .map(|f| respan_gateway_http_faults::status(f).as_u16()),
             end: end.as_ref().map_or_else(
-                |f| respan_gateway_http::error_code(f).to_owned(),
+                |f| respan_gateway_http_faults::error_code(f).to_owned(),
                 |()| "ok".into(),
             ),
             usage: Usage::default(),
@@ -172,14 +172,14 @@ impl<S: Sink> Plugin for Log<S> {
 }
 
 /// Marks requests of zero-retention tenants, named by `x-tenant` here
-/// (the client's request as it came, [`Wire`]); in practice, by the tenant
+/// (the client's request as it came, [`Original`]); in practice, by the tenant
 /// your auth plugin resolved.
 struct Tenancy(&'static [&'static str]);
 
 #[async_trait]
 impl Plugin for Tenancy {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+        let asked = cx.extensions().get::<Original>().and_then(Original::get);
         let tenant = asked.and_then(|a| a.headers().get("x-tenant")?.to_str().ok());
         if tenant.is_some_and(|t| self.0.contains(&t)) {
             cx.extensions_mut().insert(NoContent);
@@ -200,7 +200,7 @@ fn gateway(
         next: AtomicU64::new(1),
     };
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
+        .provider(Provider::new("openai", OpenAiChat, transport))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(Tenancy(&["zdr-bank"]))
         .plugin(log)

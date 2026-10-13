@@ -12,6 +12,7 @@ mod support;
 #[path = "../../apps/gateway/tests/support/mod.rs"]
 mod binary;
 
+use respan_gateway_core::Provider;
 use std::time::Duration;
 
 use base64::Engine;
@@ -61,13 +62,9 @@ async fn real_gemini_live_audio_and_transcription_through_tls_gateway() {
         .unwrap()
         .with_binary_text(true);
     let gw = respan_gateway_core::Gateway::new()
-        .client::<respan_gateway_http::passthrough::Input<Raw>, _, _>(Raw)
+        .client::<respan_gateway_passthrough_http::Input<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<respan_gateway_http::passthrough::Input<Raw>, _, _>(
-            "p",
-            Raw,
-            transport.connect(),
-        )
+        .provider(Provider::new("p", Raw, transport.connect()))
         .unwrap()
         .plugin(ends.clone())
         .target("p")

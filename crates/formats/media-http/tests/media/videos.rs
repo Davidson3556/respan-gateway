@@ -1,6 +1,6 @@
 //! Video jobs relayed through OpenAI Videos.
 
-use respan_gateway_core::Gateway;
+use respan_gateway_core::{Gateway, Provider};
 use respan_gateway_http::ClientIo;
 use respan_gateway_http::http::{Method, StatusCode};
 use respan_gateway_media::video;
@@ -14,7 +14,7 @@ use crate::support::{
 
 fn gateway(fake: &Videos) -> Gateway {
     Gateway::new()
-        .provider("openai", OpenAiVideos, fake.transport())
+        .provider(Provider::new("openai", OpenAiVideos, fake.transport()))
         .and_then(|g| g.client::<video::Input, video::Output, ClientIo>(OpenAiVideos))
         .and_then(|g| g.target("openai"))
         .expect("a gateway")

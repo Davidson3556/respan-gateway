@@ -395,7 +395,7 @@ fn unknown_request_tool_siblings_refuse_before_any_callback_or_edit() {
         assert_eq!(
             chat.read_all()
                 .err()
-                .map(|f| respan_gateway_http::error_code(&f).to_owned())
+                .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
                 .as_deref(),
             Some(UNREADABLE)
         );
@@ -408,7 +408,7 @@ fn unknown_request_tool_siblings_refuse_before_any_callback_or_edit() {
         assert_eq!(
             result
                 .err()
-                .map(|f| respan_gateway_http::error_code(&f).to_owned())
+                .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
                 .as_deref(),
             Some(UNREADABLE)
         );
@@ -528,7 +528,7 @@ fn unreadable_reply_content_refuses_before_editing_any_text() {
         assert_eq!(
             result
                 .err()
-                .map(|f| respan_gateway_http::error_code(&f).to_owned())
+                .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
                 .as_deref(),
             Some(UNREADABLE)
         );
@@ -571,7 +571,7 @@ fn holdback_refuses_unreadable_reply_before_rewriting_or_emitting_text() {
         assert_eq!(
             result
                 .err()
-                .map(|f| respan_gateway_http::error_code(&f).to_owned())
+                .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
                 .as_deref(),
             Some(UNREADABLE)
         );

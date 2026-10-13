@@ -447,12 +447,12 @@ async fn a_providers_trailers_are_not_passed_on() {
     assert_eq!(says(log.only()), Ok(()));
 }
 
-// A raw relay sends the client's bytes and key; to another vendor it
-// would send both, so it is refused before anything is sent.
+// A relay carries the client's key only to a provider of its own format: a
+// call translated to another vendor goes without it.
 #[tokio::test]
-async fn a_raw_relay_never_reaches_a_provider_of_another_format() {
+async fn a_relay_carries_no_key_to_a_provider_of_another_format() {
     let sites = Sites::default();
-    let gw = translating(&sites, explicit::Relay::RAW);
+    let gw = translating(&sites, respan_gateway_plugin_relay::Relay);
     let mut req = call(
         CHAT,
         r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}"#,
@@ -462,10 +462,11 @@ async fn a_raw_relay_never_reaches_a_provider_of_another_format() {
         HeaderValue::from_static("Bearer client-key"),
     );
 
-    let (status, _, _) = read_whole(serve(&gw, req).await.0).await;
+    let _ = read_whole(serve(&gw, req).await.0).await;
 
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(sites.sent.sent().is_empty(), "nothing reached the provider");
+    let sent = sites.sent.sent();
+    assert_eq!(sent.len(), 1, "the translated call was sent");
+    assert!(sent[0].headers().get(http::header::AUTHORIZATION).is_none());
 }
 
 #[tokio::test]
@@ -515,7 +516,10 @@ async fn a_plugin_answers_with_its_calls_events_read_as_they_are_sent() {
 
 #[tokio::test]
 async fn a_205_is_sent_with_no_body() {
-    let h = Harness::new(vec![Arc::new(explicit::Relay::HEADS)], Some("openai"));
+    let h = Harness::new(
+        vec![Arc::new(respan_gateway_plugin_relay::Relay)],
+        Some("openai"),
+    );
     // A provider that writes a body under a 205 anyway.
     h.sites
         .openai

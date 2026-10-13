@@ -17,7 +17,7 @@ fn gateway_of(rec: &Rec, dialer: Dialer) -> Gateway {
     Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("a", Toy, connect(dialer))
+        .provider(Provider::new::<In, _, _>("a", Toy, connect(dialer)))
         .unwrap()
         .target("a")
         .unwrap()
@@ -180,7 +180,7 @@ async fn a_provider_stream_panic_while_until_end_reads_refuses_internal() {
         let gw = Gateway::new()
             .client::<In, _, _>(Toy)
             .unwrap()
-            .provider::<In, _, _>("a", Toy, connect(t))
+            .provider(Provider::new::<In, _, _>("a", Toy, connect(t)))
             .unwrap()
             .plugin(rec.clone())
             .plugin(Mode(mode));

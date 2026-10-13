@@ -152,20 +152,30 @@ fn opening(
     decoded: Arc<AtomicUsize>,
 ) -> impl Future<Output = Result<EventStream<Bytes>, Fault>> {
     let (incoming, _answer) = h::ClientIo::accept(Request::new(body), h::Framing::Whole, LIMIT);
-    let (opening, _sink) = incoming.bind(
-        move |request| {
-            h::messages(request, move |_, bytes| {
-                decoded.fetch_add(1, Ordering::SeqCst);
-                Ok(bytes)
-            })
+    let (opening, _sink) = incoming.with_error(h::rules::plain).bind(
+        move |_request| {
+            {
+                Box::new(move |bytes: Bytes, out: &mut Vec<_>| {
+                    let value: Result<_, Fault> = {
+                        {
+                            decoded.fetch_add(1, Ordering::SeqCst);
+                            Ok(bytes)
+                        }
+                    };
+                    out.push(value?);
+                    Ok(())
+                })
+            }
         },
         |reply| {
             Ok(reply.write(
                 Response::new(()).into_parts().0,
-                h::framing::each(|_: &()| Ok(Bytes::new())),
+                Box::new(|_: &(), out: &mut Vec<Bytes>| {
+                    out.push(Bytes::new());
+                    Ok(())
+                }),
             ))
         },
-        h::plain,
     );
     opening
 }
@@ -203,7 +213,7 @@ fn external_adapter_is_lazy_and_preserves_pending_frames_and_errors() {
     assert_eq!(probe.polls(), 5);
     let error = body.as_mut().poll_next(&mut cx);
     assert!(matches!(error, Poll::Ready(Some(Err(fault)))
-        if h::error_code(&fault) == "upstream" && fault.message() == "external body broke"));
+        if respan_gateway_http_faults::error_code(&fault) == "upstream" && fault.message() == "external body broke"));
     assert_eq!(probe.polls(), 6);
     assert!(matches!(
         body.as_mut().poll_next(&mut cx),
@@ -261,7 +271,7 @@ fn collection_resumes_on_wakeup_and_does_not_decode_a_late_wire_error() {
     assert_eq!(probe.wakes.load(Ordering::SeqCst), 1);
     let result = read.as_mut().poll(&mut cx);
     assert!(matches!(result, Poll::Ready(Err(fault))
-        if h::error_code(&fault) == "upstream" && fault.message() == "external body broke"));
+        if respan_gateway_http_faults::error_code(&fault) == "upstream" && fault.message() == "external body broke"));
     assert_eq!(probe.polls(), 4, "never read past the wire error");
     assert_eq!(probe.drops(), 1);
     assert_eq!(decoded.load(Ordering::SeqCst), 0);

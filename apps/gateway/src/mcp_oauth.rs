@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use respan_gateway_core::{Fault, Upstream};
 use respan_gateway_http::http::{HeaderValue, header};
-use respan_gateway_http::reqwest;
+use respan_gateway_http_transport::reqwest;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;

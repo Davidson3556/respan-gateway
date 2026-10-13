@@ -14,7 +14,7 @@
 //! - A `DELETE` ends the session: `204 No Content`, with no body, once the
 //!   server ended it.
 //!
-//! A head a plugin chose ([`ClientHead`](respan_gateway_http::ClientHead))
+//! A relayed answer's head ([`Relayed`](respan_gateway_http::raw::Relayed))
 //! gives the status and headers instead, but never the framing. What MCP
 //! carries in headers is the kind's: [`Input`]'s session, protocol
 //! version and last event id are read from the client's request and written
@@ -25,21 +25,20 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, ready};
 
-use respan_gateway_core::futures::{Sink, SinkExt, StreamExt, stream};
+use respan_gateway_core::futures::{Sink, SinkExt};
 use respan_gateway_core::{
-    BadRequest, Connection, Details, EventSink, EventStream, Fault, Format, RetryAfter, Truncated,
-    Upstream,
+    BadRequest, Connection, Details, EventSink, Fault, Format, RetryAfter, Truncated, Upstream,
 };
-use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::framing::{self, sse, whole};
+use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::framing::{self, sse};
 use respan_gateway_http::http::header::{ACCEPT, CONTENT_TYPE};
 use respan_gateway_http::http::request::Parts as RequestHead;
 use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http::{Request, Response};
-use respan_gateway_http::{
-    self as h, Body, ClientIo, ProviderError, ProviderIo, Status, bodiless, error_code,
-};
+use respan_gateway_http::{self as h, ClientIo, ProviderIo, rules::bodiless};
+use respan_gateway_http::{Sse, Whole};
+use respan_gateway_http_faults::{ProviderError, Status, error_code};
 use serde_json::{Value, json};
 
 use crate::{PARSE_ERROR, body, lock, messages, read};
@@ -53,7 +52,9 @@ const PROTOCOL_VERSION: &str = "mcp-protocol-version";
 /// The header naming the last event a resuming client got (SSE).
 const LAST_EVENT_ID: &str = "last-event-id";
 
-const NAME: &str = "mcp";
+/// The format's name, of [`StreamableHttp`] and the stdio servers alike.
+pub const FORMAT: &str = "mcp";
+const NAME: &str = FORMAT;
 const JSON: &str = "application/json";
 const SSE: &str = "text/event-stream";
 
@@ -97,7 +98,7 @@ impl StreamableHttp {
 
     /// Whether it is served at `path`, as cleaned.
     fn serves(&self, path: &str) -> bool {
-        let base = framing::clean_path(&self.path);
+        let base = respan_gateway_http_syntax::clean_path(&self.path);
         match &self.servers {
             None => path == base,
             Some(_) if self.root && path == base => true,
@@ -124,23 +125,29 @@ impl Format<ClientIo, Input, Output> for StreamableHttp {
     fn matches(&self, io: &ClientIo) -> bool {
         let head = io.request();
         [Method::POST, Method::GET, Method::DELETE].contains(head.method())
-            && self.serves(&framing::clean_path(head.uri().path()))
+            && self.serves(&respan_gateway_http_syntax::clean_path(head.uri().path()))
     }
 
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         let started = Started::default();
         let refused = started.clone();
+        let io = io.with_error(move |fault, request, head| {
+            framing::default_content_type(head, JSON);
+            match refused.get() {
+                Some(answered) => lock(answered).refusal(fault),
+                None => Answered::of(request.body()).refusal(fault),
+            }
+            .into()
+        });
         Ok(io.bind(
-            |request| h::messages(request, decode),
-            move |reply| Ok(answer(reply, &started)),
-            move |fault, request, head| {
-                framing::default_content_type(head, JSON);
-                match refused.get() {
-                    Some(answered) => lock(answered).refusal(fault),
-                    None => Answered::of(request.body()).refusal(fault),
-                }
-                .into()
+            |head| {
+                let head = head.clone();
+                Box::new(move |raw: Bytes, out: &mut Vec<Input>| {
+                    out.push(decode(&head, raw)?);
+                    Ok(())
+                })
             },
+            move |reply| Ok(answer(reply, &started)),
         ))
     }
 }
@@ -209,22 +216,28 @@ impl Format<ProviderIo, Output, Input> for StreamableHttp {
 
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
         let path = self.path.clone();
+        let io = io
+            .with_refusal(|answer| rpc_refusal(respan_gateway_http_faults::provider_fault(answer)));
         Ok(io.bind(
             move |head, input: Option<&Input>| {
                 let streamed = "a call in mcp carries one body, not streamed inputs";
                 call_head(head, input.ok_or_else(|| Fault::config(streamed))?, &path)?;
-                Ok(framing::each(|input: &Input| match input.method {
-                    Method::POST if input.messages.is_empty() => Err(Fault::config(
-                        "a POST to an MCP server carries at least one message",
-                    )),
-                    Method::POST => {
-                        Ok(body(input.messages.clone(), input.batch).to_string().into())
+                Ok(Box::new(|input: &Input, out: &mut Vec<Bytes>| {
+                    match input.method {
+                        Method::POST if input.messages.is_empty() => {
+                            return Err(Fault::config(
+                                "a POST to an MCP server carries at least one message",
+                            ));
+                        }
+                        Method::POST => {
+                            out.push(body(input.messages.clone(), input.batch).to_string().into())
+                        }
+                        _ => {}
                     }
-                    _ => Ok(Bytes::new()),
+                    Ok(())
                 }))
             },
             response_events,
-            |answer| rpc_refusal(h::provider_fault(NAME, answer)),
         ))
     }
 }
@@ -233,8 +246,8 @@ impl Format<ProviderIo, Output, Input> for StreamableHttp {
 fn call_head(head: &mut RequestHead, input: &Input, path: &str) -> Result<(), Fault> {
     head.method = input.method.clone();
     match &input.query {
-        Some(query) => framing::set_path(head, &format!("{path}?{query}"))?,
-        None => framing::set_path(head, path)?,
+        Some(query) => respan_gateway_http_syntax::set_path(head, &format!("{path}?{query}"))?,
+        None => respan_gateway_http_syntax::set_path(head, path)?,
     }
     // MCP: a client lists both in its `Accept`.
     let both = HeaderValue::from_static("application/json, text/event-stream");
@@ -255,35 +268,34 @@ fn call_head(head: &mut RequestHead, input: &Input, path: &str) -> Result<(), Fa
     Ok(())
 }
 
-/// The outputs of a server's answer: its JSON-RPC messages, whole or as
+/// The decoder of a server's answer: its JSON-RPC messages, whole or as
 /// events, each request of a `POST` answered once, or `truncated`.
-fn response_events(answer: Response<Body>, sent: Request<Bytes>) -> EventStream<Output> {
+fn response_events(
+    head: &ResponseHead,
+    sent: &Request<Bytes>,
+) -> Option<Box<dyn h::Decoder<Output>>> {
     let posted = read(sent.body()).unwrap_or_default().0;
     let pending: Vec<Value> = posted.iter().filter_map(Message::request_id).collect();
     // GET may resume replies from previous POSTs; only a POST's replies
     // are correlated against the requests actually sent in this call.
     let correlate = sent.method() == Method::POST && !pending.is_empty();
-    if answer.status().is_success()
-        && (bodiless(sent.method(), answer.status()) || answer.status() == StatusCode::ACCEPTED)
+    if head.status.is_success()
+        && (bodiless(sent.method(), head.status) || head.status == StatusCode::ACCEPTED)
     {
-        if !pending.is_empty() {
-            return EventStream::stream(stream::iter([Err(Truncated::fault())]));
-        }
-        return EventStream::empty();
+        return (!pending.is_empty()).then(|| failing(Truncated::fault()));
     }
-    let (head, body) = answer.into_parts();
     let Ok(session) = header(&head.headers, SESSION) else {
         let invalid = "the MCP server sent an invalid session header";
-        return EventStream::stream(stream::iter([Err(Upstream::fault(invalid))]));
+        return Some(failing(Upstream::fault(invalid)));
     };
     let output = move |read: Option<(Vec<Message>, bool)>| Output {
         messages: read.map(|(messages, _)| messages).unwrap_or_default(),
         session: session.clone(),
         ..Output::default()
     };
-    let inner = if sse::is_stream(&head) {
-        let on_event = move |_: &mut (), raw: Bytes, out: &mut Vec<Output>| {
-            let data = sse::event_data(&raw);
+    let inner: Box<dyn h::Decoder<Output>> = if sse::is_stream(head) {
+        Box::new(Sse::new(move |raw: Bytes, out: &mut Vec<Output>| {
+            let data = respan_gateway_sse::event_data(&raw);
             let messages = match data.filter(|d| !d.is_empty()) {
                 Some(data) => Some(read(data.as_bytes()).ok_or_else(|| {
                     Upstream::fault("the MCP server sent an invalid JSON-RPC message")
@@ -295,10 +307,9 @@ fn response_events(answer: Response<Body>, sent: Request<Bytes>) -> EventStream<
             output.event = field(&raw, "event");
             out.push(output);
             Ok(())
-        };
-        sse::read(body, (), on_event, |_, end, _| end).boxed()
+        }))
     } else {
-        let on_body = move |raw: Bytes, out: &mut Vec<Output>| {
+        Box::new(Whole::new(move |raw: Bytes, out: &mut Vec<Output>| {
             if !raw.is_empty() {
                 let messages = read(&raw).ok_or_else(|| {
                     Upstream::fault("the MCP server sent an invalid JSON-RPC message")
@@ -306,39 +317,103 @@ fn response_events(answer: Response<Body>, sent: Request<Bytes>) -> EventStream<
                 out.push(output(Some(messages)));
             }
             Ok(())
-        };
-        whole::read(body, on_body).boxed()
+        }))
     };
-    EventStream::stream(stream::unfold(
-        (inner, pending, false),
-        move |(mut inner, mut pending, done)| async move {
-            if done {
-                return None;
+    Some(Box::new(Correlated {
+        inner,
+        pending,
+        correlate,
+        done: false,
+    }))
+}
+
+/// An answer that is a fault from its head.
+struct Fails(Option<Fault>);
+
+/// The decoder of an answer that is `fault` from its head.
+fn failing(fault: Fault) -> Box<dyn h::Decoder<Output>> {
+    Box::new(Fails(Some(fault)))
+}
+
+impl h::Decoder<Output> for Fails {
+    fn start(&mut self, _: &mut Vec<Output>) -> Result<(), Fault> {
+        self.0.take().map_or(Ok(()), Err)
+    }
+
+    fn decode(&mut self, _: Bytes, _: &mut Vec<Output>) -> Result<(), Fault> {
+        Ok(())
+    }
+}
+
+/// A `POST`'s answer read until each request it sent is answered once: a
+/// reply to no pending request fails it, and one left unanswered at its end
+/// truncates it. Once all are answered, it is done, whatever the server
+/// still sends.
+struct Correlated {
+    inner: Box<dyn h::Decoder<Output>>,
+    pending: Vec<Value>,
+    correlate: bool,
+    done: bool,
+}
+
+impl Correlated {
+    /// Mark the requests the outputs from `from` answer; what follows the
+    /// last answer goes unread, and a reply to no pending request fails it,
+    /// unsent with all after it.
+    fn answered(&mut self, out: &mut Vec<Output>, from: usize) -> Result<(), Fault> {
+        if !self.correlate {
+            return Ok(());
+        }
+        for at in from..out.len() {
+            let ids: Vec<Value> = out[at].answers().collect();
+            for id in ids {
+                let Some(pending) = self.pending.iter().position(|p| *p == id) else {
+                    // The reply and what follows it never go out.
+                    out.truncate(at);
+                    return Err(Upstream::fault(
+                        "the MCP server replied to an ID that is not pending",
+                    ));
+                };
+                self.pending.remove(pending);
             }
-            match inner.next().await {
-                Some(Ok(output)) => {
-                    if correlate {
-                        for id in output.answers() {
-                            let Some(at) = pending.iter().position(|p| *p == id) else {
-                                let fault = Upstream::fault(
-                                    "the MCP server replied to an ID that is not pending",
-                                );
-                                return Some((Err(fault), (inner, pending, true)));
-                            };
-                            pending.remove(at);
-                        }
-                    }
-                    let done = correlate && pending.is_empty();
-                    Some((Ok(output), (inner, pending, done)))
-                }
-                Some(Err(fault)) => Some((Err(fault), (inner, pending, true))),
-                None if !pending.is_empty() => {
-                    Some((Err(Truncated::fault()), (inner, pending, true)))
-                }
-                None => None,
+            if self.pending.is_empty() {
+                out.truncate(at + 1);
+                self.done = true;
+                break;
             }
-        },
-    ))
+        }
+        Ok(())
+    }
+}
+
+impl h::Decoder<Output> for Correlated {
+    fn start(&mut self, out: &mut Vec<Output>) -> Result<(), Fault> {
+        self.inner.start(out)
+    }
+
+    fn decode(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
+        let from = out.len();
+        self.inner.decode(raw, out)?;
+        self.answered(out, from)
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
+        let from = out.len();
+        self.inner.end(end, out)?;
+        self.answered(out, from)?;
+        match self.pending.is_empty() {
+            true => Ok(()),
+            false => Err(Truncated::fault()),
+        }
+    }
+
+    fn limit(&mut self, bytes: Option<usize>) {
+        self.inner.limit(bytes);
+    }
+
+    fn done(&self) -> bool {
+        self.done
+    }
 }
 
 /// `fault`, a refusal whose body says a JSON-RPC error (a single one or the
@@ -350,7 +425,7 @@ fn rpc_refusal(fault: Fault) -> Fault {
     let Some(error) = fault.get::<ProviderError>().cloned() else {
         return fault;
     };
-    let all = match serde_json::from_slice(error.response.body()) {
+    let all = match serde_json::from_slice(error.0.body()) {
         Ok(Value::Array(all)) => all,
         Ok(one) => vec![one],
         Err(_) => Vec::new(),
@@ -448,12 +523,14 @@ fn answer(reply: h::Reply, started: &Started) -> EventSink<Output> {
     head.headers
         .insert(CONTENT_TYPE, HeaderValue::from_static(framing));
     let _ = started.set(answered.clone());
+    let quiet = *ask.method() == Method::GET;
     let encoder = Box::new(Answer {
         answered,
         events: framing == SSE,
+        quiet,
     });
-    if *ask.method() == Method::GET {
-        return reply.open(head, sse::comment("stream").into(), encoder);
+    if quiet {
+        return reply.open(head, encoder);
     }
     EventSink::new(Headed {
         start: Some((reply, head, encoder)),
@@ -500,10 +577,20 @@ fn takes_events(headers: &HeaderMap) -> bool {
 struct Answer {
     answered: Arc<Mutex<Answered>>,
     events: bool,
+    /// Whether the stream opens at once, as a `GET`'s quiet one does, with
+    /// a comment.
+    quiet: bool,
 }
 
 impl h::Encoder<Output> for Answer {
-    fn encode(&mut self, output: &Output, out: &mut BytesMut) -> Result<(), Fault> {
+    fn start(&mut self, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+        if self.quiet {
+            out.push(respan_gateway_sse::comment("stream").into());
+        }
+        Ok(())
+    }
+
+    fn encode(&mut self, output: &Output, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         let mut answered = lock(&self.answered);
         if !self.events && output.messages.iter().any(|m| m.request_id().is_some()) {
             return Err(Upstream::fault(
@@ -514,7 +601,7 @@ impl h::Encoder<Output> for Answer {
             answered.pending.retain(|p| *p != id);
         }
         match self.events {
-            true => out.extend_from_slice(&event(output)?),
+            true => out.push(event(output)?),
             // A JSON response contains the posted requests' responses, not
             // notifications mixed into an invented response batch. SSE is
             // needed to receive the server's independent messages.
@@ -528,16 +615,16 @@ impl h::Encoder<Output> for Answer {
         Ok(())
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         let answered = lock(&self.answered);
-        match (end, self.events) {
+        match (&end, self.events) {
             (Ok(()), false) if !answered.messages.is_empty() => {
                 let json = body(answered.messages.clone(), answered.batch).to_string();
-                out.extend_from_slice(json.as_bytes());
+                out.push(json.into());
             }
             (Err(fault), true) => {
                 for id in &answered.pending {
-                    out.extend_from_slice(sse::event(None, failure(id, fault)).as_bytes());
+                    out.push(respan_gateway_sse::event(None, failure(id, fault)).into());
                 }
             }
             _ => {}
@@ -550,7 +637,7 @@ impl h::Encoder<Output> for Answer {
 struct Bodiless;
 
 impl h::Encoder<Output> for Bodiless {
-    fn encode(&mut self, _: &Output, _: &mut BytesMut) -> Result<(), Fault> {
+    fn encode(&mut self, _: &Output, _: &mut Vec<Bytes>) -> Result<(), Fault> {
         Ok(())
     }
 }
@@ -671,7 +758,7 @@ fn event(output: &Output) -> Result<Bytes, Fault> {
         true => String::new(),
         false => body(output.messages.clone(), false).to_string(),
     };
-    out.push_str(&sse::event(None, data));
+    out.push_str(&respan_gateway_sse::event(None, data));
     Ok(out.into())
 }
 

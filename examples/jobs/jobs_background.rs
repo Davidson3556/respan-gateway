@@ -32,7 +32,7 @@
 //! `cargo run -p respan-gateway-examples --example jobs_background`
 
 use hmac::{Hmac, Mac};
-use respan_gateway_core::{BadRequest, ErrorCode, Upstream};
+use respan_gateway_core::{BadRequest, ErrorCode, Provider, Upstream};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -50,8 +50,10 @@ use respan_gateway_examples::store::{
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode, Uri};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::passthrough;
-use respan_gateway_http::{Body, Credential, HttpTransport, Wire, built_wrong};
+use respan_gateway_http::{Body, Credential, raw::Original};
+use respan_gateway_http_faults::built_wrong;
+use respan_gateway_http_transport::HttpTransport;
+use respan_gateway_passthrough_http as passthrough;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -179,7 +181,7 @@ fn split(path: &str) -> Option<(&str, &str)> {
 
 /// Whether a request asks for a streamed answer, in its body or its query.
 fn streams(cx: &ClientContext, body: &Value) -> bool {
-    let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+    let asked = cx.extensions().get::<Original>().and_then(Original::get);
     let query = asked
         .and_then(|asked| asked.uri().query())
         .unwrap_or_default();
@@ -499,8 +501,8 @@ impl Jobs {
         let reserve = (body.to_string().len() as i64).saturating_add(max as i64);
         let mut uri = cx
             .extensions()
-            .get::<Wire>()
-            .and_then(Wire::get)
+            .get::<Original>()
+            .and_then(Original::get)
             .map_or_else(|| "/v1/responses".into(), |a| a.uri().to_string());
         if let Some(credential) = cx.extensions().get::<Credential>() {
             let query = credential.query().collect::<Vec<_>>().join("&");
@@ -522,7 +524,7 @@ impl Jobs {
         self.db(move |tx| {
             tx.execute("INSERT OR IGNORE INTO job_accounts(tenant,balance) VALUES(?1,?2)", (&home, i64::MAX)).map_err(sql)?;
             let held = tx.execute("UPDATE job_accounts SET held=held+?1 WHERE tenant=?2 AND balance-spent-held>=?1", (reserve, &home)).map_err(sql)?;
-            if held == 0 { return Err(Fault::new("job exceeds available budget").with(ErrorCode("insufficient_funds".into())).with(respan_gateway_http::Status(StatusCode::PAYMENT_REQUIRED))); }
+            if held == 0 { return Err(Fault::new("job exceeds available budget").with(ErrorCode("insufficient_funds".into())).with(respan_gateway_http_faults::Status(StatusCode::PAYMENT_REQUIRED))); }
             tx.execute("INSERT INTO background_jobs(id,request,uri,headers,tenant,reserve,webhook) VALUES(?1,?2,?3,?4,?5,?6,?7)", (saved_id, saved_body, uri, headers, home, reserve, webhook)).map_err(sql)?;
             Ok(())
         }).await?;
@@ -546,14 +548,14 @@ impl Plugin for Jobs {
             .unwrap_or_default();
         if let Some(key) = px
             .extensions()
-            .get::<Wire>()
-            .and_then(Wire::get)
+            .get::<Original>()
+            .and_then(Original::get)
             .and_then(|a| a.headers().get("idempotency-key"))
         {
             headers.insert("idempotency-key", key.clone());
         }
         px.extensions_mut()
-            .insert(respan_gateway_http::CallHeaders(headers));
+            .insert(respan_gateway_http::call::CallHeaders(headers));
         Ok(())
     }
 
@@ -712,8 +714,8 @@ fn gateway(
 ) -> Result<Gateway, Fault> {
     Ok(Gateway::new()
         .client::<Ask, _, _>(RESPONSES)?
-        .provider::<Ask, _, _>("east", RESPONSES, east)?
-        .provider::<Ask, _, _>("west", RESPONSES, west)?
+        .provider(Provider::new("east", RESPONSES, east))?
+        .provider(Provider::new("west", RESPONSES, west))?
         .plugin(jobs.clone()))
 }
 

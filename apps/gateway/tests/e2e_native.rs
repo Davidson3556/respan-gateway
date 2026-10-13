@@ -89,7 +89,7 @@ fn gemini_config(fake: &str) -> String {
         "providers:
   g: {{ vendor: gemini, formats: gemini-generate, base_url: '{fake}/v1beta/openai', key: gw-gemini-key }}
 formats: [gemini-generate]
-default: g
+plugins: {{ routing: {{ default: g }} }}
 "
     )
 }
@@ -99,7 +99,7 @@ fn gemini_over_openai_config(fake: &str) -> String {
         "providers:
   o: {{ formats: openai-chat, base_url: '{fake}', auth: {{ type: bearer, key: sk-gw }} }}
 formats: [gemini-generate]
-default: o
+plugins: {{ routing: {{ default: o }} }}
 "
     )
 }
@@ -260,7 +260,7 @@ fn responses_config(format: &str, provider: &str) -> String {
         "providers:
   p: {{ formats: {format}, base_url: '{provider}', auth: {{ type: bearer, key: sk-gw }} }}
 formats: [openai-responses]
-default: p
+plugins: {{ routing: {{ default: p }} }}
 "
     )
 }
@@ -347,7 +347,7 @@ async fn a_responses_request_is_translated_to_an_anthropic_provider() {
         "providers:
   a: {{ formats: anthropic-messages, base_url: '{}', auth: {{ type: header, name: x-api-key, key: sk-ant-gw }} }}
 formats: [openai-responses]
-default: a
+plugins: {{ routing: {{ default: a }} }}
 ",
         fake.base_url()
     );

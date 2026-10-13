@@ -76,7 +76,7 @@ async fn gateway(base: &str) -> Gateway {
         "providers:
   any: {{ formats: passthrough, base_url: '{base}' }}
 formats: [passthrough]
-default: any
+plugins: {{ routing: {{ default: any }} }}
 "
     ))
     .await

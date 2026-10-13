@@ -13,7 +13,8 @@ use respan_gateway_core::{Abandoned, BadRequest, Fault, Gateway, Truncated, Upst
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::header::{self, HeaderValue};
 use respan_gateway_http::http::{self, Method, StatusCode, Version};
-use respan_gateway_http::{Body, Credential, Frames, Framing, error_code, status};
+use respan_gateway_http::{Body, Credential, Frames, Framing};
+use respan_gateway_http_faults::{error_code, status};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::WebSocketStream;
@@ -22,7 +23,7 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig
 use tokio_tungstenite::tungstenite::{Error, Message, Utf8Bytes};
 
 use crate::{CloseCode, Limits, ProviderClose};
-use respan_gateway_http::header_tokens;
+use respan_gateway_http_syntax::header_tokens;
 
 /// Hand a client's WebSocket upgrade, `head`, to `gateway`, and pump its
 /// frames both ways once `upgraded` gives the connection: the HTTP
@@ -64,7 +65,7 @@ use respan_gateway_http::header_tokens;
 /// | Client's upgrade fails | as when it drops | nothing |
 /// | Client sends a binary frame, or a message over `max_message` | input ends `Err(bad_request)` with its [`CloseCode`]; provider is sent that Close | Close 1003 (binary) or 1009 (too large); the response is read to its end, unsent |
 /// | Provider sends Close 1000 (or no code) | dropped | Close 1000; ends clean |
-/// | Provider sends Close with another code | dropped | an `upstream` fault with that [`ProviderClose`]: Close 1011, or that code if the call was relayed ([`Relay`](respan_gateway_http::Relay)) |
+/// | Provider sends Close with another code | dropped | an `upstream` fault with that [`ProviderClose`]: Close 1011, or that code if the call was relayed (`respan_gateway_plugin_relay::Relay`) |
 /// | Provider drops, no Close, or is silent through a ping | dropped | Close 1011 `truncated` |
 /// | Provider sends a binary frame or a message over `max_message` | it is sent Close 1003 or 1009 | Close 1011 `upstream` |
 /// | Provider is unreachable, or refuses the upgrade | (no session) | the client's format answers the handshake: 502, or under the provider's status |

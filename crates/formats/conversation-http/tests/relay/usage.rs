@@ -469,29 +469,34 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
         }
         fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
             let tally = self.0.clone();
-            Ok(io.bind(
-                |request| OpenAiChat.read_request(request),
-                move |reply| {
-                    let mut head = reply.head();
-                    let encoder = OpenAiChat.response_encoder(&mut head, reply.request());
-                    Ok(reply.write(head, Box::new(Tallying(tally.clone(), encoder))))
-                },
-                |fault, request, head| OpenAiChat.refusal(fault, request, head),
-            ))
+            Ok(io
+                .with_error(|fault, request, head| OpenAiChat.refusal(fault, request, head))
+                .bind(
+                    |request| OpenAiChat.read_request(request),
+                    move |reply| {
+                        let mut head = reply.head();
+                        let encoder = OpenAiChat.response_encoder(&mut head, reply.request());
+                        Ok(reply.write(head, Box::new(Tallying(tally.clone(), encoder))))
+                    },
+                ))
         }
     }
 
     struct Tallying(Arc<Mutex<Usage>>, Box<dyn Encoder<Output>>);
 
     impl Encoder<Output> for Tallying {
-        fn encode(&mut self, reply: &Output, out: &mut bytes::BytesMut) -> Result<(), Fault> {
+        fn encode(&mut self, reply: &Output, out: &mut Vec<bytes::Bytes>) -> Result<(), Fault> {
             if let Output::Usage(usage) = reply {
                 self.0.lock().map(|mut t| *t += usage).ok();
             }
             self.1.encode(reply, out)
         }
 
-        fn end(&mut self, end: &Result<(), Fault>, out: &mut bytes::BytesMut) -> Result<(), Fault> {
+        fn end(
+            &mut self,
+            end: Result<(), Fault>,
+            out: &mut Vec<bytes::Bytes>,
+        ) -> Result<(), Fault> {
             self.1.end(end, out)
         }
     }

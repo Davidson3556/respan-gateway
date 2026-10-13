@@ -113,12 +113,12 @@ pub struct RequestLog {
 }
 
 impl RequestLog {
-    /// A log as `config` says: keeping its last `request_history` requests,
+    /// A log as `config` says: keeping its last `request_log.history` requests,
     /// printing each as its `log` says, starting with the ones its
-    /// `request_history_file` holds.
+    /// `request_log.file` holds.
     pub fn new(config: &Config) -> Arc<Self> {
-        let capacity = config.request_history.unwrap_or(KEPT);
-        let loaded = (config.request_history_file.as_deref())
+        let capacity = config.plugins.request_log.history.unwrap_or(KEPT);
+        let loaded = (config.plugins.request_log.file.as_deref())
             .map(|path| history::load(path, capacity))
             .unwrap_or_default();
         let next_id = (loaded.iter())
@@ -144,10 +144,10 @@ impl RequestLog {
     }
 
     /// Applies a reloaded `config`: what is kept stays, up to its
-    /// `request_history`.
+    /// `request_log.history`.
     pub fn configure(&self, config: &Config) {
         let mut kept = self.kept();
-        kept.capacity = config.request_history.unwrap_or(KEPT);
+        kept.capacity = config.plugins.request_log.history.unwrap_or(KEPT);
         kept.format = config.log;
         while kept.recent.len() > kept.capacity {
             kept.recent.pop_front();

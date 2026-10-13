@@ -10,12 +10,13 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use axum::body::Body as Wire;
+use axum::body::Body as Original;
 use futures::StreamExt;
 use respan_gateway_core::Extensions;
+use respan_gateway_http::ProviderIo;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{HttpTransport, ProviderIo};
+use respan_gateway_http_transport::HttpTransport;
 use serde_json::{Value, json};
 
 use super::answered;
@@ -75,7 +76,7 @@ impl Veo {
             seen: seen.clone(),
             operations: Mutex::new(HashMap::new()),
         });
-        let app = axum::Router::new().fallback(move |request: http::Request<Wire>| {
+        let app = axum::Router::new().fallback(move |request: http::Request<Original>| {
             let state = state.clone();
             async move { Ok::<_, Infallible>(answer(request, &state).await) }
         });
@@ -111,7 +112,7 @@ impl Veo {
 }
 
 /// An error in Google's schema.
-fn error(status: StatusCode, message: &str) -> http::Response<Wire> {
+fn error(status: StatusCode, message: &str) -> http::Response<Original> {
     let name = match status {
         StatusCode::BAD_REQUEST => "INVALID_ARGUMENT",
         StatusCode::FORBIDDEN => "PERMISSION_DENIED",
@@ -124,23 +125,23 @@ fn error(status: StatusCode, message: &str) -> http::Response<Wire> {
     response
 }
 
-fn invalid(message: &str) -> http::Response<Wire> {
+fn invalid(message: &str) -> http::Response<Original> {
     error(StatusCode::BAD_REQUEST, message)
 }
 
-fn json_answer(v: Value) -> http::Response<Wire> {
+fn json_answer(v: Value) -> http::Response<Original> {
     answered("application/json; charset=UTF-8", v.to_string())
 }
 
-fn video() -> http::Response<Wire> {
+fn video() -> http::Response<Original> {
     let paced = futures::stream::iter(video_chunks()).then(|chunk| async move {
         tokio::time::sleep(Duration::from_millis(5)).await;
         Ok::<_, Infallible>(chunk)
     });
-    answered("video/mp4", Wire::from_stream(paced))
+    answered("video/mp4", Original::from_stream(paced))
 }
 
-async fn answer(request: http::Request<Wire>, state: &State) -> http::Response<Wire> {
+async fn answer(request: http::Request<Original>, state: &State) -> http::Response<Original> {
     let (head, body) = request.into_parts();
     let Ok(body) = body.collect().await.map(|b| b.to_bytes()) else {
         return invalid("The body could not be read.");
@@ -215,7 +216,7 @@ async fn answer(request: http::Request<Wire>, state: &State) -> http::Response<W
     error(StatusCode::NOT_FOUND, "Not found.")
 }
 
-fn create(model: &str, body: &Value, state: &State) -> http::Response<Wire> {
+fn create(model: &str, body: &Value, state: &State) -> http::Response<Original> {
     if !["veo-3.0-generate-001", "veo-3.0-fast-generate-001"].contains(&model) {
         let message = format!("models/{model} is not found for API version v1beta.");
         return error(StatusCode::NOT_FOUND, &message);
@@ -297,7 +298,7 @@ fn create(model: &str, body: &Value, state: &State) -> http::Response<Wire> {
 
 /// An operation, done from its second poll: with a video, an error, or, for
 /// a prompt the filters take, neither.
-fn poll(name: &str, state: &State) -> http::Response<Wire> {
+fn poll(name: &str, state: &State) -> http::Response<Original> {
     let mut operations = locked(&state.operations);
     let Some((prompt, polls)) = operations.get_mut(name) else {
         return error(StatusCode::NOT_FOUND, "Operation not found.");

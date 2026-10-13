@@ -1,13 +1,13 @@
 //! Anthropic Messages, streamed or whole, as events: the decoder.
 
 use crate::schema::{
-    Decoder, Totals, ended, error_event, native_fields, says, says_error, unreadable_event,
+    Totals, ended, error_event, native_fields, says, says_error, unreadable_event,
     unsupported_fields,
 };
 use respan_gateway_conversation::{Block, Output, Start};
 use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::sse::event_json;
+use respan_gateway_sse::event_json;
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
@@ -183,8 +183,9 @@ impl AnthropicDecoder {
     }
 }
 
-impl Decoder for AnthropicDecoder {
-    fn event(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
+impl AnthropicDecoder {
+    /// The events of one stream event, `raw`.
+    pub(crate) fn event(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
         if self.done {
             return Ok(());
         }
@@ -193,7 +194,7 @@ impl Decoder for AnthropicDecoder {
             return Ok(());
         };
         if says_error(&v) || v["type"] == "error" {
-            return Err(error_event(ANTHROPIC, &raw, &v));
+            return Err(error_event(&raw, &v));
         }
         let block = v["index"]
             .as_u64()
@@ -231,11 +232,13 @@ impl Decoder for AnthropicDecoder {
         Ok(())
     }
 
-    fn end(&mut self, _out: &mut Vec<Output>) -> Result<(), Fault> {
+    /// The events of a stream that ended well.
+    fn end_stream(&mut self, _out: &mut Vec<Output>) -> Result<(), Fault> {
         ended(self.done)
     }
 
-    fn body(&mut self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
+    /// The events of one whole response body `v`.
+    pub(crate) fn body(&mut self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
         self.message(v, out)?;
         for (at, b) in v["content"].as_array().into_iter().flatten().enumerate() {
             let block = u32::try_from(at).unwrap_or(u32::MAX);
@@ -261,5 +264,16 @@ impl Decoder for AnthropicDecoder {
         self.finish(&v["stop_reason"], out);
         self.done = true;
         Ok(())
+    }
+}
+
+impl respan_gateway_http::Decoder<Output> for AnthropicDecoder {
+    fn decode(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
+        self.event(raw, out)
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
+        end?;
+        self.end_stream(out)
     }
 }

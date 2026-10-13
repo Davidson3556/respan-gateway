@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use respan_gateway_core::{Fault, Plugin, ProviderContext, async_trait};
-use respan_gateway_http::Status;
+use respan_gateway_http_faults::Status;
 
 use crate::ledger::{Amount, HoldId, Ledger};
 

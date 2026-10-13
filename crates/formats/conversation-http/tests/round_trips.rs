@@ -7,9 +7,10 @@ use respan_gateway_conversation_http::Schema;
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::Upstream;
+use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
-use respan_gateway_http::{Body, Status};
+use respan_gateway_http_faults::Status;
 use serde_json::{Value, json};
 
 const OPENAI: OpenAiChat = OpenAiChat;
@@ -669,9 +670,9 @@ async fn held_usage_survives_semantic_failure_but_not_a_wire_failure() {
                 .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
             let request = http::Request::new(Bytes::new());
             let values = if provider == 0 {
-                OPENAI.read_response(response, request)
+                read(OPENAI, response, &request)
             } else {
-                AnthropicMessages.read_response(response, request)
+                read(AnthropicMessages, response, &request)
             }
             .collect::<Vec<_>>()
             .await;
@@ -757,9 +758,9 @@ async fn finite_and_streamed_response_reads_share_framing_and_errors() {
                     .collect();
                 let live = http::Response::from_parts(head, Body::stream(stream::iter(chunks)));
                 let live = if anthropic {
-                    AnthropicMessages.read_response(live, request.clone())
+                    read(AnthropicMessages, live, &request.clone())
                 } else {
-                    OPENAI.read_response(live, request.clone())
+                    read(OPENAI, live, &request.clone())
                 }
                 .try_collect::<Vec<_>>()
                 .await;
@@ -767,8 +768,8 @@ async fn finite_and_streamed_response_reads_share_framing_and_errors() {
                     (Ok(finite), Ok(live)) => assert_eq!(finite, live),
                     (Err(finite), Err(live)) => {
                         assert_eq!(
-                            respan_gateway_http::error_code(&finite),
-                            respan_gateway_http::error_code(&live)
+                            respan_gateway_http_faults::error_code(&finite),
+                            respan_gateway_http_faults::error_code(&live)
                         );
                         assert_eq!(finite.message(), live.message());
                     }
@@ -886,9 +887,9 @@ async fn non_success_sse_is_a_whole_refusal_in_finite_and_live_reads() {
             let live =
                 http::Response::from_parts(head, Body::stream(stream::iter([Ok(bytes.clone())])));
             let live = if anthropic {
-                AnthropicMessages.read_response(live, call.clone())
+                read(AnthropicMessages, live, &call.clone())
             } else {
-                OPENAI.read_response(live, call.clone())
+                read(OPENAI, live, &call.clone())
             }
             .try_collect::<Vec<_>>()
             .await
@@ -901,8 +902,8 @@ async fn non_success_sse_is_a_whole_refusal_in_finite_and_live_reads() {
                 );
                 assert_eq!(
                     fault
-                        .get::<respan_gateway_http::ProviderError>()
-                        .map(|e| &e.response)
+                        .get::<respan_gateway_http_faults::ProviderError>()
+                        .map(|e| &e.0)
                         .map(|a| a.body().clone()),
                     Some(bytes.clone())
                 );
@@ -1015,4 +1016,17 @@ fn the_fields_of_an_anthropic_message_are_dropped_by_another_format() {
     // It cannot change the answer.
     let ask = http::Request::new(Bytes::from_static(b"{}"));
     assert!(OPENAI.encode_response(&ask, &events).is_ok());
+}
+
+/// `response` read as `schema` reads a provider's answer to `request`.
+fn read<S: Schema>(
+    schema: S,
+    response: http::Response<Body>,
+    request: &http::Request<Bytes>,
+) -> respan_gateway_core::EventStream<Output> {
+    let (head, body) = response.into_parts();
+    match schema.read_response(&head, request) {
+        Some(decoder) => body.decode(decoder),
+        None => respan_gateway_core::EventStream::empty(),
+    }
 }

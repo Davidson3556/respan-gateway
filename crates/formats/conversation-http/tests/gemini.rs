@@ -17,7 +17,7 @@ mod http_support;
 use http_support::{post, read_whole, serve};
 
 mod support;
-use respan_gateway_http::HttpTransport;
+use respan_gateway_http_transport::HttpTransport;
 use serde_json::{Value, json};
 use support::{
     CHAT, Call, MESSAGES, SendRequest, add_provider, http_sender, providers, with_plugins,

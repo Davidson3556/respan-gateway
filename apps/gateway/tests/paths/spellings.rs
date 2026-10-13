@@ -12,7 +12,7 @@ async fn no_spelling_of_the_chat_path_reaches_the_vendor_chat_endpoint_through_p
   p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
   any: {{ formats: passthrough, base_url: '{base}/pt' }}
 formats: [openai-chat, passthrough]
-default: p
+plugins: {{ routing: {{ default: p }} }}
 "
     ))
     .await;
@@ -67,7 +67,7 @@ async fn passthrough_forwards_the_matched_segments() {
   p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
   any: {{ formats: passthrough, base_url: '{base}/pt' }}
 formats: [openai-chat, passthrough]
-default: p
+plugins: {{ routing: {{ default: p }} }}
 "
     ))
     .await;

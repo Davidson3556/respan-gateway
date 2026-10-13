@@ -9,7 +9,7 @@ async fn embed(gw: &Gateway, body: &str) -> (StatusCode, Result<Value, Fault>) {
     (status, parsed)
 }
 
-async fn provider() -> Result<(FakeOpenAi, respan_gateway_http::HttpTransport), Fault> {
+async fn provider() -> Result<(FakeOpenAi, respan_gateway_http_transport::HttpTransport), Fault> {
     let openai = FakeOpenAi::start().await;
     let transport = provider_support::openai(&openai.base_url())?;
     Ok((openai, transport))

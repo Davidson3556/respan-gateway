@@ -108,7 +108,7 @@ const EXAMPLES: &str = "Examples:
   respan-gateway init --client-key  ... with a generated client key, printed once
   respan-gateway init -p groq       Write a starter that also enables groq, key env:GROQ_API_KEY
   respan-gateway check -c my.yaml   Check a config and print what it serves
-  respan-gateway check --online     ... and call each provider with its key, and list the agent's tools
+  respan-gateway check --online     ... and call each provider with its key, and list the tool loop's tools
   respan-gateway models             List the models the providers offer
   respan-gateway proxy --anthropic  Sit in front of Claude Code
 

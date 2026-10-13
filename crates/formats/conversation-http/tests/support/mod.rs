@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use respan_gateway_conversation::Usage;
 use respan_gateway_conversation::{Block, Delta, Finish, Input, Output};
 use respan_gateway_core::{
-    ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Fault, Filter, Gateway, Plugin, Provider, ProviderContext, Response, async_trait,
 };
 
 /// Where OpenAI Chat clients send.
@@ -36,7 +36,7 @@ where
     let send = send.into();
     let connect = respan_gateway_http::connect(move |request| send(request), LIMIT);
     let name = name.to_owned();
-    Box::new(move |g| g.provider(name, format, connect))
+    Box::new(move |g| g.provider(Provider::new(name, format, connect)))
 }
 
 /// Shared native HTTP callback for scripted provider fixtures.
@@ -73,7 +73,7 @@ where
     Arc::new(move |request| Box::pin(send(request)))
 }
 
-pub fn http_sender(client: respan_gateway_http::HttpTransport) -> SendRequest {
+pub fn http_sender(client: respan_gateway_http_transport::HttpTransport) -> SendRequest {
     let client = Arc::new(client);
     sender(move |request| {
         let client = client.clone();
@@ -177,7 +177,7 @@ impl Plugin for Flip {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let streaming = cx
             .extensions()
-            .get::<respan_gateway_http::Wire>()
+            .get::<respan_gateway_http::raw::Original>()
             .and_then(|w| w.get())
             .and_then(|r| serde_json::from_slice::<serde_json::Value>(r.body()).ok())
             .and_then(|v| v["stream"].as_bool())
@@ -429,7 +429,7 @@ impl Filter<Output> for Footer {
 
 /// The code a client's error body would carry for `fault`.
 pub fn fault_code(fault: &Fault) -> String {
-    respan_gateway_http::error_code(fault).to_owned()
+    respan_gateway_http_faults::error_code(fault).to_owned()
 }
 
 /// `r` with its fault as its message, which tests can compare.

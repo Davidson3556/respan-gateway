@@ -1,5 +1,5 @@
 //! How a session ends, from either side, and what each hook is told: each
-//! relayed unread with `Relay::RAW` and typed as JSON events with no relay
+//! relayed through passthrough with `Relay` and typed as JSON events with no relay
 //! ([`Via`]). Texts are JSON, which both ways carry as they are.
 #![allow(clippy::unwrap_used)]
 
@@ -8,7 +8,7 @@ mod support;
 use std::sync::atomic::Ordering;
 
 use respan_gateway_core::{
-    ClientContext, ErrorCode, Fault, Gateway, Plugin, Response, async_trait,
+    ClientContext, ErrorCode, Fault, Gateway, Plugin, Provider, Response, async_trait,
 };
 use respan_gateway_realtime::Input;
 use respan_gateway_ws::{CloseCode, Limits, ProviderClose};
@@ -507,11 +507,11 @@ async fn a_provider_silent_through_a_ping_is_truncated() {
     let gateway = Gateway::new()
         .client::<Input, _, _>(respan_gateway_realtime_ws::OpenAiRealtime)
         .unwrap()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "p",
             respan_gateway_realtime_ws::OpenAiRealtime,
             transport.connect(),
-        )
+        ))
         .unwrap()
         .plugin(ends.clone())
         .plugin(calls.clone())

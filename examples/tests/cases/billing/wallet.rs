@@ -89,42 +89,6 @@ async fn several_answers_are_refused_unless_relayed_raw() -> Result<(), Fault> {
     Ok(())
 }
 
-/// Five answers of up to 10,000 tokens each, through an explicit raw relay
-/// (the only way a request for several choices reaches a provider): the
-/// hold covers all five.
-#[tokio::test]
-async fn n_answers_cannot_overspend_the_wallet() -> Result<(), Fault> {
-    let (fake, ledger) = (FakeOpenAi::start().await, wallets());
-    let prices = prices();
-    let accounting = Accounting::new(ledger.clone(), move |px, tally| quote(px, tally, &prices));
-    // A raw relay keeps the client's path, so the provider sits at the origin.
-    let base = fake.base_url();
-    let origin = base.trim_end_matches("/v1");
-    let gw = Gateway::new()
-        .provider::<Input, _, _>(
-            "openai",
-            OpenAiChat,
-            provider_support::openai(origin)?.connect(),
-        )?
-        .client::<Input, _, _>(OpenAiChat)?
-        .plugin(accounting)
-        .plugin(respan_gateway_http::Relay::RAW)
-        .target("openai")?;
-    let five = r#"{"id":"c1","object":"chat.completion","model":"gpt-x","choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"..."}}],"usage":{"prompt_tokens":10,"completion_tokens":50000}}"#;
-    let body =
-        r#"{"model":"gpt-x","n":5,"max_tokens":10000,"messages":[{"role":"user","content":"hi"}]}"#;
-    let mut statuses = vec![];
-    for _ in 0..4 {
-        fake.answer(Answer::raw(five));
-        statuses.push(send(&gw, "sk-b1", body).await?.as_u16());
-    }
-    // Each holds about $0.40 of acme's $1: two are served.
-    assert_eq!(statuses, [200, 200, 402, 402]);
-    assert_eq!(ledger.spent("acme"), 2 * 400_020);
-    assert_eq!(fake.requests().len(), 2);
-    Ok(())
-}
-
 /// The kind reads the larger of two spellings, so the hold covers whichever
 /// one a provider reads.
 #[tokio::test]
@@ -150,8 +114,8 @@ async fn two_spellings_of_max_tokens_cannot_overspend() -> Result<(), Fault> {
 /// and it may have cost all it was allowed, so it pays at least its hold.
 #[tokio::test(start_paused = true)]
 async fn the_loser_of_a_hedge_is_charged_at_least_its_hold() -> Result<(), Fault> {
-    use respan_gateway_core::{ClientContext, Plugin, Response, async_trait};
-    use respan_gateway_plugins::routing::{Until, race};
+    use respan_gateway_core::{ClientContext, Plugin, Provider, Response, async_trait};
+    use respan_gateway_plugin_fallback::{Until, race};
     use std::time::Duration;
 
     /// Races both deployments, the second starting 200 ms after the first.
@@ -185,16 +149,16 @@ async fn the_loser_of_a_hedge_is_charged_at_least_its_hold() -> Result<(), Fault
         }
     };
     let gw = Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(slow, LIMIT),
-        )?
-        .provider::<Input, _, _>(
+        ))?
+        .provider(Provider::new(
             "openai-eu",
             OpenAiChat,
             provider_support::openai(&eu_fake.base_url())?.connect(),
-        )?
+        ))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(Hedge)
         .plugin(accounting);

@@ -9,7 +9,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 use http::StatusCode;
 use respan_gateway_conversation::{Block, Finish, Output};
 use respan_gateway_conversation_http::openai::OpenAiChat;
-use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Provider, Response};
 use respan_gateway_core::{async_trait, futures};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http;
@@ -167,23 +167,23 @@ async fn check(answer: Answer, whole: bool, read: bool) {
         answer,
     };
     let gw = Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(
                 move |request| async move { Scripted { whole }.send(request).await },
                 LIMIT,
             ),
-        )
+        ))
         .and_then(|g| {
-            g.provider::<Input, _, _>(
+            g.provider(Provider::new(
                 "backup",
                 OpenAiChat,
                 respan_gateway_http::connect(
                     move |request| async move { Scripted { whole }.send(request).await },
                     LIMIT,
                 ),
-            )
+            ))
         })
         .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .map(|g| g.plugin(probing))

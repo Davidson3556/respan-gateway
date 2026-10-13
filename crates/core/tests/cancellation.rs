@@ -130,7 +130,7 @@ async fn spawned_calls_end_with_their_request() {
         let gw = Gateway::new()
             .client::<In, _, _>(Toy)
             .unwrap()
-            .provider::<In, _, _>("a", Toy, connect(t))
+            .provider(Provider::new::<In, _, _>("a", Toy, connect(t)))
             .unwrap()
             .plugin(rec.clone())
             .plugin(Spawner(std::sync::Arc::clone(&tasks)));

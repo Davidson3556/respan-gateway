@@ -54,7 +54,8 @@ fn models_asked(mock: &FakeOpenAi) -> Vec<String> {
 async fn the_first_listed_prefix_a_model_matches_wins() {
     let yaml = format!(
         "{TWO}plugins:
-  - models: [{{ prefix: claude, provider: a }}, {{ prefix: claude-3, provider: b }}]
+  routing:
+    models: [{{ prefix: claude, provider: a }}, {{ prefix: claude-3, provider: b }}]
 "
     );
     let (gateway, a, b) = local(&yaml).await;
@@ -65,24 +66,10 @@ async fn the_first_listed_prefix_a_model_matches_wins() {
 }
 
 #[tokio::test]
-async fn a_later_models_plugin_wins_over_an_earlier_one() {
-    let yaml = format!(
-        "{TWO}plugins:
-  - models: [{{ prefix: gpt, provider: a }}]
-  - models: [{{ prefix: gpt, provider: b }}]
-"
-    );
-    let (gateway, a, b) = local(&yaml).await;
-    request(&gateway, "gpt-x").await;
-    assert_eq!(b.requests().len(), 1);
-    assert!(a.requests().is_empty());
-}
-
-#[tokio::test]
 async fn the_default_target_answers_what_no_router_targets() {
     let yaml = format!(
-        "{TWO}default: b
-plugins: [{{ models: [{{ prefix: claude, provider: a }}] }}]
+        "{TWO}plugins:
+  routing: {{ default: b, models: [{{ prefix: claude, provider: a }}] }}
 "
     );
     let (gateway, a, b) = local(&yaml).await;
@@ -476,24 +463,21 @@ fn a_bad_plugin_or_default_is_an_error() {
     let router = "models: [{ prefix: c, provider: a }]";
     let cases = [
         (
-            "plugins: [{ models: [{ prefix: c, provider: nope }] }]".to_owned(),
-            "plugins: models: unknown provider 'nope'; providers: [a, b]",
+            "plugins: { routing: { models: [{ prefix: c, provider: nope }] } }".to_owned(),
+            "plugins: routing: models: unknown provider 'nope'; providers: [a, b]",
         ),
         (
-            "default: nope".to_owned(),
-            "default: unknown provider 'nope'; providers: [a, b]",
+            "plugins: { routing: { default: nope } }".to_owned(),
+            "plugins: routing: default: unknown provider 'nope'; providers: [a, b]",
         ),
     ];
     for (yaml, expected) in cases {
         let yaml = format!("{TWO}{yaml}");
         assert_eq!(resolve(&yaml).err().as_deref(), Some(expected), "{yaml}");
     }
-    let named = format!("{TWO}plugins: [{{ name: x, {router} }}]");
+    let named = format!("{TWO}plugins: {{ routing: {{ name: x, {router} }} }}");
     let said = resolve(&named).err().unwrap_or_default();
-    assert!(
-        said.contains("unknown field `name`, expected `models`"),
-        "{said}"
-    );
+    assert!(said.contains("unknown field `name`"), "{said}");
 }
 
 #[test]
@@ -518,8 +502,9 @@ formats: [responses-ws]"
     let both = format!("providers: {{ {realtime} }}\nformats: [openai-realtime]");
     assert!(resolve(&both).is_ok());
     // A models route applies to every kind its provider serves.
-    let routed =
-        format!("{both}\nplugins: [{{ models: [{{ prefix: gpt, provider: realtime }}] }}]");
+    let routed = format!(
+        "{both}\nplugins: {{ routing: {{ models: [{{ prefix: gpt, provider: realtime }}] }} }}"
+    );
     assert!(resolve(&routed).is_ok());
 }
 
@@ -529,7 +514,7 @@ async fn a_models_route_applies_to_every_kind_its_provider_serves() {
   chat: { formats: openai-chat, base_url: 'https://a.test/v1', key: k }
   asr: { formats: openai-transcriptions, base_url: 'https://b.test/v1', key: k }
 formats: [openai-chat, openai-transcriptions]
-plugins: [{ models: [{ prefix: voice, provider: asr }, { prefix: voice-chat, provider: chat }] }]";
+plugins: { routing: { models: [{ prefix: voice, provider: asr }, { prefix: voice-chat, provider: chat }] } }";
     let plan = plan(yaml).unwrap_or_else(|e| panic!("{e}"));
     let route = |kind, format, model| {
         plan.routes
@@ -549,7 +534,7 @@ async fn responses_are_served_by_default_natively_where_a_provider_speaks_them()
     let yaml = "providers:
   a: { formats: [openai-chat, openai-responses], base_url: 'https://a.test/v1', auth: { type: bearer, key: sk-test } }
   b: { formats: openai-chat, base_url: 'https://b.test/v1', auth: { type: bearer, key: sk-test } }
-plugins: [{ models: [{ prefix: gpt, provider: a }, { prefix: llama, provider: b }] }]
+plugins: { routing: { models: [{ prefix: gpt, provider: a }, { prefix: llama, provider: b }] } }
 ";
     let (gateway, a, b) = local(yaml).await;
     let send = |path: &'static str, body: serde_json::Value| {
@@ -708,4 +693,66 @@ fn a_vendors_model_name_with_a_slash_goes_to_the_provider_that_serves_it() {
             Some("openai/gpt-oss-120b".to_owned())
         ))
     );
+}
+
+/// Two providers `a` and `b`, `a` the default, under `plugins`; `a` answers
+/// `first`, `b` answers `b`.
+async fn with_attempts(plugins: &str, first: Answer) -> (Gateway, FakeOpenAi, FakeOpenAi) {
+    let a = FakeOpenAi::start().await;
+    let b = FakeOpenAi::start().await;
+    a.answer(first);
+    b.answer(Answer::text("b"));
+    let yaml = format!(
+        "{}plugins:\n  routing: {{ default: a }}\n{plugins}",
+        TWO.replace("https://a.test/v1", &a.base_url())
+            .replace("https://b.test/v1", &b.base_url())
+    );
+    let gateway = resolve(&yaml).unwrap_or_else(|e| panic!("gateway: {e}"));
+    (gateway, a, b)
+}
+
+#[tokio::test]
+async fn fallback_sends_a_refused_request_down_its_chain() {
+    let refused = Answer::error(503).message("overloaded");
+    let (gateway, a, b) = with_attempts("  fallback: { after: { a: [b] } }\n", refused).await;
+    request(&gateway, "gpt-x").await;
+    assert_eq!((a.requests().len(), b.requests().len()), (1, 1));
+}
+
+#[tokio::test]
+async fn hedge_takes_whichever_provider_answers() {
+    let plugins = "  hedge: { after: { a: [b] }, stagger: 0s }\n";
+    let (gateway, _, b) = with_attempts(plugins, Answer::error(503)).await;
+    request(&gateway, "gpt-x").await;
+    assert_eq!(b.requests().len(), 1);
+}
+
+#[test]
+fn bad_fallback_and_hedge_settings_are_errors() {
+    let cases = [
+        (
+            "fallback: { after: { a: [nope] } }",
+            "plugins: fallback: after: unknown provider 'nope'; providers: [a, b]",
+        ),
+        (
+            "fallback: { after: { a: [b, b] } }",
+            "plugins: fallback: after: a: 'b' is listed twice",
+        ),
+        (
+            "fallback: { after: { a: [b] }, tries: 0 }",
+            "plugins: fallback: tries: 0; 1 to 10",
+        ),
+        (
+            "fallback: { after: { a: [b] }, backoff: 5s, max_backoff: 1s }",
+            "plugins: fallback: backoff: 5s is longer than max_backoff: 1s",
+        ),
+        (
+            "hedge: { after: { a: [] } }",
+            "plugins: hedge: after: 'a' has no provider to race it against",
+        ),
+    ];
+    for (plugins, expected) in cases {
+        let yaml = format!("{TWO}plugins: {{ {plugins} }}");
+        assert_eq!(resolve(&yaml).err().as_deref(), Some(expected), "{yaml}");
+    }
 }

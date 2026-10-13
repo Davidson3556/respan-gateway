@@ -1,0 +1,16 @@
+[package]
+name = "respan-gateway-plugin-relay"
+description = "The relay plugin: a client's request, key, response head and error body forwarded as they came, between a client and a provider of one format."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+respan-gateway-core.workspace = true
+respan-gateway-http.workspace = true

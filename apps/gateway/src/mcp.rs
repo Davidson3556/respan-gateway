@@ -20,14 +20,16 @@ use std::time::{Duration, Instant};
 use indexmap::IndexMap;
 use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::{
-    ClientContext, ErrorCode, Extensions, Fault, Gateway, Plugin, Response, async_trait,
+    ClientContext, ErrorCode, Extensions, Fault, Gateway, Plugin, Provider, Response, async_trait,
 };
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
-use respan_gateway_http::reqwest;
-use respan_gateway_http::{Body, Completion, HttpTransport, ProviderIo, Status, Wire, framing};
+use respan_gateway_http::{Body, Completion, ProviderIo, raw::Original};
+use respan_gateway_http_faults::Status;
+use respan_gateway_http_transport::HttpTransport;
+use respan_gateway_http_transport::reqwest;
 use respan_gateway_mcp::{Input, Output, RpcCode};
 use respan_gateway_mcp_http::{Owner, SESSION, StdioTransport, StreamableHttp};
-use respan_gateway_plugins::Model;
+use respan_gateway_plugin_routing::Model;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
@@ -40,7 +42,7 @@ use crate::models::{Probe, Reach};
 use crate::presets::origin;
 
 /// The format's name, as the request log shows it.
-pub const FORMAT: &str = "mcp";
+pub use respan_gateway_mcp_http::FORMAT;
 /// Where clients reach a server: `/mcp/{name}`.
 const MOUNT: &str = "/mcp";
 /// The most client sessions, so child processes, one server holds at once
@@ -552,7 +554,7 @@ fn register(
             } => {
                 let transport = HttpTransport::new(origin)?.with_headers(auth.clone())?;
                 let io = explained(transport, &s.name, origin, limit, Some(owners.clone()));
-                gateway.provider::<Input, Output, _>(name, StreamableHttp::new(path), io)?
+                gateway.provider(Provider::new(name, StreamableHttp::new(path), io))?
             }
             Transport::Stdio {
                 command,
@@ -570,11 +572,11 @@ fn register(
                 if let Some(dir) = cwd {
                     child = child.current_dir(dir);
                 }
-                gateway.provider::<Input, Output, _>(
+                gateway.provider(Provider::new(
                     name,
                     StreamableHttp::new("/"),
                     child.connect(),
-                )?
+                ))?
             }
         };
     }
@@ -742,9 +744,9 @@ impl Plugin for McpRoute {
         }
         let path = cx
             .extensions()
-            .get::<Wire>()
+            .get::<Original>()
             .and_then(|wire| wire.get())
-            .map(|request| framing::clean_path(request.uri().path()));
+            .map(|request| respan_gateway_http_syntax::clean_path(request.uri().path()));
         let name = path.as_deref().and_then(|p| p.rsplit('/').next());
         let name = name.ok_or_else(|| Fault::not_found("no MCP server named"))?;
         cx.set_target(name);

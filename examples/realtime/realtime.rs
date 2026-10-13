@@ -81,10 +81,11 @@ use std::time::Duration;
 use respan_gateway_conversation::Content;
 use respan_gateway_core::futures::{Stream, StreamExt, TryStreamExt, stream};
 use respan_gateway_core::{
-    ClientContext, EventStream, Fault, Filter, Gateway, NativeFields, Plugin, ProviderContext,
-    Response, async_trait,
+    ClientContext, EventStream, Fault, Filter, Gateway, NativeFields, Plugin, Provider,
+    ProviderContext, Response, async_trait,
 };
-use respan_gateway_http::{Credential, Status};
+use respan_gateway_http::Credential;
+use respan_gateway_http_faults::Status;
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::{Amount, HoldId, Ledger, MemoryLedger};
@@ -574,7 +575,7 @@ impl Plugin for Meter {
     async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
         if let Some(Metered(session, turns)) = px.extensions().get::<Metered>() {
             let code = end.as_ref().err().map_or("ok".into(), |f| {
-                respan_gateway_http::error_code(f).to_owned()
+                respan_gateway_http_faults::error_code(f).to_owned()
             });
             let turns = turns.load(Ordering::SeqCst);
             lock(&self.ended).push(Ended {
@@ -1167,11 +1168,11 @@ fn gateway_with_audio(
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
         .client::<Input, _, _>(OpenAiRealtime)?
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "openai",
             OpenAiRealtime,
             WsTransport::new(provider)?.connect(),
-        )?
+        ))?
         .target("openai")?
         .plugin(ends.clone())
         .plugin(audio::Validate(allow_audio));
@@ -1303,14 +1304,8 @@ async fn main() -> Result<(), Fault> {
     let (meter, ends) = (Meter::default(), Outcomes::default());
     let wallets = MemoryLedger::new();
     wallets.open("sk-demo", None, 100_000);
-    let gw = gateway(
-        provider.trim_end_matches("/v1"),
-        &meter,
-        &ends,
-        &wallets,
-        HOUR,
-    )?;
-    let gw = gw.plugin(respan_gateway_http::Relay::RAW);
+    let gw = gateway(&provider, &meter, &ends, &wallets, HOUR)?;
+    let gw = gw.plugin(respan_gateway_plugin_relay::Relay);
     let addr = listen(&gw).await;
 
     let mut ws = client(addr).await;

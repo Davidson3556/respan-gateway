@@ -7,7 +7,7 @@ export interface Served {
   provider: string | null;
   /** The client API it was translated from, when the provider speaks another. */
   translatedFrom: ChatApiId | null;
-  /** Calls to the model, when the gateway ran an agent loop. */
+  /** Calls to the model, when the gateway ran a tool loop. */
   steps: RequestRecord["steps"];
 }
 

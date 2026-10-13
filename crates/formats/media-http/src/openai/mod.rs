@@ -36,19 +36,20 @@ use crate::edge::{bind_provider, kept, sends};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use respan_gateway_conversation::{Media, MediaSource, Usage};
+use respan_gateway_conversation_http::fields::{merge_missing, rest_of, set, unix_now};
 use respan_gateway_conversation_http::{merge_details, read_provider_error};
 use respan_gateway_core::{
     BadRequest, Connection, Details, ErrorCode, Fault, NativeFields, NativeValue, Upstream,
 };
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::fields::{merge_missing, rest_of, set, unix_now};
-use respan_gateway_http::framing::{self, path_ends_with, sse};
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{
     self, HeaderMap, HeaderValue, StatusCode, request::Parts as RequestHead,
     response::Parts as ResponseHead,
 };
-use respan_gateway_http::{ClientIo, Encoder, ProviderIo, RawReply, Wire, error_code};
+use respan_gateway_http::{ClientIo, Encoder, ProviderIo, raw::Original, raw::RawReply};
+use respan_gateway_http_faults::error_code;
+use respan_gateway_http_syntax::path_ends_with;
 use serde_json::{Map, Value, json};
 use std::sync::LazyLock;
 
@@ -68,7 +69,7 @@ struct Fields {
 struct Form<'a> {
     headers: &'a HeaderMap,
     raw: &'a Bytes,
-    wire: Option<&'a Wire>,
+    wire: Option<&'a Original>,
 }
 
 impl Form<'_> {
@@ -323,7 +324,7 @@ fn foreign(format: &str, native: &NativeValue) -> Fault {
         native.format
     ))
     .with(ErrorCode("untranslatable".into()))
-    .with(respan_gateway_http::Status(StatusCode::BAD_GATEWAY))
+    .with(respan_gateway_http_faults::Status(StatusCode::BAD_GATEWAY))
 }
 
 /// Bytes as base64.
@@ -346,14 +347,14 @@ fn json_bytes(v: &Map<String, Value>) -> Result<Bytes, Fault> {
 /// One server-sent event of `v`, without a name, as OpenAI's SDKs read it
 /// by its `type`.
 fn sse_event(v: &Value) -> String {
-    sse::event(None, v)
+    respan_gateway_sse::event(None, v)
 }
 
 /// The JSON of a provider's stream event `raw` of `format`: `None` for one
 /// with no data or `[DONE]`; data that is no JSON as a string; an error
 /// event as its fault.
-fn event_json(format: &str, raw: &[u8]) -> Result<Option<Value>, Fault> {
-    let Some(data) = sse::event_data(raw) else {
+fn event_json(_format: &str, raw: &[u8]) -> Result<Option<Value>, Fault> {
+    let Some(data) = respan_gateway_sse::event_data(raw) else {
         return Ok(None);
     };
     if data.trim() == "[DONE]" {
@@ -363,7 +364,7 @@ fn event_json(format: &str, raw: &[u8]) -> Result<Option<Value>, Fault> {
         return Ok(Some(Value::String(data)));
     };
     match says_error(&v) {
-        true => Err(said_error(format, Bytes::from(data))),
+        true => Err(said_error(Bytes::from(data))),
         false => Ok(Some(v)),
     }
 }
@@ -379,13 +380,13 @@ fn says_error(v: &Value) -> bool {
         }
 }
 
-/// The fault of an error a provider of `format` said in a success: read
+/// The fault of an error a provider said in a success: read
 /// as its error answers are, a 502 unless it says another status.
-fn said_error(format: &str, raw: Bytes) -> Fault {
+fn said_error(raw: Bytes) -> Fault {
     let mut answer = http::Response::new(raw);
     let json = HeaderValue::from_static("application/json");
     answer.headers_mut().insert(CONTENT_TYPE, json);
-    read_provider_error(format, answer)
+    read_provider_error(answer)
 }
 
 /// A provider's whole JSON body `raw` of `format`, if `is_response` says it
@@ -396,7 +397,7 @@ fn whole_json(format: &str, raw: Bytes, is_response: fn(&Value) -> bool) -> Resu
         return Ok(v);
     }
     Err(match says_error(&v) {
-        true => said_error(format, raw),
+        true => said_error(raw),
         false => Upstream::fault(format!(
             "the provider's success is not a response of {format}"
         )),
@@ -451,17 +452,19 @@ where
     I: Clone + Send + Sync + 'static,
     O: Clone + Send + Sync + 'static,
 {
-    let wire = io.extensions().get::<Wire>().cloned();
+    let wire = io.extensions().get::<Original>().cloned();
     let read = wire.clone();
-    io.bind(
-        move |request| {
-            respan_gateway_http::messages(request, move |head, raw| {
+    io.with_error(refusal).bind(
+        move |head| {
+            let head = head.clone();
+            Box::new(move |raw: Bytes, out: &mut Vec<I>| {
                 let form = Form {
                     headers: &head.headers,
                     raw: &raw,
                     wire: read.as_ref(),
                 };
-                decode(head, &form)
+                out.push(decode(&head, &form)?);
+                Ok(())
             })
         },
         move |reply| {
@@ -470,13 +473,12 @@ where
             let encoder = encoder(reply.request(), fields, &mut head);
             Ok(reply.write(head, encoder))
         },
-        refusal,
     )
 }
 
 /// Set a call's path and content type.
 fn post_to(head: &mut RequestHead, path: &str, content_type: &str) -> Result<(), Fault> {
-    framing::set_path(head, path)?;
+    respan_gateway_http_syntax::set_path(head, path)?;
     let content_type = HeaderValue::from_str(content_type)
         .map_err(|e| Fault::internal("a content type is no header").with_source(e))?;
     head.headers.insert(CONTENT_TYPE, content_type);
@@ -490,9 +492,9 @@ fn streams(io: &ProviderIo, paths: &[&str], wants: fn(&Map<String, Value>) -> bo
     if let Some(StreamResponse(stream)) = io.extensions().get::<StreamResponse>() {
         return *stream;
     }
-    let wire = io.extensions().get::<Wire>();
+    let wire = io.extensions().get::<Original>();
     let paths_match = wire
-        .and_then(Wire::get)
+        .and_then(Original::get)
         .is_some_and(|r| paths.iter().any(|p| path_ends_with(r.uri(), p)));
     paths_match && wants(asked(wire))
 }
@@ -500,7 +502,7 @@ fn streams(io: &ProviderIo, paths: &[&str], wants: fn(&Map<String, Value>) -> bo
 /// The text fields of a client's request, for its response's framing, as
 /// its decoder parsed them ([`Form::fields`]); none if it cannot be read, as
 /// it then was refused.
-fn asked(wire: Option<&Wire>) -> &Map<String, Value> {
+fn asked(wire: Option<&Original>) -> &Map<String, Value> {
     static NONE: LazyLock<Map<String, Value>> = LazyLock::new(Map::new);
     let parsed = wire.and_then(|w| w.memo(|r| parse_fields(r.headers(), r.body())));
     parsed
@@ -602,7 +604,7 @@ mod tests {
             .header(CONTENT_TYPE, "multipart/form-data; boundary=b")
             .body(body)
             .unwrap_or_default();
-        let wire = Wire::new(request, false);
+        let wire = Original::new(request, false);
         let request = wire.get().cloned().unwrap_or_default();
         let (head, raw) = request.into_parts();
         let decoding = Form {

@@ -14,33 +14,29 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, TryStreamExt};
-#[cfg(feature = "reqwest")]
 use http::header::AUTHORIZATION;
 use http::header::{CONNECTION, CONTENT_ENCODING, UPGRADE};
 use http::{HeaderValue, StatusCode};
 use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
-#[cfg(feature = "reqwest")]
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes;
-use respan_gateway_http::passthrough;
+use respan_gateway_passthrough_http as passthrough;
 
 use respan_gateway_conversation::{Delta, Input, Message, Output, Role};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures;
-use respan_gateway_core::{BadRequest, Upstream};
+use respan_gateway_core::{BadRequest, Provider, Upstream};
 use respan_gateway_core::{
-    ClientContext, EventSink, EventStream, Fault, Filter, Format, Gateway, Plugin, ProviderContext,
-    Response, async_trait,
+    ClientContext, EventSink, Fault, Filter, Format, Gateway, Plugin, ProviderContext, Response,
+    async_trait,
 };
 use respan_gateway_http::Encoder;
-use respan_gateway_http::framing::set_path;
-use respan_gateway_http::{ClientIo, Completion, ProviderIo, Wire};
+use respan_gateway_http::{ClientIo, Completion, ProviderIo, raw::Original};
 use respan_gateway_http::{http, http_body, http_body_util};
+use respan_gateway_http_syntax::set_path;
 use serde_json::{Value, json};
-#[cfg(not(feature = "reqwest"))]
-use std::collections::VecDeque;
 
 /// A provider registration used only by this suite.
 type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
@@ -67,11 +63,11 @@ where
 {
     let name = name.to_owned();
     Box::new(move |gw| {
-        gw.provider(
+        gw.provider(Provider::new(
             name,
             format,
             respan_gateway_http::connect(move |request| send(request), LIMIT),
-        )
+        ))
     })
 }
 
@@ -109,21 +105,34 @@ struct Heard(String);
 #[derive(Clone)]
 struct Talk;
 
-fn read_talk(request: http::Request<Body>, strict: bool) -> EventStream<Say> {
-    respan_gateway_http::messages(request, move |_, raw| {
-        let mut rest = match serde_json::from_slice::<Value>(&raw) {
-            Ok(Value::Object(fields)) => fields,
-            _ => serde_json::Map::new(),
-        };
-        let v = rest.remove("say");
-        let text = match v.as_ref().and_then(Value::as_str) {
-            _ if raw.is_empty() && !strict => String::new(),
-            _ if raw.is_empty() => return Err(BadRequest::fault("an empty message is not talk")),
-            Some(s) => s.to_owned(),
-            None => return Err(BadRequest::fault("not talk")),
-        };
-        Ok(Say(text, rest))
-    })
+fn read_talk(
+    _request: &http::request::Parts,
+    strict: bool,
+) -> Box<dyn respan_gateway_http::Decoder<Say>> {
+    {
+        Box::new(move |raw: Bytes, out: &mut Vec<_>| {
+            let value: Result<_, Fault> = {
+                {
+                    let mut rest = match serde_json::from_slice::<Value>(&raw) {
+                        Ok(Value::Object(fields)) => fields,
+                        _ => serde_json::Map::new(),
+                    };
+                    let v = rest.remove("say");
+                    let text = match v.as_ref().and_then(Value::as_str) {
+                        _ if raw.is_empty() && !strict => String::new(),
+                        _ if raw.is_empty() => {
+                            return Err(BadRequest::fault("an empty message is not talk"));
+                        }
+                        Some(s) => s.to_owned(),
+                        None => return Err(BadRequest::fault("not talk")),
+                    };
+                    Ok(Say(text, rest))
+                }
+            };
+            out.push(value?);
+            Ok(())
+        })
+    }
 }
 
 fn talk_reply(reply: respan_gateway_http::Reply) -> Result<EventSink<Heard>, Fault> {
@@ -136,16 +145,11 @@ fn talk_reply(reply: respan_gateway_http::Reply) -> Result<EventSink<Heard>, Fau
     Ok(reply.write(head, Box::new(Write)))
 }
 
-fn read_heard(response: http::Response<Body>, _: http::Request<Bytes>) -> EventStream<Heard> {
-    respan_gateway_http::framing::parse(
-        response.into_body(),
-        Messages,
-        Messages::decode,
-        |decoder, end, out| {
-            end?;
-            decoder.end(out)
-        },
-    )
+fn read_heard(
+    _: &http::response::Parts,
+    _: &http::Request<Bytes>,
+) -> Option<Box<dyn respan_gateway_http::Decoder<Heard>>> {
+    Some(Box::new(Messages))
 }
 
 impl Format<ClientIo, Say, Heard> for Talk {
@@ -156,11 +160,9 @@ impl Format<ClientIo, Say, Heard> for Talk {
         io.request().uri().path().ends_with("/talk")
     }
     fn bind(&self, io: ClientIo) -> Result<respan_gateway_core::Connection<Say, Heard>, Fault> {
-        Ok(io.bind(
-            |request| read_talk(request, false),
-            talk_reply,
-            |fault, _, _| json!({"error": fault.message()}).to_string().into(),
-        ))
+        Ok(io
+            .with_error(|fault, _, _| json!({"error": fault.message()}).to_string().into())
+            .bind(|request| read_talk(request, false), talk_reply))
     }
 }
 
@@ -169,9 +171,7 @@ impl Format<ProviderIo, Heard, Say> for Talk {
         "talk"
     }
     fn bind(&self, io: ProviderIo) -> Result<respan_gateway_core::Connection<Heard, Say>, Fault> {
-        Ok(io.bind(talk_call, read_heard, |answer| {
-            respan_gateway_http::provider_fault("talk", answer)
-        }))
+        Ok(io.bind(talk_call, read_heard))
     }
 }
 
@@ -193,15 +193,39 @@ fn talk_call(
 /// Writes each talk message from its text and its other fields.
 struct Says;
 
-impl Encoder<Say> for Says {
-    fn encode(&mut self, say: &Say, out: &mut BytesMut) -> Result<(), Fault> {
+impl Says {
+    fn encode_into(&mut self, say: &Say, out: &mut BytesMut) -> Result<(), Fault> {
         let mut v = say.1.clone();
         v.insert("say".into(), say.0.clone().into());
         out.extend_from_slice(Value::Object(v).to_string().as_bytes());
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+}
+
+impl Encoder<Say> for Says {
+    fn encode(
+        &mut self,
+        value: &Say,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.encode_into(value, &mut out)?;
+        frames.push(out.freeze());
+        Ok(())
+    }
+
+    fn end(
+        &mut self,
+        end: Result<(), Fault>,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.end_into(&end, &mut out)?;
+        frames.extend((!out.is_empty()).then(|| out.freeze()));
         Ok(())
     }
 }
@@ -209,7 +233,7 @@ impl Encoder<Say> for Says {
 /// One message per data frame.
 struct Messages;
 
-impl Messages {
+impl respan_gateway_http::Decoder<Heard> for Messages {
     fn decode(&mut self, bytes: Bytes, out: &mut Vec<Heard>) -> Result<(), Fault> {
         let heard = serde_json::from_slice::<Value>(&bytes).ok();
         match heard.as_ref().and_then(|v| v["heard"].as_str()) {
@@ -218,24 +242,44 @@ impl Messages {
         }
         Ok(())
     }
-
-    fn end(&mut self, _out: &mut Vec<Heard>) -> Result<(), Fault> {
-        Ok(())
-    }
 }
 
 struct Write;
 
-impl Encoder<Heard> for Write {
-    fn encode(&mut self, heard: &Heard, out: &mut BytesMut) -> Result<(), Fault> {
+impl Write {
+    fn encode_into(&mut self, heard: &Heard, out: &mut BytesMut) -> Result<(), Fault> {
         out.extend_from_slice(json!({ "heard": heard.0 }).to_string().as_bytes());
         Ok(())
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         if let Err(f) = end {
             out.extend_from_slice(json!({ "error": f.message() }).to_string().as_bytes());
         }
+        Ok(())
+    }
+}
+
+impl Encoder<Heard> for Write {
+    fn encode(
+        &mut self,
+        value: &Heard,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.encode_into(value, &mut out)?;
+        frames.push(out.freeze());
+        Ok(())
+    }
+
+    fn end(
+        &mut self,
+        end: Result<(), Fault>,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.end_into(&end, &mut out)?;
+        frames.extend((!out.is_empty()).then(|| out.freeze()));
         Ok(())
     }
 }
@@ -331,111 +375,41 @@ fn talk_with_openai(
     (gw.unwrap_or_else(|e| panic!("{e}")), calls)
 }
 
-/// Two OpenAI replies, with exact in-memory frames when Reqwest is disabled;
-/// with Reqwest enabled, exercise the real HTTP transport and pinned mockllm.
+/// Two OpenAI replies, through the real HTTP transport and pinned mockllm.
 struct OpenAiFixture {
     transport: SendRequest,
-    #[cfg(feature = "reqwest")]
     fake: FakeOpenAi,
-    #[cfg(not(feature = "reqwest"))]
-    sent: Arc<Mutex<Vec<Value>>>,
 }
 
 impl OpenAiFixture {
     async fn new(streamed: bool) -> Self {
-        #[cfg(feature = "reqwest")]
-        {
-            let fake = FakeOpenAi::start().await;
-            for text in ["one", "two"] {
-                if streamed {
-                    let chunk = json!({"id":"c","choices":[{"index":0,"delta":{"content":text}}]});
-                    fake.answer(Answer::events(vec![
-                        Value::String(format!("data: {chunk}")),
-                        Value::String("data: [DONE]".into()),
-                    ]));
-                } else {
-                    let reply = json!({"id":"c","choices":[{"message":{"content":text}}]});
-                    fake.answer(Answer::raw(reply.to_string()));
-                }
+        let fake = FakeOpenAi::start().await;
+        for text in ["one", "two"] {
+            if streamed {
+                let chunk = json!({"id":"c","choices":[{"index":0,"delta":{"content":text}}]});
+                fake.answer(Answer::events(vec![
+                    Value::String(format!("data: {chunk}")),
+                    Value::String("data: [DONE]".into()),
+                ]));
+            } else {
+                let reply = json!({"id":"c","choices":[{"message":{"content":text}}]});
+                fake.answer(Answer::raw(reply.to_string()));
             }
-            let mut headers = http::HeaderMap::new();
-            headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer sk-test"));
-            let client = respan_gateway_http::HttpTransport::new(fake.base_url())
-                .and_then(|http| http.with_headers(headers))
-                .unwrap_or_else(|fault| panic!("{fault}"));
-            let transport = sender(move |request| {
-                let client = client.clone();
-                async move { client.send(request).await }
-            });
-            Self { transport, fake }
         }
-        #[cfg(not(feature = "reqwest"))]
-        {
-            let sent = Arc::new(Mutex::new(Vec::new()));
-            let answers: VecDeque<Vec<Bytes>> = ["one", "two"]
-                .map(|text| {
-                    if streamed {
-                        let chunk =
-                            json!({"id":"c","choices":[{"index":0,"delta":{"content":text}}]});
-                        vec![
-                            Bytes::from(format!("data: {chunk}\n\n")),
-                            Bytes::from_static(b"data: [DONE]\n\n"),
-                        ]
-                    } else {
-                        let reply = json!({"id":"c","choices":[{"message":{"content":text}}]});
-                        vec![Bytes::from(reply.to_string())]
-                    }
-                })
-                .into();
-            let answers = Arc::new(Mutex::new(answers));
-            let record = sent.clone();
-            let transport = sender(move |call| {
-                let (record, answers) = (record.clone(), answers.clone());
-                async move {
-                    let chunks: Vec<Bytes> = call.into_body().try_collect().await?;
-                    let mut request = BytesMut::new();
-                    for chunk in chunks {
-                        request.extend_from_slice(&chunk);
-                    }
-                    let value = serde_json::from_slice(&request)
-                        .map_err(|err| BadRequest::fault(format!("bad chat request: {err}")))?;
-                    record.lock().unwrap_or_else(|p| p.into_inner()).push(value);
-                    let frames = answers
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .pop_front()
-                        .ok_or_else(|| Upstream::fault("unexpected chat call"))?;
-                    let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
-                    head.headers.insert(
-                        http::header::CONTENT_TYPE,
-                        HeaderValue::from_static(if streamed {
-                            "text/event-stream"
-                        } else {
-                            "application/json"
-                        }),
-                    );
-                    Ok((
-                        http::Response::from_parts(
-                            head,
-                            Body::stream(futures::stream::iter(frames.into_iter().map(Ok))),
-                        ),
-                        None,
-                    ))
-                }
-            });
-            Self { transport, sent }
-        }
+        let mut headers = http::HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer sk-test"));
+        let client = respan_gateway_http_transport::HttpTransport::new(fake.base_url())
+            .and_then(|http| http.with_headers(headers))
+            .unwrap_or_else(|fault| panic!("{fault}"));
+        let transport = sender(move |request| {
+            let client = client.clone();
+            async move { client.send(request).await }
+        });
+        Self { transport, fake }
     }
 
     fn requests(&self) -> Vec<Value> {
-        #[cfg(feature = "reqwest")]
-        {
-            self.fake.requests().into_iter().map(|r| r.body).collect()
-        }
-        #[cfg(not(feature = "reqwest"))]
-        {
-            self.sent.lock().unwrap_or_else(|p| p.into_inner()).clone()
-        }
+        self.fake.requests().into_iter().map(|r| r.body).collect()
     }
 }
 
@@ -622,9 +596,13 @@ async fn a_whole_request_carries_one_input_even_empty_and_an_upgrading_head_none
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let input = match cx.input::<Say>() {
                 Ok(say) => format!("{say:?}"),
-                Err(f) => format!("{}: {}", respan_gateway_http::error_code(&f), f.message()),
+                Err(f) => format!(
+                    "{}: {}",
+                    respan_gateway_http_faults::error_code(&f),
+                    f.message()
+                ),
             };
-            let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+            let asked = cx.extensions().get::<Original>().and_then(Original::get);
             let count = match asked.is_some_and(|a| a.headers().contains_key(UPGRADE)) {
                 // A framed request's inputs are left for the call.
                 true => 0,
@@ -891,7 +869,7 @@ async fn an_input_filters_failure_ends_every_input_filter_with_it() {
             let code = end
                 .as_ref()
                 .err()
-                .map_or("ok", respan_gateway_http::error_code);
+                .map_or("ok", respan_gateway_http_faults::error_code);
             self.0.note(format!("{} {code}", self.1));
             Ok(())
         }
@@ -961,7 +939,7 @@ async fn a_panic_ending_a_call_keeps_its_end() {
             let code = o
                 .as_ref()
                 .err()
-                .map_or("ok", respan_gateway_http::error_code);
+                .map_or("ok", respan_gateway_http_faults::error_code);
             self.0.note(code.to_owned());
         }
     }
@@ -1000,7 +978,7 @@ async fn a_call_pending_at_the_requests_end_ends_abandoned_before_it() {
                 let end = call
                     .await
                     .err()
-                    .map(|f| respan_gateway_http::error_code(&f).to_owned());
+                    .map(|f| respan_gateway_http_faults::error_code(&f).to_owned());
                 notes.note(format!("call {}", end.unwrap_or_default()));
             });
             let _ = pending.await;
@@ -1026,7 +1004,7 @@ async fn a_call_pending_at_the_requests_end_ends_abandoned_before_it() {
             let end = o
                 .as_ref()
                 .err()
-                .map(|f| respan_gateway_http::error_code(f).to_owned());
+                .map(|f| respan_gateway_http_faults::error_code(f).to_owned());
             self.0
                 .note(format!("on_provider_end {}", end.unwrap_or_default()));
         }
@@ -1205,7 +1183,6 @@ impl Format<ProviderIo, Heard, Say> for TalkHttp {
                 Ok(Box::new(Says) as Box<dyn Encoder<Say>>)
             },
             read_heard,
-            |answer| respan_gateway_http::provider_fault("talk-http", answer),
         ))
     }
 }
@@ -1226,7 +1203,7 @@ async fn a_framed_requests_inputs_go_only_to_a_call_that_switches_protocols() {
     assert_eq!(
         ended
             .await
-            .map_err(|f| respan_gateway_http::error_code(&f).to_owned()),
+            .map_err(|f| respan_gateway_http_faults::error_code(&f).to_owned()),
         Err("config".into())
     );
     gw.idle().await;
@@ -1252,11 +1229,9 @@ impl Format<ClientIo, passthrough::Input<Raw>, passthrough::Output<Raw>> for Raw
         respan_gateway_core::Connection<passthrough::Input<Raw>, passthrough::Output<Raw>>,
         Fault,
     > {
-        Ok(io.bind(
-            passthrough::read_request,
-            passthrough::write_response,
-            respan_gateway_http::plain,
-        ))
+        Ok(io
+            .with_error(respan_gateway_http::rules::plain)
+            .bind(passthrough::read_request, passthrough::write_response))
     }
 }
 impl Format<ProviderIo, passthrough::Output<Raw>, passthrough::Input<Raw>> for Raw {
@@ -1270,14 +1245,14 @@ impl Format<ProviderIo, passthrough::Output<Raw>, passthrough::Input<Raw>> for R
         respan_gateway_core::Connection<passthrough::Output<Raw>, passthrough::Input<Raw>>,
         Fault,
     > {
+        let write = passthrough::request_writer(&io);
         Ok(io.bind(
-            |head, input| {
-                let encoder = passthrough::write_request(head, input)?;
+            move |head, input| {
+                let encoder = write(head, input)?;
                 set_path(head, "/")?;
                 Ok(encoder)
             },
             passthrough::read_response,
-            |answer| respan_gateway_http::provider_fault("raw", answer),
         ))
     }
 }
@@ -1291,7 +1266,7 @@ async fn a_request_that_asks_to_switch_protocols_is_framed_in_any_format() {
                 .target("raw")
         })
         .unwrap_or_else(|e| panic!("{e}"))
-        .plugin(explicit::Relay::RAW);
+        .plugin(respan_gateway_plugin_relay::Relay);
     let (send, req) = upgrade();
 
     // Raw says nothing of framing: the request's `Upgrade` does.
@@ -1347,7 +1322,7 @@ async fn a_101_goes_only_to_a_request_that_asked() {
     assert_eq!(
         ended
             .await
-            .map_err(|f| respan_gateway_http::error_code(&f).to_owned()),
+            .map_err(|f| respan_gateway_http_faults::error_code(&f).to_owned()),
         Err("upstream".into())
     );
 }
@@ -1371,10 +1346,13 @@ async fn a_clone_of_a_polled_call_keeps_its_settings() {
     let (resp, ended) = serve(&gw, post("/v1/talk", r#"{"say":"x"}"#)).await;
     let status = resp.status();
     let _ = BodyExt::collect(resp.into_body()).await;
-    let end = ended
-        .await
-        .err()
-        .map(|f| format!("{} {}", respan_gateway_http::error_code(&f), f.message()));
+    let end = ended.await.err().map(|f| {
+        format!(
+            "{} {}",
+            respan_gateway_http_faults::error_code(&f),
+            f.message()
+        )
+    });
     assert_eq!((status, end), (StatusCode::OK, None));
 }
 
@@ -1414,7 +1392,7 @@ async fn a_pending_call_left_unpolled_still_ends_with_its_request() {
             let end = o
                 .as_ref()
                 .err()
-                .map(|f| respan_gateway_http::error_code(f).to_owned());
+                .map(|f| respan_gateway_http_faults::error_code(f).to_owned());
             self.0
                 .note(format!("on_provider_end {}", end.unwrap_or_default()));
         }
@@ -1552,7 +1530,7 @@ async fn a_retry_after_a_call_that_read_the_end_gets_a_clean_end() {
     let end = ended
         .await
         .err()
-        .map(|f| respan_gateway_http::error_code(&f).to_owned());
+        .map(|f| respan_gateway_http_faults::error_code(&f).to_owned());
     assert_eq!((got, end), (Vec::<String>::new(), None));
 }
 
@@ -1813,11 +1791,9 @@ impl Format<ClientIo, Say, Heard> for Strict {
         Talk.matches(io)
     }
     fn bind(&self, io: ClientIo) -> Result<respan_gateway_core::Connection<Say, Heard>, Fault> {
-        Ok(io.bind(
-            |request| read_talk(request, true),
-            talk_reply,
-            |fault, _, _| json!({"error": fault.message()}).to_string().into(),
-        ))
+        Ok(io
+            .with_error(|fault, _, _| json!({"error": fault.message()}).to_string().into())
+            .bind(|request| read_talk(request, true), talk_reply))
     }
 }
 impl Format<ProviderIo, Heard, Say> for Strict {
@@ -1857,7 +1833,7 @@ async fn r8_4_an_input_a_filter_adds_at_the_end_is_sent() {
 
     let echo = Echo::default();
     let gw = Gateway::new()
-        .provider::<Say, _, _>(
+        .provider(Provider::new(
             "echo",
             Strict,
             respan_gateway_http::connect(
@@ -1870,7 +1846,7 @@ async fn r8_4_an_input_a_filter_adds_at_the_end_is_sent() {
                 },
                 LIMIT,
             ),
-        )
+        ))
         .and_then(|g| g.client::<Say, _, _>(Strict))
         .map(|g| g.plugin(P))
         .and_then(|g| g.target("echo"))
@@ -1915,7 +1891,7 @@ async fn r8_an_input_filter_added_after_the_inputs_ended_ends_at_once() {
             let added = cx.filter(Ends(self.0.clone()));
             let code = added
                 .err()
-                .map(|f| respan_gateway_http::error_code(&f).to_owned());
+                .map(|f| respan_gateway_http_faults::error_code(&f).to_owned());
             self.0
                 .lock()
                 .map(|mut n| n.push(format!("{read} {code:?}")))
@@ -1948,7 +1924,7 @@ struct WsToSse(&'static str);
 #[async_trait]
 impl Plugin for WsToSse {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+        let asked = cx.extensions().get::<Original>().and_then(Original::get);
         if !cx.is_kind::<Say>() || !asked.is_some_and(|a| a.headers().contains_key(UPGRADE)) {
             return Ok(None);
         }
@@ -2000,5 +1976,3 @@ async fn r11_plugin_ws_to_sse_bridge() {
     assert_eq!(calls.all().len(), 2);
     assert!(ended.await.is_ok());
 }
-
-use respan_gateway_http as explicit;

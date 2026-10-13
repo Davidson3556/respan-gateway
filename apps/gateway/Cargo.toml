@@ -20,15 +20,24 @@ name = "respan-gateway"
 path = "src/main.rs"
 
 [dependencies]
+respan-gateway-http-syntax.workspace = true
+respan-gateway-http-faults.workspace = true
+respan-gateway-plugin-relay.workspace = true
+respan-gateway-plugin-credentials.workspace = true
 respan-gateway-conversation.workspace = true
 respan-gateway-conversation-http.workspace = true
 respan-gateway-core.workspace = true
-respan-gateway-http = { workspace = true, features = ["reqwest"] }
+respan-gateway-http.workspace = true
+respan-gateway-http-transport.workspace = true
 respan-gateway-mcp.workspace = true
 respan-gateway-mcp-http.workspace = true
+respan-gateway-passthrough-http.workspace = true
 respan-gateway-media.workspace = true
 respan-gateway-media-http.workspace = true
-respan-gateway-plugins.workspace = true
+respan-gateway-plugin-fallback.workspace = true
+respan-gateway-plugin-routing.workspace = true
+respan-gateway-plugin-tool-loop.workspace = true
+respan-gateway-plugin-mcp-aggregate.workspace = true
 respan-gateway-providers.workspace = true
 respan-gateway-realtime.workspace = true
 respan-gateway-realtime-ws.workspace = true

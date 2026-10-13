@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex};
 use futures::FutureExt;
 
 use crate::call::SharedCall;
+use crate::client_output::client_flow;
 use crate::fault::PANICKED;
-use crate::format::{AnyFormat, Erased, snapshot};
-use crate::leg::locked;
+use crate::format::{AnyFormat, Erased};
+use crate::layers::locked;
 use crate::lifecycle::{EndHooks, InFlight};
-use crate::outflow::outflow;
 use crate::provider::Provider;
 use crate::response::Batch;
 use crate::{ClientContext, EventStream, Extensions, Fault, Format, Plugin, Response, Result};
@@ -55,30 +55,10 @@ impl Gateway {
         Gateway::default()
     }
 
-    /// Add a provider speaking `format`. After its hooks run, each attempt
-    /// gets a fresh transport from `factory`, with that call's extensions.
-    /// The factory may return a lightweight handle backed by a shared pool.
-    /// `I` is the gateway input type and `O` its output type: this binding
-    /// receives `O` and sends `I`.
-    pub fn provider<I, O, T>(
-        self,
-        name: impl Into<String>,
-        format: impl Format<T, O, I>,
-        factory: impl Fn(Extensions) -> T + Send + Sync + 'static,
-    ) -> Result<Gateway>
-    where
-        T: Send + 'static,
-        I: Clone + Send + Sync + 'static,
-        O: Clone + Send + Sync + 'static,
-    {
-        let factory =
-            Arc::new(move |extensions| Box::new(factory(extensions)) as Box<dyn Any + Send>);
-        let provider = Provider {
-            format: Arc::new(Erased::<_, T, O, I>::provider(format)),
-            snapshot: snapshot::<I>,
-            factory,
-        };
-        self.add_provider(name.into(), provider)
+    /// Add `provider`. `Err` with [`Config`](crate::Config) if a provider
+    /// of its name was added before, or its format's name is another kind's.
+    pub fn provider(self, provider: Provider) -> Result<Gateway> {
+        self.add_provider(provider)
     }
 
     /// Register a client format receiving inputs `I` and sending outputs `O`
@@ -180,7 +160,7 @@ impl Gateway {
                 None => {
                     let ran = AssertUnwindSafe(run(&inner, &mut hooks)).catch_unwind();
                     let resp = ran.await.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
-                    outflow(&format, resp, &mut hooks, &discarded).await
+                    client_flow(&format, resp, &mut hooks, &discarded).await
                 }
             };
             // This guard ends the exchange before a cancelled writer drops
@@ -221,8 +201,9 @@ impl Gateway {
         Arc::make_mut(&mut self.inner)
     }
 
-    fn add_provider(mut self, name: String, provider: Provider) -> Result<Gateway> {
+    fn add_provider(mut self, provider: Provider) -> Result<Gateway> {
         self.check(&*provider.format)?;
+        let name = provider.name.clone();
         if self.inner.providers.contains_key(&name) {
             return Err(Fault::config(format!("provider '{name}' is defined twice")));
         }

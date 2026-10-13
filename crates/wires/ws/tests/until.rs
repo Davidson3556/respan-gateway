@@ -22,7 +22,7 @@ async fn stop_ends_a_session_whose_client_does_not_read() {
     .await;
     let (gateway, ends, _calls) = relay(&probe.base());
     let stop = tokio::time::sleep(Duration::from_millis(300));
-    let server = serve_with(gateway.plugin(Relay::RAW), Limits::default(), stop).await;
+    let server = serve_with(gateway.plugin(Relay), Limits::default(), stop).await;
     let mut ws = connect(server.addr, PATH, &[]).await.unwrap();
     probe.connected(0).await;
     say(&mut ws, "!flood:20000:4096").await;

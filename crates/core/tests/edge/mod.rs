@@ -1137,23 +1137,23 @@ pub fn gateway(scenario: usize, rec: &Rec) -> Gateway {
     let gw = Gateway::new().client::<In, _, _>(Toy).unwrap();
     let gw = match scenario {
         0 => gw
-            .provider::<In, _, _>("a", Toy, connect(slow_ok))
+            .provider(Provider::new::<In, _, _>("a", Toy, connect(slow_ok)))
             .unwrap()
             .target("a")
             .unwrap(),
         1 => gw
-            .provider::<In, _, _>("a", Toy, connect(reads_body))
+            .provider(Provider::new::<In, _, _>("a", Toy, connect(reads_body)))
             .unwrap()
             .target("a")
             .unwrap(),
         2 => gw
-            .provider::<In, _, _>("a", Toy, connect(slow_ok))
+            .provider(Provider::new::<In, _, _>("a", Toy, connect(slow_ok)))
             .unwrap()
-            .provider::<In, _, _>("b", Toy, connect(fast_ok))
+            .provider(Provider::new::<In, _, _>("b", Toy, connect(fast_ok)))
             .unwrap()
             .plugin(Racer),
         3 => gw
-            .provider::<In, _, _>("a", Toy, connect(cut))
+            .provider(Provider::new::<In, _, _>("a", Toy, connect(cut)))
             .unwrap()
             .target("a")
             .unwrap(),

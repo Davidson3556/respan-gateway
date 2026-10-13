@@ -10,10 +10,10 @@ use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
 use crate::auth::Client;
-use crate::config::{Auth, ClientKey, Config, PluginConfig, ProviderConfig};
+use crate::config::{Auth, ClientKey, Config, ModelRoute, ProviderConfig};
 use crate::formats::{KnownFormat, kind};
 use crate::presets;
-use respan_gateway_plugins::{Kind, Routes, Speaks};
+use respan_gateway_plugin_routing::{Kind, Routes, Speaks};
 use respan_gateway_providers::{Auth as KeyIn, Base, Provider};
 
 /// The name of the format that relays what no other served format accepts.
@@ -76,12 +76,13 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
         None => default_serve(&upstreams, formats),
     };
     let gateway = serve_formats(gateway, &serve, &upstreams, formats)?;
-    let tables = model_tables(&config.plugins, &upstreams)?;
-    if let Some(default) = &config.default
+    let routing = &config.plugins.routing;
+    let table = model_table(&routing.models, &upstreams)?;
+    if let Some(default) = &routing.default
         && !upstreams.iter().any(|u| u.name == *default)
     {
         return Err(Fault::config(format!(
-            "default: unknown provider '{default}'; providers: [{}]",
+            "plugins: routing: default: unknown provider '{default}'; providers: [{}]",
             names(&upstreams)
         )));
     }
@@ -91,7 +92,7 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
             "providers: none configured; add one, such as `openai: { vendor: openai }`",
         ));
     }
-    let routes = Arc::new(routes(&upstreams, tables, config.default.clone()));
+    let routes = Arc::new(routes(&upstreams, table, routing.default.clone()));
     let plan = Plan {
         upstreams,
         serve,
@@ -102,13 +103,9 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
     Ok((gateway, plan))
 }
 
-/// The routes to `upstreams`: by `tables`, then their presets' prefixes,
+/// The routes to `upstreams`: by `table`, then their presets' prefixes,
 /// then by default to `default`.
-fn routes(
-    upstreams: &[Upstream],
-    tables: Vec<Vec<(String, String)>>,
-    default: Option<String>,
-) -> Routes {
+fn routes(upstreams: &[Upstream], table: Vec<(String, String)>, default: Option<String>) -> Routes {
     let mut routes = Routes::new();
     for u in upstreams {
         let speaks = u.entries.iter().map(|e| Speaks {
@@ -123,7 +120,7 @@ fn routes(
         prefixes.iter().map(|prefix| (*prefix, &u.name))
     });
     routes = claims.fold(routes, |routes, (prefix, name)| routes.claim(prefix, name));
-    routes = tables.into_iter().fold(routes, Routes::models);
+    routes = routes.models(table);
     match default {
         Some(default) => routes.target(default),
         None => routes,
@@ -140,9 +137,17 @@ fn providers(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Vec<U
         for entry in &upstream.entries {
             let format = format_named(formats, &entry.format, &format!("provider '{name}'"))?;
             let (internal, auth) = (entry.internal.clone(), entry.auth.clone());
-            gateway = format
-                .add_provider(gateway, internal, &entry.base_url, auth)
-                .map_err(|e| Fault::config(format!("provider '{name}': {}", e.message())))?;
+            let in_provider =
+                |e: Fault| Fault::config(format!("provider '{name}': {}", e.message()));
+            let mut provider = format
+                .provider(internal, &entry.base_url, auth)
+                .map_err(in_provider)?;
+            // The vendor's departures from the format's spec are part of
+            // its providers, so every plugin sees the kind's events.
+            if let Some(quirks) = upstream.preset.and_then(|p| p.plugin) {
+                provider = provider.plugin(quirks);
+            }
+            gateway = gateway.provider(provider).map_err(in_provider)?;
         }
         upstreams.push(upstream);
     }
@@ -186,31 +191,25 @@ fn serve_formats(
     Ok(gateway)
 }
 
-/// Each `models` plugin's routes, as `(prefix, provider)`, in the order
+/// Routing's `models` routes, as `(prefix, provider)`, in the order
 /// listed. A route applies to every kind its provider serves.
-fn model_tables(
-    plugins: &[PluginConfig],
+fn model_table(
+    models: &[ModelRoute],
     upstreams: &[Upstream],
-) -> Result<Vec<Vec<(String, String)>>, Fault> {
-    let mut tables = Vec::new();
-    for PluginConfig { models: routes } in plugins {
-        for m in routes {
-            if !upstreams.iter().any(|u| u.name == m.provider) {
-                return Err(Fault::config(format!(
-                    "plugins: models: unknown provider '{}'; providers: [{}]",
-                    m.provider,
-                    names(upstreams)
-                )));
-            }
+) -> Result<Vec<(String, String)>, Fault> {
+    for m in models {
+        if !upstreams.iter().any(|u| u.name == m.provider) {
+            return Err(Fault::config(format!(
+                "plugins: routing: models: unknown provider '{}'; providers: [{}]",
+                m.provider,
+                names(upstreams)
+            )));
         }
-        tables.push(
-            routes
-                .iter()
-                .map(|m| (m.prefix.clone(), m.provider.clone()))
-                .collect(),
-        );
     }
-    Ok(tables)
+    let table = models
+        .iter()
+        .map(|m| (m.prefix.clone(), m.provider.clone()));
+    Ok(table.collect())
 }
 
 /// The providers' names, comma separated.

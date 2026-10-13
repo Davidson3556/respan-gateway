@@ -6,9 +6,10 @@
 mod support;
 
 use respan_gateway_core::{
-    ClientContext, Config, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Config, Fault, Filter, Gateway, Plugin, Provider, ProviderContext, Response,
+    async_trait,
 };
-use respan_gateway_http::CallHeaders;
+use respan_gateway_http::call::CallHeaders;
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
 use respan_gateway_realtime::Input;
 use respan_gateway_realtime_ws::{OpenAiRealtime, ResponsesWs};
@@ -87,13 +88,9 @@ async fn a_transport_with_its_own_key_hides_the_clients() {
         .with_headers(own)
         .unwrap();
     let gateway = Gateway::new()
-        .client::<respan_gateway_http::passthrough::Input<Raw>, _, _>(Raw)
+        .client::<respan_gateway_passthrough_http::Input<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<respan_gateway_http::passthrough::Input<Raw>, _, _>(
-            "p",
-            Raw,
-            transport.connect(),
-        )
+        .provider(Provider::new("p", Raw, transport.connect()))
         .unwrap()
         .target("p")
         .unwrap();
@@ -145,11 +142,11 @@ async fn a_translated_call_carries_none_of_the_clients_keys() {
     let gateway = Gateway::new()
         .client::<Input, _, _>(OpenAiRealtime)
         .unwrap()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "p",
             ResponsesWs,
             WsTransport::new(probe.base()).unwrap().connect(),
-        )
+        ))
         .unwrap()
         .target("p")
         .unwrap();
@@ -197,13 +194,13 @@ impl Plugin for Tenant {
 async fn a_key_set_for_the_call_replaces_the_clients() {
     let probe = Probe::start().await;
     let gateway = Gateway::new()
-        .client::<respan_gateway_http::passthrough::Input<Raw>, _, _>(Raw)
+        .client::<respan_gateway_passthrough_http::Input<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<respan_gateway_http::passthrough::Input<Raw>, _, _>(
+        .provider(Provider::new(
             "p",
             Raw,
             WsTransport::new(probe.base()).unwrap().connect(),
-        )
+        ))
         .unwrap()
         .plugin(Tenant)
         .target("p")
@@ -247,7 +244,11 @@ fn a_transport_takes_only_ws_urls_and_no_connection_headers() {
         "wss://h/#frag",
     ] {
         let refused = WsTransport::new(bad).unwrap_err();
-        assert_eq!(respan_gateway_http::error_code(&refused), "config", "{bad}");
+        assert_eq!(
+            respan_gateway_http_faults::error_code(&refused),
+            "config",
+            "{bad}"
+        );
         assert!(
             !refused.message().contains("pw") && !refused.message().contains("key=k"),
             "{bad}"

@@ -2,8 +2,8 @@ use super::*;
 
 use super::encode::reason_of;
 use super::request::is_synthetic;
-use crate::schema::Decoder;
 use respan_gateway_conversation::Delta;
+use respan_gateway_http::Decoder;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 
 use respan_gateway_conversation::{Content, Role, ToolChoice};
@@ -15,7 +15,7 @@ fn decode(chunks: &[Value]) -> Result<Vec<Output>, Fault> {
     for c in chunks {
         reader.event(Bytes::from(format!("data: {c}\n\n")), &mut out)?;
     }
-    reader.end(&mut out)?;
+    reader.end(Ok(()), &mut out)?;
     Ok(out)
 }
 
@@ -31,9 +31,9 @@ fn stream_of(replies: &[Output]) -> Result<String, Fault> {
     let mut enc = EventStream::default();
     let mut out = BytesMut::new();
     for reply in replies {
-        enc.encode(reply, &mut out)?;
+        enc.encode_into(reply, &mut out)?;
     }
-    enc.end(&Ok(()), &mut out)?;
+    enc.end_into(&Ok(()), &mut out)?;
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 

@@ -5,12 +5,12 @@ use super::{
     response_fields, usage_of,
 };
 use crate::schema::{
-    Decoder, Totals, ended, error_event, native_fields, rest_of, says, says_error, unreadable_event,
+    Totals, ended, error_event, native_fields, rest_of, says, says_error, unreadable_event,
 };
 use respan_gateway_conversation::{Block, Finish, Output, Start};
 use respan_gateway_core::{Fault, Upstream};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::sse::event_json;
+use respan_gateway_sse::event_json;
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
@@ -675,7 +675,7 @@ fn summary_texts(item: &Value) -> Option<Vec<&str>> {
 /// not the event it came in, goes to a client of this format.
 fn failure(error: &Value) -> Fault {
     let data = format!("data: {error}\n\n");
-    error_event(RESPONSES, data.as_bytes(), error)
+    error_event(data.as_bytes(), error)
 }
 
 /// The error `e` of a response or error event, as a provider error body.
@@ -689,8 +689,9 @@ fn error_body(e: &Value) -> Value {
     json!({ "error": error })
 }
 
-impl Decoder for ResponsesDecoder {
-    fn event(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
+impl ResponsesDecoder {
+    /// The events of one stream event, `raw`.
+    pub(crate) fn event(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
         if self.done {
             return Ok(());
         }
@@ -699,7 +700,7 @@ impl Decoder for ResponsesDecoder {
             return Ok(());
         };
         if says_error(&v) {
-            return Err(error_event(RESPONSES, &raw, &v));
+            return Err(error_event(&raw, &v));
         }
         let kind = v["type"].as_str().unwrap_or_default();
         // An item the kind has no form for is native in all its events.
@@ -751,11 +752,13 @@ impl Decoder for ResponsesDecoder {
         Ok(())
     }
 
-    fn end(&mut self, _out: &mut Vec<Output>) -> Result<(), Fault> {
+    /// The events of a stream that ended well.
+    fn end_stream(&mut self, _out: &mut Vec<Output>) -> Result<(), Fault> {
         ended(self.done)
     }
 
-    fn body(&mut self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
+    /// The events of one whole response body `v`.
+    pub(crate) fn body(&mut self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
         match v["status"].as_str() {
             Some("failed") => {
                 let error = match says(&v["error"]) {
@@ -776,5 +779,16 @@ impl Decoder for ResponsesDecoder {
         self.finish(v, out)?;
         self.done = true;
         Ok(())
+    }
+}
+
+impl respan_gateway_http::Decoder<Output> for ResponsesDecoder {
+    fn decode(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
+        self.event(raw, out)
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
+        end?;
+        self.end_stream(out)
     }
 }

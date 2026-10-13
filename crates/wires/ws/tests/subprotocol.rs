@@ -5,7 +5,7 @@
 
 mod support;
 
-use respan_gateway_core::Gateway;
+use respan_gateway_core::{Gateway, Provider};
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
 use respan_gateway_realtime::Input;
 use respan_gateway_realtime_ws::OpenAiRealtime;
@@ -23,13 +23,9 @@ fn keyed(probe: &Probe) -> Gateway {
         .with_headers(own)
         .unwrap();
     Gateway::new()
-        .client::<respan_gateway_http::passthrough::Input<Raw>, _, _>(Raw)
+        .client::<respan_gateway_passthrough_http::Input<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<respan_gateway_http::passthrough::Input<Raw>, _, _>(
-            "p",
-            Raw,
-            transport.connect(),
-        )
+        .provider(Provider::new("p", Raw, transport.connect()))
         .unwrap()
         .target("p")
         .unwrap()
@@ -95,11 +91,11 @@ fn speaking(probe: &Probe) -> Gateway {
     Gateway::new()
         .client::<Input, _, _>(OpenAiRealtime)
         .unwrap()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "p",
             OpenAiRealtime,
             WsTransport::new(probe.base()).unwrap().connect(),
-        )
+        ))
         .unwrap()
         .target("p")
         .unwrap()

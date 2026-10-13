@@ -1,6 +1,6 @@
 //! OpenAI Videos clients served by Veo.
 
-use respan_gateway_core::{Extensions, Gateway};
+use respan_gateway_core::{Extensions, Gateway, Provider};
 use respan_gateway_http::http::{Method, StatusCode};
 use respan_gateway_http::{ClientIo, ProviderIo};
 use respan_gateway_media::video::{self, LocateContent};
@@ -19,7 +19,7 @@ where
     T: Fn(Extensions) -> ProviderIo + Clone + Send + Sync + 'static,
 {
     Gateway::new()
-        .provider("veo", GeminiVeo, transport)
+        .provider(Provider::new("veo", GeminiVeo, transport))
         .and_then(|g| g.client::<video::Input, video::Output, ClientIo>(OpenAiVideos))
         .and_then(|g| g.target("veo"))
         .expect("a gateway")

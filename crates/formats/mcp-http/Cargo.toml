@@ -12,6 +12,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+respan-gateway-sse.workspace = true
+respan-gateway-http-syntax.workspace = true
+respan-gateway-http-faults.workspace = true
 getrandom = { workspace = true, features = ["std"] }
 respan-gateway-core.workspace = true
 respan-gateway-http.workspace = true
@@ -20,7 +23,9 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["process", "io-util", "sync", "rt", "macros", "time"] }
 
 [dev-dependencies]
-respan-gateway-http = { workspace = true, features = ["reqwest"] }
+respan-gateway-plugin-relay.workspace = true
+respan-gateway-http.workspace = true
+respan-gateway-http-transport.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time", "test-util"] }
 
 # Signals a stdio server's process group, which tokio cannot.

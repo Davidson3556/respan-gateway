@@ -1,5 +1,5 @@
 //! A live encoder writes zero or more messages of each value, a frame each
-//! ([`Encoder::encode_messages`]), at both edges, and takes the next value
+//! ([`Encoder::encode`]), at both edges, and takes the next value
 //! only once its reader has read the last one's.
 #![allow(clippy::unwrap_used)]
 
@@ -9,14 +9,14 @@ use std::time::Duration;
 use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::{FutureExt, SinkExt, StreamExt, stream};
 use respan_gateway_core::{EventSink, EventStream, Extensions, Fault};
-use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::{Body, ClientIo, Encoder, Framing, framing, http};
+use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::{Body, ClientIo, Encoder, Framing, http};
 
 const LIMIT: usize = 1 << 20;
 
 /// Value `n` as `n` messages: `n.0`, `n.1`, ….
 fn messages() -> Box<dyn Encoder<usize>> {
-    framing::each_message(|n: &usize, out| {
+    Box::new(|n: &usize, out: &mut Vec<Bytes>| {
         out.extend((0..*n).map(|i| Bytes::from(format!("{n}.{i}"))));
         Ok(())
     })
@@ -63,13 +63,17 @@ async fn zero_one_three(sink: &mut EventSink<usize>, body: &mut Body) {
 async fn a_clients_live_reply_frames_each_message() {
     let request = http::Request::get("/").body(Body::stream(stream::pending().boxed()));
     let (io, answer) = ClientIo::accept(request.unwrap(), Framing::Live, LIMIT);
-    let (_, mut sink) = io.bind(
-        |request| respan_gateway_http::messages(request, |_, _| Ok(0)),
+    let (_, mut sink) = io.with_error(respan_gateway_http::rules::plain).bind(
+        |_| {
+            Box::new(move |_: Bytes, out: &mut Vec<_>| {
+                out.push(0);
+                Ok(())
+            })
+        },
         |reply| {
             let head = reply.head();
-            Ok(reply.open(head, Bytes::new(), messages()))
+            Ok(reply.open(head, messages()))
         },
-        respan_gateway_http::plain,
     );
     sink.prepare(&mut live()).unwrap();
     let (response, _) = answer.await.expect("opened");
@@ -88,10 +92,9 @@ async fn a_providers_live_call_frames_each_message() {
     };
     let io = respan_gateway_http::connect(transport, LIMIT)(Extensions::new());
     // The answer is held: a call whose answer is dropped is over.
-    let (_answer, mut sink) = io.bind(
+    let (_answer, mut sink) = io.with_refusal(|_| Fault::internal("refused")).bind(
         |_, _: Option<&usize>| Ok(messages()),
-        |_, _| EventStream::<usize>::stream(stream::pending()),
-        |_| Fault::internal("refused"),
+        |_, _| Some(Box::new(|_: Bytes, _: &mut Vec<usize>| Ok(()))),
     );
     sink.prepare(&mut live()).unwrap();
     // The call is made once the sink is first polled.
@@ -101,10 +104,10 @@ async fn a_providers_live_call_frames_each_message() {
 }
 
 /// Messages are one after another where the body is not live, and an
-/// encoder's failure discards what it wrote of the value.
+/// encoder's failure fails the body whole.
 #[test]
-fn messages_concatenate_and_a_failure_discards_them() {
-    let mut encoder = framing::each_message(|n: &usize, out| {
+fn messages_concatenate_and_a_failure_fails_the_body() {
+    let mut encoder: Box<dyn Encoder<usize>> = Box::new(|n: &usize, out: &mut Vec<Bytes>| {
         out.push(Bytes::from("partial"));
         if *n == 0 {
             return Err(Fault::internal("no"));
@@ -112,13 +115,6 @@ fn messages_concatenate_and_a_failure_discards_them() {
         out.push(Bytes::from("whole"));
         Ok(())
     });
-    let mut bytes = BytesMut::new();
-    encoder.encode(&1, &mut bytes).unwrap();
-    assert_eq!(bytes, "partialwhole");
-    let mut out = vec![Bytes::from("kept")];
-    assert!(encoder.encode_messages(&0, &mut out).is_err());
-    assert_eq!(out, [Bytes::from("kept")]);
-    let mut plain = framing::each(|n: &usize| Ok(Bytes::from(n.to_string())));
-    plain.encode_messages(&7, &mut out).unwrap();
-    assert_eq!(out, [Bytes::from("kept"), Bytes::from("7")]);
+    assert_eq!(encoder.encode_all(&[1]).unwrap(), "partialwhole");
+    assert!(encoder.encode_all(&[0]).is_err());
 }

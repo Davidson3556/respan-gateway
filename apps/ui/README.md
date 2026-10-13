@@ -19,7 +19,7 @@ instead of the mock. `GATEWAY_URL=http://host:port pnpm dev` proxies
 somewhere else.
 
 The mock (`mock/server.mjs`, no dependencies) serves the admin API (overview with `reloaded_at`, MCP servers, requests
-including agent-loop `steps`, and `POST /ui/api/reload`) with
+including tool-loop `steps`, and `POST /ui/api/reload`) with
 generated traffic over the `/ui/api/events` stream, and fake chat (streamed),
 image, transcription, speech, embeddings and video-job endpoints (a video
 prompt containing "fail" makes its job fail). `MOCK_KEY=secret pnpm mock` requires a key, to exercise

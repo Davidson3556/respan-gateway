@@ -17,7 +17,7 @@ use bytes::{Bytes, BytesMut};
 use respan_gateway_core::futures::channel::mpsc;
 use respan_gateway_core::futures::future::{self, BoxFuture};
 use respan_gateway_core::futures::{FutureExt, SinkExt, StreamExt, stream};
-use respan_gateway_core::{BadRequest, ErrorCode, Truncated, Upstream};
+use respan_gateway_core::{BadRequest, ErrorCode, Provider, Truncated, Upstream};
 use respan_gateway_core::{EventSink, EventStream, Extensions, Fault, Gateway, async_trait};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http_body_util::BodyExt;
@@ -64,39 +64,22 @@ impl respan_gateway_core::Format<ClientIo, In, Out> for Toy {
     fn bind(&self, io: ClientIo) -> Result<respan_gateway_core::Connection<In, Out>, Fault> {
         let toy = self.clone();
         let unwritable = self.unwritable;
-        Ok(io.bind(
-            |request| {
-                if request.body().full_bytes().is_some() {
-                    respan_gateway_http::messages(request, |_, bytes| {
-                        let mut values = Vec::new();
-                        ReqDec.decode(bytes, &mut values)?;
-                        values
-                            .into_iter()
-                            .next()
-                            .ok_or_else(|| BadRequest::fault("empty input"))
-                    })
-                } else {
-                    respan_gateway_http::framing::parse(
-                        request.into_body(),
-                        ReqDec,
-                        ReqDec::decode,
-                        |decoder, end, values| {
-                            end?;
-                            decoder.end(values)
-                        },
-                    )
-                }
-            },
-            move |reply| {
-                let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
-                head.status = StatusCode::from_u16(toy.answers.unwrap_or(200)).unwrap();
-                Ok(reply.write(head, Box::new(RespEnc)))
-            },
-            move |fault, _, _| {
+        Ok(io
+            .with_error(move |fault, _, _| {
                 assert!(!unwritable, "unwritable");
-                Bytes::from(format!("ERR {}", respan_gateway_http::error_code(fault)))
-            },
-        ))
+                Bytes::from(format!(
+                    "ERR {}",
+                    respan_gateway_http_faults::error_code(fault)
+                ))
+            })
+            .bind(
+                |_| Box::new(ReqDec),
+                move |reply| {
+                    let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
+                    head.status = StatusCode::from_u16(toy.answers.unwrap_or(200)).unwrap();
+                    Ok(reply.write(head, Box::new(RespEnc)))
+                },
+            ))
     }
 }
 
@@ -106,7 +89,7 @@ impl respan_gateway_core::Format<ProviderIo, Out, In> for Toy {
     }
     fn bind(&self, io: ProviderIo) -> Result<respan_gateway_core::Connection<Out, In>, Fault> {
         let toy = self.clone();
-        Ok(io.bind(
+        Ok(io.with_refusal(|answer| refused(answer.status())).bind(
             move |head, _| {
                 head.uri = http::Uri::from_static("/x");
                 if toy.upgrade {
@@ -121,21 +104,11 @@ impl respan_gateway_core::Format<ProviderIo, Out, In> for Toy {
                 })
             },
             |answer, _| {
-                let decoder = RespDec {
+                Some(Box::new(RespDec {
                     done: false,
-                    status: answer.status().as_u16(),
-                };
-                respan_gateway_http::framing::parse(
-                    answer.into_body(),
-                    decoder,
-                    RespDec::decode,
-                    |decoder, end, values| {
-                        end?;
-                        decoder.end(values)
-                    },
-                )
+                    status: answer.status.as_u16(),
+                }))
             },
-            |answer| refused(answer.status()),
         ))
     }
 }
@@ -144,20 +117,44 @@ impl respan_gateway_core::Format<ProviderIo, Out, In> for Toy {
 fn refused(status: StatusCode) -> Fault {
     Fault::new("refused")
         .with(ErrorCode("refused".into()))
-        .with(respan_gateway_http::Status(status))
+        .with(respan_gateway_http_faults::Status(status))
         .with(())
 }
 
 /// Writes its bytes alone, whatever the input.
 struct Open(&'static str);
 
-impl Encoder<In> for Open {
-    fn encode(&mut self, _: &In, _: &mut BytesMut) -> Result<(), Fault> {
+impl Open {
+    fn encode_into(&mut self, _: &In, _: &mut BytesMut) -> Result<(), Fault> {
         Ok(())
     }
 
-    fn end(&mut self, _: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, _: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         out.extend_from_slice(self.0.as_bytes());
+        Ok(())
+    }
+}
+
+impl Encoder<In> for Open {
+    fn encode(
+        &mut self,
+        value: &In,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.encode_into(value, &mut out)?;
+        frames.push(out.freeze());
+        Ok(())
+    }
+
+    fn end(
+        &mut self,
+        end: Result<(), Fault>,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.end_into(&end, &mut out)?;
+        frames.extend((!out.is_empty()).then(|| out.freeze()));
         Ok(())
     }
 }
@@ -181,11 +178,22 @@ impl ReqDec {
     }
 }
 
+impl respan_gateway_http::Decoder<In> for ReqDec {
+    fn decode(&mut self, bytes: Bytes, out: &mut Vec<In>) -> Result<(), Fault> {
+        ReqDec::decode(self, bytes, out)
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<In>) -> Result<(), Fault> {
+        end?;
+        ReqDec::end(self, out)
+    }
+}
+
 /// Writes an input as text, and `<END>` for clean end. `ENCPANIC` panics.
 struct ReqEnc;
 
-impl Encoder<In> for ReqEnc {
-    fn encode(&mut self, v: &In, out: &mut BytesMut) -> Result<(), Fault> {
+impl ReqEnc {
+    fn encode_into(&mut self, v: &In, out: &mut BytesMut) -> Result<(), Fault> {
         if v.0 == "ENCPANIC" {
             panic!("encoder panic");
         }
@@ -193,10 +201,34 @@ impl Encoder<In> for ReqEnc {
         Ok(())
     }
 
-    fn end(&mut self, e: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, e: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         if e.is_ok() {
             out.extend_from_slice(b"<END>");
         }
+        Ok(())
+    }
+}
+
+impl Encoder<In> for ReqEnc {
+    fn encode(
+        &mut self,
+        value: &In,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.encode_into(value, &mut out)?;
+        frames.push(out.freeze());
+        Ok(())
+    }
+
+    fn end(
+        &mut self,
+        end: Result<(), Fault>,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.end_into(&end, &mut out)?;
+        frames.extend((!out.is_empty()).then(|| out.freeze()));
         Ok(())
     }
 }
@@ -230,10 +262,21 @@ impl RespDec {
     }
 }
 
+impl respan_gateway_http::Decoder<Out> for RespDec {
+    fn decode(&mut self, bytes: Bytes, out: &mut Vec<Out>) -> Result<(), Fault> {
+        RespDec::decode(self, bytes, out)
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Out>) -> Result<(), Fault> {
+        end?;
+        RespDec::end(self, out)
+    }
+}
+
 struct RespEnc;
 
-impl Encoder<Out> for RespEnc {
-    fn encode(&mut self, v: &Out, out: &mut BytesMut) -> Result<(), Fault> {
+impl RespEnc {
+    fn encode_into(&mut self, v: &Out, out: &mut BytesMut) -> Result<(), Fault> {
         if v.0 == "REJECT" {
             return Err(Fault::config("response encoding rejected"));
         }
@@ -242,13 +285,37 @@ impl Encoder<Out> for RespEnc {
         Ok(())
     }
 
-    fn end(&mut self, e: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, e: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         match e {
             Ok(()) => out.extend_from_slice(b"!"),
             Err(f) => out.extend_from_slice(
-                format!("ERR {}", respan_gateway_http::error_code(f)).as_bytes(),
+                format!("ERR {}", respan_gateway_http_faults::error_code(f)).as_bytes(),
             ),
         }
+        Ok(())
+    }
+}
+
+impl Encoder<Out> for RespEnc {
+    fn encode(
+        &mut self,
+        value: &Out,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.encode_into(value, &mut out)?;
+        frames.push(out.freeze());
+        Ok(())
+    }
+
+    fn end(
+        &mut self,
+        end: Result<(), Fault>,
+        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+    ) -> Result<(), Fault> {
+        let mut out = respan_gateway_http::bytes::BytesMut::new();
+        self.end_into(&end, &mut out)?;
+        frames.extend((!out.is_empty()).then(|| out.freeze()));
         Ok(())
     }
 }
@@ -329,7 +396,7 @@ impl Seen {
                     while let Some(f) = body.next().await {
                         let f = f
                             .map(|b| text(&b))
-                            .map_err(|e| respan_gateway_http::error_code(&e).to_string());
+                            .map_err(|e| respan_gateway_http_faults::error_code(&e).to_string());
                         lock(&seen.frames).push(f);
                     }
                     seen.done.send_replace(true);
@@ -361,7 +428,11 @@ fn gateway_of(
     let gw = Gateway::new()
         .client::<In, _, _>(Toy::default())
         .unwrap()
-        .provider::<In, _, _>("a", codec, respan_gateway_http::connect(transport, LIMIT))
+        .provider(Provider::new(
+            "a",
+            codec,
+            respan_gateway_http::connect(transport, LIMIT),
+        ))
         .unwrap()
         .target("a")
         .unwrap()
@@ -420,7 +491,7 @@ async fn read(resp: Option<http::Response<Body>>) -> Result<(u16, String), Strin
             Err(e) => {
                 return Err(format!(
                     "{} after {out}",
-                    respan_gateway_http::error_code(&e)
+                    respan_gateway_http_faults::error_code(&e)
                 ));
             }
         }
@@ -430,7 +501,7 @@ async fn read(resp: Option<http::Response<Body>>) -> Result<(u16, String), Strin
 
 fn code(end: &Result<(), Fault>) -> String {
     end.as_ref().map_or_else(
-        |f| respan_gateway_http::error_code(f).to_string(),
+        |f| respan_gateway_http_faults::error_code(f).to_string(),
         |()| "ok".into(),
     )
 }
@@ -438,7 +509,7 @@ fn code(end: &Result<(), Fault>) -> String {
 /// What a client reads of a result: a fault's code and message.
 fn said<T>(result: Result<T, Fault>) -> Result<(), (String, String)> {
     result.map(|_| ()).map_err(|f| {
-        let code = respan_gateway_http::error_code(&f).to_owned();
+        let code = respan_gateway_http_faults::error_code(&f).to_owned();
         (code, f.message().to_owned())
     })
 }
@@ -610,7 +681,7 @@ async fn a_providers_frames_are_read_apart() {
         polls.push(match outputs.poll_next_unpin(&mut cx) {
             Poll::Pending => "pending".to_string(),
             Poll::Ready(Some(Ok(Out(s)))) => s,
-            Poll::Ready(Some(Err(f))) => respan_gateway_http::error_code(&f).to_string(),
+            Poll::Ready(Some(Err(f))) => respan_gateway_http_faults::error_code(&f).to_string(),
             Poll::Ready(None) => "end".to_string(),
         });
     }
@@ -634,10 +705,12 @@ async fn a_slow_refusal_is_known_at_its_head() {
     let transport = fnt(|_| future::ready(Ok(answer(429, late("busy")))).boxed());
     let outputs = dial(&Toy::default(), transport).await.unwrap();
     let fault = outputs.refusal().unwrap();
-    assert_eq!(respan_gateway_http::error_code(fault), "refused");
+    assert_eq!(respan_gateway_http_faults::error_code(fault), "refused");
     assert_eq!(
         fault.get(),
-        Some(&respan_gateway_http::Status(StatusCode::TOO_MANY_REQUESTS))
+        Some(&respan_gateway_http_faults::Status(
+            StatusCode::TOO_MANY_REQUESTS
+        ))
     );
 
     let transport = fnt(|_| future::ready(Ok(answer(200, late("DONE")))).boxed());
@@ -715,7 +788,9 @@ async fn an_error_answer_that_never_ends_is_refused() {
             "dial still pending after 2s; it pulled {frames} frames ({mib} MiB) of a 503's body into memory"
         )
     };
-    let refusal = outputs.refusal().map(respan_gateway_http::error_code);
+    let refusal = outputs
+        .refusal()
+        .map(respan_gateway_http_faults::error_code);
     assert_eq!(refusal, Some("upstream"));
 }
 
@@ -792,11 +867,11 @@ async fn a_client_that_leaves_ends_the_request_before_its_call() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy::default())
         .unwrap()
-        .provider::<In, _, _>(
+        .provider(Provider::new(
             "a",
             Toy::default(),
             respan_gateway_http::connect(transport, LIMIT),
-        )
+        ))
         .unwrap()
         .plugin(calls.clone())
         .plugin(ReadToEnd);
@@ -865,11 +940,11 @@ async fn provider_saw(plugin: impl respan_gateway_core::Plugin) -> Vec<String> {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy::default())
         .unwrap()
-        .provider::<In, _, _>(
+        .provider(Provider::new(
             "a",
             Toy::default(),
             respan_gateway_http::connect(noting, LIMIT),
-        )
+        ))
         .unwrap()
         .target("a")
         .unwrap()

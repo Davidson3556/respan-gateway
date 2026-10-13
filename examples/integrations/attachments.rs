@@ -35,7 +35,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example attachments`
 
-use respan_gateway_core::{BadRequest, ErrorCode, Upstream};
+use respan_gateway_core::{BadRequest, ErrorCode, Provider, Upstream};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -57,12 +57,13 @@ use respan_gateway_examples::store::{
     rusqlite::{OptionalExtension, params},
     sql,
 };
-use respan_gateway_http::HttpTransport;
-use respan_gateway_http::Status;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
-use respan_gateway_http::passthrough;
-use respan_gateway_http::{CallHeaders, Credential, Wire, retryable};
-use respan_gateway_plugins::routing::{Backoff, Until, first_success};
+use respan_gateway_http::{Credential, call::CallHeaders, raw::Original};
+use respan_gateway_http_faults::Status;
+use respan_gateway_http_faults::retryable;
+use respan_gateway_http_transport::HttpTransport;
+use respan_gateway_passthrough_http as passthrough;
+use respan_gateway_plugin_fallback::{Backoff, Until, first_success};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -382,8 +383,8 @@ impl Plugin for PdfToText {
         if cx.extensions().get::<NoContent>().is_some() {
             let tenant = cx
                 .extensions()
-                .get::<Wire>()
-                .and_then(Wire::get)
+                .get::<Original>()
+                .and_then(Original::get)
                 .and_then(|asked| asked.headers().get("x-tenant")?.to_str().ok())
                 .unwrap_or_default();
             tokio::time::timeout_at(deadline, self.forget(tenant))
@@ -431,7 +432,7 @@ impl Plugin for PdfToText {
         let ext = px.extensions();
         let until = ext.get::<Deadline>().map(|d| d.0);
         let until = until.unwrap_or_else(|| Instant::now() + self.budget);
-        let asked = ext.get::<Wire>().and_then(Wire::get);
+        let asked = ext.get::<Original>().and_then(Original::get);
         let tenant = asked.and_then(|a| a.headers().get("x-tenant")?.to_str().ok());
         let tenant = tenant.unwrap_or_default().to_owned();
         let keep = ext.get::<NoContent>().is_none();
@@ -589,21 +590,21 @@ impl Fixture {
 
 fn gateway(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
     Ok(Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "text-only",
             OpenAiChat,
             provider_support::openai(&fixture.text.base_url())?.connect(),
-        )?
-        .provider::<Input, _, _>(
+        ))?
+        .provider(Provider::new(
             "reads-pdf",
             OpenAiChat,
             provider_support::openai(&fixture.pdf.base_url())?.connect(),
-        )?
-        .provider::<Ask, _, _>(
+        ))?
+        .provider(Provider::new(
             "files",
             FILES,
             HttpTransport::new(&fixture.files.url)?.connect(),
-        )?
+        ))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(pdfs)
         .plugin(Fallback))
@@ -626,21 +627,21 @@ async fn send(gw: &Gateway, tenant: &'static str, body: &str) -> StatusCode {
 /// As `gateway`, with the PDF reader an Anthropic model.
 fn gateway_claude(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
     Ok(Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "text-only",
             OpenAiChat,
             provider_support::openai(&fixture.text.base_url())?.connect(),
-        )?
-        .provider::<Input, _, _>(
+        ))?
+        .provider(Provider::new(
             "reads-pdf",
             AnthropicMessages,
             provider_support::anthropic(&fixture.claude.base_url())?.connect(),
-        )?
-        .provider::<Ask, _, _>(
+        ))?
+        .provider(Provider::new(
             "files",
             FILES,
             HttpTransport::new(&fixture.files.url)?.connect(),
-        )?
+        ))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(pdfs)
         .plugin(Fallback))

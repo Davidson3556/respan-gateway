@@ -17,7 +17,7 @@ use crate::requests::{RequestRecord, Usage};
 /// (never memory) rather than slow requests.
 const QUEUE: usize = 4096;
 /// The file is rotated at this size unless the config's
-/// `request_history_file_max` says.
+/// `request_log.file_max` says.
 pub const DEFAULT_MAX: usize = 64 << 20;
 
 /// Appends lines to a file from its own thread, so no request waits for
@@ -32,8 +32,8 @@ pub struct Writer {
 impl Writer {
     /// A writer for the file `config` names, if it names one.
     pub fn from_config(config: &Config) -> Option<Self> {
-        let path = config.request_history_file.clone()?;
-        let max = config.request_history_file_max.unwrap_or(DEFAULT_MAX);
+        let path = config.plugins.request_log.file.clone()?;
+        let max = config.plugins.request_log.file_max.unwrap_or(DEFAULT_MAX);
         Some(Self::open(path, max))
     }
 
@@ -51,8 +51,8 @@ impl Writer {
 
     /// Whether `config` asks for this writer as it is.
     pub fn is(&self, config: &Config) -> bool {
-        let max = config.request_history_file_max.unwrap_or(DEFAULT_MAX);
-        config.request_history_file.as_deref() == Some(&self.path) && max == self.max
+        let max = config.plugins.request_log.file_max.unwrap_or(DEFAULT_MAX);
+        config.plugins.request_log.file.as_deref() == Some(&self.path) && max == self.max
     }
 
     pub fn append(&self, record: &RequestRecord) {

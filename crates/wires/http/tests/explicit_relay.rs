@@ -4,7 +4,7 @@
 mod http_support;
 use http_support::{LIMIT, serve};
 use respan_gateway_core::{
-    ClientContext, Connection, Fault, Format, Gateway, Plugin, Response, async_trait,
+    ClientContext, Connection, Fault, Format, Gateway, Plugin, Provider, Response, async_trait,
 };
 use respan_gateway_http::{self as h, bytes::Bytes, http};
 use std::sync::{
@@ -23,18 +23,31 @@ impl Format<h::ClientIo, String, Bytes> for Text {
     }
     fn bind(&self, io: h::ClientIo) -> Result<Connection<String, Bytes>, Fault> {
         let decodes = self.0.clone();
-        Ok(io.bind(
-            move |request| {
-                h::messages(request, move |_, bytes| {
-                    decodes.fetch_add(1, Ordering::SeqCst);
-                    Ok(format!("encoded:{}", String::from_utf8_lossy(&bytes)))
-                })
+        Ok(io.with_error(h::rules::plain).bind(
+            move |_request| {
+                {
+                    Box::new(move |bytes: Bytes, out: &mut Vec<_>| {
+                        let value: Result<_, Fault> = {
+                            {
+                                decodes.fetch_add(1, Ordering::SeqCst);
+                                Ok(format!("encoded:{}", String::from_utf8_lossy(&bytes)))
+                            }
+                        };
+                        out.push(value?);
+                        Ok(())
+                    })
+                }
             },
             |reply| {
                 let head = reply.head();
-                Ok(reply.write(head, h::framing::each(|value: &Bytes| Ok(value.clone()))))
+                Ok(reply.write(
+                    head,
+                    Box::new(|value: &Bytes, out: &mut Vec<Bytes>| {
+                        out.push(value.clone());
+                        Ok(())
+                    }),
+                ))
             },
-            h::plain,
         ))
     }
 }
@@ -45,42 +58,32 @@ impl Format<h::ProviderIo, Bytes, String> for Text {
     fn bind(&self, io: h::ProviderIo) -> Result<Connection<Bytes, String>, Fault> {
         Ok(io.bind(
             |_, _: Option<&String>| {
-                Ok(h::framing::each(|value: &String| {
-                    Ok(Bytes::from(value.clone()))
+                Ok(Box::new(|value: &String, out: &mut Vec<Bytes>| {
+                    out.push(Bytes::from(value.clone()));
+                    Ok(())
                 }))
             },
-            |response, _| {
-                h::framing::whole::read(response.into_body(), |bytes, out| {
-                    out.push(bytes);
-                    Ok(())
-                })
+            |_, _| {
+                Some(Box::new(h::Whole::new(
+                    |bytes: Bytes, out: &mut Vec<Bytes>| {
+                        out.push(bytes);
+                        Ok(())
+                    },
+                )))
             },
-            |answer| h::provider_fault("text", answer),
         ))
     }
 }
 struct Choose {
-    raw: bool,
     key: bool,
-    head: bool,
     error: bool,
 }
 #[async_trait]
 impl Plugin for Choose {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let slot = h::ProviderHead::default();
-        let mut call = cx.call("p").with_extension(slot.clone());
-        if self.raw {
-            let wire = cx
-                .extensions()
-                .get::<h::Wire>()
-                .expect("adapter publishes raw request");
-            let request = wire.get().expect("body available in hook").clone();
-            assert!(!request.headers().contains_key("authorization"));
-            call = call.with_extension(h::SendRaw(h::Wire::new(request, false)));
-        }
+        let mut call = cx.call("p");
         if self.key {
-            call = call.with_extension(h::CallHeaders(
+            call = call.with_extension(h::call::CallHeaders(
                 cx.extensions()
                     .get::<h::Credential>()
                     .expect("key")
@@ -89,23 +92,15 @@ impl Plugin for Choose {
             ));
         }
         let mut response = call.await?;
-        let head = slot.get().expect("head published before call resolves");
-        if self.head {
-            cx.extensions()
-                .get::<h::ClientHead>()
-                .expect("client slot")
-                .set(Some(head.clone()));
-        }
         if self.error
-            && head.status.is_server_error()
             && let Err(fault) = response.until_end().await
         {
             let original = fault
-                .get::<h::ProviderError>()
+                .get::<respan_gateway_http_faults::ProviderError>()
                 .expect("inspection hint")
-                .response
+                .0
                 .clone();
-            return Err(fault.with(h::RawReply(original)));
+            return Err(fault.with(h::raw::RawReply(original)));
         }
         Ok(Some(response))
     }
@@ -122,14 +117,14 @@ async fn exercise(
     let mut gateway = Gateway::new()
         .client::<String, Bytes, h::ClientIo>(format.clone())
         .expect("client")
-        .provider::<String, Bytes, _>(
+        .provider(Provider::new(
             "p",
             format,
             h::connect(
                 move |mut request| {
                     let seen = seen.clone();
                     async move {
-                        h::credentials(&mut request, &http::HeaderMap::new());
+                        h::call::credentials(&mut request, &http::HeaderMap::new());
                         let (head, body) = request.into_parts();
                         *seen.lock().expect("record") = Some(http::Request::from_parts(
                             head,
@@ -149,7 +144,7 @@ async fn exercise(
                 },
                 LIMIT,
             ),
-        )
+        ))
         .expect("provider")
         .target("p")
         .expect("target");
@@ -193,53 +188,11 @@ async fn same_name_default_encodes_without_client_key_or_provider_head() {
     assert_eq!(response.status(), 200);
     assert!(!response.headers().contains_key("x-provider"));
 }
-/// A raw request goes as the client sent it, but for what no proxy passes
-/// on, which the binding strips whatever its transport, though this one
-/// strips nothing: a whole request's `Upgrade`, which the adapter dropped,
-/// a hop's headers, `Host`, `Expect`, conditions and the gateway origin's
-/// cookies and forwarding headers.
-#[tokio::test]
-async fn explicit_raw_request_skips_decoding_and_keys_require_separate_copy() {
-    for key in [false, true] {
-        let (request, response, decodes) = exercise(
-            Some(Choose {
-                raw: true,
-                key,
-                head: true,
-                error: false,
-            }),
-            false,
-        )
-        .await;
-        assert_eq!(decodes, 0);
-        assert_eq!(request.body(), "raw unknown bytes");
-        assert_eq!(request.method(), "PATCH");
-        assert_eq!(request.uri(), "/original?x=1");
-        assert_eq!(request.headers().contains_key("authorization"), key);
-        for stripped in [
-            "x-hop",
-            "upgrade",
-            "connection",
-            "host",
-            "expect",
-            "if-none-match",
-            "cookie",
-            "x-forwarded-for",
-        ] {
-            assert!(!request.headers().contains_key(stripped), "{stripped}");
-        }
-        assert_eq!(request.headers()["x-client"], "custom");
-        assert_eq!(response.status(), 201);
-        assert_eq!(response.headers()["x-provider"], "private");
-    }
-}
 #[tokio::test]
 async fn call_headers_can_explicitly_supply_a_key_with_typed_input() {
     let (request, _, decodes) = exercise(
         Some(Choose {
-            raw: false,
             key: true,
-            head: false,
             error: false,
         }),
         false,
@@ -251,16 +204,7 @@ async fn call_headers_can_explicitly_supply_a_key_with_typed_input() {
 #[tokio::test]
 async fn provider_errors_are_inspectable_but_only_explicit_raw_replies_are_written() {
     for error in [false, true] {
-        let (_, response, _) = exercise(
-            Some(Choose {
-                raw: false,
-                key: false,
-                head: false,
-                error,
-            }),
-            true,
-        )
-        .await;
+        let (_, response, _) = exercise(Some(Choose { key: false, error }), true).await;
         assert_eq!(response.status(), 503);
         assert_eq!(response.body() == "secret upstream bytes", error);
         assert_eq!(response.headers().contains_key("x-provider"), error);

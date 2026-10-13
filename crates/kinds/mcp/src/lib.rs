@@ -17,6 +17,10 @@ mod messages;
 pub use envelope::{Input, Output};
 pub use messages::{Id, Message, Outcome, RpcError};
 
+/// The protocol version the gateway asks for when it opens a session of
+/// its own with a server.
+pub const PROTOCOL: &str = "2025-06-18";
+
 /// The JSON-RPC error code a format writes for a fault, as a fact
 /// ([`Fault::with`](respan_gateway_core::Fault::with)). A fault without one
 /// is written as an invalid request (-32600) if it is a `BadRequest`, else
@@ -28,4 +32,23 @@ pub struct RpcCode(pub i64);
 /// A JSON-RPC error response to `id` (`null` if unknown).
 pub fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+/// The answer to request `id` among `messages`: its result, or its error.
+pub fn answer(
+    messages: &[Message],
+    id: u64,
+) -> Result<Result<Value, RpcError>, respan_gateway_core::Fault> {
+    let wanted = json!(id);
+    for m in messages {
+        if let Message::Response { outcome, .. } = m
+            && m.response_id().as_ref() == Some(&wanted)
+        {
+            return Ok(match outcome {
+                Outcome::Success(result) => Ok(result.clone()),
+                Outcome::Error(e) => Err(e.clone()),
+            });
+        }
+    }
+    Err(respan_gateway_core::Fault::new("the server did not answer"))
 }

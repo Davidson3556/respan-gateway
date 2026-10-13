@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_core::Provider;
 use respan_gateway_http::http::StatusCode;
 
 #[tokio::test]
@@ -91,55 +92,31 @@ async fn non_text_input_is_refused_before_it_is_sent() -> Result<(), Fault> {
     Ok(())
 }
 
-/// `n` answers of up to `CAP` each: the hold covers all of them, so 30
-/// parallel requests for three answers never overspend the team.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn n_answers_never_overspend_the_team() -> Result<(), Fault> {
+/// A request for several answers (`n > 1`) is refused before anything is
+/// held or sent: the kind has one answer.
+#[tokio::test]
+async fn a_request_for_several_answers_is_refused_and_costs_nothing() -> Result<(), Fault> {
     let (fake, ledger) = (FakeOpenAi::start().await, team());
-    let answer = r#"{"id":"c1","object":"chat.completion","model":"m","choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"a"}},{"index":1,"finish_reason":"length","message":{"role":"assistant","content":"b"}},{"index":2,"finish_reason":"length","message":{"role":"assistant","content":"c"}}],"usage":{"prompt_tokens":3,"completion_tokens":300}}"#;
-    for _ in 0..30 {
-        fake.answer(Answer::raw(answer));
-    }
-    // A request for several choices reaches a provider only through an
-    // explicit raw relay, which sends the client's body as it is.
-    // A raw relay keeps the client's path, so the provider sits at the origin.
-    let base = fake.base_url();
-    let origin = base.trim_end_matches("/v1");
     let gw = Gateway::new()
-        .provider::<Input, _, _>(
+        .provider(Provider::new(
             "openai",
             OpenAiChat,
-            provider_support::openai(origin)?.connect(),
-        )?
+            provider_support::openai(&fake.base_url())?.connect(),
+        ))?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(Cap)
         .plugin(Accounting::new(ledger.clone(), quote))
-        .plugin(respan_gateway_http::Relay::RAW)
         .target("openai")?;
     let body =
         r#"{"model":"m","n":3,"max_tokens":5000,"messages":[{"role":"user","content":"hi"}]}"#;
-    let all = (0..30).map(|_| {
-        let gw = gw.clone();
-        tokio::spawn(async move {
-            let (status, _, _) =
-                read_whole(serve(&gw, post("/v1/chat/completions", body)).await.0).await;
-            gw.idle().await;
-            status
-        })
-    });
-    let statuses = respan_gateway_core::futures::future::join_all(all).await;
-    let served = statuses.iter().flatten().filter(|s| s.is_success()).count();
-    let spent = ledger.spent("team");
-    assert!(spent <= 10_000, "overspent: {spent} of 10,000");
-    assert!(served > 0, "the raw relay serves some");
-    assert_eq!(spent, served as i64 * PRICE.cost(3, 300));
-    assert_eq!(fake.requests().len(), served);
+    let (status, _, _) = read_whole(serve(&gw, post("/v1/chat/completions", body)).await.0).await;
+    gw.idle().await;
+    assert_eq!(status.as_u16(), 400);
+    assert_eq!(ledger.spent("team"), 0);
+    assert!(fake.requests().is_empty());
     Ok(())
 }
 
-/// A stream cut before its usage and before any text (a reasoning model
-/// thinks first, or the upstream resets): the provider may have billed the
-/// whole cap, so the team is charged the reserve.
 #[tokio::test]
 async fn a_stream_cut_before_any_text_is_charged_its_reserve() -> Result<(), Fault> {
     let (fake, ledger) = (FakeOpenAi::start().await, team());

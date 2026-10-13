@@ -25,7 +25,7 @@ async fn gateway(vendor: &str, fake: &FakeOpenAi) -> Gateway {
         "providers:
   p: {{ {vendor}, base_url: '{base}', auth: {{ type: bearer, key: sk-test }} }}
 formats: [openai-chat, anthropic-messages]
-default: p
+plugins: {{ routing: {{ default: p }} }}
 "
     ))
     .await

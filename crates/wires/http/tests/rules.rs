@@ -8,12 +8,12 @@ use respan_gateway_conversation::Input;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::ErrorCode;
 use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Fault, Gateway, Plugin, Provider, ProviderContext, Response, async_trait,
 };
-use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util::{self, BodyExt};
-use respan_gateway_http::{Body, CallHeaders, Credential, ProviderIo, Wire};
+use respan_gateway_http::{Body, Credential, ProviderIo, call::CallHeaders, raw::Original};
+use respan_gateway_http_faults::Status;
 
 #[allow(dead_code)]
 #[path = "../../../../tests/support/hooks.rs"]
@@ -27,7 +27,7 @@ use hooks::{Calls, Outcomes};
 use http_support::{LIMIT, post, read_whole, serve};
 use scripted::{Scripted, json, sse};
 
-use respan_gateway_http::Relay;
+use respan_gateway_plugin_relay::Relay;
 
 const OPENAI: &str = "http://openai.test/v1";
 const BACKUP: &str = "http://backup.test/v1";
@@ -59,11 +59,11 @@ where
 {
     let name = name.to_owned();
     Box::new(move |gw| {
-        gw.provider(
+        gw.provider(Provider::new(
             name,
             format,
             respan_gateway_http::connect(transport.into_sender(), LIMIT),
-        )
+        ))
     })
 }
 
@@ -77,7 +77,7 @@ fn gateway(
         .try_fold(Gateway::new(), |gw, add| add(gw))?
         .client::<Input, _, _>(OpenAiChat)?;
     let gw = plugins.into_iter().fold(gw, Gateway::plugin);
-    let gw = gw.plugin(Relay::RAW);
+    let gw = gw.plugin(Relay);
     match target {
         Some(target) => gw.target(target),
         None => Ok(gw),
@@ -172,7 +172,7 @@ struct ByHeader;
 #[async_trait]
 impl Plugin for ByHeader {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+        let asked = cx.extensions().get::<Original>().and_then(Original::get);
         let to = asked.and_then(|a| a.headers().get("x-to")?.to_str().ok());
         let to = to.unwrap_or_default().to_owned();
         cx.set_target(to);
@@ -375,11 +375,9 @@ async fn a_calls_own_key_keeps_the_clients_credentials_off_it() {
 }
 
 #[tokio::test]
-async fn a_changed_body_is_sent_without_the_clients_content_encoding() {
-    for (chain, kept) in [
-        (Vec::new(), true),
-        (vec![Arc::new(Cool) as Arc<dyn Plugin>], false),
-    ] {
+async fn a_body_written_again_is_sent_without_the_clients_content_encoding() {
+    // The format writes every body again, edited or not.
+    for chain in [Vec::new(), vec![Arc::new(Cool) as Arc<dyn Plugin>]] {
         let h = Harness::new(chain, Some("openai"));
         h.mock.reply(OPENAI, json(StatusCode::OK, UNARY));
         let mut req = unary_chat();
@@ -388,20 +386,17 @@ async fn a_changed_body_is_sent_without_the_clients_content_encoding() {
 
         assert_eq!(h.text(req).await.0, StatusCode::OK);
         let sent = h.mock.sent();
-        assert_eq!(sent[0].headers().contains_key("content-encoding"), kept);
+        assert!(!sent[0].headers().contains_key("content-encoding"));
     }
 }
 
 #[tokio::test]
 async fn a_transport_with_its_own_key_drops_credentials_from_the_query() {
     let query = "key=a&api_key=b&access_token=c&api-version=1&beta=true";
-    // `openai` has a key of its own; `backup` has none, so it puts the
-    // client's back, after the rest, as the adapter lifted them.
-    let passed = "api-version=1&beta=true&key=a&api_key=b&access_token=c";
-    for (target, base, sent) in [
-        ("openai", OPENAI, Some("api-version=1&beta=true")),
-        ("backup", BACKUP, Some(passed)),
-    ] {
+    // `openai` has a key of its own; `backup` has none, so the relay puts
+    // the client's back. Parameters of no spec of the format do not pass.
+    let passed = "key=a&api_key=b&access_token=c";
+    for (target, base, sent) in [("openai", OPENAI, None), ("backup", BACKUP, Some(passed))] {
         let h = Harness::new(Vec::new(), Some(target));
         h.mock.reply(base, json(StatusCode::OK, UNARY));
         let mut req = unary_chat();
@@ -413,8 +408,9 @@ async fn a_transport_with_its_own_key_drops_credentials_from_the_query() {
 }
 
 #[tokio::test]
-async fn a_relay_passes_the_clients_end_to_end_headers() {
-    // To a provider with no headers of its own, credentials pass too.
+async fn a_relay_passes_the_clients_credentials_and_spec_headers_alone() {
+    // To a provider with no headers of its own, credentials pass, and the
+    // headers of the format's spec; the format writes the rest of the head.
     let h = Harness::new(Vec::new(), Some("backup"));
     h.mock.reply(BACKUP, json(StatusCode::OK, UNARY));
     let mut req = post(CHAT, UNARY_REQ);
@@ -434,14 +430,21 @@ async fn a_relay_passes_the_clients_end_to_end_headers() {
         "if-none-match",
         "range",
     ];
+    let denied = [
+        denied.as_slice(),
+        &[
+            "user-agent",
+            "x-app",
+            "x-stainless-lang",
+            "idempotency-key",
+            "x-max-tokens",
+            "x-monkey",
+            "x-tokenizer",
+        ],
+    ]
+    .concat();
     let passed = [
-        ("user-agent", "OpenAI/Python 1.0"),
-        ("x-app", "notes"),
-        ("x-stainless-lang", "python"),
-        ("idempotency-key", "k1"),
-        ("x-max-tokens", "10"),
-        ("x-monkey", "m"),
-        ("x-tokenizer", "t"),
+        ("openai-beta", "assistants=v2"),
         ("x-api-key", "k"),
         ("x-auth-token", "k"),
         ("x-client-secret", "k"),
@@ -449,9 +452,9 @@ async fn a_relay_passes_the_clients_end_to_end_headers() {
         ("cf-aig-authorization", "k"),
         ("x-password", "k"),
     ];
-    for (name, value) in denied.map(|name| (name, "v")).iter().chain(&passed) {
+    for (name, value) in denied.iter().map(|name| (*name, "v")).chain(passed) {
         let value = HeaderValue::from_static(value);
-        req.headers_mut().insert(*name, value);
+        req.headers_mut().insert(name, value);
     }
 
     assert_eq!(h.text(req).await.0, StatusCode::OK);
@@ -464,7 +467,7 @@ async fn a_relay_passes_the_clients_end_to_end_headers() {
     for name in denied {
         assert!(headers.get(name).is_none(), "{name}");
     }
-    assert_eq!(headers.get_all("content-type").iter().count(), 0);
+    assert_eq!(headers["content-type"], "application/json");
 }
 
 #[tokio::test]
@@ -508,9 +511,10 @@ async fn a_clients_connection_header_names_only_its_own_headers() {
 
     assert_eq!(h.text(req).await.0, StatusCode::OK);
 
-    // The format's content type stays; a header `Connection` names goes.
+    // The client's `Connection` names nothing of the head the format
+    // writes: its content type stays, and the client's `x-hop` never came.
     let sent = h.mock.sent();
-    assert!(!sent[0].headers().contains_key("content-type"));
+    assert_eq!(sent[0].headers()["content-type"], "application/json");
     assert!(sent[0].headers().get("x-hop").is_none());
 }
 
@@ -575,14 +579,14 @@ async fn the_kernel_leaves_origin_headers_to_the_transport() {
     }
 
     let provider: AddProvider = Box::new(|gw| {
-        gw.provider::<Input, _, _>(
+        gw.provider(Provider::new(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(
                 |request| async move { Cookie.send(request).await },
                 LIMIT,
             ),
-        )
+        ))
     });
     let gw = gateway([provider], vec![], Some("openai")).unwrap_or_else(|e| panic!("{e}"));
 

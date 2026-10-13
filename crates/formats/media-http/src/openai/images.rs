@@ -11,12 +11,13 @@ use super::{
 };
 use respan_gateway_conversation::{Media, MediaSource, Usage};
 use respan_gateway_core::{
-    BadRequest, Connection, EventStream, Fault, Format, NativeFields, NativeValue, Truncated,
+    BadRequest, Connection, Fault, Format, NativeFields, NativeValue, Truncated,
 };
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::framing::{path_ends_with, sse, whole};
+use respan_gateway_http::framing::sse;
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
-use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo};
+use respan_gateway_http::{ClientIo, Decoder, Encoder, ProviderIo, Sse, Whole};
+use respan_gateway_http_syntax::path_ends_with;
 use respan_gateway_media::image::{Image, Input, Output, Partial, Start};
 use serde_json::{Map, Value, json};
 
@@ -77,7 +78,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiImages {
             io,
             NAME,
             move |head, input| post(head, input, stream),
-            |response, _| read_response(response),
+            |head, _| read_response(head),
         ))
     }
 }
@@ -223,18 +224,24 @@ fn linked_edit(input: &Input, stream: bool) -> Result<Map<String, Value>, Fault>
     Ok(v)
 }
 
-/// A provider's answer: a stream of events, or one JSON body.
-fn read_response(response: http::Response<Body>) -> EventStream<Output> {
-    let (head, body) = response.into_parts();
-    if sse::is_stream(&head) {
-        return sse::read(
-            body,
-            Streamed::default(),
-            |stream, raw, out| stream.event(&raw, out),
-            |stream, wire, _| wire.and_then(|()| stream.end()),
-        );
+/// The decoder of a provider's answer of `head`: a stream of events, or one
+/// JSON body.
+fn read_response(head: &http::response::Parts) -> Option<Box<dyn Decoder<Output>>> {
+    Some(match sse::is_stream(head) {
+        true => Box::new(Sse::new(Streamed::default())),
+        false => Box::new(Whole::new(decode_whole)),
+    })
+}
+
+impl Decoder<Output> for Streamed {
+    fn decode(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
+        self.event(&raw, out)
     }
-    whole::read(body, decode_whole)
+
+    fn end(&mut self, end: Result<(), Fault>, _: &mut Vec<Output>) -> Result<(), Fault> {
+        end?;
+        Streamed::end(self)
+    }
 }
 
 /// The events of a whole JSON response.
@@ -360,7 +367,7 @@ fn response_encoder(
 ) -> Box<dyn Encoder<Output>> {
     if !is_true(asked.get("stream")) {
         super::content_type(head, "application/json");
-        return whole::collect(encode_whole);
+        return Box::new(Whole::new(encode_whole));
     }
     super::content_type(head, "text/event-stream");
     let prefix = match path_ends_with(request.uri(), EDITS) {
@@ -467,8 +474,8 @@ impl StreamEncoder {
     }
 }
 
-impl Encoder<Output> for StreamEncoder {
-    fn encode(&mut self, event: &Output, out: &mut BytesMut) -> Result<(), Fault> {
+impl StreamEncoder {
+    fn encode_into(&mut self, event: &Output, out: &mut BytesMut) -> Result<(), Fault> {
         match event {
             Output::Start(start) => {
                 self.created = start.created.or(self.created);
@@ -500,9 +507,19 @@ impl Encoder<Output> for StreamEncoder {
         Ok(())
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end_into(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         self.flush(out);
         end.clone()
+    }
+}
+
+impl Encoder<Output> for StreamEncoder {
+    fn encode(&mut self, event: &Output, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        crate::edge::frame(frames, |out| self.encode_into(event, out))
+    }
+
+    fn end(&mut self, end: Result<(), Fault>, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        crate::edge::frame(frames, |out| self.end_into(&end, out))
     }
 }
 
@@ -540,7 +557,11 @@ mod tests {
         let encoder = post(&mut head, &input, false).expect("a call");
         assert_eq!(head.uri.path(), EDITS);
         assert_eq!(head.headers[http::header::CONTENT_TYPE], "application/json");
-        let written = respan_gateway_http::encode_all(encoder, &[input]).expect("a body");
+        let written = {
+            let mut encoder = encoder;
+            encoder.encode_all(&[input])
+        }
+        .expect("a body");
         let written: Value = serde_json::from_slice(&written).unwrap_or_default();
         assert_eq!(written, body);
     }
@@ -569,7 +590,11 @@ mod tests {
             usage: None,
             extras: Map::new(),
         });
-        let written = respan_gateway_http::encode_all(encoder, &events).expect("a stream");
+        let written = {
+            let mut encoder: Box<dyn Encoder<Output>> = encoder;
+            encoder.encode_all(&events)
+        }
+        .expect("a stream");
         let written = String::from_utf8_lossy(&written);
         let seen: Vec<(String, u64)> = written
             .split("\n\n")

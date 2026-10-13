@@ -7,9 +7,9 @@
 
 use respan_gateway_core::{Details, ErrorCode, Fault, RetryAfter, Upstream};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::sse::{Parser, event_json};
 use respan_gateway_http::http::{self, StatusCode, header::CONTENT_TYPE};
-use respan_gateway_http::{ProviderError, Status, provider_fault};
+use respan_gateway_http_faults::{ProviderError, Status, provider_fault};
+use respan_gateway_sse::{Parser, event_json};
 use serde_json::Value;
 
 use super::Schema;
@@ -96,13 +96,13 @@ fn read(fault: Fault, status: StatusCode, v: &Value) -> Fault {
 }
 
 /// The fault of a provider's answer `v` of `status` that says an error in
-/// a success, such as an error event, in a response of format `name`: what
+/// a success, such as an error event: what
 /// it says ([`answer`]), the answer, `raw`, going as it came to a client of
 /// this format.
-pub(crate) fn said_error(name: &str, status: StatusCode, raw: Bytes, v: &Value) -> Fault {
+pub(crate) fn said_error(status: StatusCode, raw: Bytes, v: &Value) -> Fault {
     let mut answer = http::Response::new(raw);
     *answer.status_mut() = status;
-    read(provider_fault(name, answer), status, v)
+    read(provider_fault(answer), status, v)
 }
 
 /// Merge the fault's details into the format's error fields: each is added
@@ -149,10 +149,10 @@ pub(crate) fn failure_json(raw: &Bytes) -> Option<Value> {
 /// [`ProviderIo::bind`]: respan_gateway_http::ProviderIo::bind
 pub(crate) fn answer<C: Schema>(_: &C, answer: http::Response<Bytes>) -> Fault {
     let status = C::status(answer.status());
-    read_answer(C::NAME, status, answer)
+    read_answer(status, answer)
 }
 
-/// The fault of a provider's `answer` in format `name` that is no success,
+/// The fault of a provider's `answer` that is no success,
 /// read leniently as the vendors and their compatible servers write errors
 /// (`{"error": {..}}`, a string `error`, Gemini's and Cloudflare's lists,
 /// FastAPI's `detail`, a problem's `title`): the HTTP fault
@@ -161,30 +161,30 @@ pub(crate) fn answer<C: Schema>(_: &C, answer: http::Response<Bytes>) -> Fault {
 /// API can use it as its error reader ([`ProviderIo::bind`]).
 ///
 /// [`ProviderIo::bind`]: respan_gateway_http::ProviderIo::bind
-pub fn read_provider_error(name: &str, answer: http::Response<Bytes>) -> Fault {
+pub fn read_provider_error(answer: http::Response<Bytes>) -> Fault {
     let status = answer.status();
-    read_answer(name, status, answer)
+    read_answer(status, answer)
 }
 
 /// [`read_provider_error`], under `status`.
-fn read_answer(name: &str, status: StatusCode, mut answer: http::Response<Bytes>) -> Fault {
+fn read_answer(status: StatusCode, mut answer: http::Response<Bytes>) -> Fault {
     let json = http::HeaderValue::from_static("application/json");
     answer.headers_mut().entry(CONTENT_TYPE).or_insert(json);
     let v = failure_json(answer.body()).unwrap_or_default();
-    read(provider_fault(name, answer), status, &v)
+    read(provider_fault(answer), status, &v)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use respan_gateway_http::error_code;
+    use respan_gateway_http_faults::error_code;
     use serde_json::json;
 
     /// What an answer of `status` whose body is `v` says.
     fn provider_error(status: StatusCode, v: &Value) -> Fault {
         let mut answer = http::Response::new(Bytes::from(v.to_string()));
         *answer.status_mut() = status;
-        read(provider_fault("f", answer), status, v)
+        read(provider_fault(answer), status, v)
     }
 
     #[test]

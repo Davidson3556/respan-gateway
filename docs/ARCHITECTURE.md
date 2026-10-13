@@ -31,7 +31,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
   providers: it serves a `Gateway` over Axum, plain HTTP and WebSocket
   upgrades from one router, so no wire hosts anything.
 - A **format** (`crates/formats/`) is a kind over a wire, a crate per pair
-  (`conversation-http`, `media-http`, `realtime-ws`, `mcp-http`), each a
+  (`conversation-http`, `media-http`, `realtime-ws`, `mcp-http`, and `passthrough-http`, whose kind is its own), each a
   `Format`. A format is a spec and names no vendor: what a provider sends
   beyond the spec stays native to it, where it appeared. It picks the wire
   capabilities its spec uses, such as a subprotocol or binary frames.
@@ -48,15 +48,23 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/kinds/media/` | Kind | A kind per media operation (images, transcription, speech, embeddings, video jobs) over the conversation kind's media and usage | Core, conversation |
 | `crates/kinds/realtime/` | Kind | A live session's events both ways: configuration, audio, messages, responses, barge-in and tool calls, over the conversation kind's messages, tools and usage | Core, conversation |
 | `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes | Core |
-| `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the passthrough format; optional Reqwest transport | Core |
+| `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the raw request and answer, and what a transport does to a call | Core, HTTP faults, HTTP syntax, SSE |
+| `crates/wires/http-faults/` | Wire | Faults in HTTP terms, with no I/O: a fault's status and error code, retry eligibility, a provider's error answer as a fault | Core |
+| `crates/wires/http-syntax/` | Wire | How paths and headers are read, with no I/O: percent-decoding, path matching and forwarding, header tokens, a hop's own headers | Core |
+| `crates/wires/sse/` | Wire | Server-sent events as bytes: an incremental splitter, and events written so no value forges a field | Core |
+| `crates/wires/http-transport/` | Wire | `HttpTransport`, a pooled Reqwest backend for the provider edge | Core, HTTP |
 | `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`) | Core, HTTP |
 | `crates/formats/conversation-http/` | Format | The HTTP binding (`Schema`) and four chat formats: OpenAI Chat, Anthropic Messages, Gemini `generateContent` and OpenAI Responses; reasoning controls map between them | Conversation, HTTP |
 | `crates/formats/media-http/` | Format | OpenAI's media endpoints as compatible vendors serve them, and Veo's as a provider | Media, conversation-http, HTTP |
 | `crates/formats/realtime-ws/` | Format | OpenAI Realtime and Gemini Live, translated both ways (audio converted, the other's scaffolding emulated), and Responses over WebSocket, sharing their session's handshake | Realtime, HTTP, WS |
 | `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
+| `crates/formats/passthrough-http/` | Format | `Input<F>` / `Output<F>`, HTTP traffic of no kind relayed unread, and the `Passthrough` format | HTTP |
 | `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins (such as Groq's usage, DeepSeek's `reasoning_content`, Gemini's `thought_signature` placeholder) | Core, the conversation, media and realtime formats, and the conversation and realtime kinds (for quirk plugins) |
 | `crates/serve/` | Hosting | One Axum router for a gateway: plain HTTP and WebSocket upgrades, body and session limits, graceful stop | Core, HTTP, WS |
-| `crates/plugins/` | Plugins | The router (`Routes`, `Routing`), attempts, fallback, races and backoff, and the agent loop (`agent::Agent`) | Core and the conversation kind |
+| `crates/plugins/*` | Plugins, one crate each | `routing` (`Routes`, `Routing`), `fallback` (`Fallback`, and the attempt, race and backoff helpers) and `tool-loop` (`ToolLoop`, and the `ToolFilter` and `ToolScope` that say which tools are offered) | Core and the conversation kind |
+| `crates/plugins/relay/` | Plugin | `Relay`: a client's request, key, response head and error body forwarded as they came, to a provider of its own format | Core, HTTP |
+| `crates/plugins/credentials/` | Plugin | `ClientCredentials`: a client's own key headers to the named providers that have no key of their own, of the client's format | Core, HTTP |
+| `crates/plugins/mcp-aggregate/` | Plugin | `Aggregate`: one MCP endpoint, `/mcp`, fronting many MCP servers as a single server | Core, HTTP, MCP, mcp-http, tool loop (`ToolFilter`, `ToolScope`) |
 | `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | The kinds, wires, formats, providers and plugins above, and MCP (`mcp:` servers at `/mcp/{name}`) |
 | `apps/ui/` | Web UI | React and shadcn/ui admin UI (providers, routes, live requests), built by `pnpm build` to `apps/ui/dist` and embedded in the binary by `apps/gateway/build.rs`; a placeholder page stands in when it is not built | None (talks to the admin API) |
 | `python/` | Python package | PyO3 extension hosting the `apps/gateway` library in-process, plus httpx transports and SDK clients | `apps/gateway` |
@@ -134,7 +142,7 @@ that relays and does not translate.
 
 Core does no routing: it knows provider names, and each request has a
 target slot (`Gateway::target` for the default, `ClientContext::set_target`
-per request). Routing is a plugin, `Routing` in `crates/plugins`, which
+per request). Routing is a plugin, `Routing` in `crates/plugins/routing`, which
 targets a request by `Routes`. Each kind's `Input` owns its model
 (`model()`, `set_model()`); the router is given, per format, its `Kind`
 (a label, and whether its formats translate) and a `Model` built from those
@@ -171,8 +179,8 @@ format the router was not given keeps its target.
   and their quirks are the providers crate's.
 - Every kind is an `Input` in and an `Output` out, in the crate that owns
   it: `conversation`, `media` (a module per operation), `realtime`, and `mcp` (envelopes around its typed
-  JSON-RPC `Message`). HTTP's passthrough (`passthrough`,
-  `Input<F>` / `Output<F>`) is the one kind that is its own wire.
+  JSON-RPC `Message`). The passthrough format (`passthrough-http`,
+  `Input<F>` / `Output<F>`) is the one kind that lives in its format's crate.
   Core defines no kinds or `Format` implementations.
   Plugins and whole-body conversation encoders share the conversation crate's ordered
   `Assembled` fold instead of maintaining separate reply representations.
@@ -199,7 +207,10 @@ The core drives typed streams and sinks while protocol code owns bytes and heads
 `Plugin` provides client and provider hooks, including an end hook for each
 lifecycle. Filters edit typed events; calls let plugins invoke providers using
 the client's input or input of their own. Responses can be streamed, inspected
-or buffered. HTTP raw relay behavior is an explicit policy in the HTTP crate.
+or buffered. A request is always written again by its provider's format;
+response heads and error bodies relay as they came only by explicit policy
+(`Relay`, which marks a call to a provider of its client's own format
+`Relayed`).
 
 An HTTP format binds `ClientIo` and `ProviderIo` with mirrored `bind`s, each
 given what only the protocol knows: a decoder, an encoder, and an error
@@ -213,7 +224,7 @@ See the [core guide](../crates/core/README.md),
 [conversation formats guide](../crates/formats/conversation-http/README.md),
 [providers guide](../crates/providers/README.md),
 [HTTP guide](../crates/wires/http/README.md), and
-[routing guide](../crates/plugins/README.md) for their public contracts.
+[plugins guide](../crates/plugins/README.md) for their public contracts.
 
 ## Tests and examples
 
@@ -244,6 +255,11 @@ the provider edge own them (see [One shape at both edges](#one-shape-at-both-edg
 - **Plugin**: four hooks, `on_client` and `on_client_end` once per
   request, `on_provider` and `on_provider_end` once per call, in
   registration order. `on_client` passes (`Ok(None)`), replies or refuses.
+- **Provider**: a name, the format it speaks, how each call gets a
+  transport, and its own plugins (`Provider::new(..).plugin(..)`, added with
+  `Gateway::provider`). A provider's own plugins' `on_provider` and
+  `on_provider_end` run on its calls alone, after the gateway's plugins. A
+  vendor's quirks are one.
 - **Filter**: edits a request's inputs or a response's outputs as they
   stream; its type says which. For work that waits, such as a remote check
   or a deadline, a plugin wraps the stream in its own (`cx.wrap`).
@@ -259,12 +275,14 @@ the provider edge own them (see [One shape at both edges](#one-shape-at-both-edg
   encoder and an error writer (client) or reader (provider).
 - **Call**: what the gateway sends a provider on a request's behalf
   (`cx.call`): the request's inputs as filters left them, or one input of
-  its own (`with_input`). HTTP plugins opt into raw requests with
-  `SendRaw(Wire)`, choose heads with `ProviderHead` and `ClientHead`, and
-  opt into raw errors with `RawReply`. Credentials are separate and must be
-  copied explicitly. The binary copies a client's credentials to a keyless
-  provider of the client's own format, and its `proxy` mode relays every
-  request raw with them.
+  its own (`with_input`). A request is always written again by its
+  provider's format; to a provider of the client's own format it carries
+  the client's spec headers and query parameters. A call marked `Relayed`
+  gives the client its provider's head, error body and close code, and the
+  provider its client's key; a plugin opts into a raw error with `RawReply`
+  too. Credentials are otherwise separate and must be copied explicitly.
+  The binary copies a client's credentials to a keyless provider of the
+  client's own format, which its `proxy` mode relies on.
 - **Response**: what a call, or `Response::stream`, gives back: read
   (`outputs`), held (`buffer_until`, `until_end`) or sent. Buffered events,
   errors and call ownership remain available for replay even when
@@ -304,7 +322,8 @@ or its own `StdioTransport` (one child per client session, limits at the
 transport's defaults but 32 sessions). `Routing` does not route the kind; a
 small plugin, `McpRoute`, targets the server named by the request path, so a
 client cannot choose another's. Credentials follow the provider rule: an
-upstream key replaces the client's, and `ClientCredentials` forwards a
+upstream key replaces the client's, and `ClientCredentials`
+(`crates/plugins/credentials`) forwards a
 client's only to a server with `forward_auth`. The request log shows the
 method (and tool, prompt or resource) where other kinds show a model; the
 server is the provider. Children are the transport's: process groups,
@@ -316,10 +335,11 @@ environment.
 
 ### The aggregate endpoint
 
-`mcp_aggregate:` adds `/mcp` beside `/mcp/{name}` (`StreamableHttp::with_root`).
-`apps/gateway/src/mcp_aggregate.rs` is a plugin, `Aggregate`, registered before
+`plugins: mcp_aggregate` adds `/mcp` beside `/mcp/{name}` (`StreamableHttp::with_root`).
+`Aggregate` (`crates/plugins/mcp-aggregate`; the binary's config and its check
+are `apps/gateway/src/mcp_aggregate.rs`) is a plugin, registered before
 `McpRoute`, that answers requests to the root itself with `Response::stream`,
-as the agent does: it is an MCP server toward the client and the gateway's
+as the tool loop does: it is an MCP server toward the client and the gateway's
 client of each `mcp:` server toward the providers, through `ClientContext::call`
 with the client's own extensions, so the `Owner` of the client key reaches the
 upstream transports and each server's own credentials apply. State is one table
@@ -346,10 +366,40 @@ drops that token, gets another and sends a call with a whole body once more.
 `check --online` takes a token for its probe. Secrets are read at load through
 the same `env:` rule as keys and have no `Debug` output.
 
-## The agent loop
+## The binary's plugins
+
+The binary configures each compiled-in plugin under its own name in
+`plugins:` (`PluginsConfig`), and registers them in an order of its own,
+whatever the file's (`with_plugins` in `apps/gateway/src/app/built.rs`): the
+closers of the tool loop's and the aggregate's sessions; the request log
+(`request_log`); routing (`routing`); the MCP aggregate (`mcp_aggregate`) and
+`/mcp/{name}` routing; video jobs (`VideoJobs` and `LocateContent`, of the
+media kind); whose credentials go where; the tool loop
+(`tool_loop`); then hedge (`hedge`) and fallback (`fallback`). Routing, the
+request log, MCP routing, video jobs and credentials are always on; the tool
+loop, the aggregate, hedge and fallback only when configured.
+
+A vendor's quirks are not one of the gateway's plugins: they are a plugin
+of each of its providers (the vendor's `Provider::plugin`, given to the core
+provider with `Provider::plugin` when it is composed). Its provider-edge
+hooks run on that provider's calls alone, after the gateway's plugins, so
+its filters are the provider edge's innermost and every plugin sees the
+kind's events. Nothing turns it off.
+
+The order is what makes them compose. Plugins that target and edit a request
+come before the ones that answer it themselves (the tool loop, hedge,
+fallback), and the first of those that applies answers it: a request the tool
+loop runs is not hedged or retried, and a hedged one is not retried.
+
+Fallback and hedge chains name configured providers; `apps/gateway/src/attempts.rs`
+turns them into chains of core providers, one per format of the target: each
+provider of the chain by its core provider of that format, else, for a kind
+that translates, its first of the kind.
+
+## The tool loop
 
 The loop that runs tools inside a chat request is a plugin, not a kernel
-feature: `agent::Agent` in `crates/plugins` depends on the core and the
+feature: `ToolLoop` in `crates/plugins/tool-loop` depends on the core and the
 conversation kind alone, so it serves every chat format and provider. In
 `on_client`, after routing has chosen the target and the request is in scope,
 it asks a `Tools` runner for the request's `Toolbox` (`list` and `call`),
@@ -365,16 +415,16 @@ the assistant's calls and a user message of results; anything else ends the
 loop, with the usage summed. Because the plugin replies, it is registered
 after the plugins that route or edit the request.
 
-The binary supplies the runner and the policy: `apps/gateway/src/agent.rs`
+The binary supplies the runner and the policy: `apps/gateway/src/tool_loop.rs`
 implements `Tools` with MCP, as the gateway's own client of the `mcp:`
 servers it already composes as providers. A tool call is a `Call` to the
 server's provider with an MCP `Input` (the server's credentials are the
 transport's; the call carries the `Owner` of no client key, and
 `ToolHop` so the request log keeps the server out of the request's provider
 field), through a session the runner keeps per server and restarts when lost,
-and a per-server tool list with a TTL, filtered by `agent.allow` and
-`agent.deny` (patterns over the name the model has). The config check refuses
+and a per-server tool list with a TTL, filtered by `plugins.tool_loop.allow` and
+`plugins.tool_loop.deny` (patterns over the name the model has). The config check refuses
 servers with `forward_auth`. `check --online` asks the same runner, through a
 request of the gateway's own marked with an extension no client can send, for
 the tools it offers. The steps and tool calls go to the request log through the
-plugin's observer (`Agent::observe`), which the recorder's entry implements.
+plugin's observer (`ToolLoop::observe`), which the recorder's entry implements.

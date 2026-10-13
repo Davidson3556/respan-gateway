@@ -204,12 +204,12 @@ async fn a_judge_reads_a_redirect_as_a_failure() {
             // A 502 fault carrying the provider's 302.
             let fault = verdict.err();
             assert_eq!(
-                fault.as_ref().map(respan_gateway_http::status),
+                fault.as_ref().map(respan_gateway_http_faults::status),
                 Some(StatusCode::BAD_GATEWAY)
             );
             let answer = fault.as_ref().and_then(|f| {
-                f.get::<respan_gateway_http::ProviderError>()
-                    .map(|e| &e.response)
+                f.get::<respan_gateway_http_faults::ProviderError>()
+                    .map(|e| &e.0)
             });
             assert_eq!(answer.map(|a| a.status()), Some(StatusCode::FOUND));
             Ok(None)
@@ -256,12 +256,12 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
     let (failed, answered) = (&ended[1].1, &ended[0].1);
     let failed = failed.as_ref().err();
     assert!(failed.is_some_and(|f| {
-        f.get::<respan_gateway_http::ProviderError>()
-            .map(|e| &e.response)
+        f.get::<respan_gateway_http_faults::ProviderError>()
+            .map(|e| &e.0)
             .is_some()
     }));
     assert_eq!(
-        failed.map(respan_gateway_http::status),
+        failed.map(respan_gateway_http_faults::status),
         Some(StatusCode::SERVICE_UNAVAILABLE)
     );
     assert_eq!(says(answered.clone()), Ok(()));

@@ -6,7 +6,7 @@ use respan_gateway_http::{Body, Completion, ProviderIo, connect, http};
 
 use crate::http_support::LIMIT;
 use respan_gateway_conversation::Usage;
-use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, async_trait};
+use respan_gateway_core::{Fault, Gateway, Plugin, Provider, ProviderContext, async_trait};
 
 pub type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
 
@@ -21,7 +21,7 @@ where
         + 'static,
 {
     let name = name.to_owned();
-    Box::new(move |gateway| gateway.provider(name, format, connect(sender, LIMIT)))
+    Box::new(move |gateway| gateway.provider(Provider::new(name, format, connect(sender, LIMIT))))
 }
 
 pub fn providers(list: impl IntoIterator<Item = AddProvider>) -> Result<Gateway, Fault> {

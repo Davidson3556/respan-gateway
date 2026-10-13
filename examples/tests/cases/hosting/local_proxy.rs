@@ -53,7 +53,7 @@ fn malformed_upstream_is_rejected_before_binding_or_announcing_readiness() {
     let Err(error) = upstream_gateway("not-a-url") else {
         panic!("malformed upstream must fail");
     };
-    assert_eq!(respan_gateway_http::error_code(&error), "config");
+    assert_eq!(respan_gateway_http_faults::error_code(&error), "config");
 }
 
 #[tokio::test]
@@ -85,7 +85,12 @@ async fn serve_mode_uses_local_upstream_and_relays_client_credentials()
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/v1/messages");
-    assert_eq!(&requests[0].raw[..], request.as_bytes());
+    let json = |raw: &[u8]| serde_json::from_slice::<serde_json::Value>(raw).ok();
+    assert_eq!(
+        json(&requests[0].raw),
+        json(request.as_bytes()),
+        "round-tripped"
+    );
     assert_eq!(
         requests[0]
             .headers
@@ -98,7 +103,7 @@ async fn serve_mode_uses_local_upstream_and_relays_client_credentials()
 }
 
 #[tokio::test]
-async fn credentials_beta_headers_and_unknown_fields_pass_untouched() -> Result<(), Fault> {
+async fn credentials_beta_headers_and_unknown_fields_round_trip() -> Result<(), Fault> {
     let sent = Sent::default();
     let gw = gateway(fixture(http::StatusCode::OK, STREAM.concat(), sent.clone()))?;
     let (status, _, body) = read_whole(serve(&gw, request()).await.0).await;
@@ -115,11 +120,16 @@ async fn credentials_beta_headers_and_unknown_fields_pass_untouched() -> Result<
     let requests = sent.lock().unwrap_or_else(PoisonError::into_inner);
     assert_eq!(requests.len(), 1);
     let (uri, headers, body) = &requests[0];
-    assert_eq!(uri.to_string(), "/v1/messages");
     assert_eq!(
-        body.as_ref(),
-        REQUEST.as_bytes(),
-        "the request body relays byte for byte"
+        uri.to_string(),
+        "/v1/messages?beta=true",
+        "its spec's query"
+    );
+    let json = |raw: &[u8]| serde_json::from_slice::<serde_json::Value>(raw).ok();
+    assert_eq!(
+        json(body),
+        json(REQUEST.as_bytes()),
+        "the request, written again, says what the client's did"
     );
     let header = |name| headers.get(name).and_then(|v| v.to_str().ok());
     assert_eq!(
@@ -137,8 +147,8 @@ async fn credentials_beta_headers_and_unknown_fields_pass_untouched() -> Result<
 async fn a_provider_error_reaches_the_client_as_the_provider_wrote_it() -> Result<(), Fault> {
     let error = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
     let sent = Sent::default();
-    let status =
-        http::StatusCode::from_u16(529).map_err(|e| respan_gateway_http::built_wrong(e.into()))?;
+    let status = http::StatusCode::from_u16(529)
+        .map_err(|e| respan_gateway_http_faults::built_wrong(e.into()))?;
     let gw = gateway(fixture(status, error, sent.clone()))?;
     let (status, _, body) = read_whole(serve(&gw, request()).await.0).await;
     assert_eq!((status.as_u16(), body?), (529, error.into()));

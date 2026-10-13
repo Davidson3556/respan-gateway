@@ -4,21 +4,91 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 
 use crate::events::Single;
-use crate::format::{AnyFormat, is_input};
+use crate::format::{AnyFormat, Erased, is_input, snapshot};
 use crate::input::Input;
-use crate::leg::{Layer, locked};
+use crate::layers::{Layer, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard, Latch};
 use crate::plugin::Filters;
 use crate::values::Value;
-use crate::{ClientContext, Extensions, Filter, Plugin, Result};
+use crate::{ClientContext, Extensions, Filter, Format, Plugin, Result};
 
-/// A provider the gateway can call: a format and a fresh-transport factory.
+/// A provider a gateway can call, added with
+/// [`Gateway::provider`](crate::Gateway::provider): its name, the format it
+/// speaks, how each call gets a transport, and its own plugins.
+///
+/// ```ignore
+/// let groq = Provider::new("groq", OpenAiChat, connect(..)).plugin(GroqQuirks);
+/// let gateway = Gateway::new().provider(groq)?;
+/// ```
 #[derive(Clone)]
-pub(crate) struct Provider {
+pub struct Provider {
+    pub(crate) name: String,
     pub(crate) format: Arc<dyn AnyFormat>,
     /// Snapshots a call's own input with the registered input type's `Clone`.
     pub(crate) snapshot: fn(&dyn Any) -> Result<Arc<Single<Value>>>,
     pub(crate) factory: Arc<dyn Fn(Extensions) -> Box<dyn Any + Send> + Send + Sync>,
+    /// Its own plugins, run on its calls alone, after the gateway's.
+    pub(crate) plugins: Plugins,
+}
+
+/// A provider's own plugins ([`Provider::plugin`]).
+pub(crate) type Plugins = Arc<[Arc<dyn Plugin>]>;
+
+impl Provider {
+    /// Provider `name`, speaking `format`. After its hooks run, each attempt
+    /// gets a fresh transport from `factory`, with that call's extensions.
+    /// The factory may return a lightweight handle backed by a shared pool.
+    /// `I` is the gateway input type and `O` its output type: this binding
+    /// receives `O` and sends `I`.
+    pub fn new<I, O, T>(
+        name: impl Into<String>,
+        format: impl Format<T, O, I>,
+        factory: impl Fn(Extensions) -> T + Send + Sync + 'static,
+    ) -> Provider
+    where
+        T: Send + 'static,
+        I: Clone + Send + Sync + 'static,
+        O: Clone + Send + Sync + 'static,
+    {
+        let factory =
+            Arc::new(move |extensions| Box::new(factory(extensions)) as Box<dyn Any + Send>);
+        Provider {
+            name: name.into(),
+            format: Arc::new(Erased::<_, T, O, I>::provider(format)),
+            snapshot: snapshot::<I>,
+            factory,
+            plugins: Arc::new([]),
+        }
+    }
+
+    /// Add `plugin` to this provider alone: its provider-edge hooks
+    /// ([`on_provider`](Plugin::on_provider) and
+    /// [`on_provider_end`](Plugin::on_provider_end)) run on this provider's
+    /// calls, after the gateway's plugins and those added here before it;
+    /// its client-edge hooks never run. It is part of the provider, not a
+    /// policy: what a vendor departs from its format's spec in goes here,
+    /// so the gateway's plugins see the kind's events.
+    pub fn plugin(mut self, plugin: impl Plugin) -> Provider {
+        let mut plugins = self.plugins.to_vec();
+        plugins.push(Arc::new(plugin));
+        self.plugins = plugins.into();
+        self
+    }
+
+    /// Its name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl std::fmt::Debug for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Provider")
+            .field("name", &self.name)
+            .field("format", &self.format.name())
+            .field("plugins", &self.plugins.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// One call to a provider, as the provider edge's hooks see it.
@@ -28,6 +98,8 @@ pub struct ProviderContext {
     /// The provider's format.
     pub(crate) format: Arc<dyn AnyFormat>,
     pub(crate) provider: String,
+    /// Its provider's own plugins, whose hooks run after the gateway's.
+    pub(crate) plugins: Plugins,
     /// Its first input: its own, or the one that came with the request's head.
     pub(crate) input: Input,
     /// Filters of its outputs, whoever reads them.
@@ -59,6 +131,15 @@ impl std::fmt::Debug for ProviderContext {
 impl Edge for ProviderContext {
     fn client(&self) -> &ClientContext {
         &self.client
+    }
+
+    /// The gateway's plugins, then its provider's own.
+    fn plugins(&self) -> impl Iterator<Item = &Arc<dyn Plugin>> + Send {
+        self.client
+            .gateway
+            .plugins
+            .iter()
+            .chain(self.plugins.iter())
     }
 
     fn hook<'a>(&'a self, plugin: &'a dyn Plugin, end: &'a Result<()>) -> BoxFuture<'a, ()> {

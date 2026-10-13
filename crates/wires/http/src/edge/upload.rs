@@ -5,7 +5,6 @@ use super::PANICKED;
 use super::reader::Failure;
 use super::writer::Writer;
 use crate::{Body, Completion, Encoder};
-use bytes::BytesMut;
 use futures::future::{BoxFuture, Shared};
 use futures::{Future, Sink};
 use respan_gateway_core::{EventSink, Fault};
@@ -39,16 +38,23 @@ pub(crate) fn encoding<T: 'static>(encoder: Box<dyn Encoder<T>>) -> (EventSink<T
         failed: failed.clone(),
         settled: settled.clone(),
     });
-    (
-        EventSink::new(Encoding {
-            encoder,
-            writer,
-            failed,
-            settled,
-            ended: false,
-        }),
-        body,
-    )
+    let mut encoding = Encoding {
+        encoder,
+        writer,
+        failed,
+        settled,
+        ended: false,
+    };
+    let mut out = Vec::new();
+    let started = std::panic::catch_unwind(AssertUnwindSafe(|| encoding.encoder.start(&mut out)))
+        .unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
+    match started {
+        Ok(()) => out
+            .into_iter()
+            .for_each(|frame| encoding.writer.send(frame)),
+        Err(fault) => encoding.finish(Err(fault)),
+    }
+    (EventSink::new(encoding), body)
 }
 
 struct Encoding<T> {
@@ -75,9 +81,10 @@ impl<T: 'static> Encoding<T> {
             return;
         }
         self.ended = true;
-        let mut out = BytesMut::new();
+        let mut out = Vec::new();
+        let ended = end.clone();
         let encoded =
-            std::panic::catch_unwind(AssertUnwindSafe(|| self.encoder.end(&end, &mut out)))
+            std::panic::catch_unwind(AssertUnwindSafe(|| self.encoder.end(ended, &mut out)))
                 .unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
         if let Err(fault) = encoded {
             out.clear();
@@ -86,8 +93,8 @@ impl<T: 'static> Encoding<T> {
         if let Err(fault) = &end {
             let _ = self.failed.set(fault.clone());
         }
-        if !out.is_empty() {
-            self.writer.send(out.freeze());
+        for frame in out {
+            self.writer.send(frame);
         }
         self.writer.end(end.clone(), end.err());
     }
@@ -103,10 +110,10 @@ impl<T: 'static> Sink<Result<T, Fault>> for Encoding<T> {
         }
         let mut out = Vec::new();
         let encoded = match item {
-            Ok(value) => std::panic::catch_unwind(AssertUnwindSafe(|| {
-                self.encoder.encode_messages(&value, &mut out)
-            }))
-            .unwrap_or_else(|_| Err(Fault::internal(PANICKED))),
+            Ok(value) => {
+                std::panic::catch_unwind(AssertUnwindSafe(|| self.encoder.encode(&value, &mut out)))
+                    .unwrap_or_else(|_| Err(Fault::internal(PANICKED)))
+            }
             Err(fault) => Err(fault),
         };
         match encoded {

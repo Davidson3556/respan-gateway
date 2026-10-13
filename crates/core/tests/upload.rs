@@ -19,7 +19,11 @@ fn gateway_of(seen: &Seen, wait: bool, answer: fn() -> Text) -> Gateway {
     Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("a", Toy, connect(seen.transport(wait, answer)))
+        .provider(Provider::new::<In, _, _>(
+            "a",
+            Toy,
+            connect(seen.transport(wait, answer)),
+        ))
         .unwrap()
         .target("a")
         .unwrap()
@@ -223,7 +227,11 @@ async fn a_retry_after_every_input_was_read_is_not_a_clean_empty_upload() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>("a", Toy, connect(reads_then_refuses_first(bodies.clone())))
+        .provider(Provider::new::<In, _, _>(
+            "a",
+            Toy,
+            connect(reads_then_refuses_first(bodies.clone())),
+        ))
         .unwrap()
         .plugin(Retry);
     let (tx, req) = upload();

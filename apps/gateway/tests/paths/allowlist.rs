@@ -10,7 +10,7 @@ fn gateway_yaml(base: &str) -> String {
   p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
   any: {{ formats: passthrough, base_url: '{base}/pt' }}
 formats: [openai-chat, passthrough]
-default: p
+plugins: {{ routing: {{ default: p }} }}
 "
     )
 }

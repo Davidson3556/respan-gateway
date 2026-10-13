@@ -5,12 +5,13 @@
 use std::sync::Arc;
 
 use respan_gateway_conversation as conversation;
-use respan_gateway_core::{Extensions, Fault, Format, Gateway, Upstream};
+use respan_gateway_core::{Extensions, Fault, Format, Gateway, Provider, Upstream};
 use respan_gateway_http::http::{HeaderMap, Uri};
-use respan_gateway_http::passthrough::Passthrough;
-use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo, Wire, reqwest};
+use respan_gateway_http::{ClientIo, ProviderIo, raw::Original};
+use respan_gateway_http_transport::{HttpTransport, reqwest};
 use respan_gateway_media::{embedding, image, speech, transcription, video};
-use respan_gateway_plugins::{Kind, Model};
+use respan_gateway_passthrough_http::Passthrough;
+use respan_gateway_plugin_routing::{Kind, Model};
 use respan_gateway_providers::{ALL, Auth, Base, Format as Spoken, Speaks};
 use respan_gateway_realtime as realtime;
 use respan_gateway_realtime_ws::{
@@ -24,7 +25,7 @@ use crate::presets::origin;
 /// The kinds of traffic this binary carries, as the admin API and routing
 /// name them.
 pub mod kind {
-    use respan_gateway_plugins::Kind;
+    use respan_gateway_plugin_routing::Kind;
 
     pub const CHAT: Kind = Kind {
         label: "chat",
@@ -86,7 +87,7 @@ pub fn first_of_each_kind<T>(items: impl IntoIterator<Item = (Kind, T)>) -> Vec<
     firsts
 }
 
-type AddProvider = dyn Fn(Gateway, String, &str, HeaderMap) -> Result<Gateway, Fault> + Send + Sync;
+type MakeProvider = dyn Fn(String, &str, HeaderMap) -> Result<Provider, Fault> + Send + Sync;
 type Serve = dyn Fn(Gateway) -> Result<Gateway, Fault> + Send + Sync;
 
 /// A format compiled into the binary.
@@ -103,7 +104,7 @@ pub struct KnownFormat {
     pub websocket: bool,
     /// What its video jobs' ids start with, which routes a follow-up.
     pub job_ids: Option<&'static str>,
-    provider: Box<AddProvider>,
+    provider: Box<MakeProvider>,
     /// None for a format only providers speak.
     serve: Option<Box<Serve>>,
     /// How its requests name their model.
@@ -164,11 +165,11 @@ impl KnownFormat {
             base: Base::Same,
             websocket: false,
             job_ids: None,
-            provider: Box::new(move |gateway, name, base_url, auth| {
+            provider: Box::new(move |name, base_url, auth| {
                 // A core provider is named `provider` or `provider:format`.
                 let provider = name.split(':').next().unwrap_or_default();
                 let reached = reach(provider, base_url, auth)?;
-                gateway.provider::<I, O, _>(name, format.clone(), reached)
+                Ok(Provider::new::<I, O, _>(name, format.clone(), reached))
             }),
             serve: None,
             model: Model::none(),
@@ -214,14 +215,14 @@ impl KnownFormat {
         self.serve.is_some()
     }
 
-    pub fn add_provider(
+    /// Its core provider `name`, at `base_url` with `auth` headers.
+    pub fn provider(
         &self,
-        gateway: Gateway,
         name: String,
         base_url: &str,
         auth: HeaderMap,
-    ) -> Result<Gateway, Fault> {
-        (self.provider)(gateway, name, base_url, auth)
+    ) -> Result<Provider, Fault> {
+        (self.provider)(name, base_url, auth)
     }
 
     pub fn serve(&self, gateway: Gateway) -> Result<Gateway, Fault> {
@@ -403,7 +404,7 @@ fn google_reach(
 /// ([`SessionModel`]) and asked for by the session's opening input.
 fn realtime() -> Model {
     Model::new(
-        |cx| requested_model(cx.extensions().get::<Wire>()?),
+        |cx| requested_model(cx.extensions().get::<Original>()?),
         |cx, model| {
             cx.extensions_mut().insert(SessionModel(model.clone()));
             cx.filter(realtime::set_model(model))
