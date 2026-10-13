@@ -30,8 +30,9 @@ the spec native, where it appeared. A quirk is a vendor's deployment
 departing from a spec it speaks, and its file handles it:
 
 - as data: the header a key goes in (`Speaks::key_in`), where a format sits
-  beside the base URL (`Speaks::at`), what its model list puts before an id
-  (`model_id_prefix`);
+  beside the base URL (`Speaks::at`), how it lists its models if not as
+  OpenAI's `GET /models` does (`Vendor::models`, a fn of the provider,
+  which calls with `client()`);
 - as a plugin, `Provider::plugin`, such as `groq::GroqQuirks`, which turns
   what the vendor sends beyond the spec into the kind's events and back.
   Each core provider of that vendor carries it as its own plugin
@@ -65,6 +66,8 @@ vendor, the first in `ALL` that speaks it, does.
 | `ollama` | `openai-chat`, `openai-embeddings` |  |
 | `azure` | `openai-chat` | `inert_choice`: A choice's `content_filter_results` and `content_filter_offsets` describe the moderation it passed. |
 | `vllm` | `openai-chat` | `reasoning_content`: Reasoning is `reasoning_content`, in a request's messages and a response's message or delta.<br>`inert_choice`: A choice's `stop_reason`, the stop token or string that ended it, describes its finish. |
+| `typesafe` | `typesafe-systemone` |  |
+| `cloudflare` | `openai-chat`, `openai-embeddings` |  |
 <!-- /table -->
 
 The table is written from `ALL`: `BLESS=1 cargo test -p respan-gateway-vendors --test registry`.

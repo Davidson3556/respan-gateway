@@ -18,3 +18,5 @@ http-body-util.workspace = true
 reqwest.workspace = true
 respan-gateway-core.workspace = true
 respan-gateway-http.workspace = true
+respan-gateway-http-faults.workspace = true
+serde_json.workspace = true

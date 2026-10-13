@@ -31,7 +31,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
   providers: it serves a `Gateway` over Axum, plain HTTP and WebSocket
   upgrades from one router, so no wire hosts anything.
 - A **format** (`crates/formats/`) is a kind over a wire, a crate per pair
-  (`conversation-http`, `media-http`, `realtime-ws`, `mcp-http`, and `passthrough-http`, whose kind is its own), each a
+  (`conversation-http`, `media-http`, `decision-http`, `realtime-ws`, `mcp-http`, and `passthrough-http`, whose kind is its own), each a
   `Format`. A format is a spec and names no vendor: what a provider sends
   beyond the spec stays native to it, where it appeared. It picks the wire
   capabilities its spec uses, such as a subprotocol or binary frames.
@@ -48,6 +48,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/core/` | Kernel | Execution, typed streams, plugin hooks, call and response lifecycles, fault extensions and tagged native values | None |
 | `crates/kinds/conversation/` | Kind | Conversation requests, reply events, typed usage and assembly | Core |
 | `crates/kinds/media/` | Kind | A kind per media operation (images, transcription, speech, embeddings, video jobs) over the conversation kind's media and usage | Core, conversation |
+| `crates/kinds/decision/` | Kind | Typed questions about a state (yes-or-no, choice, score), each answered with probabilities | Core, conversation (usage) |
 | `crates/kinds/realtime/` | Kind | A live session's events both ways: configuration, audio, messages, responses, barge-in and tool calls, over the conversation kind's messages, tools and usage | Core, conversation |
 | `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes | Core |
 | `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, path matching and forwarding, the raw request and answer, and what a transport does to a call | Core, HTTP faults, SSE |
@@ -57,10 +58,11 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`) | Core, HTTP |
 | `crates/formats/conversation-http/` | Format | The HTTP binding (`Schema`) and four chat formats: OpenAI Chat, Anthropic Messages, Gemini `generateContent` and OpenAI Responses; reasoning controls map between them | Conversation, HTTP |
 | `crates/formats/media-http/` | Format | OpenAI's media endpoints as compatible vendors serve them, and Veo's as a provider | Media, conversation-http, HTTP |
+| `crates/formats/decision-http/` | Format | TypeSafe's System One | Decision, conversation-http, HTTP |
 | `crates/formats/realtime-ws/` | Format | OpenAI Realtime and Gemini Live, translated both ways (audio converted, the other's scaffolding emulated), and Responses over WebSocket, sharing their session's handshake | Realtime, HTTP, WS |
 | `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
 | `crates/formats/passthrough-http/` | Format | `Input<F>` / `Output<F>`, HTTP traffic of no kind relayed unread, and the `Passthrough` format | HTTP |
-| `crates/vendor-kit/` | Vendors | A vendor as a template (`Vendor`), and a provider of it (`VendorProvider`): each format at its base URL with its key and quirks, registered; its model list | Core, the formats, HTTP, HTTP transport, WS |
+| `crates/vendor-kit/` | Vendors | A vendor as a template (`Vendor`), and a provider of it (`VendorProvider`): each format (any core `Format`, named by a vendor as `&Speaks::http(F)` or `&Speaks::ws(F, ..)`) at its base URL with its key and quirks, registered; its model list and a client of it | Core, HTTP, HTTP faults, HTTP transport, WS; no format |
 | `crates/vendors/` | Vendors | Every vendor, a file each, and their quirks: data and plugins (such as Groq's usage, DeepSeek's `reasoning_content`, Gemini's `thought_signature` placeholder) | The vendor kit, core, the formats, and the conversation and realtime kinds (for quirk plugins) |
 | `crates/serve/` | Hosting | One Axum router for a gateway: plain HTTP and WebSocket upgrades, body and session limits, graceful stop | Core, HTTP, WS |
 | `crates/plugins/*` | Plugins, one crate each | `routing` (`Routes`, `Routing`), `fallback` (`Fallback`, and the attempt, race and backoff helpers) and `tool-loop` (`ToolLoop`, and the `ToolFilter` and `ToolScope` that say which tools are offered) | Core and the conversation kind |
@@ -77,7 +79,7 @@ can cross these boundaries to exercise a complete request.
 
 ```mermaid
 flowchart LR
-    core --> kinds["conversation · media · realtime · mcp"]
+    core --> kinds["conversation · media · decision · realtime · mcp"]
     core --> http
     core --> plugins
     conversation --> media
@@ -87,12 +89,14 @@ flowchart LR
     http --> conversation-http
     media --> media-http
     conversation-http --> media-http
+    decision --> decision-http
     realtime --> realtime-ws
     ws --> realtime-ws
     mcp --> mcp-http
     http --> mcp-http
     conversation-http --> providers
     media-http --> providers
+    decision-http --> providers
     realtime-ws --> providers
     http --> serve
     ws --> serve
@@ -101,6 +105,7 @@ flowchart LR
     serve --> gateway
     conversation-http --> gateway
     media-http --> gateway
+    decision-http --> gateway
     realtime-ws --> gateway
     mcp --> gateway
     mcp-http --> gateway

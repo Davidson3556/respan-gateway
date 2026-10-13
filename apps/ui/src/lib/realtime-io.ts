@@ -1,6 +1,8 @@
 // The browser's side of a realtime session: the mic into 24 kHz PCM16 chunks
-// and the model's audio back out. Needs a real AudioContext, so it is
-// exercised in the browser; the maths it leans on is in realtime-audio.
+// and the model's audio back out, both through one AudioContext, so the
+// browser's echo canceller hears what is played and takes it out of the mic.
+// Needs a real AudioContext, so it is exercised in the browser; the maths it
+// leans on is in realtime-audio.
 
 import {
   MIC_WORKLET,
@@ -18,21 +20,32 @@ export interface Mic {
   stop: () => void;
 }
 
-/** Captures the mic and calls `onChunk` with base64 PCM16 at 24 kHz, ~40 ms apiece. */
+/**
+ * Captures the mic, in `player`'s AudioContext, and calls `onChunk` with
+ * base64 PCM16 at 24 kHz, ~40 ms apiece.
+ */
 export async function startMic(
+  player: Player,
   onChunk: (base64: string) => void,
   onLevel: (level: number) => void,
 ): Promise<Mic> {
   const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
   });
-  const context = new AudioContext();
+  // What the browser applied, which may not be what was asked: without echo
+  // cancellation, the speaker's audio comes back through the mic.
+  console.info("[realtime] microphone settings", stream.getAudioTracks()[0]?.getSettings());
+  const { context } = player;
   const url = URL.createObjectURL(new Blob([MIC_WORKLET], { type: "text/javascript" }));
   try {
     await context.audioWorklet.addModule(url);
   } catch (error) {
     stream.getTracks().forEach((t) => t.stop());
-    void context.close();
     throw error;
   } finally {
     URL.revokeObjectURL(url);
@@ -58,20 +71,26 @@ export async function startMic(
     onLevel(Math.min(1, Math.sqrt(sum / chunk.length) * 4));
     onChunk(encodeMic(chunk, context.sampleRate));
   };
-  context.createMediaStreamSource(stream).connect(tap);
+  const source = context.createMediaStreamSource(stream);
+  source.connect(tap);
   return {
     stop() {
       tap.port.onmessage = null;
+      source.disconnect();
+      tap.disconnect();
       stream.getTracks().forEach((t) => t.stop());
-      void context.close();
       onLevel(0);
     },
   };
 }
 
-/** Plays the model's audio deltas gaplessly, and can cut them off. */
+/**
+ * Plays the model's audio deltas gaplessly, and can cut them off. Its
+ * AudioContext, at the device's own rate, is the session's: the mic is
+ * captured in it too ([`startMic`]).
+ */
 export class Player {
-  private context = new AudioContext({ sampleRate: REALTIME_RATE });
+  readonly context = new AudioContext();
   private sources = new Set<AudioBufferSourceNode>();
   private next = 0;
   private began = 0;

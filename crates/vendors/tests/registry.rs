@@ -68,11 +68,7 @@ fn table() -> String {
 
 fn row(provider: &Vendor) -> String {
     let code = |s: &str| format!("`{s}`");
-    let formats: Vec<String> = provider
-        .formats
-        .iter()
-        .map(|s| code(s.format.name()))
-        .collect();
+    let formats: Vec<String> = provider.formats.iter().map(|f| code(f.name())).collect();
     let quirks: Vec<String> = provider
         .quirks
         .iter()
@@ -95,7 +91,7 @@ fn each_format_sits_where_and_takes_the_key_as_its_vendor_says() {
         .base("https://a.test/v1beta/openai");
     let parts = gemini.parts().unwrap_or_default();
     let at = |format: &str| {
-        let part = parts.iter().find(|p| p.speaks.format.name() == format);
+        let part = parts.iter().find(|p| p.format.name() == format);
         part.map(|p| (p.name.as_str(), p.base_url.as_str()))
     };
     assert_eq!(
@@ -117,7 +113,7 @@ fn each_format_sits_where_and_takes_the_key_as_its_vendor_says() {
 #[test]
 fn a_format_of_no_vendor_is_spoken_as_its_own_vendor_speaks_it() {
     use respan_gateway_vendors::{Auth, speaks};
-    let messages = speaks(None, "anthropic-messages").map(|s| s.auth);
+    let messages = speaks(None, "anthropic-messages").map(|f| f.auth());
     assert_eq!(messages, Some(Auth::Header("x-api-key")));
     assert!(speaks(None, "passthrough").is_some());
     assert!(speaks(None, "nope").is_none());

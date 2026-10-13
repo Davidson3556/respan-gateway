@@ -1,17 +1,18 @@
 //! OpenAI: Chat Completions, Responses, Realtime and Responses over WebSocket, and its
 //! media endpoints (images, transcriptions, speech, videos, embeddings).
 
+use respan_gateway_core::{NativeFields, Plugin, ProviderContext, Result, async_trait};
+use respan_gateway_realtime::Input;
+use serde_json::{Value, json};
+
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_conversation_http::responses::OpenAiResponses;
-use respan_gateway_core::{NativeFields, Plugin, ProviderContext, Result, async_trait};
 use respan_gateway_media_http::openai::{
     OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
 };
-use respan_gateway_realtime::Input;
 use respan_gateway_realtime_ws::{OpenAiRealtime, ResponsesWs};
-use serde_json::{Value, json};
 
-use crate::{Format, Quirk, Speaks, Vendor};
+use crate::{Quirk, Speaks, Vendor};
 
 /// The model it transcribes a session's input with, unless the session
 /// names one.
@@ -22,19 +23,17 @@ pub const VENDOR: Vendor = Vendor {
     id: "openai",
     base_url: Some("https://api.openai.com/v1"),
     key_env: &["OPENAI_API_KEY"],
-    example_model: "gpt-4o-mini",
     formats: &[
-        Speaks::new(Format::OpenAiChat(OpenAiChat)),
-        Speaks::new(Format::OpenAiResponses(OpenAiResponses)),
-        Speaks::new(Format::OpenAiRealtime(OpenAiRealtime)),
-        Speaks::new(Format::ResponsesWs(ResponsesWs)),
-        Speaks::new(Format::OpenAiImages(OpenAiImages)),
-        Speaks::new(Format::OpenAiTranscriptions(OpenAiTranscriptions)),
-        Speaks::new(Format::OpenAiSpeech(OpenAiSpeech)),
-        Speaks::new(Format::OpenAiVideos(OpenAiVideos)),
-        Speaks::new(Format::OpenAiEmbeddings(OpenAiEmbeddings)),
+        &Speaks::http(OpenAiChat),
+        &Speaks::http(OpenAiResponses),
+        &Speaks::ws(OpenAiRealtime, |base| OpenAiRealtime.transport(base)),
+        &Speaks::ws(ResponsesWs, |base| ResponsesWs.transport(base)),
+        &Speaks::http(OpenAiImages),
+        &Speaks::http(OpenAiTranscriptions),
+        &Speaks::http(OpenAiSpeech),
+        &Speaks::http(OpenAiVideos),
+        &Speaks::http(OpenAiEmbeddings),
     ],
-    model_id_prefix: None,
     quirks: &[Quirk {
         name: "openai_transcription_model",
         description: "Realtime transcribes the user's audio only with a named model: a session \
@@ -42,6 +41,7 @@ pub const VENDOR: Vendor = Vendor {
                       `gpt-4o-mini-transcribe`.",
     }],
     plugin: Some(&OpenAiQuirks),
+    ..Vendor::DEFAULT
 };
 
 /// OpenAI's quirks: a realtime session's input transcription names its

@@ -123,10 +123,9 @@ fn routes(upstreams: &[Upstream], table: Vec<(String, String)>, default: Option<
         });
         routes = routes.provider(&u.name, speaks.collect());
     }
-    let claims = upstreams.iter().flat_map(|u| {
-        let vendor = u.provider.vendor().map_or("", |v| v.id);
-        vendors::claims(vendor).map(|prefix| (prefix, &u.name))
-    });
+    let claims = upstreams
+        .iter()
+        .flat_map(|u| vendors::claims(u.provider.vendor().id).map(|prefix| (prefix, &u.name)));
     routes = claims.fold(routes, |routes, (prefix, name)| routes.claim(prefix, name));
     routes = routes.models(table);
     match default {
@@ -295,7 +294,7 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
     };
     let names: Vec<&str> = match (&p.formats, vendor) {
         (Some(names), _) => names.iter().map(String::as_str).collect(),
-        (None, Some(vendor)) => vendor.formats.iter().map(|s| s.format.name()).collect(),
+        (None, Some(vendor)) => vendor.formats.iter().map(|f| f.name()).collect(),
         (None, None) => return Err(bad("needs a `vendor` or `formats`".into())),
     };
     if names.is_empty() {
@@ -320,8 +319,16 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
         provider =
             provider.formats(speaks.ok_or_else(|| bad("speaks a format no vendor does".into()))?);
     }
-    let base_url = p.base_url.as_deref().or(vendor.and_then(|v| v.base_url));
-    provider = provider.base(base_url.ok_or_else(|| bad("needs a `base_url`".into()))?);
+    let located = match (&p.base_url, vendor) {
+        (Some(base_url), _) => Some(base_url.clone()),
+        (None, Some(vendor)) => vendor.located().map_err(|var| {
+            bad(format!(
+                "environment variable {var} is not set; its base URL needs it, or set `base_url`"
+            ))
+        })?,
+        (None, None) => None,
+    };
+    provider = provider.base(located.ok_or_else(|| bad("needs a `base_url`".into()))?);
     // Where its own key comes from; none for the client's credentials.
     let key_from = match (&p.key, &p.auth, vendor) {
         (Some(_), Some(_), _) => return Err(bad("set `key` or `auth`, not both".into())),
@@ -348,7 +355,7 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
     };
     let entries = provider.parts().map_err(|e| bad(e.message().into()))?;
     let entries = entries.into_iter().map(|part| {
-        let format = part.speaks.format.name();
+        let format = part.format.name();
         Ok(Entry {
             format: format.to_owned(),
             kind: format_named(formats, format, &owner)?.kind,

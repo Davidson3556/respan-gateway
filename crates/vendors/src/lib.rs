@@ -12,13 +12,15 @@
 use respan_gateway_passthrough_http::Passthrough;
 
 pub use respan_gateway_vendor_kit::{
-    Auth, Base, Format, Part, Quirk, Speaks, Vendor, VendorProvider,
+    Auth, Base, Body, BoxFuture, Connect, HttpTransport, ListModels, Model, Models, Part, Quirk,
+    Reach, Speaks, Vendor, VendorProvider, Wire, built_wrong, http, json, models,
 };
 
 mod chat;
 
 pub mod anthropic;
 pub mod azure;
+pub mod cloudflare;
 pub mod deepseek;
 pub mod fireworks;
 pub mod gemini;
@@ -28,6 +30,7 @@ pub mod ollama;
 pub mod openai;
 pub mod openrouter;
 pub mod together;
+pub mod typesafe;
 pub mod vllm;
 pub mod xai;
 
@@ -48,6 +51,8 @@ pub const ALL: &[&Vendor] = &[
     &ollama::VENDOR,
     &azure::VENDOR,
     &vllm::VENDOR,
+    &typesafe::VENDOR,
+    &cloudflare::VENDOR,
 ];
 
 /// The vendor `id`.
@@ -58,12 +63,12 @@ pub fn find(id: &str) -> Option<&'static Vendor> {
 /// Format `name` as `vendor` speaks it, else as a provider of no vendor
 /// does: as the format's own vendor, the first in [`ALL`] that speaks it;
 /// passthrough at the origin. `None` for a format no vendor speaks.
-pub fn speaks(vendor: Option<&Vendor>, name: &str) -> Option<Speaks> {
+pub fn speaks(vendor: Option<&Vendor>, name: &str) -> Option<&'static dyn Wire> {
     let own = vendor.into_iter().flat_map(|v| v.formats);
     let spoken = own.chain(ALL.iter().flat_map(|v| v.formats));
-    match spoken.clone().find(|s| s.format.name() == name) {
-        Some(speaks) => Some(speaks.clone()),
-        None => (name == "passthrough")
-            .then(|| Speaks::new(Format::Passthrough(Passthrough)).at(Base::Origin)),
-    }
+    let found = spoken.copied().find(|f| f.name() == name);
+    found.or((name == "passthrough").then_some(PASSTHROUGH))
 }
+
+/// Passthrough, as a provider of no vendor speaks it: at the origin.
+const PASSTHROUGH: &dyn Wire = &Speaks::http(Passthrough).at(Base::Origin);

@@ -83,6 +83,7 @@ function useRealtimeSession(model: string) {
         dispatch({ type: "open" });
         ws.send(transcribeInput);
         startMic(
+          speaker,
           (audio) => ws.send({ type: "input_audio_buffer.append", audio }),
           setLevel,
         ).then(

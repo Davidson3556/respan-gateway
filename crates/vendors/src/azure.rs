@@ -1,25 +1,25 @@
 //! Azure OpenAI: Chat Completions, at a resource's own URL
 //! (`https://<resource>.openai.azure.com/openai/v1`).
 
-use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{Plugin, ProviderContext, Result, async_trait};
 
-use crate::{Format, Quirk, Speaks, Vendor, chat};
+use respan_gateway_conversation_http::openai::OpenAiChat;
+
+use crate::{Quirk, Speaks, Vendor, chat};
 
 /// Azure OpenAI. It has no base URL of its own: a resource has one.
 pub const VENDOR: Vendor = Vendor {
     id: "azure",
     base_url: None,
     key_env: &["AZURE_OPENAI_API_KEY"],
-    example_model: "gpt-4o-mini",
-    formats: &[Speaks::new(Format::OpenAiChat(OpenAiChat)).key_in("api-key")],
-    model_id_prefix: None,
+    formats: &[&Speaks::http(OpenAiChat).key_in("api-key")],
     quirks: &[Quirk {
         name: "inert_choice",
         description: "A choice's `content_filter_results` and `content_filter_offsets` \
                       describe the moderation it passed.",
     }],
     plugin: Some(&AzureQuirks),
+    ..Vendor::DEFAULT
 };
 
 /// Azure's quirks: a choice's moderation results only describe it.

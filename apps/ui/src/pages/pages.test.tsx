@@ -166,4 +166,23 @@ describe("RequestsPage filters", () => {
     expect(screen.queryByText("claude-sonnet-4-5")).not.toBeInTheDocument();
     expect(screen.getByText("broken-model")).toBeInTheDocument();
   });
+
+  it("narrows the list to a model searched for, and back to all", async () => {
+    serve({
+      "/ui/api/requests": {
+        requests: [record, { ...record, id: "r_2", model: "broken-model", status: 500 }],
+      },
+    });
+    renderPage(<RequestsPage />);
+    await screen.findByText("broken-model");
+    const filter = screen.getByRole("combobox", { name: "Model" });
+    expect(filter).toHaveTextContent("All models");
+    await userEvent.click(filter);
+    await userEvent.type(screen.getByPlaceholderText("Search 2 models"), "broken");
+    await userEvent.click(screen.getByRole("option", { name: "broken-model" }));
+    expect(screen.queryByText("claude-sonnet-4-5")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("combobox", { name: "Model" }));
+    await userEvent.click(screen.getByRole("option", { name: "All models" }));
+    expect(await screen.findByText("claude-sonnet-4-5")).toBeInTheDocument();
+  });
 });

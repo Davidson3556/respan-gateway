@@ -5,17 +5,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use respan_gateway_core::{Extensions, Fault, Gateway, Provider as Core};
+use crate::{Auth, Base, Connect, Models, Reach, Vendor, Wire};
+use respan_gateway_core::{Fault, Gateway};
+use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
-use respan_gateway_http::http::{self, HeaderMap, Uri};
-use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{Body, ProviderIo};
-use respan_gateway_http_faults::{built_wrong, provider_fault};
 use respan_gateway_http_transport::{HttpTransport, reqwest, unreachable};
-use respan_gateway_ws::{Limits, WsTransport};
-use serde_json::Value;
-
-use crate::{Auth, Format, Speaks, Vendor};
+use respan_gateway_ws::Limits;
 
 /// A provider of a vendor ([`Vendor::provider`]), or of formats of no
 /// vendor, at a base URL with a key, to register
@@ -25,12 +20,13 @@ use crate::{Auth, Format, Speaks, Vendor};
 /// let openai = respan_gateway_vendors::openai::VENDOR.provider("openai");
 /// let gateway = openai.register(Gateway::new())?;
 /// let models = openai.models().await;
+/// let usage = openai.client()?.send(request).await?; // any call of its own
 /// ```
 #[derive(Clone)]
 pub struct VendorProvider {
     name: String,
-    vendor: Option<&'static Vendor>,
-    speaks: Vec<Speaks>,
+    vendor: &'static Vendor,
+    formats: Vec<&'static dyn Wire>,
     base: Option<String>,
     key: Key,
     limit: usize,
@@ -39,12 +35,12 @@ pub struct VendorProvider {
 
 /// One format's core provider of a [`VendorProvider`] ([`VendorProvider::parts`]).
 #[derive(Debug)]
-pub struct Part<'a> {
+pub struct Part {
     /// Its name: the provider's for its first format, `name:format` for the
     /// others.
     pub name: String,
     /// Its format, as the vendor speaks it.
-    pub speaks: &'a Speaks,
+    pub format: &'static dyn Wire,
     /// Its base URL.
     pub base_url: String,
     /// What its calls carry to authenticate.
@@ -66,7 +62,7 @@ impl std::fmt::Debug for VendorProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VendorProvider")
             .field("name", &self.name)
-            .field("vendor", &self.vendor.map(|v| v.id))
+            .field("vendor", &self.vendor.id)
             .finish_non_exhaustive()
     }
 }
@@ -78,9 +74,9 @@ impl Vendor {
         let env = |var: &&str| std::env::var(var).ok().filter(|k| !k.trim().is_empty());
         let key = self.key_env.iter().find_map(env);
         VendorProvider {
-            vendor: Some(self),
-            speaks: self.formats.to_vec(),
-            base: self.base_url.map(Into::into),
+            vendor: self,
+            formats: self.formats.to_vec(),
+            base: self.located().ok().flatten(),
             key: key.map_or(Key::Client, Key::Own),
             ..VendorProvider::new(name)
         }
@@ -93,8 +89,8 @@ impl VendorProvider {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            vendor: None,
-            speaks: Vec::new(),
+            vendor: &NONE,
+            formats: Vec::new(),
             base: None,
             key: Key::Client,
             limit: 32 << 20,
@@ -103,8 +99,8 @@ impl VendorProvider {
     }
 
     /// Speaking `speaks` alone, in place of its vendor's formats.
-    pub fn formats(mut self, speaks: impl IntoIterator<Item = Speaks>) -> Self {
-        self.speaks = speaks.into_iter().collect();
+    pub fn formats(mut self, speaks: impl IntoIterator<Item = &'static dyn Wire>) -> Self {
+        self.formats = speaks.into_iter().collect();
         self
     }
 
@@ -138,42 +134,43 @@ impl VendorProvider {
         self
     }
 
-    /// Its vendor, if it has one.
-    pub fn vendor(&self) -> Option<&'static Vendor> {
+    /// Its vendor: [`Vendor::DEFAULT`]'s, of no id, for one of no vendor.
+    pub fn vendor(&self) -> &'static Vendor {
         self.vendor
     }
 
     /// Each format's core provider. One format of no vendor sits at the
     /// base URL exactly. `Err` with `config` if it has no base URL, or a
     /// key no header can carry.
-    pub fn parts<'a>(&'a self) -> Result<Vec<Part<'a>>, Fault> {
+    pub fn parts(&self) -> Result<Vec<Part>, Fault> {
         let base = self.base.as_deref();
         let base = base.ok_or_else(|| Fault::config("needs a `base_url`"))?;
-        let exact = self.vendor.is_none() && self.speaks.len() == 1;
-        let part = |(i, speaks): (usize, &'a Speaks)| {
+        let exact = self.vendor.id.is_empty() && self.formats.len() == 1;
+        let part = |(i, format): (usize, &&'static dyn Wire)| {
             Ok(Part {
                 name: match i {
                     0 => self.name.clone(),
-                    _ => format!("{}:{}", self.name, speaks.format.name()),
+                    _ => format!("{}:{}", self.name, format.name()),
                 },
-                speaks,
+                format: *format,
                 base_url: match exact {
                     true => base.to_owned(),
-                    false => speaks.base_url(base),
+                    false => format.base_url(base),
                 },
-                headers: self.auth(speaks.auth)?,
+                headers: self.auth(format.auth())?,
             })
         };
-        self.speaks.iter().enumerate().map(part).collect()
+        self.formats.iter().enumerate().map(part).collect()
     }
 
     /// `gateway` with a core provider of each of its formats, each carrying
     /// its vendor's quirks ([`Vendor::plugin`]).
     pub fn register(&self, mut gateway: Gateway) -> Result<Gateway, Fault> {
         for part in self.parts()? {
-            let format = &part.speaks.format;
-            let mut core = self.core(part.name, format, &part.base_url, part.headers)?;
-            if let Some(quirks) = self.vendor.and_then(|v| v.plugin) {
+            let wire = part.format;
+            let connect = self.connect(wire, &part.base_url, part.headers)?;
+            let mut core = wire.provider(part.name, connect);
+            if let Some(quirks) = self.vendor.plugin {
                 core = core.plugin(quirks);
             }
             gateway = gateway.provider(core)?;
@@ -181,66 +178,31 @@ impl VendorProvider {
         Ok(gateway)
     }
 
-    /// The models it lists, each as the vendor lists it (OpenAI's
-    /// `{"id", "created", ..}`), its `id` the name a call takes
-    /// ([`Vendor::model_id`]); by its first chat format, else OpenAI's
-    /// media; `None` if it speaks neither. A refusal is
-    /// [`provider_fault`]'s.
-    pub async fn models(&self) -> Option<Result<Vec<Value>, Fault>> {
-        let parts = match self.parts() {
-            Ok(parts) => parts,
-            Err(fault) => return Some(Err(fault)),
-        };
-        let lists = |f: &Format| match f {
-            Format::OpenAiChat(_)
-            | Format::OpenAiResponses(_)
-            | Format::AnthropicMessages(_)
-            | Format::GeminiGenerate(_) => 0,
-            Format::OpenAiImages(_)
-            | Format::OpenAiTranscriptions(_)
-            | Format::OpenAiSpeech(_)
-            | Format::OpenAiEmbeddings(_)
-            | Format::OpenAiVideos(_) => 1,
-            _ => 2,
-        };
-        let part = parts
-            .into_iter()
-            .filter(|p| lists(&p.speaks.format) < 2)
-            .min_by_key(|p| lists(&p.speaks.format))?;
-        Some(self.list(part).await)
+    /// A client of it: each call to its base URL, with its key as its first
+    /// format over HTTP takes it.
+    pub fn client(&self) -> Result<HttpTransport, Fault> {
+        self.client_at(Base::Same)
     }
 
-    async fn list(&self, part: Part<'_>) -> Result<Vec<Value>, Fault> {
-        let mut headers = part.headers;
-        let path = match part.speaks.format {
-            Format::AnthropicMessages(_) => {
-                let version = HeaderValue::from_static("2023-06-01");
-                headers.insert("anthropic-version", version);
-                "/v1/models?limit=1000"
-            }
-            _ => "/models",
-        };
-        let client = HttpTransport::new(part.base_url)?.with_headers(headers)?;
-        let call = http::Request::get(path).body(Body::default());
-        let sent = client.send(call.map_err(built_wrong)?).await;
-        let (answer, _) = sent.map_err(|f| unreached(&f).map_or(f, Fault::upstream))?;
-        let (head, body) = answer.into_parts();
-        let body = BodyExt::collect(body).await?.to_bytes();
-        if !head.status.is_success() {
-            return Err(provider_fault(http::Response::from_parts(head, body)));
+    /// A client of it at `base`, relative to its base URL, such as an API
+    /// beside the one its formats are at.
+    pub fn client_at(&self, base: Base) -> Result<HttpTransport, Fault> {
+        let parts = self.parts()?;
+        let part = parts.into_iter().find(|p| !p.format.websocket());
+        let part = part.ok_or_else(|| Fault::config("speaks no format over HTTP"))?;
+        HttpTransport::new(base.of(&part.base_url))?.with_headers(part.headers)
+    }
+
+    /// The models it lists, as its vendor lists them ([`Vendor::models`]);
+    /// `None` if it speaks no format whose models are listed, such as only
+    /// passthrough or sessions.
+    pub async fn models(&self) -> Option<Models> {
+        let lists = |f: &&dyn Wire| !f.websocket() && f.name() != "passthrough";
+        if !self.formats.iter().any(lists) {
+            return None;
         }
-        let list: Value =
-            serde_json::from_slice(&body).map_err(|_| Fault::upstream("its answer is not JSON"))?;
-        let models = list["data"].as_array();
-        let models = models.ok_or_else(|| Fault::upstream("its answer has no `data` list"))?;
-        let named = |m: &Value| {
-            let id = m["id"].as_str()?;
-            let id = self.vendor.map_or(id, |v| v.model_id(id));
-            let mut m = m.clone();
-            m["id"] = id.into();
-            Some(m)
-        };
-        Ok(models.iter().filter_map(named).collect())
+        let listed = (self.vendor.models)(self).await;
+        Some(listed.map_err(|f| unreached(&f).map_or(f, Fault::upstream)))
     }
 
     /// The headers its calls of a format that takes the key `auth` carry.
@@ -256,58 +218,28 @@ impl VendorProvider {
         Ok(HeaderMap::from_iter([(name, value)]))
     }
 
-    /// The core provider `name` of `format` at `base`, its calls carrying
-    /// `auth`: over HTTP, or over WebSocket for a session.
-    fn core(
-        &self,
-        name: String,
-        format: &Format,
-        base: &str,
-        auth: HeaderMap,
-    ) -> Result<Core, Fault> {
-        let http = || {
-            Ok::<_, Fault>(self.reach(HttpTransport::new(base)?.with_headers(auth.clone())?, base))
-        };
-        let session = |transport: Result<WsTransport, Fault>| {
-            let transport = transport?.with_limits(self.sessions);
-            Ok::<_, Fault>(transport.with_headers(auth.clone())?.connect())
-        };
-        Ok(match format.clone() {
-            Format::OpenAiChat(f) => Core::new(name, f, http()?),
-            Format::OpenAiResponses(f) => Core::new(name, f, http()?),
-            Format::AnthropicMessages(f) => Core::new(name, f, http()?),
-            Format::GeminiGenerate(f) => Core::new(name, f, http()?),
-            Format::OpenAiImages(f) => Core::new(name, f, http()?),
-            Format::OpenAiTranscriptions(f) => Core::new(name, f, http()?),
-            Format::OpenAiSpeech(f) => Core::new(name, f, http()?),
-            Format::OpenAiEmbeddings(f) => Core::new(name, f, http()?),
-            Format::OpenAiVideos(f) => Core::new(name, f, http()?),
-            Format::Passthrough(f) => Core::new(name, f, http()?),
-            // Veo serves a video's bytes by redirect to Google's storage.
-            Format::GeminiVeo(f) => {
-                let client = HttpTransport::new(base)?
-                    .with_connect_timeout(Duration::from_secs(10))?
-                    .follow_redirects(google_storage);
-                Core::new(name, f, self.reach(client.with_headers(auth)?, base))
+    /// What makes the calls of `wire` at `base`, carrying `auth`: a session
+    /// over WebSocket; or calls over HTTP, a provider it cannot reach named
+    /// in the fault with its host, as the transport's names neither.
+    fn connect(&self, wire: &dyn Wire, base: &str, auth: HeaderMap) -> Result<Connect, Fault> {
+        let follow = match wire.reach() {
+            Reach::Ws(transport) => {
+                let transport = transport(base)?.with_limits(self.sessions);
+                return Ok(Arc::new(transport.with_headers(auth)?.connect()));
             }
-            Format::OpenAiRealtime(f) => Core::new(name, f, session(f.transport(base))?),
-            Format::GeminiLive(f) => Core::new(name, f, session(f.transport(base))?),
-            Format::ResponsesWs(f) => Core::new(name, f, session(f.transport(base))?),
-        })
-    }
-
-    /// Calls through `client`, a provider it cannot reach named in the fault
-    /// with its host, as the transport's names neither.
-    fn reach(
-        &self,
-        client: HttpTransport,
-        base: &str,
-    ) -> impl Fn(Extensions) -> ProviderIo + Clone + Send + Sync + 'static {
-        let client = Arc::new(client);
+            Reach::Http { follow } => follow,
+        };
+        let mut client = HttpTransport::new(base)?;
+        if let Some(follow) = follow {
+            client = client
+                .with_connect_timeout(Duration::from_secs(10))?
+                .follow_redirects(follow);
+        }
+        let client = Arc::new(client.with_headers(auth)?);
         let host = base.split_once("://").map_or(base, |(_, rest)| rest);
         let host = host.split('/').next().unwrap_or_default();
         let who: Arc<str> = format!("provider '{}' at {host}", self.name).into();
-        respan_gateway_http::connect(
+        Ok(Arc::new(respan_gateway_http::connect(
             move |call| {
                 let (client, who) = (client.clone(), who.clone());
                 async move {
@@ -321,48 +253,70 @@ impl VendorProvider {
                 }
             },
             self.limit,
-        )
+        )))
     }
 }
 
+/// The vendor of a provider of no vendor.
+static NONE: Vendor = Vendor::DEFAULT;
+
 /// Why `fault` says its provider could not be reached, if it does.
-fn unreached(fault: &Fault) -> Option<String> {
+pub(crate) fn unreached(fault: &Fault) -> Option<String> {
     let e = fault.cause::<reqwest::Error>();
     e.filter(|e| !e.is_builder()).map(unreachable)
-}
-
-/// The redirects the Gemini API's calls follow: to Google's hosts over
-/// HTTPS alone. The transport leaves the key behind once a call leaves the
-/// API's origin.
-fn google_storage(uri: &Uri) -> bool {
-    let host = uri.host().unwrap_or_default();
-    let google = [".googleapis.com", ".googleusercontent.com"];
-    uri.scheme_str() == Some("https") && google.iter().any(|domain| host.ends_with(domain))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use respan_gateway_passthrough_http::Passthrough;
 
-    #[test]
-    fn only_googles_hosts_over_https_are_followed() {
-        let follows = |uri: &str| google_storage(&uri.parse().unwrap_or_default());
-        assert!(follows("https://storage.googleapis.com/v/1"));
-        assert!(follows("https://x.googleusercontent.com/v"));
-        assert!(!follows("http://storage.googleapis.com/v"));
-        assert!(!follows("https://evil.test/storage.googleapis.com"));
-        assert!(!follows("https://googleapis.com.evil.test/v"));
+    /// A format of no kind, over HTTP.
+    struct Fake;
+
+    impl Wire for Fake {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn reach(&self) -> Reach {
+            Reach::Http { follow: None }
+        }
+        fn auth(&self) -> Auth {
+            Auth::Bearer
+        }
+        fn base(&self) -> Base {
+            Base::Origin
+        }
+        fn provider(&self, _: String, _: Connect) -> respan_gateway_core::Provider {
+            unreachable!("not registered")
+        }
     }
 
     #[test]
     fn one_format_of_no_vendor_sits_at_its_base_exactly() {
-        let passthrough = Speaks::new(Format::Passthrough(Passthrough)).at(crate::Base::Origin);
+        let passthrough: &'static dyn Wire = &Fake;
         let one = VendorProvider::new("p")
             .formats([passthrough])
             .base("https://x.test/v1");
         let parts = one.parts().unwrap_or_default();
         assert_eq!(parts[0].base_url, "https://x.test/v1");
         assert!(VendorProvider::new("p").parts().is_err(), "no base URL");
+    }
+
+    #[test]
+    fn a_base_url_takes_its_names_from_the_environment() {
+        let at = |base_url| Vendor {
+            base_url,
+            ..Vendor::DEFAULT
+        };
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(
+            at(Some("https://x.test/{HOME}/v1")).located(),
+            Ok(Some(format!("https://x.test/{home}/v1")))
+        );
+        assert_eq!(
+            at(Some("https://x.test/{RESPAN_NOT_SET}")).located(),
+            Err("RESPAN_NOT_SET")
+        );
+        assert_eq!(at(None).located(), Ok(None));
     }
 }

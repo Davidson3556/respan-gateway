@@ -85,23 +85,14 @@ impl Built {
         if !self.plan.serves("openai-chat") {
             return None;
         }
-        let route = self.plan.routes.route(kind::CHAT, "openai-chat", None)?;
-        let upstream = self
-            .plan
-            .upstreams
-            .iter()
-            .find(|u| u.name == route.provider)?;
-        let model = upstream
-            .provider
-            .vendor()
-            .map_or("<model>", |p| p.example_model);
+        self.plan.routes.route(kind::CHAT, "openai-chat", None)?;
         let key = match self.plan.keys.is_empty() {
             true => "",
             false => " -H 'authorization: Bearer <key>'",
         };
         Some(format!(
             "curl {base}/v1/chat/completions{key} -H 'content-type: application/json' \
-             -d '{{\"model\":\"{model}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'"
+             -d '{{\"model\":\"<model>\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'"
         ))
     }
 }

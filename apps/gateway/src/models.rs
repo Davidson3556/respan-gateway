@@ -21,7 +21,7 @@ use crate::compose::Upstream;
 use crate::formats::{first_of_each_kind, kind};
 use crate::requests::rfc3339;
 use respan_gateway_plugin_routing::{Kind, Routes};
-use respan_gateway_vendors::VendorProvider;
+use respan_gateway_vendors::{Model, VendorProvider};
 
 /// How long a provider may take to list its models.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -32,7 +32,8 @@ const FRESH: Duration = Duration::from_secs(60);
 #[derive(Debug)]
 struct Listing {
     provider: String,
-    vendor: VendorProvider,
+    /// Where its models come from.
+    source: VendorProvider,
     /// A format of each kind it serves.
     kinds: Vec<(Kind, String)>,
 }
@@ -72,7 +73,7 @@ impl Models {
     pub fn new(upstreams: &[Upstream], routes: Arc<Routes>) -> Self {
         let listings = upstreams.iter().map(|u| Listing {
             provider: u.name.clone(),
-            vendor: u.provider.clone(),
+            source: u.provider.clone(),
             kinds: first_of_each_kind(u.entries.iter().map(|e| (e.kind, e.format.clone()))),
         });
         Self {
@@ -117,8 +118,8 @@ impl Models {
     }
 
     /// One provider's models, or why it gave none; `None` if it lists none.
-    async fn get(&self, listing: &Listing) -> Option<Result<Vec<Value>, Refusal>> {
-        let listed = tokio::time::timeout(TIMEOUT, listing.vendor.models()).await;
+    async fn get(&self, listing: &Listing) -> Option<Result<Vec<Model>, Refusal>> {
+        let listed = tokio::time::timeout(TIMEOUT, listing.source.models()).await;
         let refused = |fault: Fault| match fault.get::<Status>() {
             Some(Status(status)) => Refusal {
                 status: Some(status.as_u16()),
@@ -172,7 +173,7 @@ impl Models {
         let models = models
             .iter()
             .filter_map(|m| {
-                let id = m["id"].as_str()?;
+                let id = m.id.as_str();
                 let kind = kind_of(id)?;
                 let (_, format) = listing.kinds.iter().find(|(k, _)| *k == kind)?;
                 let mut model = json!({
@@ -181,7 +182,7 @@ impl Models {
                     "owned_by": listing.provider,
                     "kind": kind.label,
                 });
-                if let Some(created) = m["created"].as_i64() {
+                if let Some(created) = m.created {
                     model["created"] = created.into();
                 }
                 Some(model)
@@ -213,6 +214,7 @@ fn kind_of(id: &str) -> Option<Kind> {
         _ if has(&["tts"]) => kind::SPEECH,
         _ if has(&["sora", "veo"]) => kind::VIDEO,
         _ if has(&["realtime"]) => kind::REALTIME,
+        _ if has(&["jev", "clef", "systemone"]) => kind::DECISION,
         _ => kind::CHAT,
     };
     Some(kind)
@@ -330,5 +332,6 @@ mod tests {
         assert_eq!(kind("gpt-realtime"), Some("realtime"));
         assert_eq!(kind("text-embedding-3-small"), Some("embedding"));
         assert_eq!(kind("gemini-embedding-001"), Some("embedding"));
+        assert_eq!(kind("jev-latest"), Some("decision"));
     }
 }

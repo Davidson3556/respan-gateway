@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use respan_gateway_conversation as conversation;
 use respan_gateway_core::{ClientContext, Fault};
+use respan_gateway_decision as decision;
 use respan_gateway_media::{embedding, image, speech, transcription};
 use respan_gateway_realtime as realtime;
 
@@ -64,6 +65,10 @@ pub(super) fn all(cx: &mut ClientContext, entry: &Arc<Entry>) -> Result<(), Faul
     })?;
     count(cx, entry, |output: &embedding::Output| match output {
         embedding::Output::Usage(usage) => Some(Counted::tokens(usage)),
+        _ => None,
+    })?;
+    count(cx, entry, |output: &decision::Output| match output {
+        decision::Output::Usage(usage) => Some(Counted::tokens(usage)),
         _ => None,
     })?;
     Ok(())

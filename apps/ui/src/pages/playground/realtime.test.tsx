@@ -8,7 +8,7 @@ import { RealtimeTab } from "./realtime";
 const mic = vi.hoisted(() => ({ stop: vi.fn(), onChunk: null as null | ((b64: string) => void) }));
 const player = vi.hoisted(() => ({ play: vi.fn(), stop: vi.fn(() => 120), close: vi.fn() }));
 vi.mock("@/lib/realtime-io", () => ({
-  startMic: vi.fn(async (onChunk: (b64: string) => void) => {
+  startMic: vi.fn(async (_player: unknown, onChunk: (b64: string) => void) => {
     mic.onChunk = onChunk;
     return { stop: mic.stop };
   }),

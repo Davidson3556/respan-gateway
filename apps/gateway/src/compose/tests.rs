@@ -335,7 +335,7 @@ fn a_bad_provider_is_an_error() {
         ("p = {  }", "provider 'p': needs a `vendor` or `formats`"),
         (
             "p = { vendor = \"nope\" }",
-            "provider 'p': unknown vendor 'nope'; vendors: [openai, anthropic, gemini, groq, deepseek, openrouter, xai, mistral, together, fireworks, ollama, azure, vllm]",
+            "provider 'p': unknown vendor 'nope'; vendors: [openai, anthropic, gemini, groq, deepseek, openrouter, xai, mistral, together, fireworks, ollama, azure, vllm, typesafe, cloudflare]",
         ),
         (
             "p = { formats = \"openai-chat\" }",
@@ -352,6 +352,10 @@ fn a_bad_provider_is_an_error() {
         (
             "p = { formats = [\"openai-chat\", \"openai-chat\"], base_url = \"http://x\" }",
             "provider 'p': lists a format twice",
+        ),
+        (
+            "p = { vendor = \"cloudflare\", key = \"k\" }",
+            "provider 'p': environment variable CLOUDFLARE_ACCOUNT_ID is not set; its base URL needs it, or set `base_url`",
         ),
     ];
     for (provider, expected) in cases {
@@ -567,7 +571,7 @@ fn an_unknown_format_names_the_compiled_in_ones() {
     assert_eq!(
         resolve(text).err().as_deref(),
         Some(
-            "formats: unknown format 'nope'; compiled-in formats: [openai-chat, openai-responses, openai-realtime, responses-ws, openai-images, openai-transcriptions, openai-speech, openai-videos, openai-embeddings, anthropic-messages, gemini-generate, gemini-live, gemini-veo, passthrough]"
+            "formats: unknown format 'nope'; compiled-in formats: [openai-chat, openai-responses, openai-realtime, responses-ws, openai-images, openai-transcriptions, openai-speech, openai-videos, openai-embeddings, anthropic-messages, gemini-generate, gemini-live, gemini-veo, typesafe-systemone, passthrough]"
         )
     );
 }

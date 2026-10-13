@@ -395,12 +395,14 @@ chat formats, or are refused where a format has no form for them
 ([table](crates/formats/conversation-http/README.md#reasoning-and-sampling)).
 Details per format: [chat](crates/formats/conversation-http/README.md),
 [media](crates/formats/media-http/README.md),
+[decision](crates/formats/decision-http/README.md),
 [realtime](crates/formats/realtime-ws/README.md).
 
 ## Vendors
 
 `openai`, `anthropic`, `gemini`, `groq`, `deepseek`, `openrouter`, `xai`,
-`mistral`, `together`, `fireworks`, `ollama`, `azure` and `vllm`, a file each
+`mistral`, `together`, `fireworks`, `ollama`, `azure`, `vllm`, `typesafe` and
+`cloudflare` (Workers AI, at `CLOUDFLARE_ACCOUNT_ID`'s base URL), a file each
 in [`crates/vendors`](crates/vendors/README.md), which lists the formats
 each speaks, the quirks the gateway handles for it (`check` prints them)
 and the base URL each format takes. Any other compatible endpoint is a
@@ -432,9 +434,9 @@ runnable, tested [`examples/`](examples/README.md) of the
 | Path | What it is |
 |---|---|
 | `crates/core/` | The neutral kernel and plugin API: typed streams, plugins, lifecycle, faults |
-| `crates/kinds/` | Event types per kind: `conversation`, `media`, `realtime`, `mcp` |
+| `crates/kinds/` | Event types per kind: `conversation`, `media`, `decision`, `realtime`, `mcp` |
 | `crates/wires/` | Bytes at both edges, no kind: `http` (bodies, credentials, path matching), `http-transport` (Reqwest), `http-faults`, `sse`, `ws` |
-| `crates/formats/` | A kind over a wire, no vendor: `conversation-http`, `media-http`, `realtime-ws`, `mcp-http` |
+| `crates/formats/` | A kind over a wire, no vendor: `conversation-http`, `media-http`, `decision-http`, `realtime-ws`, `mcp-http` |
 | `crates/vendor-kit/` | A vendor as a template, and a provider of it: register its formats, list its models |
 | `crates/vendors/` | Every vendor, a file each: URL, key, formats, quirks |
 | `crates/plugins/routing`, `fallback`, `tool-loop` | First-party plugins: model routing; retry, fallback and race; the tool loop |

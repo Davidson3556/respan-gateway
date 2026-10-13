@@ -214,6 +214,19 @@ impl HttpTransport {
     }
 }
 
+/// `answer`'s body as JSON. An answer other than a success is the provider's
+/// refusal ([`provider_fault`](respan_gateway_http_faults::provider_fault)),
+/// and a body that is no JSON an `upstream` fault.
+pub async fn json(answer: http::Response<Body>) -> Result<serde_json::Value, Fault> {
+    let (head, body) = answer.into_parts();
+    let body = BodyExt::collect(body).await?.to_bytes();
+    if !head.status.is_success() {
+        let answer = http::Response::from_parts(head, body);
+        return Err(respan_gateway_http_faults::provider_fault(answer));
+    }
+    serde_json::from_slice(&body).map_err(|_| Fault::upstream("its answer is not JSON"))
+}
+
 /// Why a call that failed with `e` could not reach its provider, naming no
 /// URL, as the error itself does: `could not be reached: <cause>`.
 pub fn unreachable(e: &reqwest::Error) -> String {

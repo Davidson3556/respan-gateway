@@ -3,19 +3,13 @@
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_media_http::openai::OpenAiEmbeddings;
 
-use crate::{Format, Speaks, Vendor};
+use crate::{Speaks, Vendor};
 
 /// Fireworks.
 pub const VENDOR: Vendor = Vendor {
     id: "fireworks",
     base_url: Some("https://api.fireworks.ai/inference/v1"),
     key_env: &["FIREWORKS_API_KEY"],
-    example_model: "accounts/fireworks/models/llama-v3p3-70b-instruct",
-    formats: &[
-        Speaks::new(Format::OpenAiChat(OpenAiChat)),
-        Speaks::new(Format::OpenAiEmbeddings(OpenAiEmbeddings)),
-    ],
-    model_id_prefix: None,
-    quirks: &[],
-    plugin: None,
+    formats: &[&Speaks::http(OpenAiChat), &Speaks::http(OpenAiEmbeddings)],
+    ..Vendor::DEFAULT
 };

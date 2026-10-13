@@ -4,29 +4,29 @@ use respan_gateway_conversation::{Output, Usage};
 use respan_gateway_conversation_http::Schema;
 use respan_gateway_conversation_http::openai::{self, OpenAiChat};
 use respan_gateway_core::{Filter, NativeValue, Plugin, ProviderContext, Result, async_trait};
-use respan_gateway_media_http::openai::{OpenAiSpeech, OpenAiTranscriptions};
 use serde_json::{Map, Value, json};
 
-use crate::{Format, Quirk, Speaks, Vendor};
+use respan_gateway_media_http::openai::{OpenAiSpeech, OpenAiTranscriptions};
+
+use crate::{Quirk, Speaks, Vendor};
 
 /// Groq.
 pub const VENDOR: Vendor = Vendor {
     id: "groq",
     base_url: Some("https://api.groq.com/openai/v1"),
     key_env: &["GROQ_API_KEY"],
-    example_model: "llama-3.3-70b-versatile",
     formats: &[
-        Speaks::new(Format::OpenAiChat(OpenAiChat)),
-        Speaks::new(Format::OpenAiTranscriptions(OpenAiTranscriptions)),
-        Speaks::new(Format::OpenAiSpeech(OpenAiSpeech)),
+        &Speaks::http(OpenAiChat),
+        &Speaks::http(OpenAiTranscriptions),
+        &Speaks::http(OpenAiSpeech),
     ],
-    model_id_prefix: None,
     quirks: &[Quirk {
         name: "x_groq_usage",
         description: "A response reports usage under `x_groq`, beside it, rather than in \
                       `usage`; the object's other fields stay native.",
     }],
     plugin: Some(&GroqQuirks),
+    ..Vendor::DEFAULT
 };
 
 /// Groq's quirks: the usage under `x_groq` is the response's.

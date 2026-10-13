@@ -1,4 +1,5 @@
 import { Search, X } from "lucide-react";
+import { ModelCombobox } from "@/components/model-combobox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -119,7 +120,16 @@ export function RequestFilters({
         </div>
         <FilterSelect label="Kind" value={filter.kind} options={options.kinds} onChange={(v) => onChange("kind", v)} />
         <FilterSelect label="Provider" value={filter.provider} options={options.providers} onChange={(v) => onChange("provider", v)} />
-        <FilterSelect label="Model" value={filter.model} options={options.models} onChange={(v) => onChange("model", v)} />
+        <ModelCombobox
+          label="Model"
+          value={filter.model}
+          onChange={(v) => onChange("model", v)}
+          models={options.models.map((id) => ({ id }))}
+          all="All models"
+          allValue={ANY}
+          size="sm"
+          className="sm:w-44"
+        />
         {options.clients.length > 0 && (
           <FilterSelect label="Client" value={filter.client} options={options.clients} onChange={(v) => onChange("client", v)} />
         )}

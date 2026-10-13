@@ -1,9 +1,10 @@
 //! vLLM: Chat Completions, as a server one runs serves it.
 
-use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{Plugin, ProviderContext, Result, async_trait};
 
-use crate::{Format, Quirk, Speaks, Vendor, chat};
+use respan_gateway_conversation_http::openai::OpenAiChat;
+
+use crate::{Quirk, Speaks, Vendor, chat};
 
 /// vLLM. It has no base URL of its own, and takes a key only if its server
 /// was started with one.
@@ -11,9 +12,7 @@ pub const VENDOR: Vendor = Vendor {
     id: "vllm",
     base_url: None,
     key_env: &[],
-    example_model: "Qwen/Qwen3-8B",
-    formats: &[Speaks::new(Format::OpenAiChat(OpenAiChat))],
-    model_id_prefix: None,
+    formats: &[&Speaks::http(OpenAiChat)],
     quirks: &[
         Quirk {
             name: "reasoning_content",
@@ -27,6 +26,7 @@ pub const VENDOR: Vendor = Vendor {
         },
     ],
     plugin: Some(&VllmQuirks),
+    ..Vendor::DEFAULT
 };
 
 /// vLLM's quirks: reasoning is `reasoning_content`, and a choice's

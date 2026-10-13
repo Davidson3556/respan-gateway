@@ -12,13 +12,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-respan-gateway-conversation-http.workspace = true
 respan-gateway-core.workspace = true
-respan-gateway-media-http.workspace = true
-respan-gateway-realtime-ws.workspace = true
 respan-gateway-http.workspace = true
 respan-gateway-http-faults.workspace = true
 respan-gateway-http-transport.workspace = true
-respan-gateway-passthrough-http.workspace = true
 respan-gateway-ws.workspace = true
 serde_json.workspace = true

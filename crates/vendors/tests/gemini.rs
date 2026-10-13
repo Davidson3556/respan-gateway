@@ -4,11 +4,18 @@ mod support;
 
 use respan_gateway_vendors::gemini;
 
-#[test]
-fn model_id_prefix() {
-    let id = gemini::VENDOR.model_id("models/gemini-2.5-flash");
-    assert_eq!(id, "gemini-2.5-flash");
-    assert_eq!(gemini::VENDOR.model_id("gemini-2.5-flash"), id);
+#[tokio::test]
+async fn model_id_prefix() {
+    let list = support::json!({"object": "list", "data": [
+        {"id": "models/gemini-2.5-flash", "object": "model", "owned_by": "google"},
+    ]});
+    let base = support::listing("/v1beta/openai/models", list).await;
+    let gemini = gemini::VENDOR
+        .provider("g")
+        .base(format!("{base}/v1beta/openai"))
+        .key("k");
+    let models = gemini.models().await.expect("a list").expect("models");
+    assert_eq!(support::ids(models), ["gemini-2.5-flash"]);
 }
 
 mod thought_signature {

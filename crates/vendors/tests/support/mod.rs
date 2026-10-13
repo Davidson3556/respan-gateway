@@ -123,3 +123,31 @@ pub fn data(stream: &str) -> Vec<Value> {
     let lines = stream.lines().filter_map(|l| l.strip_prefix("data: "));
     lines.filter_map(|d| serde_json::from_str(d).ok()).collect()
 }
+
+/// A server that answers `GET <path>` carrying the key `k` with `body`, and
+/// 404 to anything else; its base URL.
+pub async fn listing(path: &'static str, body: Value) -> String {
+    use axum::response::IntoResponse;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let base = format!("http://{}", listener.local_addr().expect("an address"));
+    let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+        let body = body.clone();
+        async move {
+            let asked = req.uri().path_and_query().map_or("", |p| p.as_str());
+            let keyed = req.headers().values().any(|v| v == "Bearer k" || v == "k");
+            match asked == path && keyed {
+                true => axum::Json(body).into_response(),
+                false => http::StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+    });
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    base
+}
+
+/// The ids of `models`.
+pub fn ids(models: Vec<respan_gateway_vendors::Model>) -> Vec<String> {
+    models.into_iter().map(|m| m.id).collect()
+}

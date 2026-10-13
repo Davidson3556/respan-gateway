@@ -4,15 +4,16 @@
 
 use respan_gateway_conversation::{Content, Input, Role};
 use respan_gateway_conversation_http::Schema;
+use respan_gateway_core::{NativeFields, Plugin, ProviderContext, Result, async_trait};
+use serde_json::Map;
+
 use respan_gateway_conversation_http::gemini::GeminiGenerate;
 use respan_gateway_conversation_http::openai::OpenAiChat;
-use respan_gateway_core::{NativeFields, Plugin, ProviderContext, Result, async_trait};
 use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_media_http::openai::{OpenAiEmbeddings, OpenAiImages};
 use respan_gateway_realtime_ws::GeminiLive;
-use serde_json::Map;
 
-use crate::{Base, Format, Quirk, Speaks, Vendor};
+use crate::{Base, BoxFuture, Models, Quirk, Speaks, Vendor, VendorProvider, http::Uri, models};
 
 /// The header its own API takes the key in.
 const KEY: &str = "x-goog-api-key";
@@ -23,22 +24,22 @@ pub const VENDOR: Vendor = Vendor {
     id: "gemini",
     base_url: Some("https://generativelanguage.googleapis.com/v1beta/openai"),
     key_env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-    example_model: "gemini-2.5-flash",
     formats: &[
-        Speaks::new(Format::OpenAiChat(OpenAiChat)),
-        Speaks::new(Format::GeminiGenerate(GeminiGenerate))
+        &Speaks::http(OpenAiChat),
+        &Speaks::http(GeminiGenerate)
             .key_in(KEY)
             .at(Base::Without("/openai")),
-        Speaks::new(Format::GeminiLive(GeminiLive))
+        &Speaks::ws(GeminiLive, |base| GeminiLive.transport(base))
             .key_in(KEY)
             .at(Base::Origin),
-        Speaks::new(Format::OpenAiImages(OpenAiImages)),
-        Speaks::new(Format::GeminiVeo(GeminiVeo))
+        &Speaks::http(OpenAiImages),
+        &Speaks::http(GeminiVeo)
+            .follow(google_storage)
             .key_in(KEY)
             .at(Base::Without("/openai")),
-        Speaks::new(Format::OpenAiEmbeddings(OpenAiEmbeddings)),
+        &Speaks::http(OpenAiEmbeddings),
     ],
-    model_id_prefix: Some("models/"),
+    models: list_models,
     quirks: &[
         Quirk {
             name: "model_id_prefix",
@@ -108,5 +109,42 @@ fn sign_calls(input: &mut Input) {
             .fields
             .entry("thoughtSignature");
         fields.or_insert_with(|| SIGNATURE_PLACEHOLDER.into());
+    }
+}
+
+/// Its models, as OpenAI lists them, each id without the `models/` it puts
+/// before it.
+fn list_models(p: &VendorProvider) -> BoxFuture<'_, Models> {
+    Box::pin(async move {
+        let mut models = models::openai(p).await?;
+        for model in &mut models {
+            if let Some(id) = model.id.strip_prefix("models/") {
+                model.id = id.to_owned();
+            }
+        }
+        Ok(models)
+    })
+}
+
+/// The redirects its calls follow: to Google's hosts over HTTPS alone, as
+/// Veo serves a video's bytes from its storage.
+fn google_storage(uri: &Uri) -> bool {
+    let host = uri.host().unwrap_or_default();
+    let google = [".googleapis.com", ".googleusercontent.com"];
+    uri.scheme_str() == Some("https") && google.iter().any(|domain| host.ends_with(domain))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_googles_hosts_over_https_are_followed() {
+        let follows = |uri: &str| google_storage(&uri.parse().unwrap_or_default());
+        assert!(follows("https://storage.googleapis.com/v/1"));
+        assert!(follows("https://x.googleusercontent.com/v"));
+        assert!(!follows("http://storage.googleapis.com/v"));
+        assert!(!follows("https://evil.test/storage.googleapis.com"));
+        assert!(!follows("https://googleapis.com.evil.test/v"));
     }
 }

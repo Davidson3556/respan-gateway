@@ -1,19 +1,29 @@
 //! Every format this binary speaks, and what the rest of the binary needs
 //! to know of each: its kind, its endpoints, and how routing reads a
 //! request's model. How a provider of it is reached is its vendor's
-//! ([`respan_gateway_vendors::VendorProvider`]).
+//! ([`respan_gateway_vendors::VendorProvider`]); every format a vendor
+//! speaks is one of these.
 
 use respan_gateway_conversation as conversation;
+use respan_gateway_conversation_http::anthropic::AnthropicMessages;
+use respan_gateway_conversation_http::gemini::GeminiGenerate;
+use respan_gateway_conversation_http::openai::OpenAiChat;
+use respan_gateway_conversation_http::responses::OpenAiResponses;
 use respan_gateway_core::{Fault, Format, Gateway};
+use respan_gateway_decision as decision;
+use respan_gateway_decision_http::SystemOne;
 use respan_gateway_http::{ClientIo, ProviderIo, raw::Original};
 use respan_gateway_media::{embedding, image, speech, transcription, video};
+use respan_gateway_media_http::gemini::GeminiVeo;
+use respan_gateway_media_http::openai::{
+    OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
+};
 use respan_gateway_passthrough_http::Passthrough;
 use respan_gateway_plugin_routing::{Kind, Model};
 use respan_gateway_realtime as realtime;
 use respan_gateway_realtime_ws::{
     GeminiLive, OpenAiRealtime, ResponsesWs, SessionModel, requested_model,
 };
-use respan_gateway_vendors::{ALL, Base, Format as Spoken, Speaks};
 
 /// The kinds of traffic this binary carries, as the admin API and routing
 /// name them.
@@ -58,15 +68,19 @@ pub mod kind {
         label: "embedding",
         translates: true,
     };
+    pub const DECISION: Kind = Kind {
+        label: "decision",
+        translates: true,
+    };
     /// MCP: tools and resources over streamable HTTP, served by the `mcp`
     /// section, which no other format translates.
     pub const MCP: Kind = Kind {
         label: "mcp",
         translates: false,
     };
-    /// The kinds of the media crate, whose client formats are served by
-    /// default once a provider speaks the kind.
-    pub const MEDIA: [Kind; 5] = [IMAGE, TRANSCRIPTION, SPEECH, VIDEO, EMBEDDING];
+    /// The kinds of one request and its answer, whose client formats are
+    /// served by default once a provider speaks the kind.
+    pub const MEDIA: [Kind; 6] = [IMAGE, TRANSCRIPTION, SPEECH, VIDEO, EMBEDDING, DECISION];
 }
 
 /// The first of `items` of each kind, in order.
@@ -195,6 +209,7 @@ mod endpoints {
     ];
     pub const SPEECH: &[&str] = &["POST /v1/audio/speech"];
     pub const EMBEDDINGS: &[&str] = &["POST /v1/embeddings"];
+    pub const SYSTEMONE: &[&str] = &["POST /v1/systemone"];
     pub const VIDEOS: &[&str] = &[
         "POST /v1/videos",
         "GET /v1/videos",
@@ -206,68 +221,45 @@ mod endpoints {
     pub const PASSTHROUGH: &[&str] = &["ANY /* (every other request)"];
 }
 
-/// Every format this binary speaks: each format a vendor speaks
-/// ([`ALL`]), and passthrough.
+/// Every format this binary speaks, each a vendor speaks or passthrough.
 pub fn formats() -> Vec<KnownFormat> {
-    let mut known: Vec<KnownFormat> = Vec::new();
-    for speaks in ALL.iter().flat_map(|p| p.formats) {
-        if !known.iter().any(|k| k.name == speaks.format.name()) {
-            known.push(known_format(speaks));
-        }
-    }
-    known.push(KnownFormat::of(
-        kind::PASSTHROUGH,
-        endpoints::PASSTHROUGH,
-        Passthrough,
-    ));
-    known
-}
-
-/// The format `speaks`: its kind, endpoints and how its model is named.
-fn known_format(speaks: &Speaks) -> KnownFormat {
-    match speaks.format.clone() {
-        Spoken::OpenAiChat(f) => {
-            KnownFormat::of(kind::CHAT, endpoints::CHAT_COMPLETIONS, f).model(chat())
-        }
-        Spoken::OpenAiResponses(f) => {
-            KnownFormat::of(kind::CHAT, endpoints::RESPONSES, f).model(chat())
-        }
-        Spoken::AnthropicMessages(f) => {
-            KnownFormat::of(kind::CHAT, endpoints::MESSAGES, f).model(chat())
-        }
-        Spoken::GeminiGenerate(f) => {
-            KnownFormat::of(kind::CHAT, endpoints::GENERATE_CONTENT, f).model(chat())
-        }
-        Spoken::OpenAiImages(f) => KnownFormat::of(kind::IMAGE, endpoints::IMAGES, f)
+    vec![
+        KnownFormat::of(kind::CHAT, endpoints::CHAT_COMPLETIONS, OpenAiChat).model(chat()),
+        KnownFormat::of(kind::CHAT, endpoints::RESPONSES, OpenAiResponses).model(chat()),
+        session(kind::REALTIME, OpenAiRealtime, OpenAiRealtime::PATH, false).model(realtime()),
+        session(kind::RESPONSES, ResponsesWs, ResponsesWs::PATH, false),
+        KnownFormat::of(kind::IMAGE, endpoints::IMAGES, OpenAiImages)
             .model(Model::of(image::Input::model, image::Input::set_model)),
-        Spoken::OpenAiTranscriptions(f) => {
-            KnownFormat::of(kind::TRANSCRIPTION, endpoints::TRANSCRIPTIONS, f).model(Model::of(
-                transcription::Input::model,
-                transcription::Input::set_model,
-            ))
-        }
-        Spoken::OpenAiSpeech(f) => KnownFormat::of(kind::SPEECH, endpoints::SPEECH, f)
+        KnownFormat::of(
+            kind::TRANSCRIPTION,
+            endpoints::TRANSCRIPTIONS,
+            OpenAiTranscriptions,
+        )
+        .model(Model::of(
+            transcription::Input::model,
+            transcription::Input::set_model,
+        )),
+        KnownFormat::of(kind::SPEECH, endpoints::SPEECH, OpenAiSpeech)
             .model(Model::of(speech::Input::model, speech::Input::set_model)),
-        Spoken::OpenAiEmbeddings(f) => KnownFormat::of(kind::EMBEDDING, endpoints::EMBEDDINGS, f)
-            .model(Model::of(
-                embedding::Input::model,
-                embedding::Input::set_model,
-            )),
         // Only a `Create` names a model; a follow-up goes by its job's id
         // ([`crate::jobs`]).
-        Spoken::OpenAiVideos(f) => KnownFormat::of(kind::VIDEO, endpoints::VIDEOS, f)
+        KnownFormat::of(kind::VIDEO, endpoints::VIDEOS, OpenAiVideos)
             .job_ids("video_")
             .model(Model::of(video::Input::model, video::Input::set_model)),
-        Spoken::GeminiVeo(f) => KnownFormat::provider_only(kind::VIDEO, &f).job_ids("veo_"),
-        Spoken::OpenAiRealtime(f) => {
-            session(kind::REALTIME, f, OpenAiRealtime::PATH, speaks.base).model(realtime())
-        }
-        Spoken::GeminiLive(f) => {
-            session(kind::REALTIME, f, GeminiLive::PATH, speaks.base).model(realtime())
-        }
-        Spoken::ResponsesWs(f) => session(kind::RESPONSES, f, ResponsesWs::PATH, speaks.base),
-        Spoken::Passthrough(f) => KnownFormat::of(kind::PASSTHROUGH, endpoints::PASSTHROUGH, f),
-    }
+        KnownFormat::of(kind::EMBEDDING, endpoints::EMBEDDINGS, OpenAiEmbeddings).model(Model::of(
+            embedding::Input::model,
+            embedding::Input::set_model,
+        )),
+        KnownFormat::of(kind::CHAT, endpoints::MESSAGES, AnthropicMessages).model(chat()),
+        KnownFormat::of(kind::CHAT, endpoints::GENERATE_CONTENT, GeminiGenerate).model(chat()),
+        session(kind::REALTIME, GeminiLive, GeminiLive::PATH, true).model(realtime()),
+        KnownFormat::provider_only(kind::VIDEO, &GeminiVeo).job_ids("veo_"),
+        KnownFormat::of(kind::DECISION, endpoints::SYSTEMONE, SystemOne).model(Model::of(
+            decision::Input::model,
+            decision::Input::set_model,
+        )),
+        KnownFormat::of(kind::PASSTHROUGH, endpoints::PASSTHROUGH, Passthrough),
+    ]
 }
 
 /// How the model of a chat request is named.
@@ -290,9 +282,8 @@ fn realtime() -> Model {
 }
 
 /// A session `format` of `kind`, its clients sending to its `path`: after
-/// `/v1`, as an SDK adds it to the gateway's base URL, unless it sits at the
-/// origin.
-fn session<F>(kind: Kind, format: F, path: &str, base: Base) -> KnownFormat
+/// `/v1`, as an SDK adds it to the gateway's base URL, unless `at_origin`.
+fn session<F>(kind: Kind, format: F, path: &str, at_origin: bool) -> KnownFormat
 where
     F: Clone
         + Send
@@ -301,9 +292,28 @@ where
         + Format<ClientIo, realtime::Input, realtime::Output>
         + Format<ProviderIo, realtime::Output, realtime::Input>,
 {
-    let endpoint = match base {
-        Base::Origin => format!("GET {path} (WebSocket)"),
-        _ => format!("GET /v1{path} (WebSocket)"),
+    let endpoint = match at_origin {
+        true => format!("GET {path} (WebSocket)"),
+        false => format!("GET /v1{path} (WebSocket)"),
     };
     KnownFormat::of(kind, &[&endpoint], format).websocket()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use respan_gateway_vendors::ALL;
+
+    #[test]
+    fn every_format_a_vendor_speaks_is_known() {
+        let known = formats();
+        for vendor in ALL {
+            for speaks in vendor.formats {
+                let name = speaks.name();
+                let found = known.iter().find(|k| k.name == name);
+                let found = found.unwrap_or_else(|| panic!("{}: {name} is unknown", vendor.id));
+                assert_eq!(found.websocket, speaks.websocket(), "{name}");
+            }
+        }
+    }
 }

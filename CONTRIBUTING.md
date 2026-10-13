@@ -9,6 +9,11 @@ Before proposing a change to the core, read
 current architecture. Architectural changes must explain their rationale and
 update that document and the relevant tests together.
 
+With [`just`](https://github.com/casey/just): `just dev` runs the gateway and
+the UI with hot reload together (Ctrl-C stops both), `just run` builds the UI
+and runs the gateway serving it, `just mock` runs the UI against a fake
+gateway, and `just check` runs the checks below. `just` lists them all.
+
 Every change must pass the checks for the code it touches. Rust:
 
 ```bash

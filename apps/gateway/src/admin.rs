@@ -78,8 +78,8 @@ impl Admin {
                 let kinds: Vec<&str> = kinds.iter().map(|(kind, _)| kind.label).collect();
                 json!({
                     "name": u.name,
-                    "vendor": u.provider.vendor().map(|p| p.id),
-                    "quirks": u.provider.vendor().map_or(&[][..], |p| p.quirks).iter()
+                    "vendor": Some(u.provider.vendor().id).filter(|id| !id.is_empty()),
+                    "quirks": u.provider.vendor().quirks.iter()
                         .map(|q| json!({ "name": q.name, "description": q.description }))
                         .collect::<Vec<_>>(),
                     "formats": formats,
