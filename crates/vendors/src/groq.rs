@@ -7,19 +7,13 @@ use respan_gateway_core::{Filter, NativeValue, Plugin, ProviderContext, Result, 
 use respan_gateway_media_http::openai::{OpenAiSpeech, OpenAiTranscriptions};
 use serde_json::{Map, Value, json};
 
-use crate::{Format, Provider, Quirk, Speaks};
+use crate::{Format, Quirk, Speaks, Vendor};
 
 /// Groq.
-pub const PROVIDER: Provider = Provider {
+pub const VENDOR: Vendor = Vendor {
     id: "groq",
     base_url: Some("https://api.groq.com/openai/v1"),
     key_env: &["GROQ_API_KEY"],
-    prefixes: &[
-        "whisper-large",
-        "distil-whisper",
-        "playai-tts",
-        "canopylabs/orpheus",
-    ],
     example_model: "llama-3.3-70b-versatile",
     formats: &[
         Speaks::new(Format::OpenAiChat(OpenAiChat)),

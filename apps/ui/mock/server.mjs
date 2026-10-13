@@ -21,7 +21,7 @@ const QUIET = !!process.env.MOCK_QUIET;
 const NO_REALTIME = !!process.env.MOCK_NO_REALTIME;
 const startedAt = new Date();
 
-// Providers as the registry in crates/providers/README.md has them: each
+// Providers as the registry in crates/vendors/README.md has them: each
 // vendor's formats and quirks. `gateway` credentials are the gateway's own
 // key; `client` providers take the caller's.
 const quirk = {

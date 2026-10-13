@@ -2,19 +2,19 @@
 
 mod support;
 
-use respan_gateway_providers::gemini;
+use respan_gateway_vendors::gemini;
 
 #[test]
 fn model_id_prefix() {
-    let id = gemini::PROVIDER.model_id("models/gemini-2.5-flash");
+    let id = gemini::VENDOR.model_id("models/gemini-2.5-flash");
     assert_eq!(id, "gemini-2.5-flash");
-    assert_eq!(gemini::PROVIDER.model_id("gemini-2.5-flash"), id);
+    assert_eq!(gemini::VENDOR.model_id("gemini-2.5-flash"), id);
 }
 
 mod thought_signature {
     use super::support::{Vendor, chat, json};
     use respan_gateway_conversation_http::gemini::GeminiGenerate;
-    use respan_gateway_providers::gemini::{GeminiQuirks, SIGNATURE_PLACEHOLDER};
+    use respan_gateway_vendors::gemini::{GeminiQuirks, SIGNATURE_PLACEHOLDER};
 
     /// A conversation in which the model called `f` twice, then was answered.
     fn history(model: &str) -> serde_json::Value {

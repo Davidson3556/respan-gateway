@@ -4,14 +4,13 @@
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{Plugin, ProviderContext, Result, async_trait};
 
-use crate::{Format, Provider, Quirk, Speaks, chat};
+use crate::{Format, Quirk, Speaks, Vendor, chat};
 
 /// Azure OpenAI. It has no base URL of its own: a resource has one.
-pub const PROVIDER: Provider = Provider {
+pub const VENDOR: Vendor = Vendor {
     id: "azure",
     base_url: None,
     key_env: &["AZURE_OPENAI_API_KEY"],
-    prefixes: &[],
     example_model: "gpt-4o-mini",
     formats: &[Speaks::new(Format::OpenAiChat(OpenAiChat)).key_in("api-key")],
     model_id_prefix: None,

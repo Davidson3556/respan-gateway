@@ -130,7 +130,7 @@ async fn problems_are_one_precise_error_and_a_failure() {
     assert!(!out.ok);
     assert!(
         out.stderr
-            .contains("unknown vendor 'nope'; presets: [openai"),
+            .contains("unknown vendor 'nope'; vendors: [openai"),
         "{}",
         out.stderr
     );

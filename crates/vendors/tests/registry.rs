@@ -1,7 +1,7 @@
 //! The registry: each vendor once, each quirk tested, and the README's
 //! table of them as the code says.
 
-use respan_gateway_providers::{ALL, Provider};
+use respan_gateway_vendors::{ALL, Vendor};
 
 #[test]
 fn every_vendor_is_listed_once() {
@@ -66,7 +66,7 @@ fn table() -> String {
     table
 }
 
-fn row(provider: &Provider) -> String {
+fn row(provider: &Vendor) -> String {
     let code = |s: &str| format!("`{s}`");
     let formats: Vec<String> = provider
         .formats
@@ -84,4 +84,41 @@ fn row(provider: &Provider) -> String {
         formats.join(", "),
         quirks.join("<br>")
     )
+}
+
+/// A provider of a vendor sits, and takes its key, as the vendor says.
+#[test]
+fn each_format_sits_where_and_takes_the_key_as_its_vendor_says() {
+    use respan_gateway_vendors::{anthropic, gemini};
+    let gemini = gemini::VENDOR
+        .provider("g")
+        .base("https://a.test/v1beta/openai");
+    let parts = gemini.parts().unwrap_or_default();
+    let at = |format: &str| {
+        let part = parts.iter().find(|p| p.speaks.format.name() == format);
+        part.map(|p| (p.name.as_str(), p.base_url.as_str()))
+    };
+    assert_eq!(
+        at("openai-chat"),
+        Some(("g", "https://a.test/v1beta/openai"))
+    );
+    assert_eq!(
+        at("gemini-generate"),
+        Some(("g:gemini-generate", "https://a.test/v1beta"))
+    );
+    assert_eq!(at("gemini-live"), Some(("g:gemini-live", "wss://a.test")));
+    let claude = anthropic::VENDOR.provider("c").key("k");
+    let parts = claude.parts().unwrap_or_default();
+    let key = parts[0].headers.get("x-api-key");
+    assert_eq!(key.map(|v| v.as_bytes()), Some(&b"k"[..]));
+}
+
+/// A format of no vendor is spoken as its own vendor speaks it.
+#[test]
+fn a_format_of_no_vendor_is_spoken_as_its_own_vendor_speaks_it() {
+    use respan_gateway_vendors::{Auth, speaks};
+    let messages = speaks(None, "anthropic-messages").map(|s| s.auth);
+    assert_eq!(messages, Some(Auth::Header("x-api-key")));
+    assert!(speaks(None, "passthrough").is_some());
+    assert!(speaks(None, "nope").is_none());
 }

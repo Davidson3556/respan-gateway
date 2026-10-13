@@ -3,30 +3,14 @@
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{Plugin, ProviderContext, Result, async_trait};
 
-use crate::{Format, Provider, Quirk, Speaks, chat};
+use crate::{Format, Quirk, Speaks, Vendor, chat};
 
 /// OpenRouter. Its models' names are `<vendor>/<model>`: a configured
 /// provider named `<vendor>` takes the name first.
-pub const PROVIDER: Provider = Provider {
+pub const VENDOR: Vendor = Vendor {
     id: "openrouter",
     base_url: Some("https://openrouter.ai/api/v1"),
     key_env: &["OPENROUTER_API_KEY"],
-    prefixes: &[
-        "openai/",
-        "anthropic/",
-        "google/",
-        "meta-llama/",
-        "mistralai/",
-        "qwen/",
-        "deepseek/",
-        "x-ai/",
-        "moonshotai/",
-        "cohere/",
-        "nvidia/",
-        "microsoft/",
-        "amazon/",
-        "perplexity/",
-    ],
     example_model: "openai/gpt-4o-mini",
     formats: &[Speaks::new(Format::OpenAiChat(OpenAiChat))],
     model_id_prefix: None,

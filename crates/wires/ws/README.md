@@ -9,7 +9,7 @@ it, one per spec (OpenAI Realtime, Gemini Live, and Responses over
 WebSocket), are
 [`respan-gateway-realtime-ws`](../../formats/realtime-ws/README.md)'s, and
 the vendors that speak them
-[`respan-gateway-providers`](../../providers/README.md)'s.
+[`respan-gateway-vendors`](../../vendors/README.md)'s.
 
 ## API
 

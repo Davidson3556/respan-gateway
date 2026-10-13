@@ -1,14 +1,15 @@
 #![warn(missing_docs)]
-//! The vendors, one module each: where a vendor is, how it takes a key, the
-//! models it serves, the formats it speaks, and its quirks. [`ALL`] lists
-//! them.
+//! A vendor as a template: where it is, how it takes a key, the formats it
+//! speaks, and its quirks ([`Vendor`]); and a provider of it, at a base URL
+//! with a key, which registers a core provider of each of its formats and
+//! lists its models ([`VendorProvider`]). The vendors themselves are
+//! `respan-gateway-vendors`'.
 //!
 //! A format is a spec and names no vendor. Where a vendor's deployment
-//! departs from a spec, its module says so: as data, such as the header a
+//! departs from a spec, its vendor says so: as data, such as the header a
 //! key goes in ([`Speaks`]) or what its model list puts before an id, or as
 //! a [`Plugin`] that turns what the vendor sends beyond the spec into the
-//! kind's events and back ([`Provider::plugin`]). Each is described as a
-//! [`Quirk`].
+//! kind's events and back. Each is described as a [`Quirk`].
 
 use respan_gateway_conversation_http::Schema;
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
@@ -20,68 +21,29 @@ use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_media_http::openai::{
     OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
 };
+use respan_gateway_passthrough_http::Passthrough;
 use respan_gateway_realtime_ws::{GeminiLive, OpenAiRealtime, ResponsesWs};
 
-mod chat;
+mod provider;
 
-pub mod anthropic;
-pub mod azure;
-pub mod deepseek;
-pub mod fireworks;
-pub mod gemini;
-pub mod groq;
-pub mod mistral;
-pub mod ollama;
-pub mod openai;
-pub mod openrouter;
-pub mod together;
-pub mod vllm;
-pub mod xai;
+pub use provider::{Part, VendorProvider};
 
-/// Every vendor. A format's own vendor, whose spec it is, comes before any
-/// other that speaks it: a provider of no vendor takes its key and sits as
-/// that vendor's does.
-pub const ALL: &[&Provider] = &[
-    &openai::PROVIDER,
-    &anthropic::PROVIDER,
-    &gemini::PROVIDER,
-    &groq::PROVIDER,
-    &deepseek::PROVIDER,
-    &openrouter::PROVIDER,
-    &xai::PROVIDER,
-    &mistral::PROVIDER,
-    &together::PROVIDER,
-    &fireworks::PROVIDER,
-    &ollama::PROVIDER,
-    &azure::PROVIDER,
-    &vllm::PROVIDER,
-];
-
-/// The vendor `id`.
-pub fn find(id: &str) -> Option<&'static Provider> {
-    ALL.iter().copied().find(|p| p.id == id)
-}
-
-/// A vendor.
-pub struct Provider {
-    /// Its id, as a config names it: `{ vendor: <id> }`.
+/// A vendor: a template of the providers of it ([`Vendor::provider`]).
+pub struct Vendor {
+    /// Its id, as the gateway's config names it: `vendor = "<id>"`.
     pub id: &'static str,
     /// The base URL its SDKs take, if it has one of its own.
     pub base_url: Option<&'static str>,
     /// The environment variables its key is read from, the first set; none
     /// for a vendor that needs no key.
     pub key_env: &'static [&'static str],
-    /// Model names routed to it without a `provider/` prefix; of two that
-    /// match, the longer wins.
-    pub prefixes: &'static [&'static str],
     /// A model to show in examples.
     pub example_model: &'static str,
     /// The formats it speaks, as it speaks them.
     pub formats: &'static [Speaks],
     /// What its model list puts before each model's id.
     pub model_id_prefix: Option<&'static str>,
-    /// How it departs from the specs it speaks, each tested in
-    /// `tests/<id>.rs` by a test named for it.
+    /// How it departs from the specs it speaks.
     pub quirks: &'static [Quirk],
     /// The plugin of its quirks, a plugin of each of its providers
     /// ([`Provider::plugin`](respan_gateway_core::Provider::plugin)): run on
@@ -90,9 +52,9 @@ pub struct Provider {
     pub plugin: Option<&'static dyn Plugin>,
 }
 
-impl std::fmt::Debug for Provider {
+impl std::fmt::Debug for Vendor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Provider")
+        f.debug_struct("Vendor")
             .field("id", &self.id)
             .field("formats", &self.formats)
             .field("quirks", &self.quirks)
@@ -100,7 +62,7 @@ impl std::fmt::Debug for Provider {
     }
 }
 
-impl Provider {
+impl Vendor {
     /// A model's id as its list names it, without
     /// [`model_id_prefix`](Self::model_id_prefix).
     pub fn model_id<'a>(&self, listed: &'a str) -> &'a str {
@@ -149,6 +111,33 @@ impl Speaks {
     pub const fn at(mut self, base: Base) -> Self {
         self.base = base;
         self
+    }
+
+    /// Its base URL, for a provider at `base_url`: a WebSocket format's
+    /// with `ws`/`wss`.
+    pub fn base_url(&self, base_url: &str) -> String {
+        let base_url = base_url.trim_end_matches('/');
+        let base = match self.base {
+            Base::Same => base_url,
+            Base::Origin => origin(base_url),
+            Base::Without(suffix) => base_url.strip_suffix(suffix).unwrap_or(base_url),
+        };
+        let swap = match self.format.websocket() {
+            true => [("https://", "wss://"), ("http://", "ws://")],
+            false => [("wss://", "https://"), ("ws://", "http://")],
+        };
+        swap.iter()
+            .find_map(|(from, to)| base.strip_prefix(from).map(|rest| format!("{to}{rest}")))
+            .unwrap_or_else(|| base.to_owned())
+    }
+}
+
+/// `scheme://host[:port]` of `url`.
+fn origin(url: &str) -> &str {
+    let after_scheme = url.find("://").map_or(0, |i| i + 3);
+    match url[after_scheme..].find('/') {
+        Some(slash) => &url[..after_scheme + slash],
+        None => url,
     }
 }
 
@@ -202,6 +191,8 @@ pub enum Format {
     GeminiLive(GeminiLive),
     /// OpenAI's Responses over WebSocket.
     ResponsesWs(ResponsesWs),
+    /// Any request, relayed as it is.
+    Passthrough(Passthrough),
 }
 
 impl Format {
@@ -221,6 +212,15 @@ impl Format {
             Format::OpenAiRealtime(_) => OpenAiRealtime::NAME,
             Format::GeminiLive(_) => GeminiLive::NAME,
             Format::ResponsesWs(_) => ResponsesWs::NAME,
+            Format::Passthrough(_) => "passthrough",
         }
+    }
+
+    /// Whether it is a WebSocket session's.
+    pub fn websocket(&self) -> bool {
+        matches!(
+            self,
+            Format::OpenAiRealtime(_) | Format::GeminiLive(_) | Format::ResponsesWs(_)
+        )
     }
 }

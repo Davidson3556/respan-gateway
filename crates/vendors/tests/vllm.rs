@@ -2,7 +2,7 @@
 
 mod support;
 
-use respan_gateway_providers::vllm::VllmQuirks;
+use respan_gateway_vendors::vllm::VllmQuirks;
 use support::{Vendor, chat, data, json, messages};
 
 #[tokio::test]

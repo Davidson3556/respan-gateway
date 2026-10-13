@@ -30,11 +30,11 @@ mod mcp;
 mod mcp_aggregate;
 mod mcp_oauth;
 mod models;
-mod presets;
 mod redact;
 mod report;
 mod requests;
 mod tool_loop;
+mod vendors;
 
 pub use app::{App, DEFAULT_LISTEN, ReloadError, Reloaded, shutdown_signal};
 pub use auth::Trusted;

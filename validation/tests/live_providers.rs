@@ -604,7 +604,7 @@ async fn real_openai_chat_client_to_responses_provider() {
 
 // Media kinds. Each call is the smallest the provider allows.
 
-/// A vendor preset (its key comes from the environment) serving `formats`.
+/// A vendor (its key comes from the environment) serving `formats`.
 fn vendor_config(vendor: &str, formats: &str) -> String {
     let formats = formats
         .split(',')

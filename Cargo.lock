@@ -1447,10 +1447,10 @@ dependencies = [
  "respan-gateway-plugin-relay",
  "respan-gateway-plugin-routing",
  "respan-gateway-plugin-tool-loop",
- "respan-gateway-providers",
  "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
  "respan-gateway-serve",
+ "respan-gateway-vendors",
  "respan-gateway-ws",
  "serde",
  "serde_json",
@@ -1525,10 +1525,10 @@ dependencies = [
  "respan-gateway-passthrough-http",
  "respan-gateway-plugin-fallback",
  "respan-gateway-plugin-relay",
- "respan-gateway-providers",
  "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
  "respan-gateway-serve",
+ "respan-gateway-vendors",
  "respan-gateway-ws",
  "rusqlite",
  "serde_json",
@@ -1749,26 +1749,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "respan-gateway-providers"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "respan-gateway-conversation",
- "respan-gateway-conversation-http",
- "respan-gateway-core",
- "respan-gateway-http",
- "respan-gateway-media-http",
- "respan-gateway-realtime",
- "respan-gateway-realtime-ws",
- "respan-gateway-serve",
- "respan-gateway-ws",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
-]
-
-[[package]]
 name = "respan-gateway-python"
 version = "0.1.0"
 dependencies = [
@@ -1846,6 +1826,43 @@ dependencies = [
  "bytes",
  "respan-gateway-core",
  "serde_json",
+]
+
+[[package]]
+name = "respan-gateway-vendor-kit"
+version = "0.1.0"
+dependencies = [
+ "respan-gateway-conversation-http",
+ "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-http-faults",
+ "respan-gateway-http-transport",
+ "respan-gateway-media-http",
+ "respan-gateway-passthrough-http",
+ "respan-gateway-realtime-ws",
+ "respan-gateway-ws",
+ "serde_json",
+]
+
+[[package]]
+name = "respan-gateway-vendors"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "respan-gateway-conversation",
+ "respan-gateway-conversation-http",
+ "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-media-http",
+ "respan-gateway-passthrough-http",
+ "respan-gateway-realtime",
+ "respan-gateway-realtime-ws",
+ "respan-gateway-serve",
+ "respan-gateway-vendor-kit",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

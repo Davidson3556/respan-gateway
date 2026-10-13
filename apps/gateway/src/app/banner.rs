@@ -91,7 +91,10 @@ impl Built {
             .upstreams
             .iter()
             .find(|u| u.name == route.provider)?;
-        let model = upstream.preset.map_or("<model>", |p| p.example_model);
+        let model = upstream
+            .provider
+            .vendor()
+            .map_or("<model>", |p| p.example_model);
         let key = match self.plan.keys.is_empty() {
             true => "",
             false => " -H 'authorization: Bearer <key>'",

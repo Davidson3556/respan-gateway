@@ -24,7 +24,7 @@ ui = true                         # Web UI at http://127.0.0.1:8080/ui/
 # formats = ["openai-chat", "anthropic-messages"]  # Otherwise auto-detected
 
 # ── Providers ─────────────────────────────────────────────────────────
-# A vendor preset supplies its URL, formats, and model routing.
+# A vendor supplies its URL, formats, and model routing.
 # The first provider serving a kind is its default. You can also address
 # any provider explicitly: openai/gpt-4o-mini, groq/llama-3.3-70b-versatile.
 # Keep secrets in environment variables or .env, referenced as env:NAME.

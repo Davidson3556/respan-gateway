@@ -23,10 +23,10 @@ use respan_gateway_core::{
     ClientContext, ErrorCode, Extensions, Fault, Gateway, Plugin, Provider, Response, async_trait,
 };
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
-use respan_gateway_http::{Body, Completion, ProviderIo, raw::Original};
+use respan_gateway_http::{Body, Completion, raw::Original};
 use respan_gateway_http_faults::Status;
-use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_http_transport::reqwest;
+use respan_gateway_http_transport::{HttpTransport, unreachable};
 use respan_gateway_mcp::{Input, Output, RpcCode};
 use respan_gateway_mcp_http::{Owner, SESSION, StdioTransport, StreamableHttp};
 use respan_gateway_plugin_routing::Model;
@@ -36,10 +36,10 @@ use tokio::time::timeout;
 
 use crate::compose::{auth_headers, secret, valid_provider_name};
 use crate::config::Auth;
-use crate::formats::{KnownFormat, explained, kind, unreachable};
+use crate::formats::{KnownFormat, kind};
 use crate::mcp_oauth::{OAuth, OAuthConfig};
 use crate::models::{Probe, Reach};
-use crate::presets::origin;
+use crate::vendors::origin;
 
 /// The format's name, as the request log shows it.
 pub use respan_gateway_mcp_http::FORMAT;
@@ -525,17 +525,41 @@ pub fn known(servers: Vec<McpServer>, aggregate: bool, limit: usize) -> KnownFor
         endpoints.extend(["POST", "GET", "DELETE"].map(|m| format!("{m} {MOUNT} (all servers)")));
     }
     let endpoints: Vec<&str> = endpoints.iter().map(String::as_str).collect();
-    // Servers are not providers: nothing configures one under `providers`.
-    let not_a_provider =
-        |_: &str, _: &str, _: HeaderMap| -> Result<fn(Extensions) -> ProviderIo, Fault> {
-            Err(Fault::config(
-                "mcp servers are configured under `mcp`, not `providers`",
-            ))
-        };
     let serve_client = client.clone();
-    KnownFormat::of(kind::MCP, &endpoints, client, not_a_provider)
+    KnownFormat::of(kind::MCP, &endpoints, client)
         .model(model())
         .serving(move |gateway| register(gateway, &servers, &serve_client, limit))
+}
+
+/// `client`'s calls through `owners`, a server that cannot be reached
+/// named in the fault with its host and the cause: the transport's own
+/// message names neither.
+fn reached(
+    client: HttpTransport,
+    server: &str,
+    url: &str,
+    limit: usize,
+    owners: Arc<SessionOwners>,
+) -> impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo + Send + Sync + use<>
+{
+    let client = Arc::new(client);
+    let host = origin(url).split_once("://").map_or("", |(_, host)| host);
+    let who: Arc<str> = format!("provider '{server}' at {host}").into();
+    respan_gateway_http::connect(
+        move |call| {
+            let (client, who, owners) = (client.clone(), who.clone(), owners.clone());
+            async move {
+                let sent = owners.send(call, |call| client.send(call)).await;
+                sent.map_err(|fault| match fault.cause::<reqwest::Error>() {
+                    Some(e) => {
+                        Fault::upstream(format!("{who} {}", unreachable(e))).with_source(fault)
+                    }
+                    None => fault,
+                })
+            }
+        },
+        limit,
+    )
 }
 
 /// `gateway` with each server as a provider, and the client format.
@@ -553,7 +577,7 @@ fn register(
                 origin, path, auth, ..
             } => {
                 let transport = HttpTransport::new(origin)?.with_headers(auth.clone())?;
-                let io = explained(transport, &s.name, origin, limit, Some(owners.clone()));
+                let io = reached(transport, &s.name, origin, limit, owners.clone());
                 gateway.provider(Provider::new(name, StreamableHttp::new(path), io))?
             }
             Transport::Stdio {

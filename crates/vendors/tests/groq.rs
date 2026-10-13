@@ -2,7 +2,7 @@
 
 mod support;
 
-use respan_gateway_providers::groq::GroqQuirks;
+use respan_gateway_vendors::groq::GroqQuirks;
 use support::{Vendor, chat, data, json, messages};
 
 #[tokio::test]

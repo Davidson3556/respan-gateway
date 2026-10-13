@@ -1,9 +1,29 @@
-# Providers
+# Vendors
 
-`respan-gateway-providers` is what the gateway knows of each vendor, one
-file each under [`src/`](src): where it is, how it takes a key, the models
-routed to it, the formats it speaks, and its quirks. `ALL` lists them; the
-binary's `{ vendor: <id> }` is one.
+`respan-gateway-vendors` is what the gateway knows of each vendor, one
+file each under [`src/`](src): where it is, how it takes a key, the formats
+it speaks, and its quirks. `ALL` lists them; the binary's
+`vendor = "<id>"` is one.
+
+A vendor is a template (`Vendor`, from `respan-gateway-vendor-kit`). A
+`VendorProvider` is one at a base URL with a key, ready to register, so a
+provider builder writes none of it again:
+
+```rust,ignore
+use respan_gateway_vendors::openai;
+
+// Its base URL, its key from `OPENAI_API_KEY`; `.base(..)` and `.key(..)`
+// set others.
+let openai = openai::VENDOR.provider("openai");
+// A core provider of each format it speaks, each at its base URL, taking
+// the key as OpenAI does, carrying its quirks.
+let gateway = openai.register(Gateway::new())?;
+// Its models, by its model list.
+let models = openai.models().await;
+```
+
+A provider of no vendor is `VendorProvider::new(name).formats(..).base(..)`,
+each format as `speaks(None, name)` gives it.
 
 A format is a spec and names no vendor: it keeps what a vendor sends beyond
 the spec native, where it appeared. A quirk is a vendor's deployment
@@ -47,7 +67,7 @@ vendor, the first in `ALL` that speaks it, does.
 | `vllm` | `openai-chat` | `reasoning_content`: Reasoning is `reasoning_content`, in a request's messages and a response's message or delta.<br>`inert_choice`: A choice's `stop_reason`, the stop token or string that ended it, describes its finish. |
 <!-- /table -->
 
-The table is written from `ALL`: `BLESS=1 cargo test -p respan-gateway-providers --test registry`.
+The table is written from `ALL`: `BLESS=1 cargo test -p respan-gateway-vendors --test registry`.
 
 ## Base URLs
 

@@ -3,14 +3,13 @@
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_media_http::openai::OpenAiEmbeddings;
 
-use crate::{Format, Provider, Speaks};
+use crate::{Format, Speaks, Vendor};
 
 /// Ollama, on this machine. It needs no key; `OLLAMA_HOST` says where it is.
-pub const PROVIDER: Provider = Provider {
+pub const VENDOR: Vendor = Vendor {
     id: "ollama",
     base_url: Some("http://localhost:11434/v1"),
     key_env: &[],
-    prefixes: &[],
     example_model: "llama3.2",
     formats: &[
         Speaks::new(Format::OpenAiChat(OpenAiChat)),

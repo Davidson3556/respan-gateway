@@ -8,13 +8,14 @@ use std::sync::Arc;
 use respan_gateway_core::{Fault, Gateway};
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
+use respan_gateway_ws::Limits;
 
 use crate::auth::Client;
 use crate::config::{Auth, ClientKey, Config, ModelRoute, ProviderConfig};
 use crate::formats::{KnownFormat, kind};
-use crate::presets;
+use crate::vendors;
 use respan_gateway_plugin_routing::{Kind, Routes, Speaks};
-use respan_gateway_providers::{Auth as KeyIn, Base, Provider};
+use respan_gateway_vendors::VendorProvider;
 
 /// The name of the format that relays what no other served format accepts.
 pub const PASSTHROUGH: &str = "passthrough";
@@ -23,7 +24,8 @@ pub const PASSTHROUGH: &str = "passthrough";
 #[derive(Debug)]
 pub struct Upstream {
     pub name: String,
-    pub preset: Option<&'static Provider>,
+    /// What reaches it: a provider of its vendor, at its base URL with its key.
+    pub provider: VendorProvider,
     pub entries: Vec<Entry>,
     /// Whether it sends a key of its own, rather than the client's.
     pub own_key: bool,
@@ -40,7 +42,6 @@ pub struct Entry {
     /// `name:format` for the others.
     pub internal: String,
     pub base_url: String,
-    pub auth: HeaderMap,
 }
 
 impl std::fmt::Debug for Entry {
@@ -69,8 +70,15 @@ impl Plan {
     }
 }
 
-pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Plan), Fault> {
-    let (gateway, upstreams) = providers(config, formats)?;
+/// The gateway `config` says, its providers reading up to `limit` bytes of
+/// an answer at once and their sessions taking `sessions`.
+pub fn compose(
+    config: &Config,
+    formats: &[KnownFormat],
+    limit: usize,
+    sessions: Limits,
+) -> Result<(Gateway, Plan), Fault> {
+    let (gateway, upstreams) = providers(config, formats, limit, sessions)?;
     let serve = match &config.formats {
         Some(serve) => serve.clone(),
         None => default_serve(&upstreams, formats),
@@ -103,7 +111,7 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
     Ok((gateway, plan))
 }
 
-/// The routes to `upstreams`: by `table`, then their presets' prefixes,
+/// The routes to `upstreams`: by `table`, then their vendors' claims,
 /// then by default to `default`.
 fn routes(upstreams: &[Upstream], table: Vec<(String, String)>, default: Option<String>) -> Routes {
     let mut routes = Routes::new();
@@ -116,8 +124,8 @@ fn routes(upstreams: &[Upstream], table: Vec<(String, String)>, default: Option<
         routes = routes.provider(&u.name, speaks.collect());
     }
     let claims = upstreams.iter().flat_map(|u| {
-        let prefixes = u.preset.map(|p| p.prefixes).unwrap_or_default();
-        prefixes.iter().map(|prefix| (*prefix, &u.name))
+        let vendor = u.provider.vendor().map_or("", |v| v.id);
+        vendors::claims(vendor).map(|prefix| (prefix, &u.name))
     });
     routes = claims.fold(routes, |routes, (prefix, name)| routes.claim(prefix, name));
     routes = routes.models(table);
@@ -129,26 +137,20 @@ fn routes(upstreams: &[Upstream], table: Vec<(String, String)>, default: Option<
 
 /// The gateway with a core provider for each format of each configured
 /// provider.
-fn providers(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Vec<Upstream>), Fault> {
+fn providers(
+    config: &Config,
+    formats: &[KnownFormat],
+    limit: usize,
+    sessions: Limits,
+) -> Result<(Gateway, Vec<Upstream>), Fault> {
     let mut gateway = Gateway::new();
     let mut upstreams = Vec::new();
     for (name, p) in &config.providers {
         let upstream = upstream(name, p, formats)?;
-        for entry in &upstream.entries {
-            let format = format_named(formats, &entry.format, &format!("provider '{name}'"))?;
-            let (internal, auth) = (entry.internal.clone(), entry.auth.clone());
-            let in_provider =
-                |e: Fault| Fault::config(format!("provider '{name}': {}", e.message()));
-            let mut provider = format
-                .provider(internal, &entry.base_url, auth)
-                .map_err(in_provider)?;
-            // The vendor's departures from the format's spec are part of
-            // its providers, so every plugin sees the kind's events.
-            if let Some(quirks) = upstream.preset.and_then(|p| p.plugin) {
-                provider = provider.plugin(quirks);
-            }
-            gateway = gateway.provider(provider).map_err(in_provider)?;
-        }
+        let provider = upstream.provider.clone().limit(limit).sessions(sessions);
+        gateway = provider
+            .register(gateway)
+            .map_err(|e| Fault::config(format!("provider '{name}': {}", e.message())))?;
         upstreams.push(upstream);
     }
     Ok((gateway, upstreams))
@@ -278,86 +280,88 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
             "a name is letters, digits, '_', '.' and '-' alone (no '/', '~' or ':')".into(),
         ));
     }
-    let preset = match &p.vendor {
+    let vendor = match &p.vendor {
         None => None,
-        Some(vendor) => Some(respan_gateway_providers::find(vendor).ok_or_else(|| {
+        Some(vendor) => Some(respan_gateway_vendors::find(vendor).ok_or_else(|| {
             bad(format!(
-                "unknown vendor '{vendor}'; presets: [{}]",
-                presets::vendors().join(", ")
+                "unknown vendor '{vendor}'; vendors: [{}]",
+                vendors::vendors().join(", ")
             ))
         })?),
     };
-    let names: Vec<String> = match (&p.formats, preset) {
-        (Some(names), _) => names.clone(),
-        (None, Some(preset)) => preset
-            .formats
-            .iter()
-            .map(|s| s.format.name().to_owned())
-            .collect(),
+    let mut provider = match vendor {
+        Some(vendor) => vendor.provider(name),
+        None => VendorProvider::new(name),
+    };
+    let names: Vec<&str> = match (&p.formats, vendor) {
+        (Some(names), _) => names.iter().map(String::as_str).collect(),
+        (None, Some(vendor)) => vendor.formats.iter().map(|s| s.format.name()).collect(),
         (None, None) => return Err(bad("needs a `vendor` or `formats`".into())),
     };
     if names.is_empty() {
         return Err(bad("has no formats".into()));
     }
-    let base_url = p
-        .base_url
-        .as_deref()
-        .or(preset.and_then(|preset| preset.base_url))
-        .ok_or_else(|| bad("needs a `base_url`".into()))?;
-    let (key, key_from) = match (&p.key, &p.auth, preset) {
+    for format in &names {
+        if format_named(formats, format, &owner)?.kind == kind::MCP {
+            return Err(bad(
+                "mcp servers are configured under `mcp`, not `providers`".into(),
+            ));
+        }
+    }
+    let unique: BTreeSet<&&str> = names.iter().collect();
+    if unique.len() != names.len() {
+        return Err(bad("lists a format twice".into()));
+    }
+    if p.formats.is_some() {
+        let speaks = names
+            .iter()
+            .map(|name| respan_gateway_vendors::speaks(vendor, name));
+        let speaks = speaks.collect::<Option<Vec<_>>>();
+        provider =
+            provider.formats(speaks.ok_or_else(|| bad("speaks a format no vendor does".into()))?);
+    }
+    let base_url = p.base_url.as_deref().or(vendor.and_then(|v| v.base_url));
+    provider = provider.base(base_url.ok_or_else(|| bad("needs a `base_url`".into()))?);
+    // Where its own key comes from; none for the client's credentials.
+    let key_from = match (&p.key, &p.auth, vendor) {
         (Some(_), Some(_), _) => return Err(bad("set `key` or `auth`, not both".into())),
-        (Some(key), None, _) => (Some(secret(&owner, key)?), key_source(key)),
-        (None, None, Some(preset)) if !preset.key_env.is_empty() => {
-            let Some(key) = presets::key_from_env(preset.key_env) else {
-                let var = preset.key_env.join(" or ");
+        (Some(key), None, _) => {
+            provider = provider.key(secret(&owner, key)?);
+            Some(key_source(key))
+        }
+        (None, Some(auth), _) => {
+            provider = provider.headers(auth_headers(name, auth)?);
+            let (Auth::Bearer { key } | Auth::Header { key, .. }) = auth;
+            Some(key_source(key))
+        }
+        (None, None, Some(vendor)) if !vendor.key_env.is_empty() => {
+            let Some(key) = vendors::key_from_env(vendor.key_env) else {
+                let var = vendor.key_env.join(" or ");
                 return Err(bad(format!(
                     "environment variable {var} is not set; export it, put it in .env, or set `key`"
                 )));
             };
-            (Some(secret(&owner, &key)?), key_source(&key))
+            provider = provider.key(secret(&owner, &key)?);
+            Some(key_source(&key))
         }
-        (None, Some(Auth::Bearer { key } | Auth::Header { key, .. }), _) => (None, key_source(key)),
-        _ => (None, "client credentials".to_owned()),
+        _ => None,
     };
-    // One explicit format sits at its base URL exactly as given.
-    let exact = preset.is_none() && names.len() == 1;
-    let mut entries = Vec::new();
-    for (i, format) in names.iter().enumerate() {
-        let known = format_named(formats, format, &owner)?;
-        // As its vendor speaks it, else as the format's own vendor does.
-        let spoken = preset.and_then(|v| v.formats.iter().find(|s| s.format.name() == format));
-        let (key_in, base) = spoken.map_or((known.key, known.base), |s| (s.auth, s.base));
-        let auth = match (&p.auth, &key) {
-            (Some(auth), _) => auth_headers(name, auth)?,
-            (None, Some(key)) => key_headers(name, key_in, key)?,
-            (None, None) => HeaderMap::new(),
-        };
-        let base_url = match exact {
-            true => base_url.to_owned(),
-            false => base_for(known, base, base_url),
-        };
-        let internal = match i {
-            0 => name.to_owned(),
-            _ => format!("{name}:{format}"),
-        };
-        entries.push(Entry {
-            format: format.clone(),
-            kind: known.kind,
-            internal,
-            base_url,
-            auth,
-        });
-    }
-    let unique: BTreeSet<&String> = names.iter().collect();
-    if unique.len() != names.len() {
-        return Err(bad("lists a format twice".into()));
-    }
+    let entries = provider.parts().map_err(|e| bad(e.message().into()))?;
+    let entries = entries.into_iter().map(|part| {
+        let format = part.speaks.format.name();
+        Ok(Entry {
+            format: format.to_owned(),
+            kind: format_named(formats, format, &owner)?.kind,
+            internal: part.name,
+            base_url: part.base_url,
+        })
+    });
     Ok(Upstream {
         name: name.to_owned(),
-        preset,
-        entries,
-        own_key: p.auth.is_some() || key.is_some(),
-        key_from,
+        entries: entries.collect::<Result<_, Fault>>()?,
+        own_key: key_from.is_some(),
+        key_from: key_from.unwrap_or_else(|| "client credentials".to_owned()),
+        provider,
     })
 }
 
@@ -367,17 +371,6 @@ fn key_source(value: &str) -> String {
         Some(var) => format!("env {var}"),
         None => "config".to_owned(),
     }
-}
-
-/// Where `format` sits, at `base`, for a provider at `base_url`.
-fn base_for(format: &KnownFormat, base: Base, base_url: &str) -> String {
-    let base_url = base_url.trim_end_matches('/');
-    let base = match base {
-        Base::Same => base_url,
-        Base::Origin => presets::origin(base_url),
-        Base::Without(suffix) => base_url.strip_suffix(suffix).unwrap_or(base_url),
-    };
-    presets::with_scheme(base, format.websocket)
 }
 
 /// `env:NAME` reads the environment variable; anything else is literal.
@@ -430,14 +423,6 @@ fn clients(entries: &[ClientKey]) -> Result<Vec<Client>, Fault> {
         });
     }
     Ok(clients)
-}
-
-/// A key read already, sent as a format expects.
-fn key_headers(provider: &str, header: KeyIn, key: &str) -> Result<HeaderMap, Fault> {
-    match header {
-        KeyIn::Bearer => one_header(provider, AUTHORIZATION, &format!("Bearer {key}")),
-        KeyIn::Header(name) => one_header(provider, HeaderName::from_static(name), key),
-    }
 }
 
 /// The header of `auth`, its key read.

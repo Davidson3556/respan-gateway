@@ -11,31 +11,17 @@ use respan_gateway_realtime::Input;
 use respan_gateway_realtime_ws::{OpenAiRealtime, ResponsesWs};
 use serde_json::{Value, json};
 
-use crate::{Format, Provider, Quirk, Speaks};
+use crate::{Format, Quirk, Speaks, Vendor};
 
 /// The model it transcribes a session's input with, unless the session
 /// names one.
 const TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
 
 /// OpenAI.
-pub const PROVIDER: Provider = Provider {
+pub const VENDOR: Vendor = Vendor {
     id: "openai",
     base_url: Some("https://api.openai.com/v1"),
     key_env: &["OPENAI_API_KEY"],
-    prefixes: &[
-        "gpt",
-        "o1",
-        "o3",
-        "o4",
-        "chatgpt",
-        "codex",
-        "dall-e",
-        "gpt-image",
-        "whisper-1",
-        "tts-",
-        "sora",
-        "text-embedding",
-    ],
     example_model: "gpt-4o-mini",
     formats: &[
         Speaks::new(Format::OpenAiChat(OpenAiChat)),

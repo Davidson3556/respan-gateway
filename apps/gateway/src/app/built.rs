@@ -58,7 +58,7 @@ impl Built {
                 .unwrap_or(Limits::default().max_message),
             ..Limits::default()
         };
-        let mut formats = formats(limit, sessions);
+        let mut formats = formats();
         let providers: Vec<&str> = config.providers.keys().map(String::as_str).collect();
         let mcp = mcp::servers(&config.mcp, &providers)?;
         if !mcp.is_empty() {
@@ -72,7 +72,7 @@ impl Built {
             Some(a) => Some(mcp_aggregate::check(a, &mcp)?),
             None => None,
         };
-        let (gateway, mut plan) = compose(&config, &formats)?;
+        let (gateway, mut plan) = compose(&config, &formats, limit, sessions)?;
         plan.mcp = mcp;
         if let Some(tool_loop) = &config.plugins.tool_loop {
             let serving = plan.serves(mcp::FORMAT);

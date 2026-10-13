@@ -5,7 +5,8 @@ members = [
     "crates/kinds/*",
     "crates/wires/*",
     "crates/formats/*",
-    "crates/providers",
+    "crates/vendor-kit",
+    "crates/vendors",
     "crates/serve",
     "apps/gateway",
     "python",
@@ -44,7 +45,8 @@ respan-gateway-media-http = { path = "crates/formats/media-http" }
 respan-gateway-realtime-ws = { path = "crates/formats/realtime-ws" }
 respan-gateway-mcp-http = { path = "crates/formats/mcp-http" }
 respan-gateway-passthrough-http = { path = "crates/formats/passthrough-http" }
-respan-gateway-providers = { path = "crates/providers" }
+respan-gateway-vendor-kit = { path = "crates/vendor-kit" }
+respan-gateway-vendors = { path = "crates/vendors" }
 respan-gateway-serve = { path = "crates/serve" }
 async-trait = "0.1"
 axum = "0.8"

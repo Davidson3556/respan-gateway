@@ -3,14 +3,13 @@
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{Plugin, ProviderContext, Result, async_trait};
 
-use crate::{Format, Provider, Quirk, Speaks, chat};
+use crate::{Format, Quirk, Speaks, Vendor, chat};
 
 /// DeepSeek.
-pub const PROVIDER: Provider = Provider {
+pub const VENDOR: Vendor = Vendor {
     id: "deepseek",
     base_url: Some("https://api.deepseek.com"),
     key_env: &["DEEPSEEK_API_KEY"],
-    prefixes: &["deepseek"],
     example_model: "deepseek-chat",
     formats: &[Speaks::new(Format::OpenAiChat(OpenAiChat))],
     model_id_prefix: None,

@@ -13,7 +13,7 @@ use crate::Error;
 use crate::logging::LogFormat;
 use crate::mcp::McpConfig;
 use crate::mcp_aggregate::AggregateConfig;
-use crate::presets;
+use crate::vendors;
 
 /// A client key in the config: the key alone, or with the name its requests
 /// are logged under and what it may do.
@@ -233,24 +233,24 @@ impl Default for Config {
     }
 }
 
-/// One provider: a vendor preset, explicit formats, or a preset with some
+/// One provider: a vendor, explicit formats, or a vendor with some
 /// of its settings replaced.
 #[derive(Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
-    /// A vendor preset: `openai`, `anthropic`, `gemini`, `groq`, ...
+    /// A vendor: `openai`, `anthropic`, `gemini`, `groq`, ...
     pub vendor: Option<String>,
-    /// Its format, or several; a preset's are every format of the vendor
+    /// Its format, or several; a vendor's are every format it speaks
     /// compiled in.
     #[serde(default, deserialize_with = "one_or_many")]
     pub formats: Option<Vec<String>>,
-    /// The base URL its SDK takes; a preset's is the vendor's.
+    /// The base URL its SDK takes; a vendor's is its own.
     pub base_url: Option<String>,
     /// Its key, literal or `env:NAME`, sent as its formats expect; a
-    /// preset's is `env:<VENDOR>_API_KEY`.
+    /// vendor's is `env:<VENDOR>_API_KEY`.
     pub key: Option<String>,
     /// Its credentials as one header, in place of `key`. A provider with
-    /// neither, and no preset key, passes on the client's.
+    /// neither, and no vendor key, passes on the client's.
     pub auth: Option<Auth>,
 }
 
@@ -294,7 +294,7 @@ pub struct PluginsConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoutingConfig {
-    /// Model routes: model prefix to provider, before the presets' own
+    /// Model routes: model prefix to provider, before the vendors' own
     /// names, for every kind the provider serves.
     #[serde(default)]
     pub models: Vec<ModelRoute>,
@@ -492,20 +492,20 @@ impl Config {
     /// Ollama if `OLLAMA_HOST` is set). `RESPAN_<VENDOR>_BASE_URL` moves a
     /// vendor's base URL. `Err` if there is none.
     pub fn from_env() -> Result<Config, Error> {
-        let detected = presets::detected();
+        let detected = vendors::detected();
         if detected.is_empty() {
             return Err(Error::new(no_keys_message()));
         }
         let providers = detected
             .into_iter()
-            .map(|(preset, key, base_url)| {
+            .map(|(vendor, key, base_url)| {
                 let provider = ProviderConfig {
-                    vendor: Some(preset.id.to_owned()),
+                    vendor: Some(vendor.id.to_owned()),
                     key,
                     base_url,
                     ..ProviderConfig::default()
                 };
-                (preset.id.to_owned(), provider)
+                (vendor.id.to_owned(), provider)
             })
             .collect();
         Ok(Config {
@@ -967,7 +967,7 @@ vendor = "anthropic"
     }
 
     #[test]
-    fn presets_lists_keys_and_switches_parse() {
+    fn vendors_lists_keys_and_switches_parse() {
         let text = "client_keys = [\"env:GATEWAY_KEY\", \"sk-local\"]\nlog = \"off\"\nui = false\nproviders = { openai = { vendor = \"openai\" }, claude = { vendor = \"anthropic\", key = \"env:MY_KEY\", base_url = \"http://x.test\" }, both = { formats = [\"openai-chat\", \"anthropic-messages\"], base_url = \"http://y.test\" }, one = { formats = \"openai-chat\", base_url = \"http://z.test\" } }\n";
         let config = Config::parse(text).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(

@@ -1,6 +1,6 @@
 [package]
-name = "respan-gateway-providers"
-description = "The vendors: where each is, how it takes a key, its models, the formats it speaks, and its quirks."
+name = "respan-gateway-vendors"
+description = "The vendors: where each is, how it takes a key, the formats it speaks, and its quirks."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,13 +18,14 @@ respan-gateway-core.workspace = true
 respan-gateway-media-http.workspace = true
 respan-gateway-realtime.workspace = true
 respan-gateway-realtime-ws.workspace = true
+respan-gateway-passthrough-http.workspace = true
+respan-gateway-vendor-kit.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+respan-gateway-http.workspace = true
 axum.workspace = true
 base64.workspace = true
-respan-gateway-http.workspace = true
-respan-gateway-ws.workspace = true
 respan-gateway-serve.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }

@@ -29,7 +29,7 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
             .first()
             .map_or(String::new(), |e| crate::redact::url(&e.base_url));
         providers.push(format!("{} at {base_url}", u.name));
-        if let Some(vendor) = u.preset {
+        if let Some(vendor) = u.provider.vendor() {
             providers.push(format!("  vendor  {}", vendor.id));
         }
         let names: Vec<&str> = u.entries.iter().map(|e| e.format.as_str()).collect();
@@ -118,7 +118,7 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
     );
 
     let quirks = plan.upstreams.iter().flat_map(|u| {
-        let quirks = u.preset.map_or(&[][..], |p| p.quirks);
+        let quirks = u.provider.vendor().map_or(&[][..], |p| p.quirks);
         quirks
             .iter()
             .map(move |q| format!("{}: {}: {}", u.name, q.name, q.description))

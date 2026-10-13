@@ -35,9 +35,11 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
   `Format`. A format is a spec and names no vendor: what a provider sends
   beyond the spec stays native to it, where it appeared. It picks the wire
   capabilities its spec uses, such as a subprotocol or binary frames.
-- The **providers** crate (`crates/providers/`) is every vendor, a file
-  each: where it is, its key, its models, the formats it speaks, and its
-  quirks, each described. A quirk, a deployment's departure from a spec, is
+- The **vendor kit** crate (`crates/vendor-kit/`) is a vendor as a template, and
+  a provider of one at a base URL with a key, which registers a core
+  provider of each of its formats and lists its models. The **vendors**
+  crate (`crates/vendors/`) is every vendor, a file each: where it is, its
+  key, the formats it speaks, and its quirks, each described. A quirk, a deployment's departure from a spec, is
   data (such as a key header) or the vendor's plugin, which turns what it
   sends beyond the spec into the kind's events and back.
 
@@ -58,13 +60,14 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/formats/realtime-ws/` | Format | OpenAI Realtime and Gemini Live, translated both ways (audio converted, the other's scaffolding emulated), and Responses over WebSocket, sharing their session's handshake | Realtime, HTTP, WS |
 | `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
 | `crates/formats/passthrough-http/` | Format | `Input<F>` / `Output<F>`, HTTP traffic of no kind relayed unread, and the `Passthrough` format | HTTP |
-| `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins (such as Groq's usage, DeepSeek's `reasoning_content`, Gemini's `thought_signature` placeholder) | Core, the conversation, media and realtime formats, and the conversation and realtime kinds (for quirk plugins) |
+| `crates/vendor-kit/` | Vendors | A vendor as a template (`Vendor`), and a provider of it (`VendorProvider`): each format at its base URL with its key and quirks, registered; its model list | Core, the formats, HTTP, HTTP transport, WS |
+| `crates/vendors/` | Vendors | Every vendor, a file each, and their quirks: data and plugins (such as Groq's usage, DeepSeek's `reasoning_content`, Gemini's `thought_signature` placeholder) | The vendor kit, core, the formats, and the conversation and realtime kinds (for quirk plugins) |
 | `crates/serve/` | Hosting | One Axum router for a gateway: plain HTTP and WebSocket upgrades, body and session limits, graceful stop | Core, HTTP, WS |
 | `crates/plugins/*` | Plugins, one crate each | `routing` (`Routes`, `Routing`), `fallback` (`Fallback`, and the attempt, race and backoff helpers) and `tool-loop` (`ToolLoop`, and the `ToolFilter` and `ToolScope` that say which tools are offered) | Core and the conversation kind |
 | `crates/plugins/relay/` | Plugin | `Relay`: a client's request, key, response head and error body forwarded as they came, to a provider of its own format | Core, HTTP |
 | `crates/plugins/credentials/` | Plugin | `ClientCredentials`: a client's own key headers to the named providers that have no key of their own, of the client's format | Core, HTTP |
 | `crates/plugins/mcp-aggregate/` | Plugin | `Aggregate`: one MCP endpoint, `/mcp`, fronting many MCP servers as a single server | Core, HTTP, MCP, mcp-http, tool loop (`ToolFilter`, `ToolScope`) |
-| `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (TOML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | The kinds, wires, formats, providers and plugins above, and MCP (`mcp:` servers at `/mcp/{name}`) |
+| `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (TOML, vendors, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | The kinds, wires, formats, providers and plugins above, and MCP (`mcp:` servers at `/mcp/{name}`) |
 | `apps/ui/` | Web UI | React and shadcn/ui admin UI (providers, routes, live requests), built by `pnpm build` to `apps/ui/dist` and embedded in the binary by `apps/gateway/build.rs`; a placeholder page stands in when it is not built | None (talks to the admin API) |
 | `python/` | Python package | PyO3 extension hosting the `apps/gateway` library in-process, plus httpx transports and SDK clients | `apps/gateway` |
 | `examples/` | Examples | Application policies and runnable integrations of public APIs | Libraries needed by each example |
@@ -112,8 +115,8 @@ settings. Crate names and `cargo run -p respan-gateway` remain independent of
 their filesystem locations.
 
 The application (`apps/gateway`) composes these crates with public APIs only.
-A configured provider may speak several formats (a vendor preset speaks every
-format of its vendor, as `crates/providers` says); the application registers one core
+A configured provider may speak several formats (a vendor's speaks every
+format of its vendor, as `crates/vendors` says); the application registers one core
 provider per format, runs each vendor's plugin on its providers' calls alone,
 registered last so every other plugin sees the kind's events, and routes
 with the plugins crate's router (see [Routing](#routing)). Each media operation
@@ -156,7 +159,7 @@ Of the providers serving the request's kind, the router picks:
 1. `provider/model` with `provider` configured, sending `model` alone;
 2. else the `models` tables, the last defined first;
 3. else the longest claimed prefix (the binary claims each vendor's
-   prefixes from `crates/providers`);
+   usual model names, `vendors::claims`);
 4. else the kind's default: the target if it serves the kind, else the
    first provider that does.
 
@@ -221,7 +224,7 @@ refused answers read whole into a fault, and no body where HTTP has none.
 See the [core guide](../crates/core/README.md),
 [conversation guide](../crates/kinds/conversation/README.md),
 [conversation formats guide](../crates/formats/conversation-http/README.md),
-[providers guide](../crates/providers/README.md),
+[vendors guide](../crates/vendors/README.md),
 [HTTP guide](../crates/wires/http/README.md), and
 [plugins guide](../crates/plugins/README.md) for their public contracts.
 

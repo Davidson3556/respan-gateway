@@ -26,8 +26,8 @@ use respan_gateway_core::futures::stream;
 use respan_gateway_core::{
     Call, ClientContext, Extensions, Fault, Gateway, Plugin, Response, async_trait,
 };
+use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, Method};
-use respan_gateway_http::{Body};
 use respan_gateway_mcp::{Input, Message, Output, PROTOCOL, RpcError, answer};
 use respan_gateway_mcp_http::Owner;
 use respan_gateway_plugin_tool_loop::{

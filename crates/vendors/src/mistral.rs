@@ -3,14 +3,13 @@
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_media_http::openai::OpenAiEmbeddings;
 
-use crate::{Format, Provider, Speaks};
+use crate::{Format, Speaks, Vendor};
 
 /// Mistral.
-pub const PROVIDER: Provider = Provider {
+pub const VENDOR: Vendor = Vendor {
     id: "mistral",
     base_url: Some("https://api.mistral.ai/v1"),
     key_env: &["MISTRAL_API_KEY"],
-    prefixes: &["mistral", "codestral", "magistral", "pixtral"],
     example_model: "mistral-small-latest",
     formats: &[
         Speaks::new(Format::OpenAiChat(OpenAiChat)),

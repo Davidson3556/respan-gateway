@@ -87,7 +87,7 @@ async fn a_provider_prefix_picks_the_provider_and_is_not_sent() {
 }
 
 #[tokio::test]
-async fn a_preset_routes_its_models_with_its_key() {
+async fn a_vendor_routes_its_models_with_its_key() {
     let openai = FakeOpenAi::start().await;
     let anthropic = FakeAnthropic::start().await;
     openai.answer(Answer::text("hi"));
@@ -115,7 +115,7 @@ async fn the_example_config_routes_by_model_both_ways() {
     let anthropic = FakeAnthropic::start().await;
     openai.answer(Answer::text("hi"));
     anthropic.answer(Answer::text("hi"));
-    // Its presets, at the fakes.
+    // Its vendors, at the fakes.
     let mut config: toml::Value =
         toml::from_str(include_str!("../../../../gateway.example.toml")).expect("example");
     for (vendor, base_url) in [
@@ -164,15 +164,15 @@ async fn the_example_config_routes_by_model_both_ways() {
 /// The plan of `text`.
 fn plan(text: &str) -> Result<Plan, String> {
     let config = Config::parse(text).map_err(|e| e.to_string())?;
-    let formats = crate::formats::formats(1 << 20, Default::default());
-    let composed = compose(&config, &formats);
+    let formats = crate::formats::formats();
+    let composed = compose(&config, &formats, 1 << 20, Default::default());
     composed
         .map(|(_, plan)| plan)
         .map_err(|e| e.message().to_owned())
 }
 
 #[test]
-fn a_preset_is_every_format_of_its_vendor() {
+fn a_vendor_is_every_format_it_speaks() {
     let plan = plan(
         "providers = { openai = { vendor = \"openai\", key = \"sk\" }, gemini = { vendor = \"gemini\", key = \"AIza\", base_url = \"http://g.test/v1beta/openai\" } }\n",
     )
@@ -253,7 +253,8 @@ fn a_preset_is_every_format_of_its_vendor() {
         ]
     );
     let header = |i: usize, e: usize, name: &str| {
-        let auth = &plan.upstreams[i].entries[e].auth;
+        let parts = plan.upstreams[i].provider.parts().unwrap_or_default();
+        let auth = parts.get(e).map(|p| p.headers.clone()).unwrap_or_default();
         auth.get(name)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned)
@@ -295,9 +296,10 @@ fn a_list_of_formats_shares_one_base_url_and_key() {
     let both = &plan.upstreams[0];
     let internal: Vec<&str> = both.entries.iter().map(|e| e.internal.as_str()).collect();
     assert_eq!(internal, ["both", "both:passthrough"]);
-    let x_api_key = both.entries[0].auth.get("x-api-key");
+    let parts = both.provider.parts().unwrap_or_default();
+    let x_api_key = parts[0].headers.get("x-api-key");
     assert_eq!(x_api_key.and_then(|v| v.to_str().ok()), Some("k"));
-    assert!(both.entries[1].auth.contains_key("authorization"));
+    assert!(parts[1].headers.contains_key("authorization"));
     assert_eq!(both.entries[1].base_url, "https://x.test");
 }
 
@@ -310,7 +312,8 @@ fn a_key_goes_where_its_own_vendor_takes_it() {
     )
     .unwrap_or_else(|e| panic!("{e}"));
     let auth = |i: usize, name: &str| {
-        let auth = &keys.upstreams[i].entries[0].auth;
+        let parts = keys.upstreams[i].provider.parts().unwrap_or_default();
+        let auth = parts.first().map(|p| p.headers.clone()).unwrap_or_default();
         auth.get(name)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned)
@@ -332,7 +335,7 @@ fn a_bad_provider_is_an_error() {
         ("p = {  }", "provider 'p': needs a `vendor` or `formats`"),
         (
             "p = { vendor = \"nope\" }",
-            "provider 'p': unknown vendor 'nope'; presets: [openai, anthropic, gemini, groq, deepseek, openrouter, xai, mistral, together, fireworks, ollama, azure, vllm]",
+            "provider 'p': unknown vendor 'nope'; vendors: [openai, anthropic, gemini, groq, deepseek, openrouter, xai, mistral, together, fireworks, ollama, azure, vllm]",
         ),
         (
             "p = { formats = \"openai-chat\" }",

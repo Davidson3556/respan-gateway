@@ -10,31 +10,29 @@ use std::time::{Duration, Instant, SystemTime};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
+use respan_gateway_core::Fault;
 use respan_gateway_core::futures::future::join_all;
 use respan_gateway_http::http::{HeaderMap, StatusCode};
-use respan_gateway_http_transport::reqwest;
+use respan_gateway_http_faults::Status;
 use serde_json::{Value, json};
 
 use crate::auth;
-use crate::compose::{Entry, Upstream};
-use crate::formats::{first_of_each_kind, kind, unreachable};
+use crate::compose::Upstream;
+use crate::formats::{first_of_each_kind, kind};
 use crate::requests::rfc3339;
 use respan_gateway_plugin_routing::{Kind, Routes};
-use respan_gateway_providers::Provider;
+use respan_gateway_vendors::VendorProvider;
 
 /// How long a provider may take to list its models.
 const TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a merged list is reused.
 const FRESH: Duration = Duration::from_secs(60);
 
-/// Where one provider lists its models.
+/// One provider, which lists its models.
 #[derive(Debug)]
 struct Listing {
     provider: String,
-    /// Its vendor, which may name a model's id its own way.
-    vendor: Option<&'static Provider>,
-    url: String,
-    headers: HeaderMap,
+    vendor: VendorProvider,
     /// A format of each kind it serves.
     kinds: Vec<(Kind, String)>,
 }
@@ -43,17 +41,6 @@ struct Listing {
 struct Refusal {
     status: Option<u16>,
     why: String,
-}
-
-impl Refusal {
-    fn of(why: String) -> Self {
-        Self { status: None, why }
-    }
-
-    fn with_status(mut self, status: u16) -> Self {
-        self.status = Some(status);
-        self
-    }
 }
 
 /// How a provider answered a call made with its key.
@@ -76,7 +63,6 @@ pub struct Probe {
 
 #[derive(Debug)]
 pub struct Models {
-    client: reqwest::Client,
     listings: Vec<Listing>,
     routes: Arc<Routes>,
     cached: Mutex<Option<(Instant, Value)>>,
@@ -84,38 +70,13 @@ pub struct Models {
 
 impl Models {
     pub fn new(upstreams: &[Upstream], routes: Arc<Routes>) -> Self {
-        let listings = upstreams
-            .iter()
-            .filter_map(|u| {
-                // OpenAI's media formats share its list of models.
-                let openai_media =
-                    |e: &&Entry| kind::MEDIA.contains(&e.kind) && e.format.starts_with("openai-");
-                let entries = || u.entries.iter();
-                let lister = entries()
-                    .find(|e| e.kind == kind::CHAT)
-                    .or_else(|| entries().find(openai_media))?;
-                let base = lister.base_url.trim_end_matches('/');
-                let mut headers = lister.auth.clone();
-                let url = match lister.format.as_str() {
-                    "anthropic-messages" => {
-                        headers.insert("anthropic-version", "2023-06-01".parse().ok()?);
-                        format!("{base}/v1/models?limit=1000")
-                    }
-                    _ => format!("{base}/models"),
-                };
-                let kinds = first_of_each_kind(entries().map(|e| (e.kind, e.format.clone())));
-                Some(Listing {
-                    provider: u.name.clone(),
-                    vendor: u.preset,
-                    url,
-                    headers,
-                    kinds,
-                })
-            })
-            .collect();
+        let listings = upstreams.iter().map(|u| Listing {
+            provider: u.name.clone(),
+            vendor: u.provider.clone(),
+            kinds: first_of_each_kind(u.entries.iter().map(|e| (e.kind, e.format.clone()))),
+        });
         Self {
-            client: reqwest::Client::new(),
-            listings,
+            listings: listings.collect(),
             routes,
             cached: Mutex::default(),
         }
@@ -155,35 +116,25 @@ impl Models {
         self.cached.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// One provider's answer to its list call, or why it gave none.
-    async fn get(&self, listing: &Listing) -> Result<Value, Refusal> {
-        let request = self
-            .client
-            .get(&listing.url)
-            .headers(listing.headers.clone());
-        let answered = tokio::time::timeout(TIMEOUT, async {
-            let resp = request
-                .send()
-                .await
-                .map_err(|e| Refusal::of(unreachable(&e)))?;
-            let status = resp.status();
-            if !status.is_success() {
-                let why = format!("answered {}", status.as_u16());
-                return Err(Refusal::of(why).with_status(status.as_u16()));
-            }
-            let body = resp
-                .bytes()
-                .await
-                .map_err(|_| Refusal::of("its answer broke off".to_owned()))?;
-            serde_json::from_slice::<Value>(&body)
-                .map_err(|_| Refusal::of("its answer is not JSON".to_owned()))
-        });
-        match answered.await {
-            Ok(body) => body,
-            Err(_) => Err(Refusal::of(format!(
-                "no answer within {}s",
-                TIMEOUT.as_secs()
-            ))),
+    /// One provider's models, or why it gave none; `None` if it lists none.
+    async fn get(&self, listing: &Listing) -> Option<Result<Vec<Value>, Refusal>> {
+        let listed = tokio::time::timeout(TIMEOUT, listing.vendor.models()).await;
+        let refused = |fault: Fault| match fault.get::<Status>() {
+            Some(Status(status)) => Refusal {
+                status: Some(status.as_u16()),
+                why: format!("answered {}", status.as_u16()),
+            },
+            None => Refusal {
+                status: None,
+                why: fault.message().to_owned(),
+            },
+        };
+        match listed {
+            Ok(listed) => Some(listed?.map_err(refused)),
+            Err(_) => Some(Err(Refusal {
+                status: None,
+                why: format!("no answer within {}s", TIMEOUT.as_secs()),
+            })),
         }
     }
 
@@ -191,12 +142,13 @@ impl Models {
     /// each answered and how long it took. A provider that lists nothing
     /// is not called.
     pub async fn probe(&self) -> Vec<Probe> {
-        join_all(self.listings.iter().map(|l| self.probe_one(l))).await
+        let probes = join_all(self.listings.iter().map(|l| self.probe_one(l))).await;
+        probes.into_iter().flatten().collect()
     }
 
-    async fn probe_one(&self, listing: &Listing) -> Probe {
+    async fn probe_one(&self, listing: &Listing) -> Option<Probe> {
         let started = Instant::now();
-        let reach = match self.get(listing).await {
+        let reach = match self.get(listing).await? {
             Ok(_) => Reach::Reachable,
             Err(Refusal {
                 status: Some(s @ (401 | 403)),
@@ -204,25 +156,23 @@ impl Models {
             }) => Reach::Unauthorized(s),
             Err(Refusal { why, .. }) => Reach::Unreachable(why),
         };
-        Probe {
+        Some(Probe {
             provider: listing.provider.clone(),
             reach,
             took: started.elapsed(),
-        }
+        })
     }
 
     /// One provider's models, or why it did not say.
     async fn fetch(&self, listing: &Listing) -> Result<Vec<Value>, String> {
-        let failed = |why: String| format!("{}: {why}", listing.provider);
-        let body = self.get(listing).await.map_err(|r| failed(r.why))?;
-        let Some(models) = body["data"].as_array() else {
-            return Err(failed("its answer has no `data` list".to_owned()));
+        let Some(listed) = self.get(listing).await else {
+            return Ok(Vec::new());
         };
+        let models = listed.map_err(|r| format!("{}: {}", listing.provider, r.why))?;
         let models = models
             .iter()
             .filter_map(|m| {
                 let id = m["id"].as_str()?;
-                let id = listing.vendor.map_or(id, |v| v.model_id(id));
                 let kind = kind_of(id)?;
                 let (_, format) = listing.kinds.iter().find(|(k, _)| *k == kind)?;
                 let mut model = json!({

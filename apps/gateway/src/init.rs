@@ -2,18 +2,18 @@
 //! provider for each vendor whose key is in the environment, or that was
 //! asked for.
 
-use crate::presets;
-use respan_gateway_providers::{ALL, Provider};
+use crate::vendors;
+use respan_gateway_vendors::{ALL, Vendor};
 
 /// The vendors the environment has keys for, by name.
 pub fn detected_vendors() -> Vec<&'static str> {
-    presets::detected().iter().map(|(p, ..)| p.id).collect()
+    vendors::detected().iter().map(|(p, ..)| p.id).collect()
 }
 
 /// A vendor `init` was asked to enable, and the key its entry names.
 #[derive(Debug, Clone)]
 pub struct Chosen {
-    pub vendor: &'static Provider,
+    pub vendor: &'static Vendor,
     /// `env:NAME`, or the literal key the user gave; `None` for a vendor
     /// that needs no key.
     pub key: Option<String>,
@@ -29,7 +29,7 @@ impl Chosen {
         };
         let vendor = ALL.iter().copied().find(|p| p.id == name);
         let vendor = vendor.ok_or_else(|| {
-            let known = presets::vendors().join(", ");
+            let known = vendors::vendors().join(", ");
             format!("unknown vendor {name}; the vendors are {known}")
         })?;
         let key = match (key, vendor.key_env.first()) {
@@ -73,7 +73,7 @@ pub fn new_client_key() -> Result<String, getrandom::Error> {
 /// OpenAI enabled if there are none. `client_key` is written into
 /// `client_keys`, else a hint is. A chosen vendor's entry names its key.
 pub fn starter(chosen: &[Chosen], client_key: Option<&str>) -> String {
-    let detected = presets::detected();
+    let detected = vendors::detected();
     let quote = |text: &str| toml::Value::String(text.to_owned()).to_string();
     let mut text = String::from(
         "# Respan Gateway\n\
@@ -89,7 +89,7 @@ pub fn starter(chosen: &[Chosen], client_key: Option<&str>) -> String {
         Some(key) => text.push_str(&format!("client_keys = [{}]\n", quote(key))),
         None => text.push_str("# client_keys = [\"env:GATEWAY_KEY\"]\n"),
     }
-    text.push_str("\n# Providers: presets supply URLs, formats, and model routing.\n");
+    text.push_str("\n# Providers: vendors supply URLs, formats, and model routing.\n");
     for vendor in ALL {
         let found = detected.iter().find(|(p, ..)| p.id == vendor.id);
         let picked = chosen.iter().find(|c| c.vendor.id == vendor.id);

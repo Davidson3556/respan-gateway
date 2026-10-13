@@ -230,7 +230,7 @@ impl OAuth {
             .await;
         // The error would name the URL; the cause alone is for a person.
         let resp = sent.map_err(|e| {
-            let cause = crate::formats::unreachable(&e);
+            let cause = respan_gateway_http_transport::unreachable(&e);
             Fault::upstream(format!("the OAuth token endpoint {cause}"))
         })?;
         let status = resp.status();

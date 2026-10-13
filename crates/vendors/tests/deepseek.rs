@@ -2,7 +2,7 @@
 
 mod support;
 
-use respan_gateway_providers::deepseek::DeepSeekQuirks;
+use respan_gateway_vendors::deepseek::DeepSeekQuirks;
 use support::{Vendor, chat, data, json, messages};
 
 fn streamed() -> Vendor {

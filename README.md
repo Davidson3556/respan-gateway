@@ -131,7 +131,7 @@ still need a client key if keys are set. `origins: ["*"]` allows any page and
 needs `client_keys`. Without `cors`, nothing changes.
 
 **Configuration** is one TOML file, every setting shown in
-[`gateway.example.toml`](gateway.example.toml): providers (vendor presets or
+[`gateway.example.toml`](gateway.example.toml): providers (vendors or
 spelled out), `formats` served, `client_keys`, `mcp` servers, `cors`,
 `listen`, `log`, `ui`, `body_limit`, `ws_message_limit`,
 `prices` (adds a cost to each request), `shutdown_grace`, and `plugins`. Each
@@ -401,7 +401,7 @@ Details per format: [chat](crates/formats/conversation-http/README.md),
 
 `openai`, `anthropic`, `gemini`, `groq`, `deepseek`, `openrouter`, `xai`,
 `mistral`, `together`, `fireworks`, `ollama`, `azure` and `vllm`, a file each
-in [`crates/providers`](crates/providers/README.md), which lists the formats
+in [`crates/vendors`](crates/vendors/README.md), which lists the formats
 each speaks, the quirks the gateway handles for it (`check` prints them)
 and the base URL each format takes. Any other compatible endpoint is a
 provider with a `base_url` and a format.
@@ -435,7 +435,8 @@ runnable, tested [`examples/`](examples/README.md) of the
 | `crates/kinds/` | Event types per kind: `conversation`, `media`, `realtime`, `mcp` |
 | `crates/wires/` | Bytes at both edges, no kind: `http` (bodies, credentials, path matching), `http-transport` (Reqwest), `http-faults`, `sse`, `ws` |
 | `crates/formats/` | A kind over a wire, no vendor: `conversation-http`, `media-http`, `realtime-ws`, `mcp-http` |
-| `crates/providers/` | Every vendor, a file each: URL, key, models, formats, quirks |
+| `crates/vendor-kit/` | A vendor as a template, and a provider of it: register its formats, list its models |
+| `crates/vendors/` | Every vendor, a file each: URL, key, formats, quirks |
 | `crates/plugins/routing`, `fallback`, `tool-loop` | First-party plugins: model routing; retry, fallback and race; the tool loop |
 | `crates/serve/` | Hosting: one Axum router for HTTP and WebSocket sessions |
 | `apps/gateway/` | The binary and its library: config, composition, client keys, `/v1/models`, request log, admin API |

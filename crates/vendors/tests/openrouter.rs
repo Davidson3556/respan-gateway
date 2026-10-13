@@ -2,7 +2,7 @@
 
 mod support;
 
-use respan_gateway_providers::openrouter::OpenRouterQuirks;
+use respan_gateway_vendors::openrouter::OpenRouterQuirks;
 use support::{Vendor, chat, data, json, messages};
 
 fn finished() -> Vendor {

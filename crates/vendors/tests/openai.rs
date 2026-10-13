@@ -7,9 +7,9 @@ mod realtime;
 use respan_gateway_core::futures::{SinkExt, StreamExt};
 use respan_gateway_core::{Gateway, Provider};
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
-use respan_gateway_providers::openai::OpenAiQuirks;
 use respan_gateway_realtime::Input;
 use respan_gateway_realtime_ws::{GeminiLive, OpenAiRealtime};
+use respan_gateway_vendors::openai::OpenAiQuirks;
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 

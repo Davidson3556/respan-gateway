@@ -19,7 +19,7 @@ class Auth(TypedDict, total=False):
 
 
 class ProviderConfig(TypedDict, total=False):
-    """One provider: a vendor preset, explicit formats, or a preset with some settings replaced."""
+    """One provider: a vendor, explicit formats, or a vendor with some settings replaced."""
 
     vendor: str  # "openai", "anthropic", "gemini", "groq", ...
     formats: Union[str, List[str]]  # e.g. "openai-chat", ["openai-images", "openai-embeddings"]

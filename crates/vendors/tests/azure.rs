@@ -2,7 +2,7 @@
 
 mod support;
 
-use respan_gateway_providers::azure::AzureQuirks;
+use respan_gateway_vendors::azure::AzureQuirks;
 use support::{Vendor, data, json, messages};
 
 /// Its moderation annotation, even after the finish, ends a stream to

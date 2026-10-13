@@ -1,12 +1,12 @@
-//! Vendor presets: `{ vendor: openai }` is a provider as the vendor is
-//! ([`respan_gateway_providers`]): at its base URL, with its key from the
+//! Vendors: `vendor = "openai"` is a provider as the vendor is
+//! ([`respan_gateway_vendors`]): at its base URL, with its key from the
 //! environment, speaking every format it speaks, and reached by its models'
 //! names.
 
-use respan_gateway_providers::{ALL, Provider};
+use respan_gateway_vendors::{ALL, Vendor};
 
 /// The variable read to override `vendor`'s base URL, such as in tests.
-pub fn base_url_env(vendor: &Provider) -> String {
+pub fn base_url_env(vendor: &Vendor) -> String {
     format!("RESPAN_{}_BASE_URL", vendor.id.to_ascii_uppercase())
 }
 
@@ -23,7 +23,7 @@ pub fn key_from_env(names: &[&str]) -> Option<String> {
 /// The vendors the environment has keys for, with a base URL of their own
 /// or one the environment gives, and Ollama if `OLLAMA_HOST` is set, each
 /// with its key and any base URL override.
-pub fn detected() -> Vec<(&'static Provider, Option<String>, Option<String>)> {
+pub fn detected() -> Vec<(&'static Vendor, Option<String>, Option<String>)> {
     ALL.iter()
         .copied()
         .filter_map(|vendor| {
@@ -56,18 +56,32 @@ fn ollama_base_url(host: &str) -> String {
     }
 }
 
-/// `url` with `ws`/`wss` for `http`/`https`, or the reverse.
-pub fn with_scheme(url: &str, websocket: bool) -> String {
-    let swapped = match websocket {
-        true => [("https://", "wss://"), ("http://", "ws://")],
-        false => [("wss://", "https://"), ("ws://", "http://")],
-    };
-    for (from, to) in swapped {
-        if let Some(rest) = url.strip_prefix(from) {
-            return format!("{to}{rest}");
+/// The models routed to a provider of `vendor` by their names alone,
+/// without a `provider/` prefix: what those names start with. Of two
+/// providers that match, the longer start wins.
+pub fn claims(vendor: &str) -> impl Iterator<Item = &'static str> {
+    let claims = match vendor {
+        "openai" => {
+            "gpt o1 o3 o4 chatgpt codex dall-e gpt-image whisper-1 tts- sora text-embedding"
         }
-    }
-    url.to_owned()
+        "anthropic" => "claude",
+        "gemini" => "gemini imagen veo",
+        "groq" => "whisper-large distil-whisper playai-tts canopylabs/orpheus",
+        "deepseek" => "deepseek",
+        "openrouter" => {
+            "openai/ anthropic/ google/ meta-llama/ mistralai/ qwen/ deepseek/ x-ai/ \
+             moonshotai/ cohere/ nvidia/ microsoft/ amazon/ perplexity/"
+        }
+        "xai" => "grok",
+        "mistral" => "mistral codestral magistral pixtral",
+        "together" => {
+            "meta-llama/ mistralai/ Qwen/ deepseek-ai/ google/ moonshotai/ zai-org/ \
+             black-forest-labs/"
+        }
+        "fireworks" => "accounts/",
+        _ => "",
+    };
+    claims.split_whitespace()
 }
 
 /// `scheme://host[:port]` of `url`.
@@ -84,11 +98,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn urls_change_scheme_and_lose_their_path() {
-        assert_eq!(with_scheme("https://a.test/v1", true), "wss://a.test/v1");
-        assert_eq!(with_scheme("http://a.test", true), "ws://a.test");
-        assert_eq!(with_scheme("wss://a.test", false), "https://a.test");
-        assert_eq!(with_scheme("wss://a.test", true), "wss://a.test");
+    fn urls_lose_their_path() {
         assert_eq!(origin("https://a.test:1/v1beta/openai"), "https://a.test:1");
         assert_eq!(origin("https://a.test"), "https://a.test");
         assert_eq!(

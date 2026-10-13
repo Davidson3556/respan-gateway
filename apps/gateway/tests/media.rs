@@ -422,7 +422,7 @@ async fn a_model_prefix_routes_only_within_the_kinds_its_provider_serves() {
         ("whisper-large-v3", &groq),
         ("whisper-1", &openai),
         ("gpt-4o-mini-transcribe", &openai),
-        // No preset claims it: the first provider of the kind.
+        // No vendor claims it: the first provider of the kind.
         ("some-asr", &groq),
     ] {
         let before = to.seen().len();

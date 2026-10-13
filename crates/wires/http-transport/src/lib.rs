@@ -214,6 +214,23 @@ impl HttpTransport {
     }
 }
 
+/// Why a call that failed with `e` could not reach its provider, naming no
+/// URL, as the error itself does: `could not be reached: <cause>`.
+pub fn unreachable(e: &reqwest::Error) -> String {
+    let mut cause = None;
+    let mut next = std::error::Error::source(e);
+    while let Some(e) = next {
+        cause = Some(e.to_string());
+        next = e.source();
+    }
+    let cause = match (cause, e.is_timeout()) {
+        (Some(cause), _) => cause,
+        (None, true) => "timed out".to_owned(),
+        (None, false) => "the connection failed".to_owned(),
+    };
+    format!("could not be reached: {cause}")
+}
+
 /// Where `resp`, an answer to a call to `from`, redirects it, if `allow`
 /// accepts that.
 fn redirect(resp: &reqwest::Response, from: &Uri, allow: &Allow) -> Option<Uri> {
