@@ -208,7 +208,7 @@ def config_for(fake: FakeOpenAI) -> dict:
         },
         "formats": ["openai-chat", "anthropic-messages", "openai-embeddings", "openai-images",
                   "openai-transcriptions", "openai-speech", "openai-videos", "passthrough"],
-        "default": "openai",
+        "plugins": {"routing": {"default": "openai"}},
     }
 
 
@@ -218,3 +218,14 @@ def gw(fake):
 
 
 CHAT = {"model": "fake-1", "messages": [{"role": "user", "content": "hi"}]}
+
+
+def toml_config(config):
+    """Render configuration fixtures as TOML without a serializer dependency."""
+    def value(item):
+        if isinstance(item, dict):
+            return "{ " + ", ".join(json.dumps(k) + " = " + value(v) for k, v in item.items() if v is not None) + " }"
+        if isinstance(item, list):
+            return "[" + ", ".join(value(v) for v in item) + "]"
+        return json.dumps(item)
+    return "\n".join(json.dumps(k) + " = " + value(v) for k, v in config.items() if v is not None) + "\n"

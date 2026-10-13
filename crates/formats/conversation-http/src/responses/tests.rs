@@ -527,7 +527,7 @@ fn a_failed_response_and_an_error_event_are_failures() {
     let (_, end) = decode_stream(&[failed]);
     let f = end.expect_err("failed");
     assert_eq!(f.message(), "boom");
-    assert_eq!(respan_gateway_http_faults::error_code(&f), "server_error");
+    assert_eq!(f.code(), "server_error");
 
     let error = json!({ "type": "error", "code": "rate_limit_exceeded", "message": "slow", "param": null, "sequence_number": 3 });
     let (_, end) = decode_stream(&[error]);

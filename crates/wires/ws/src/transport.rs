@@ -4,13 +4,13 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use respan_gateway_core::futures::{FutureExt, Stream, StreamExt, stream};
-use respan_gateway_core::{Extensions, Fault, Truncated, Upstream};
+use respan_gateway_core::{Extensions, Fault};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http::{self, HeaderMap, StatusCode};
+use respan_gateway_http::rules::is_connection_header;
 use respan_gateway_http::{Body, Completion, Frames, raw::Relayed};
 use respan_gateway_http::{call::prepare_call, call::strip_origin_headers};
-use respan_gateway_http_syntax::is_connection_header;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 
 use crate::Limits;
 use crate::session::{Edge, inbound, pump};
-use respan_gateway_http_syntax::{header_tokens, is_token};
+use respan_gateway_http::rules::header_tokens;
 
 /// How long a provider has to answer the upgrade by default: connecting
 /// takes well under a second to a reachable host, and 10 s spans TCP's
@@ -50,7 +50,7 @@ fn is_handshake(name: &HeaderName) -> bool {
 /// refusal of the upgrade, a non-`101` answer with its body, which the
 /// format reads as any error answer. A provider that cannot be reached, or
 /// does not answer the upgrade, its refusal's body included, within the
-/// handshake timeout ([`with_handshake_timeout`](Self::with_handshake_timeout)),
+/// handshake timeout (10 s),
 /// fails the call `upstream`.
 ///
 /// The body of the call is the session's frames to send, each one text
@@ -85,7 +85,6 @@ pub struct WsTransport {
     headers: HeaderMap,
     limits: Limits,
     binary_text: bool,
-    handshake_timeout: Duration,
 }
 
 impl std::fmt::Debug for WsTransport {
@@ -96,7 +95,6 @@ impl std::fmt::Debug for WsTransport {
             .field("headers", &self.headers.keys().collect::<Vec<_>>())
             .field("limits", &self.limits)
             .field("binary_text", &self.binary_text)
-            .field("handshake_timeout", &self.handshake_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -113,7 +111,6 @@ impl WsTransport {
             headers: HeaderMap::new(),
             limits: Limits::default(),
             binary_text: false,
-            handshake_timeout: HANDSHAKE_TIMEOUT,
         })
     }
 
@@ -140,11 +137,6 @@ impl WsTransport {
         self
     }
 
-    /// What this transport takes of a session ([`with_limits`](Self::with_limits)).
-    pub fn limits(&self) -> Limits {
-        self.limits
-    }
-
     /// Take `limits` ([`Limits`]): a message, or a refusal's body, over
     /// `max_message` breaks the answer `Err(upstream)`.
     pub fn with_limits(mut self, limits: Limits) -> Self {
@@ -158,13 +150,6 @@ impl WsTransport {
     /// messages and the normalized response body remain text.
     pub fn with_binary_text(mut self, enabled: bool) -> Self {
         self.binary_text = enabled;
-        self
-    }
-
-    /// Give the provider `timeout` to answer the upgrade: to be reached, to
-    /// answer the handshake, and to send a refusal's body whole.
-    pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
-        self.handshake_timeout = timeout;
         self
     }
 }
@@ -227,7 +212,7 @@ fn validate_upgrade(sent: &HeaderMap, received: &HeaderMap) -> Result<(), Fault>
     let extended = received.contains_key(header::SEC_WEBSOCKET_EXTENSIONS);
     match upgrade && connection && key_matches && protocol && !extended {
         true => Ok(()),
-        false => Err(Upstream::fault(
+        false => Err(Fault::upstream(
             "the provider returned an invalid WebSocket handshake",
         )),
     }
@@ -239,7 +224,7 @@ fn invalid(e: impl std::error::Error + Send + Sync + 'static) -> Fault {
 
 /// The fault of a provider that did not answer the upgrade in time.
 fn too_slow() -> Fault {
-    Upstream::fault("the provider took too long to accept")
+    Fault::upstream("the provider took too long to accept")
 }
 
 /// `body`, failing [`too_slow`] once `deadline` passes.
@@ -293,7 +278,7 @@ impl WsTransport {
             req.headers_mut().append(name, value.clone());
         }
         let limits = self.limits;
-        let deadline = Instant::now() + self.handshake_timeout;
+        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
         let connect = async {
             let expected = req.headers().clone();
             let url = req.uri().to_string().replacen("ws", "http", 1);
@@ -303,7 +288,7 @@ impl WsTransport {
                 .headers(expected.clone())
                 .send()
                 .await
-                .map_err(|e| Upstream::fault("the provider could not be reached").with_source(e))?;
+                .map_err(|e| Fault::upstream("the provider could not be reached").with_source(e))?;
             let mut head = http::Response::new(()).into_parts().0;
             head.status = resp.status();
             head.version = resp.version();
@@ -313,7 +298,7 @@ impl WsTransport {
                 // The body is read whole by the format, as framed here.
                 head.headers.remove(header::TRANSFER_ENCODING);
                 head.headers.remove(header::CONTENT_LENGTH);
-                let broke = |e| Truncated::fault().with_source(e);
+                let broke = |e| Fault::truncated().with_source(e);
                 let body = resp.bytes_stream().map(move |chunk| chunk.map_err(broke));
                 let body = body.boxed();
                 let body = Body::stream(until(deadline, body));
@@ -321,11 +306,11 @@ impl WsTransport {
             }
             validate_upgrade(&expected, &head.headers)?;
             let upgraded = resp.upgrade().await.map_err(|e| {
-                Upstream::fault("the provider did not upgrade the connection").with_source(e)
+                Fault::upstream("the provider did not upgrade the connection").with_source(e)
             })?;
             head.headers.remove(header::SEC_WEBSOCKET_ACCEPT);
             head.headers.remove(header::SEC_WEBSOCKET_EXTENSIONS);
-            let (frames, end, answer) = inbound(Truncated::fault);
+            let (frames, end, answer) = inbound(Fault::truncated);
             let edge = Edge::Provider {
                 relayed,
                 binary_text: self.binary_text,
@@ -360,9 +345,34 @@ impl WsTransport {
     }
 }
 
+/// Whether `bytes` are a token (RFC 9110 5.6.2), as a subprotocol is.
+fn is_token(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && (bytes.iter()).all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // An incomplete refusal body stops at the handshake's deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_body_fails_upstream_once_its_deadline_passes() {
+        let wait = Duration::from_millis(300);
+        let body = stream::iter([Ok(Bytes::from_static(b"partial"))])
+            .chain(stream::pending())
+            .boxed();
+        let start = Instant::now();
+        let read: Vec<_> = until(start + wait, body).collect().await;
+        assert_eq!(read.len(), 2);
+        assert!(read[0].is_ok());
+        assert!(
+            read[1]
+                .as_ref()
+                .is_err_and(|f| f.is(respan_gateway_core::FaultKind::Provider))
+        );
+        assert_eq!(start.elapsed(), wait);
+    }
 
     #[test]
     fn upgrades_require_the_key_and_only_negotiated_protocols() {

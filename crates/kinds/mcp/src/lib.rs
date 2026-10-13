@@ -21,9 +21,9 @@ pub use messages::{Id, Message, Outcome, RpcError};
 /// its own with a server.
 pub const PROTOCOL: &str = "2025-06-18";
 
-/// The JSON-RPC error code a format writes for a fault, as a fact
+/// The JSON-RPC error code a format writes for a fault, as an extension
 /// ([`Fault::with`](respan_gateway_core::Fault::with)). A fault without one
-/// is written as an invalid request (-32600) if it is a `BadRequest`, else
+/// is written as an invalid request (-32600) if it is the client's (`FaultKind::Client`), else
 /// as an internal error (-32603). A server's JSON-RPC error that refused a
 /// call is read back into one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

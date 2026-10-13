@@ -6,11 +6,11 @@ use super::{
     unb64, unreadable, whole_json,
 };
 use respan_gateway_conversation::Usage;
-use respan_gateway_core::{BadRequest, Connection, Fault, Format, Upstream};
+use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
-use respan_gateway_http::{ClientIo, Decoder, Encoder, ProviderIo, Whole};
-use respan_gateway_http_syntax::path_ends_with;
+use respan_gateway_http::path::path_ends_with;
+use respan_gateway_http::{All, ClientIo, Decoder, Encoder, ProviderIo, Whole};
 use respan_gateway_media::embedding::{Embedding, Input, Item, Output, Start};
 use serde_json::{Map, Value};
 
@@ -135,7 +135,7 @@ fn items_json(items: &[Item]) -> Result<Value, Fault> {
     let same = |pair: &[Item]| std::mem::discriminant(&pair[0]) == std::mem::discriminant(&pair[1]);
     match items.windows(2).all(same) {
         true => Ok(items.iter().map(item).collect::<Vec<_>>().into()),
-        false => Err(BadRequest::fault("an input cannot mix texts and tokens")),
+        false => Err(Fault::bad_request("an input cannot mix texts and tokens")),
     }
 }
 
@@ -161,7 +161,7 @@ fn decode_whole(raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
         let count = |key: &str| match &v["usage"][key] {
             Value::Null => Ok(0),
             n => n.as_u64().ok_or_else(|| {
-                Upstream::fault(format!("a usage count is not a whole number: {n}"))
+                Fault::upstream(format!("a usage count is not a whole number: {n}"))
             }),
         };
         out.push(Output::Usage(Usage::new(count("prompt_tokens")?, 0)));
@@ -199,7 +199,7 @@ fn response_encoder(
 ) -> Box<dyn Encoder<Output>> {
     super::content_type(head, "application/json");
     let base64 = asked.get("encoding_format").and_then(Value::as_str) == Some("base64");
-    Box::new(Whole::new(move |events: &[Output]| {
+    Box::new(All::new(move |events: &[Output]| {
         encode_whole(events, base64)
     }))
 }
@@ -271,6 +271,7 @@ fn encode_whole(events: &[Output], base64: bool) -> Result<Bytes, Fault> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use respan_gateway_core::FaultKind;
     use serde_json::json;
 
     fn items(input: Value) -> Result<Vec<Item>, Fault> {
@@ -313,7 +314,7 @@ mod tests {
             json!([[1], "a"]),
         ] {
             let refused = items(asked.clone());
-            assert!(refused.is_err_and(|f| f.is::<BadRequest>()), "{asked}");
+            assert!(refused.is_err_and(|f| f.is(FaultKind::Client)), "{asked}");
         }
         let mixed = [Item::Text("a".into()), Item::Tokens(vec![1])];
         assert!(items_json(&mixed).is_err());

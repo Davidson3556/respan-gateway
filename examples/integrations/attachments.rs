@@ -35,7 +35,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example attachments`
 
-use respan_gateway_core::{BadRequest, ErrorCode, Provider, Upstream};
+use respan_gateway_core::{ErrorCode, Provider};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -223,7 +223,7 @@ impl PdfToText {
         let (base64, digest) = tokio::task::spawn_blocking(move || {
             let bytes = STANDARD
                 .decode(&base64)
-                .map_err(|_| BadRequest::fault("invalid PDF base64"))?;
+                .map_err(|_| Fault::bad_request("invalid PDF base64"))?;
             Ok::<_, Fault>((base64, Sha256::digest(bytes).to_vec()))
         })
         .await
@@ -317,7 +317,7 @@ impl PdfToText {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
         {
-            return Err(BadRequest::fault("invalid stored file id"));
+            return Err(Fault::bad_request("invalid stored file id"));
         }
         let key = cx
             .extensions()
@@ -344,7 +344,7 @@ impl PdfToText {
         let fetch = async {
             let metadata = read(format!("/v1/files/{id}"), 16 * 1024).await?;
             let metadata: serde_json::Value = serde_json::from_slice(&metadata)
-                .map_err(|_| Upstream::fault("invalid stored file metadata"))?;
+                .map_err(|_| Fault::upstream("invalid stored file metadata"))?;
             let pdf = metadata["mime_type"].as_str().map_or_else(
                 || {
                     metadata["filename"]
@@ -410,10 +410,10 @@ impl Plugin for PdfToText {
                 };
                 let encoded = data
                     .strip_prefix("data:application/pdf;base64,")
-                    .ok_or_else(|| BadRequest::fault("invalid inline PDF"))?;
+                    .ok_or_else(|| Fault::bad_request("invalid inline PDF"))?;
                 let bytes = STANDARD
                     .decode(encoded)
-                    .map_err(|_| BadRequest::fault("invalid PDF base64"))?;
+                    .map_err(|_| Fault::bad_request("invalid PDF base64"))?;
                 *part = Content::Document(Media::new(
                     "application/pdf",
                     MediaSource::Bytes(bytes.into()),

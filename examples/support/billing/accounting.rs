@@ -1,7 +1,8 @@
 //! Private example policy: reserve before every call, settle once when it ends.
 //! Quotes, conservative charges and priced tallies are application policy, not public APIs.
 
-use respan_gateway_core::{Abandoned, ErrorCode, Internal, Truncated};
+use respan_gateway_core::ErrorCode;
+use respan_gateway_core::FaultKind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
@@ -105,7 +106,7 @@ impl<L: Ledger> Accounting<L> {
 /// Whether `fault` says a response was cut off or its client left, which the
 /// provider may still bill, not that it refused.
 fn is_cut(fault: &Fault) -> bool {
-    fault.is::<Abandoned>() || fault.is::<Truncated>() || fault.is::<Internal>()
+    fault.is(FaultKind::Abandoned) || matches!(fault.code(), "truncated" | "internal")
 }
 
 /// One call's hold, in the call's extensions.

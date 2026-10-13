@@ -1,6 +1,7 @@
 //! The provider edge of a session ([`WsTransport`]) against real sockets,
 //! through a gateway relaying a JSON event format.
 
+use respan_gateway_core::FaultKind;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,9 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use respan_gateway_core::futures::{SinkExt, Stream, StreamExt, stream};
-use respan_gateway_core::{
-    Fault, Gateway, Plugin, Provider, ProviderContext, Upstream, async_trait,
-};
+use respan_gateway_core::{Fault, Gateway, Plugin, Provider, ProviderContext, async_trait};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, StatusCode, header};
@@ -19,7 +18,6 @@ use respan_gateway_http_faults::ProviderError;
 use respan_gateway_realtime::Input;
 use respan_gateway_realtime_ws::OpenAiRealtime;
 use respan_gateway_ws::{Limits, WsTransport};
-use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
@@ -90,7 +88,7 @@ async fn fragmented_unicode_with_interleaved_ping_and_no_selected_subprotocol() 
             assert_eq!(first.expect("complete Unicode message"), text);
             assert!(body.next().await.is_none());
         } else {
-            assert!(first.is_err_and(|f| f.is::<Upstream>()));
+            assert!(first.is_err_and(|f| f.is(FaultKind::Provider)));
         }
         drop(body);
         tokio::time::timeout(Duration::from_secs(3), completion.expect("completion"))
@@ -176,7 +174,7 @@ async fn session_through(
     }
 
     let ended = Ended::default();
-    let limit = transport.limits().max_message;
+    let limit = Limits::default().max_message;
     let gateway = Gateway::new()
         .provider(Provider::new("ws", OpenAiRealtime, transport.connect()))
         .and_then(|g| g.client::<Input, _, _>(OpenAiRealtime))
@@ -192,7 +190,7 @@ async fn session_through(
         .expect("request");
     let (response, completion) = tokio::time::timeout(
         Duration::from_secs(3),
-        respan_gateway_http::handle(&gateway, request, respan_gateway_http::Framing::Live, limit),
+        respan_gateway_http::handle_live(&gateway, request, limit),
     )
     .await
     .expect("refusal must not wait for an upload frame");
@@ -257,29 +255,6 @@ async fn non_upgrade_200_and_204_are_original_refusals_without_waiting_for_uploa
 }
 
 #[tokio::test]
-async fn an_incomplete_refusal_body_fails_at_the_handshake_deadline() {
-    let head = "HTTP/1.1 403 Forbidden\r\nContent-Length: 1000000\r\n\r\n".to_owned();
-    let address = answering(head, b"partial".to_vec());
-    let deadline = Duration::from_millis(300);
-    let transport = WsTransport::new(format!("ws://{address}"))
-        .expect("transport")
-        .with_handshake_timeout(deadline);
-    let request = http::Request::get("/realtime?model=m")
-        .body(Body::full(Bytes::new()))
-        .expect("request");
-    let start = Instant::now();
-    let (answer, completion) = transport.send(request).await.expect("the refusal's head");
-    assert!(completion.is_none());
-    assert_eq!(answer.status(), StatusCode::FORBIDDEN);
-    let read = tokio::time::timeout(deadline * 10, BodyExt::collect(answer.into_body()))
-        .await
-        .expect("an incomplete refusal stops at the handshake's deadline");
-    let fault = read.expect_err("the body is incomplete");
-    assert!(fault.is::<Upstream>(), "{fault}");
-    assert!(start.elapsed() >= deadline);
-}
-
-#[tokio::test]
 async fn a_refusal_body_is_read_up_to_the_message_limit() {
     let limits = Limits {
         max_message: 1024,
@@ -302,7 +277,7 @@ async fn a_refusal_body_is_read_up_to_the_message_limit() {
             }
             None => {
                 assert_eq!(size, 1025);
-                assert!(fault.is::<Upstream>());
+                assert!(fault.is(FaultKind::Provider));
                 assert!(fault.message().contains("over the limit"), "{fault}");
             }
         }

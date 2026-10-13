@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_core::Fault;
 
 use super::encode::reason_of;
 use super::request::is_synthetic;
@@ -585,7 +586,7 @@ fn what_another_format_cannot_write_is_refused() {
 
 #[test]
 fn an_error_body_is_googles() {
-    let fault = BadRequest::fault("no good");
+    let fault = Fault::bad_request("no good");
     let body = GeminiGenerate::error_body(&fault);
     assert_eq!(
         body,

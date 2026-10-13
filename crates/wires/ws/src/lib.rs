@@ -71,7 +71,7 @@ impl Default for Limits {
     }
 }
 
-/// The WebSocket close code a fault asks for, a fact ([`Fault::with`]) that
+/// The WebSocket close code a fault asks for, an extension ([`Fault::with`]) that
 /// the client edge sends as its Close in place of 1011: a plugin's
 /// `Fault::new(msg).with(CloseCode(1008))`. A provider's own code is a
 /// [`ProviderClose`], which reaches the client only as this: set by a
@@ -86,7 +86,7 @@ pub struct CloseCode(pub u16);
 impl CloseCode {
     /// This code if a Close frame may carry it (RFC 6455 7.4), else 1011:
     /// 1004 to 1006, 1015, and any outside 1000 to 4999 may not be sent.
-    pub fn sendable(self) -> u16 {
+    pub(crate) fn sendable(self) -> u16 {
         match self.0 {
             1000..=1003 | 1007..=1014 | 3000..=4999 => self.0,
             _ => 1011,
@@ -94,7 +94,7 @@ impl CloseCode {
     }
 }
 
-/// The code a provider closed its session with, other than 1000: a fact on
+/// The code a provider closed its session with, other than 1000: an extension on
 /// the `upstream` fault [`WsTransport`] ends the answer with. It says why
 /// the provider ended; whether the client is told is a plugin's choice
 /// ([`CloseCode`]).

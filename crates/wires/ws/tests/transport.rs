@@ -83,7 +83,7 @@ async fn a_call_that_ends_in_an_err_closes_the_connection_and_the_answer_ends_wi
         let fault = fault.with(ErrorCode("policy".into()));
         tx.unbounded_send(Err(fault)).unwrap();
         let end = answer.body_mut().next().await.unwrap().unwrap_err();
-        assert_eq!(respan_gateway_http_faults::error_code(&end), "policy");
+        assert_eq!(end.code(), "policy");
         eventually("the connection closed", || {
             probe.live.load(Ordering::SeqCst) == 0
         })
@@ -127,7 +127,7 @@ async fn a_frame_that_is_not_text_fails_the_call() {
     tx.unbounded_send(Ok(Bytes::from_static(&[0xff, 0xfe])))
         .unwrap();
     let end = answer.body_mut().next().await.unwrap().unwrap_err();
-    assert_eq!(respan_gateway_http_faults::error_code(&end), "config");
+    assert_eq!(end.code(), "config");
     assert!(probe.texts().is_empty());
 }
 
@@ -147,7 +147,7 @@ async fn a_message_over_the_limit_breaks_the_answer() {
     probe.connected(0).await;
     probe.tell(0, Cmd::Send("x".repeat(4096)));
     let end = answer.body_mut().next().await.unwrap().unwrap_err();
-    assert_eq!(respan_gateway_http_faults::error_code(&end), "upstream");
+    assert_eq!(end.code(), "upstream");
     assert!(end.message().contains("too large"), "{end}");
 }
 
@@ -198,7 +198,7 @@ async fn wss_fails_cleanly_against_a_server_that_is_not_tls() {
         .await
         .err()
         .expect("connection failure");
-    assert_eq!(respan_gateway_http_faults::error_code(&refused), "upstream");
+    assert_eq!(refused.code(), "upstream");
     assert!(!refused.message().contains(&addr.to_string()));
 }
 
@@ -273,10 +273,6 @@ async fn a_truncated_or_malformed_refusal_body_fails_instead_of_ending_partial()
         assert_eq!(answer.status(), 403);
         let read: Result<Vec<Bytes>, Fault> = answer.into_body().try_collect().await;
         let fault = read.expect_err("invalid body");
-        assert_eq!(
-            respan_gateway_http_faults::error_code(&fault),
-            "truncated",
-            "{headers}"
-        );
+        assert_eq!(fault.code(), "truncated", "{headers}");
     }
 }

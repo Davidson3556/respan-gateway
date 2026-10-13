@@ -10,7 +10,7 @@ use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::{FutureExt, SinkExt, StreamExt, stream};
 use respan_gateway_core::{EventSink, EventStream, Extensions, Fault};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::{Body, ClientIo, Encoder, Framing, http};
+use respan_gateway_http::{Body, ClientIo, Encoder, http};
 
 const LIMIT: usize = 1 << 20;
 
@@ -62,8 +62,8 @@ async fn zero_one_three(sink: &mut EventSink<usize>, body: &mut Body) {
 #[tokio::test]
 async fn a_clients_live_reply_frames_each_message() {
     let request = http::Request::get("/").body(Body::stream(stream::pending().boxed()));
-    let (io, answer) = ClientIo::accept(request.unwrap(), Framing::Live, LIMIT);
-    let (_, mut sink) = io.with_error(respan_gateway_http::rules::plain).bind(
+    let (io, answer) = ClientIo::accept_live(request.unwrap(), LIMIT);
+    let (_, mut sink) = io.bind(
         |_| {
             Box::new(move |_: Bytes, out: &mut Vec<_>| {
                 out.push(0);

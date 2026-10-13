@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use http_support::LIMIT;
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_core::{
-    ClientContext, Config, ErrorCode, Fault, Filter, Gateway, Plugin, Provider, ProviderContext,
-    Response, async_trait,
+    ClientContext, ErrorCode, Fault, Filter, Gateway, Plugin, Provider, ProviderContext, Response,
+    async_trait,
 };
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_realtime::{Input, Modality, Output};
@@ -360,7 +360,7 @@ async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
         &OpenAiRealtime,
         factory(Extensions::new()),
     );
-    assert!(matches!(unnamed, Err(fault) if fault.is::<respan_gateway_core::BadRequest>()));
+    assert!(matches!(unnamed, Err(fault) if fault.is(respan_gateway_core::FaultKind::Client)));
     let session = || {
         let mut extensions = Extensions::new();
         extensions.insert(respan_gateway_realtime_ws::SessionModel("m".into()));
@@ -370,7 +370,7 @@ async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
         <OpenAiRealtime as Format<ProviderIo, Output, Input>>::bind(&OpenAiRealtime, session())
             .unwrap();
     let mut finite = EventStream::single(Input::native("openai-realtime", json!({"type":"x"})));
-    assert!(matches!(refusal.prepare(&mut finite), Err(fault) if fault.is::<Config>()));
+    assert!(matches!(refusal.prepare(&mut finite), Err(fault) if fault.code() == "config"));
     let (opening, mut write) =
         <OpenAiRealtime as Format<ProviderIo, Output, Input>>::bind(&OpenAiRealtime, session())
             .unwrap();

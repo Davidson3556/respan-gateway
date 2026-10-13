@@ -11,22 +11,18 @@ import httpx
 import pytest
 
 import respan_gateway as rg
-from conftest import CHAT, KEY, WORDS, config_for
+from conftest import CHAT, KEY, WORDS, config_for, toml_config
 
 
 # -- configuration ---------------------------------------------------------
 
 
-def test_config_from_dict_yaml_and_file(fake, tmp_path):
+def test_config_from_dict_toml_and_file(fake, tmp_path):
     cfg = config_for(fake)
-    yaml = (
-        "providers:\n"
-        f"  p: {{ formats: openai-chat, base_url: '{fake.base_url}', auth: {{ type: bearer, key: {KEY} }} }}\n"
-        "formats: [openai-chat]\ndefault: p\n"
-    )
-    path = tmp_path / "gateway.yaml"
-    path.write_text(yaml)
-    for gw in (rg.Gateway(config=cfg), rg.Gateway(config=yaml), rg.Gateway.from_file(path)):
+    text = toml_config(cfg)
+    path = tmp_path / "gateway.toml"
+    path.write_text(text)
+    for gw in (rg.Gateway(config=cfg), rg.Gateway(config=text), rg.Gateway.from_file(path)):
         assert gw.request("POST", "/v1/chat/completions", json=CHAT).status_code == 200
 
 
@@ -34,11 +30,21 @@ def test_bad_config_raises_config_error(tmp_path):
     with pytest.raises(rg.ConfigError, match="unknown format 'nope'"):
         rg.Gateway(config={"providers": {"p": {"formats": "nope", "base_url": "http://x"}}, "formats": []})
     with pytest.raises(rg.ConfigError):
-        rg.Gateway(config="formats: [unclosed")
+        rg.Gateway(config="formats = [unclosed")
     with pytest.raises(ValueError):  # ConfigError is a ValueError
         rg.Gateway(config={"surprise": 1})
-    with pytest.raises(rg.ConfigError, match="missing.yaml"):
-        rg.Gateway.from_file(tmp_path / "missing.yaml")
+    with pytest.raises(rg.ConfigError, match="missing.toml"):
+        rg.Gateway.from_file(tmp_path / "missing.toml")
+
+
+def test_string_configs_are_toml_only():
+    with pytest.raises(rg.ConfigError):
+        rg.Gateway(config='providers: { p: { vendor: ollama } }')
+    with pytest.raises(rg.ConfigError):
+        rg.Gateway(config='{"providers": {"p": {"vendor": "ollama"}}}')
+    with pytest.raises(rg.ConfigError) as exc:
+        rg.Gateway(config={"client_keys": "sk-secret-value"})
+    assert "sk-secret-value" not in str(exc.value)
 
 
 def test_zero_config_from_env(fake, monkeypatch):
@@ -55,7 +61,7 @@ def test_zero_config_without_providers_is_an_error(monkeypatch):
     for var in list(os.environ):
         if var.endswith("_API_KEY") or var.startswith("RESPAN_") or var == "OLLAMA_HOST":
             monkeypatch.delenv(var)
-    with pytest.raises(rg.ConfigError, match="no provider key"):
+    with pytest.raises(rg.ConfigError, match="no configuration found"):
         rg.Gateway()
 
 
@@ -225,8 +231,8 @@ def test_console_script_version():
 
 
 def test_cli_check_and_bad_usage(fake, tmp_path):
-    ok = tmp_path / "gateway.yaml"
-    ok.write_text(json.dumps(config_for(fake)))
+    ok = tmp_path / "gateway.toml"
+    ok.write_text(toml_config(config_for(fake)))
     run = lambda *a: subprocess.run([sys.executable, "-m", "respan_gateway", *a], capture_output=True, text=True)
     assert run("-c", str(ok), "check").stdout.strip().endswith(": ok")
     assert run("--bogus").returncode == 2
@@ -359,8 +365,8 @@ def test_bare_serve_keeps_running(gw):
     assert httpx.post(f"http://127.0.0.1:{port}/v1/chat/completions", json=CHAT).status_code == 200
 
 
-def test_gateway_reads_gateway_yaml_in_the_working_directory(fake, tmp_path, monkeypatch):
-    (tmp_path / "gateway.yaml").write_text(json.dumps(config_for(fake)))
+def test_gateway_reads_gateway_toml_in_the_working_directory(fake, tmp_path, monkeypatch):
+    (tmp_path / "gateway.toml").write_text(toml_config(config_for(fake)))
     for var in list(os.environ):
         if var.endswith("_API_KEY") or var.startswith("RESPAN_"):
             monkeypatch.delenv(var)
@@ -373,8 +379,8 @@ def test_cli_exits_quietly_on_sigint(fake, tmp_path):
     import signal
     import time
 
-    cfg = tmp_path / "gateway.yaml"
-    cfg.write_text(json.dumps(config_for(fake)))
+    cfg = tmp_path / "gateway.toml"
+    cfg.write_text(toml_config(config_for(fake)))
     windows = sys.platform == "win32"
     proc = subprocess.Popen(
         [sys.executable, "-m", "respan_gateway", "-c", str(cfg), "--listen", "127.0.0.1:0"],

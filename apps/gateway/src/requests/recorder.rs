@@ -1,12 +1,13 @@
 //! The plugin that fills in what the gateway knows of a request, and the
 //! sink that records a tool loop's steps.
 
+use respan_gateway_core::FaultKind;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use respan_gateway_conversation as conversation;
-use respan_gateway_core::{Abandoned, ClientContext, Fault, Plugin, ProviderContext, async_trait};
+use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, async_trait};
 use respan_gateway_plugin_routing::{Kind, Model};
 use respan_gateway_plugin_tool_loop::{Sink, StepReport, ToolHop};
 
@@ -85,7 +86,7 @@ impl Plugin for Recorder {
         };
         if live {
             let error = match end {
-                Err(fault) if !fault.is::<Abandoned>() => Some(clip(&fault.to_string())),
+                Err(fault) if !fault.is(FaultKind::Abandoned) => Some(clip(&fault.to_string())),
                 _ => None,
             };
             self.log.finish(entry, error);

@@ -25,7 +25,7 @@ fn scratch(name: &str) -> PathBuf {
 fn config(up: &FakeOpenAi, extra: &str) -> String {
     let url = up.base_url();
     format!(
-        "{extra}\nproviders:\n  openai: {{ formats: openai-chat, base_url: '{url}', key: k }}\n"
+        "{extra}providers = {{ openai = {{ formats = \"openai-chat\", base_url = \"{url}\", key = \"k\" }} }}\n"
     )
 }
 
@@ -83,7 +83,7 @@ async fn settled(gw: &Gateway) {
 async fn the_history_is_exported_as_json_lines_or_csv_and_filtered() {
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("hello"));
-    let gw = Gateway::start(&config(&up, "client_keys: [secret]")).await;
+    let gw = Gateway::start(&config(&up, "client_keys = [\"secret\"]\n")).await;
     let auth = |path: &str| client().get(gw.url(path)).bearer_auth("secret");
 
     // Keys guard it like the rest of the admin API.
@@ -197,15 +197,15 @@ async fn a_history_file_keeps_the_history_across_a_restart() {
     let file = scratch("kept.jsonl");
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("hello"));
-    let yaml = config(
+    let text = config(
         &up,
         &format!(
-            "plugins: {{ request_log: {{ file: '{}' }} }}",
+            "plugins = {{ request_log = {{ file = \"{}\" }} }}\n",
             file.display()
         ),
     );
 
-    let mut first = Gateway::start(&yaml).await;
+    let mut first = Gateway::start(&text).await;
     for model in ["gpt-4o", "o3"] {
         assert_eq!(chat(&first, model).await, 200);
     }
@@ -219,7 +219,7 @@ async fn a_history_file_keeps_the_history_across_a_restart() {
     assert_eq!(line["provider"], "openai");
     assert!(!written.join("").contains("hello"));
 
-    let second = Gateway::start(&yaml).await;
+    let second = Gateway::start(&text).await;
     let kept = records(&second).await;
     let models: Vec<&Value> = kept.iter().map(|r| &r["model"]).collect();
     assert_eq!(models, ["gpt-4o", "o3"]);
@@ -247,20 +247,20 @@ async fn only_the_last_request_history_records_are_read_back() {
     let file = scratch("tail.jsonl");
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("hello"));
-    let yaml = config(
+    let text = config(
         &up,
         &format!(
-            "plugins: {{ request_log: {{ file: '{}', history: 2 }} }}",
+            "plugins = {{ request_log = {{ file = \"{}\", history = 2 }} }}\n",
             file.display()
         ),
     );
-    let mut first = Gateway::start(&yaml).await;
+    let mut first = Gateway::start(&text).await;
     for model in ["a", "b", "c"] {
         assert_eq!(chat(&first, model).await, 200);
     }
     lines_in(&file, 3).await;
     first.child.kill().await.unwrap();
-    let second = Gateway::start(&yaml).await;
+    let second = Gateway::start(&text).await;
     let models: Vec<Value> = records(&second)
         .await
         .iter()
@@ -275,14 +275,14 @@ async fn the_file_is_rotated_by_size_keeping_one_old_file() {
     let old = PathBuf::from(format!("{}.1", file.display()));
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("hello"));
-    let yaml = config(
+    let text = config(
         &up,
         &format!(
-            "plugins: {{ request_log: {{ file: '{}', file_max: 3KiB }} }}",
+            "plugins = {{ request_log = {{ file = \"{}\", file_max = \"3KiB\" }} }}\n",
             file.display()
         ),
     );
-    let gw = Gateway::start(&yaml).await;
+    let gw = Gateway::start(&text).await;
     for _ in 0..30 {
         assert_eq!(chat(&gw, "gpt-4o").await, 200);
     }
@@ -316,14 +316,14 @@ async fn a_file_that_cannot_be_written_does_not_fail_requests() {
     let file = parent.join("requests.jsonl");
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("hello"));
-    let yaml = config(
+    let text = config(
         &up,
         &format!(
-            "plugins: {{ request_log: {{ file: '{}' }} }}",
+            "plugins = {{ request_log = {{ file = \"{}\" }} }}\n",
             file.display()
         ),
     );
-    let gw = Gateway::start(&yaml).await;
+    let gw = Gateway::start(&text).await;
     for _ in 0..3 {
         assert_eq!(chat(&gw, "gpt-4o").await, 200);
     }
@@ -336,8 +336,7 @@ async fn a_file_that_cannot_be_written_does_not_fail_requests() {
 async fn prices_give_each_request_a_cost_and_the_totals_their_sum() {
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("hello"));
-    let prices = "prices:\n  gpt-4o: { input: 1000000, output: 2000000 }\n  \
-                  gpt-4o-mini: { input: 100000, output: 200000, cached_input: 0 }";
+    let prices = "prices = { gpt-4o = { input = 1000000, output = 2000000 }, gpt-4o-mini = { input = 100000, output = 200000, cached_input = 0 } }\n";
     let gw = Gateway::start(&config(&up, prices)).await;
     for model in ["gpt-4o", "gpt-4o-mini", "o3"] {
         assert_eq!(chat(&gw, model).await, 200);
@@ -378,18 +377,18 @@ async fn prices_give_each_request_a_cost_and_the_totals_their_sum() {
 
 #[tokio::test]
 async fn bad_prices_and_sizes_are_refused() {
-    for yaml in [
-        "prices: { gpt-4o: { input: -1, output: 1 } }",
-        "prices: { gpt-4o: { input: 1 } }",
-        "plugins: { request_log: { file_max: 0 } }",
+    for text in [
+        "prices = { gpt-4o = { input = -1, output = 1 } }\n",
+        "prices = { gpt-4o = { input = 1 } }\n",
+        "plugins = { request_log = { file_max = 0 } }\n",
     ] {
-        let path = support::write_config(&format!("listen: 127.0.0.1:0\n{yaml}\n"));
+        let path = support::write_config(&format!("listen = \"127.0.0.1:0\"\n{text}\n"));
         let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
             .args(["--config", path.to_str().unwrap()])
             .output()
             .await
             .unwrap();
-        assert!(!out.status.success(), "{yaml}");
+        assert!(!out.status.success(), "{text}");
     }
 }
 
@@ -397,8 +396,7 @@ async fn bad_prices_and_sizes_are_refused() {
 async fn requests_carry_the_name_of_their_client_key() {
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("ok"));
-    let keys =
-        "client_keys:\n  - { name: app, key: k-app }\n  - k-plain\n  - { name: ci, key: k-ci }";
+    let keys = "client_keys = [{ name = \"app\", key = \"k-app\" }, \"k-plain\", { name = \"ci\", key = \"k-ci\" }]\n";
     let gw = Gateway::start(&config(&up, keys)).await;
     for (key, model) in [
         ("k-app", "m1"),
@@ -463,14 +461,14 @@ async fn the_history_file_is_private() {
     let file = scratch("private.jsonl");
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("hello"));
-    let yaml = config(
+    let text = config(
         &up,
         &format!(
-            "plugins: {{ request_log: {{ file: '{}' }} }}",
+            "plugins = {{ request_log = {{ file = \"{}\" }} }}\n",
             file.display()
         ),
     );
-    let gw = Gateway::start(&yaml).await;
+    let gw = Gateway::start(&text).await;
     assert_eq!(chat(&gw, "gpt-4o").await, 200);
     lines_in(&file, 1).await;
     let mode = std::fs::metadata(&file).unwrap().permissions().mode();

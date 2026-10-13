@@ -13,8 +13,9 @@ use crate::Frames;
 /// does not imply a live semantic input; the incoming adapter selects that.
 pub struct Body {
     data: Data,
-    pub(crate) upload: Option<super::upload::Handoff>,
-    /// The most bytes a reader holds of it at once, its binding's limit.
+    /// The most bytes a reader holds of it at once: of a provider's answer,
+    /// its transport's ([`connect`](crate::connect)); `None` for a body no
+    /// binding read.
     pub(crate) limit: Option<usize>,
 }
 
@@ -28,7 +29,6 @@ impl Body {
     pub fn full(bytes: impl Into<Bytes>) -> Self {
         Self {
             data: Data::Full(Some(bytes.into())),
-            upload: None,
             limit: None,
         }
     }
@@ -37,17 +37,8 @@ impl Body {
     pub fn stream(stream: impl Stream<Item = Result<Bytes, Fault>> + Send + 'static) -> Self {
         Self {
             data: Data::Stream(stream.boxed()),
-            upload: None,
             limit: None,
         }
-    }
-
-    /// The most bytes a reader may hold of it at once: of a provider's
-    /// answer, its transport's limit ([`connect`](crate::connect)), which a
-    /// [`Decoder`](crate::Decoder) that holds bytes keeps a whole body, or
-    /// one event, to. `None` for a body no binding read, already in memory.
-    pub fn limit(&self) -> Option<usize> {
-        self.limit
     }
 
     /// Complete bytes, if this is an unread finite body.
@@ -56,16 +47,6 @@ impl Body {
             Data::Full(bytes) => bytes.as_ref(),
             Data::Stream(_) => None,
         }
-    }
-
-    /// Its values, as `decoder` reads its frames, as a binding reads a
-    /// body: the decoder held to its limit, until it is
-    /// [`done`](crate::Decoder::done).
-    pub fn decode<T: Send + 'static>(
-        self,
-        decoder: Box<dyn crate::Decoder<T>>,
-    ) -> respan_gateway_core::EventStream<T> {
-        crate::codec::decode(self, decoder)
     }
 
     /// Whether its bytes come as a stream of frames rather than whole: how a

@@ -7,9 +7,7 @@ use respan_gateway_conversation::{
     Block, Content, Delta, Finish, Input, Message, Output, Role, Tool, ToolChoice,
 };
 use respan_gateway_conversation::{Effort, Reasoning, Start, Usage};
-use respan_gateway_core::{
-    BadRequest, ErrorCode, Fault, NativeFields, NativeValue, Truncated, Upstream,
-};
+use respan_gateway_core::{ErrorCode, Fault, NativeFields, NativeValue};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http_faults::Status;
 use serde_json::{Map, Value};
@@ -19,7 +17,7 @@ use super::errors::says;
 
 /// A request body that is not a JSON object.
 pub(crate) fn not_an_object() -> Fault {
-    BadRequest::fault("request body is not a JSON object")
+    Fault::bad_request("request body is not a JSON object")
 }
 
 /// What a format does with the fields of an `native` it writes: `own` keys it
@@ -178,7 +176,7 @@ pub(crate) fn count(v: Option<&Value>) -> Result<Option<u64>, Fault> {
     });
     whole
         .map(Some)
-        .ok_or_else(|| Upstream::fault(format!("a usage count is not a whole number: {v}")))
+        .ok_or_else(|| Fault::upstream(format!("a usage count is not a whole number: {v}")))
 }
 
 /// The fields of the usage object `u` the kind has no unit for: not the
@@ -496,7 +494,7 @@ pub(crate) fn unwritable_usage() -> Fault {
 
 /// A request carrying `what` cannot be sent in another format.
 pub(crate) fn untranslatable(what: &str) -> Fault {
-    BadRequest::fault(format!("{what} cannot be translated to another format yet"))
+    Fault::bad_request(format!("{what} cannot be translated to another format yet"))
 }
 
 /// A 502 for content the client's format cannot write anew, such as a tool call.
@@ -511,7 +509,7 @@ pub(crate) fn unwritable_content() -> Fault {
 pub(crate) fn ended(done: bool) -> Result<(), Fault> {
     match done {
         true => Ok(()),
-        false => Err(Truncated::fault()),
+        false => Err(Fault::truncated()),
     }
 }
 
@@ -605,7 +603,7 @@ pub(crate) fn parse_effort(name: &str) -> Option<Effort> {
 /// budget at once, as no vendor takes both.
 pub(crate) fn reasoning_of(input: &Input) -> Result<Option<&Reasoning>, Fault> {
     match &input.options.reasoning {
-        Some(r) if r.effort.is_some() && r.budget_tokens.is_some() => Err(BadRequest::fault(
+        Some(r) if r.effort.is_some() && r.budget_tokens.is_some() => Err(Fault::bad_request(
             "reasoning with both an effort and a token budget cannot be written",
         )),
         r => Ok(r.as_ref()),

@@ -9,7 +9,7 @@
 
 use std::sync::atomic::Ordering;
 
-use respan_gateway_core::{BadRequest, Fault, NativeFields, NativeValue, Upstream};
+use respan_gateway_core::{Fault, NativeFields, NativeValue};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_realtime::{Audio, AudioFormat, Output, Status, Usage};
 use respan_gateway_ws::CloseCode;
@@ -58,7 +58,7 @@ impl Provider {
 
     pub(super) fn read(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
         let mut v: Value = serde_json::from_slice(&raw)
-            .map_err(|_| Upstream::fault("a provider's message is not JSON"))?;
+            .map_err(|_| Fault::upstream("a provider's message is not JSON"))?;
         if !v.is_object() {
             out.push(Output::native(NAME, v));
             return Ok(());
@@ -547,7 +547,7 @@ impl Client {
                     .ok()
                     .filter(Value::is_object)
                     .ok_or_else(|| {
-                        Upstream::fault("a tool call's arguments are not a JSON object")
+                        Fault::upstream("a tool call's arguments are not a JSON object")
                     })?;
                 let mut call = json!({"id": id, "name": name, "args": args});
                 merge(
@@ -607,9 +607,9 @@ impl Client {
                 // A Live API client knows a refusal only as its session's close.
                 return Err(match code.as_deref() {
                     Some("invalid_request_error") => {
-                        BadRequest::fault(message.clone()).with(CloseCode(1007))
+                        Fault::bad_request(message.clone()).with(CloseCode(1007))
                     }
-                    _ => Upstream::fault(message.clone()),
+                    _ => Fault::upstream(message.clone()),
                 });
             }
             Output::Native(NativeValue { format, value }) if **format == *NAME => {

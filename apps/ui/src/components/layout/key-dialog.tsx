@@ -1,103 +1,80 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { KeyRound } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { CircleAlert, KeyRound, LoaderCircle } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { getGatewayKey, onForbidden, onUnauthorized, setGatewayKey, subscribeGatewayKey } from "@/lib/api";
+import { ApiError, getGatewayKey, onForbidden, onUnauthorized, setGatewayKey, verifyGatewayKey } from "@/lib/api";
 
-/** Opens when a call is refused with 401 (asks for a key) or 403 (the key may not open the admin UI). */
 export function KeyDialog() {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [rejected, setRejected] = useState(false);
-  const [forbidden, setForbidden] = useState(false);
   const [value, setValue] = useState("");
-  // Once dismissed, background polling must not keep reopening the dialog;
-  // it asks again only after the key changes (for instance in Settings).
-  const dismissed = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const offKey = subscribeGatewayKey(() => (dismissed.current = false));
-    const offUnauthorized = onUnauthorized(() => {
-      if (dismissed.current) return;
-      setRejected(getGatewayKey() !== null);
-      setForbidden(false);
+    const prompt = (message: string | null) => {
+      if (open) return;
+      setError(message);
       setOpen(true);
-    });
-    const offForbidden = onForbidden(() => {
-      if (dismissed.current) return;
-      setForbidden(true);
-      setOpen(true);
-    });
-    return () => {
-      offKey();
-      offUnauthorized();
-      offForbidden();
     };
-  }, []);
+    const offUnauthorized = onUnauthorized(() => prompt(getGatewayKey() ? "Invalid key. Try another." : null));
+    const offForbidden = onForbidden(() => prompt("This key has no admin access. Use an admin key."));
+    return () => { offUnauthorized(); offForbidden(); };
+  }, [open]);
 
-  const onOpenChange = (next: boolean) => {
-    if (!next) dismissed.current = true;
-    setOpen(next);
-  };
-
-  const submit = (e: FormEvent) => {
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!value.trim()) return;
-    setGatewayKey(value.trim());
-    setValue("");
-    setOpen(false);
-    void queryClient.invalidateQueries();
+    const key = value.trim();
+    if (!key || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await verifyGatewayKey(key);
+      setGatewayKey(key);
+      setValue("");
+      setOpen(false);
+      void queryClient.invalidateQueries();
+    } catch (e) {
+      setError(e instanceof ApiError && e.status === 401
+        ? "Invalid key. Try another."
+        : e instanceof ApiError && e.status === 403
+          ? "This key has no admin access. Use an admin key."
+          : "Couldn't connect to the gateway. Try again.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+    <Dialog open={open}>
+      <DialogContent className="sm:max-w-sm" showCloseButton={false}
+        onEscapeKeyDown={(e) => e.preventDefault()} onInteractOutside={(e) => e.preventDefault()}>
         <form onSubmit={submit} className="grid gap-5">
           <DialogHeader>
-            <div className="mb-2 flex size-10 items-center justify-center rounded-full bg-brand-soft text-brand">
-              <KeyRound className="size-5" />
-            </div>
-            <DialogTitle>{forbidden
-                ? "This key can't open the admin UI"
-                : rejected
-                  ? "That key was refused"
-                  : "This gateway needs a key"}
-            </DialogTitle>
-            <DialogDescription>
-              {forbidden
-                ? "The key is valid, but it isn't an admin key. Enter an admin key to use the dashboard."
-                : "The gateway is configured with client keys. Enter one to use the dashboard and the playground; it's kept in this browser only."}
-            </DialogDescription>
+            <KeyRound className="mb-1 size-6 text-muted-foreground" />
+            <DialogTitle>Gateway key required</DialogTitle>
+            <DialogDescription>Enter an admin key to continue.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
             <Label htmlFor="gateway-key">Gateway key</Label>
-            <Input
-              id="gateway-key"
-              type="password"
-              autoComplete="off"
-              autoFocus
-              placeholder="sk-gw-…"
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              aria-invalid={rejected || forbidden || undefined}
-            />
+            <Input id="gateway-key" type="password" autoComplete="off" autoFocus
+              placeholder="Paste your key" value={value} disabled={busy}
+              onChange={(e) => { setValue(e.target.value); setError(null); }}
+              aria-invalid={!!error} aria-describedby={error ? "gateway-key-error" : undefined} />
+            {error && (
+              <div id="gateway-key-error" role="alert" className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm leading-relaxed">
+                <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
+                <p>{error}</p>
+              </div>
+            )}
           </div>
           <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-              Not now
-            </Button>
-            <Button type="submit" disabled={!value.trim()}>
-              Save key
+            <Button type="submit" className="w-full" disabled={!value.trim() || busy}>
+              {busy && <LoaderCircle className="animate-spin" />}
+              {busy ? "Checking…" : "Connect"}
             </Button>
           </DialogFooter>
         </form>

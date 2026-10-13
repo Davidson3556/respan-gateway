@@ -1279,8 +1279,10 @@ name = "respan-gateway"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "clap",
  "dotenvy",
+ "form_urlencoded",
  "getrandom 0.3.4",
  "indexmap",
  "respan-gateway-conversation",
@@ -1288,7 +1290,6 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-faults",
- "respan-gateway-http-syntax",
  "respan-gateway-http-transport",
  "respan-gateway-mcp",
  "respan-gateway-mcp-http",
@@ -1308,8 +1309,8 @@ dependencies = [
  "respan-gateway-ws",
  "serde",
  "serde_json",
- "serde_norway",
  "tokio",
+ "toml",
  "tower",
 ]
 
@@ -1331,7 +1332,6 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-faults",
- "respan-gateway-http-syntax",
  "respan-gateway-sse",
  "serde",
  "serde_json",
@@ -1356,13 +1356,14 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "percent-encoding",
  "respan-gateway-core",
  "respan-gateway-http-faults",
- "respan-gateway-http-syntax",
  "respan-gateway-sse",
  "serde",
  "serde_json",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -1371,14 +1372,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "http",
- "respan-gateway-core",
-]
-
-[[package]]
-name = "respan-gateway-http-syntax"
-version = "0.1.0"
-dependencies = [
- "http",
+ "httpdate",
  "respan-gateway-core",
 ]
 
@@ -1392,7 +1386,6 @@ dependencies = [
  "reqwest",
  "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-http-syntax",
 ]
 
 [[package]]
@@ -1414,7 +1407,6 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-faults",
- "respan-gateway-http-syntax",
  "respan-gateway-mcp",
  "respan-gateway-sse",
  "serde_json",
@@ -1436,14 +1428,16 @@ name = "respan-gateway-media-http"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "form_urlencoded",
+ "futures",
  "getrandom 0.3.4",
- "memchr",
+ "multer",
+ "percent-encoding",
  "respan-gateway-conversation",
  "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-faults",
- "respan-gateway-http-syntax",
  "respan-gateway-media",
  "respan-gateway-sse",
  "serde_json",
@@ -1454,10 +1448,10 @@ name = "respan-gateway-passthrough-http"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "percent-encoding",
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-faults",
- "respan-gateway-http-syntax",
 ]
 
 [[package]]
@@ -1486,7 +1480,6 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-faults",
- "respan-gateway-http-syntax",
  "respan-gateway-mcp",
  "respan-gateway-mcp-http",
  "respan-gateway-plugin-tool-loop",
@@ -1549,11 +1542,11 @@ name = "respan-gateway-realtime-ws"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "form_urlencoded",
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-faults",
- "respan-gateway-http-syntax",
  "respan-gateway-realtime",
  "respan-gateway-ws",
  "serde_json",
@@ -1607,7 +1600,6 @@ dependencies = [
  "respan-gateway-ws",
  "serde",
  "serde_json",
- "serde_norway",
  "tokio",
  "tokio-tungstenite",
 ]
@@ -1620,7 +1612,6 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-faults",
- "respan-gateway-http-syntax",
  "rustls",
  "rustls-native-certs",
  "serde_json",
@@ -1842,19 +1833,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_norway"
-version = "0.9.42"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e408f29489b5fd500fab51ff1484fc859bb655f32c671f307dcd733b72e8168c"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml-norway",
-]
-
-[[package]]
 name = "serde_path_to_error"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1863,6 +1841,15 @@ dependencies = [
  "itoa",
  "serde",
  "serde_core",
+]
+
+[[package]]
+name = "serde_spanned"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -2113,6 +2100,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_edit",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.22.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_write",
+ "winnow",
+]
+
+[[package]]
+name = "toml_write"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2213,12 +2242,6 @@ name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
-
-[[package]]
-name = "unsafe-libyaml-norway"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b39abd59bf32521c7f2301b52d05a6a2c975b6003521cbd0c6dc1582f0a22104"
 
 [[package]]
 name = "untrusted"
@@ -2483,6 +2506,15 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "winnow"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "wit-bindgen"

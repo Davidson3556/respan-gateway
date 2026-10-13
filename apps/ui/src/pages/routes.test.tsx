@@ -44,8 +44,8 @@ describe("RoutesPage", () => {
   it("lists prefix routes, defaults and served endpoints", async () => {
     api(routes);
     renderApp(<RoutesPage />);
-    expect(await screen.findByText("claude…")).toBeInTheDocument();
-    expect(screen.getByText("llama…")).toBeInTheDocument();
+    expect(await screen.findByText("claude*", { selector: "code" })).toBeInTheDocument();
+    expect(screen.getByText("llama*", { selector: "code" })).toBeInTheDocument();
     expect(screen.getByText("/v1/chat/completions")).toBeInTheDocument();
     expect(screen.getByText("/v1/embeddings")).toBeInTheDocument();
     expect(screen.getByText("openai-embeddings")).toBeInTheDocument();
@@ -54,16 +54,16 @@ describe("RoutesPage", () => {
   it("explains an empty configuration instead of showing blank tables", async () => {
     api({ serve: [], routes: [], defaults: [] });
     renderApp(<RoutesPage />);
-    expect(await screen.findByText(/No prefix routes/)).toBeInTheDocument();
+    expect(await screen.findByText(/No overrides/)).toBeInTheDocument();
     expect(screen.getByText(/No default provider/)).toBeInTheDocument();
-    expect(screen.getByText(/every request is a 404/)).toBeInTheDocument();
+    expect(screen.getByText(/No endpoints configured/)).toBeInTheDocument();
   });
 
   it("says the routes could not be loaded, and does not claim there are none", async () => {
     serve({});
     renderApp(<RoutesPage />);
     expect(await screen.findByText("Couldn't load routes")).toBeInTheDocument();
-    expect(screen.queryByText(/No prefix routes/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No overrides/)).not.toBeInTheDocument();
   });
 
   describe("route tester", () => {
@@ -90,8 +90,8 @@ describe("RoutesPage", () => {
       api(routes);
       renderApp(<RoutesPage />);
       const examples = await screen.findByRole("group", { name: "Example models" });
-      await userEvent.click(within(examples).getByRole("button", { name: "llama-example" }));
-      expect(screen.getByLabelText("Model", { exact: true })).toHaveValue("llama-example");
+      await userEvent.click(within(examples).getByRole("button", { name: "llama*" }));
+      expect(screen.getByLabelText("Model", { exact: true })).toHaveValue("llama");
       expect(await screen.findByText("prefix llama*")).toBeInTheDocument();
     });
   });

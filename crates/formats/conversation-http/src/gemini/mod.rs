@@ -80,7 +80,7 @@ use crate::schema::{
     kept_fields, merge_details, merge_fields, native_fields, set, unwritable_content, usage_extra,
 };
 use respan_gateway_conversation::{Assembled, AssembledItem, Block, Finish, Input, Output, Usage};
-use respan_gateway_core::{BadRequest, Connection, Fault, Format, NativeValue};
+use respan_gateway_core::{Connection, Fault, Format, NativeValue};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, StatusCode, request::Parts as RequestHead};
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo};
@@ -210,7 +210,7 @@ impl GeminiGenerate {
     fn decode_call(&self, head: &RequestHead, raw: Bytes) -> Result<Input, Fault> {
         let v = match serde_json::from_slice::<Value>(&raw) {
             Ok(v) if v.is_object() => v,
-            _ => return Err(BadRequest::fault("request body is not a JSON object")),
+            _ => return Err(Fault::bad_request("request body is not a JSON object")),
         };
         let mut chat = self.decode_json(&v);
         chat.model = call_of(&head.uri).map(|(model, _)| model.to_owned());
@@ -271,7 +271,7 @@ impl Schema for GeminiGenerate {
         let model = input.model.as_deref().unwrap_or_default();
         let model = model.strip_prefix("models/").unwrap_or(model);
         if !is_segment(model) {
-            return Err(BadRequest::fault(
+            return Err(Fault::bad_request(
                 "a Gemini call needs a model, such as gemini-2.5-flash",
             ));
         }
@@ -339,7 +339,7 @@ impl Schema for GeminiGenerate {
     fn encode_json(&self, chat: &Input) -> Result<Map<String, Value>, Fault> {
         let (system, rest) = split_system(chat)?;
         if rest.is_empty() {
-            return Err(BadRequest::fault(
+            return Err(Fault::bad_request(
                 "Gemini needs at least one user or model message",
             ));
         }

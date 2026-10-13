@@ -4,7 +4,7 @@
 use respan_gateway_core::futures::channel::mpsc;
 use respan_gateway_core::futures::stream::{self, PollNext};
 use respan_gateway_core::futures::{FutureExt, StreamExt, future};
-use respan_gateway_core::{BadRequest, Connection, EventStream, Fault, NativeValue, Upstream};
+use respan_gateway_core::{Connection, EventStream, Fault, NativeValue};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{CONTENT_TYPE, SEC_WEBSOCKET_PROTOCOL, UPGRADE};
 use respan_gateway_http::http::response::Parts as ResponseHead;
@@ -48,9 +48,9 @@ impl Spec {
     pub(crate) fn matches(&self, io: &ClientIo) -> bool {
         let head = io.request();
         head.method() == Method::GET
-            && respan_gateway_http_syntax::header_tokens(head.headers(), UPGRADE)
+            && respan_gateway_http::rules::header_tokens(head.headers(), UPGRADE)
                 .any(|v| v.eq_ignore_ascii_case("websocket"))
-            && respan_gateway_http_syntax::path_ends_with(head.uri(), self.path)
+            && respan_gateway_http::path::path_ends_with(head.uri(), self.path)
     }
 
     /// A transport to its provider at `base_url`, taking binary text if the
@@ -80,7 +80,7 @@ impl Spec {
                 }
                 if let Some(protocol) = protocol {
                     head.headers.remove(SEC_WEBSOCKET_PROTOCOL);
-                    let mut offers = respan_gateway_http_syntax::header_tokens(
+                    let mut offers = respan_gateway_http::rules::header_tokens(
                         reply.request().headers(),
                         SEC_WEBSOCKET_PROTOCOL,
                     );
@@ -148,11 +148,12 @@ impl Spec {
     }
 }
 
-/// The model at `?model=` of a client's handshake, if it names one.
+/// The model at `?model=` of a client's handshake, unescaped, if it names one.
 pub(crate) fn model_at(uri: &Uri) -> Option<String> {
-    let query = uri.query()?;
-    let model = query.split('&').find_map(|p| p.strip_prefix("model="))?;
-    (!model.is_empty()).then(|| model.to_owned())
+    let query = uri.query()?.as_bytes();
+    form_urlencoded::parse(query)
+        .find(|(name, model)| name == "model" && !model.is_empty())
+        .map(|(_, model)| model.into_owned())
 }
 
 /// The events of `frames`, with what was `said` first whenever there is
@@ -168,11 +169,11 @@ fn among(said: Said, frames: EventStream<Output>) -> EventStream<Output> {
 }
 
 /// A refused handshake's answer: text/plain, with the fault's error code
-/// ([`error_code`](respan_gateway_http_faults::error_code)), never its message.
+/// ([`Fault::code`](respan_gateway_core::Fault::code)), never its message.
 fn refusal(fault: &Fault, _request: &Request<Bytes>, head: &mut ResponseHead) -> Bytes {
     let text = HeaderValue::from_static("text/plain; charset=utf-8");
     head.headers.insert(CONTENT_TYPE, text);
-    Bytes::from(respan_gateway_http_faults::error_code(fault).to_owned())
+    Bytes::from(fault.code().to_owned())
 }
 
 /// Offer `protocol` in `headers` beside the subprotocols the client
@@ -183,7 +184,7 @@ fn offer_beside_the_clients(
     protocol: &str,
 ) -> Result<(), Fault> {
     let offered = client.into_iter().flat_map(|client| {
-        respan_gateway_http_syntax::header_tokens(client, SEC_WEBSOCKET_PROTOCOL)
+        respan_gateway_http::rules::header_tokens(client, SEC_WEBSOCKET_PROTOCOL)
     });
     let mut offers: Vec<&str> = offered.filter(|offer| !offer.is_empty()).collect();
     if !offers.contains(&protocol) {
@@ -201,7 +202,7 @@ fn offer_beside_the_clients(
 pub(crate) fn native_client(name: &'static str) -> (Read<Input>, Box<dyn Encoder<Output>>) {
     let read = move |raw: Bytes, out: &mut Vec<Input>| {
         let json: Value = serde_json::from_slice(&raw)
-            .map_err(|_| BadRequest::fault("a client's frame is not a JSON event"))?;
+            .map_err(|_| Fault::bad_request("a client's frame is not a JSON event"))?;
         out.push(Input::native(name, json));
         Ok(())
     };
@@ -228,7 +229,7 @@ pub(crate) fn native_provider(name: &'static str) -> (Box<dyn Encoder<Input>>, R
     };
     let read = move |raw: Bytes, out: &mut Vec<Output>| {
         let json: Value = serde_json::from_slice(&raw)
-            .map_err(|_| Upstream::fault("a provider's frame is not a JSON event"))?;
+            .map_err(|_| Fault::upstream("a provider's frame is not a JSON event"))?;
         out.push(Output::native(name, json));
         Ok(())
     };
@@ -262,7 +263,7 @@ mod tests {
         );
         for refused in [written("two", Some(&event)), written("one", None)] {
             let refused = refused.expect_err("foreign event");
-            assert!(refused.is::<respan_gateway_core::Config>());
+            assert!(refused.code() == "config");
         }
     }
 }

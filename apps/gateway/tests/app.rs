@@ -20,7 +20,7 @@ fn chat(model: &str) -> String {
     json!({"model": model, "messages": [{"role": "user", "content": "hi"}]}).to_string()
 }
 
-/// A fresh, empty directory: no `gateway.yaml` in it.
+/// A fresh, empty directory: no `gateway.toml` in it.
 fn empty_dir() -> PathBuf {
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -106,7 +106,7 @@ fn with_no_config_and_no_key_it_says_what_to_do() {
     assert!(!out.status.success());
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(said.contains("OPENAI_API_KEY"), "{said}");
-    assert!(said.contains("ANTHROPIC_API_KEY"), "{said}");
+    assert!(said.contains("respan-gateway --help"), "{said}");
     assert!(said.contains("respan-gateway init"), "{said}");
 }
 
@@ -124,39 +124,29 @@ fn init_writes_a_config_that_check_accepts() {
     };
     let out = run(&["init"]);
     assert!(out.status.success(), "{out:?}");
-    let written = std::fs::read_to_string(dir.join("gateway.yaml")).unwrap();
-    assert!(
-        written.contains("\n  anthropic: { vendor: anthropic }"),
-        "{written}"
-    );
-    assert!(
-        written.contains("\n  # openai: { vendor: openai }"),
-        "{written}"
-    );
+    let written = std::fs::read_to_string(dir.join("gateway.toml")).unwrap();
+    assert!(written.contains("[providers.anthropic]"), "{written}");
+    assert!(!written.contains("[providers.openai]"), "{written}");
 
     let out = run(&["check"]);
     assert!(out.status.success(), "{out:?}");
     let report = String::from_utf8_lossy(&out.stdout);
-    assert!(report.contains("config     gateway.yaml"), "{report}");
-    assert!(report.ends_with("gateway.yaml: ok\n"), "{report}");
+    assert!(report.contains("config     gateway.toml"), "{report}");
+    assert!(report.ends_with("gateway.toml: ok\n"), "{report}");
 
     let out = run(&["init"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--force"));
-    let out = run(&["init", "--force", "-o", "other.yaml"]);
+    let out = run(&["init", "--force", "-o", "other.toml"]);
     assert!(out.status.success(), "{out:?}");
-    assert!(dir.join("other.yaml").is_file());
+    assert!(dir.join("other.toml").is_file());
 }
 
 #[tokio::test]
 async fn client_keys_are_required_and_never_forwarded() {
     let openai = FakeOpenAi::start().await;
     let gw = Gateway::start(&format!(
-        "client_keys: [gw-key]
-providers:
-  own: {{ formats: openai-chat, base_url: '{}', key: sk-gw-openai }}
-  theirs: {{ formats: openai-chat, base_url: '{}' }}
-",
+        "client_keys = [\"gw-key\"]\nproviders = {{ own = {{ formats = \"openai-chat\", base_url = \"{}\", key = \"sk-gw-openai\" }}, theirs = {{ formats = \"openai-chat\", base_url = \"{}\" }} }}\n",
         openai.base_url(),
         openai.base_url(),
     ))
@@ -228,7 +218,7 @@ providers:
 #[tokio::test]
 async fn health_and_the_web_ui_are_served() {
     let gw = Gateway::start(
-        "providers: { p: { formats: openai-chat, base_url: 'http://127.0.0.1:9/v1' } }\n",
+        "providers = { p = { formats = \"openai-chat\", base_url = \"http://127.0.0.1:9/v1\" } }\n",
     )
     .await;
     let health = client().get(gw.url("/healthz")).send().await.unwrap();
@@ -294,11 +284,7 @@ async fn models_are_merged_from_every_provider() {
     let anthropic = FakeAnthropic::start().await;
     let (openai, seen) = listing(&["gpt-4o", "llama-x"]).await;
     let gw = Gateway::start(&format!(
-        "providers:
-  anthropic: {{ vendor: anthropic, base_url: '{}', key: sk-ant }}
-  openai: {{ vendor: openai, base_url: '{openai}', key: sk-openai }}
-  down: {{ formats: openai-chat, base_url: '{}/v1' }}
-",
+        "providers = {{ anthropic = {{ vendor = \"anthropic\", base_url = \"{}\", key = \"sk-ant\" }}, openai = {{ vendor = \"openai\", base_url = \"{openai}\", key = \"sk-openai\" }}, down = {{ formats = \"openai-chat\", base_url = \"{}/v1\" }} }}\n",
         anthropic.base_url(),
         closed_port().await,
     ))
@@ -335,7 +321,7 @@ async fn models_are_merged_from_every_provider() {
 async fn models_are_listed_in_anthropics_shape_for_a_request_with_its_version() {
     let (openai, _) = listing(&["gpt-4o", "text-embedding-3-small"]).await;
     let gw = Gateway::start(&format!(
-        "providers:\n  openai: {{ vendor: openai, base_url: '{openai}', key: sk-openai }}\n"
+        "providers = {{ openai = {{ vendor = \"openai\", base_url = \"{openai}\", key = \"sk-openai\" }} }}\n"
     ))
     .await;
     let list = client()
@@ -369,7 +355,7 @@ async fn models_are_listed_in_anthropics_shape_for_a_request_with_its_version() 
 async fn models_are_listed_in_geminis_shape_for_its_sdks() {
     let (openai, seen) = listing(&["gpt-4o", "text-embedding-3-small"]).await;
     let gw = Gateway::start(&format!(
-        "providers:\n  openai: {{ vendor: openai, base_url: '{openai}', key: sk-openai }}\nclient_keys: [gw-key]\n"
+        "providers = {{ openai = {{ vendor = \"openai\", base_url = \"{openai}\", key = \"sk-openai\" }} }}\nclient_keys = [\"gw-key\"]\n"
     ))
     .await;
     let get = |path: &'static str| {
@@ -416,11 +402,7 @@ async fn the_merged_models_win_over_a_served_passthrough() {
     let (openai, seen) = listing(&["gpt-4o"]).await;
     let origin = openai.trim_end_matches("/v1");
     let gw = Gateway::start(&format!(
-        "providers:
-  openai: {{ vendor: openai, base_url: '{openai}', key: sk-openai }}
-  any: {{ formats: passthrough, base_url: '{origin}' }}
-formats: [openai-chat, passthrough]
-"
+        "providers = {{ openai = {{ vendor = \"openai\", base_url = \"{openai}\", key = \"sk-openai\" }}, any = {{ formats = \"passthrough\", base_url = \"{origin}\" }} }}\nformats = [\"openai-chat\", \"passthrough\"]\n"
     ))
     .await;
     let list = get_json(&gw, "/v1/models").await;
@@ -433,7 +415,7 @@ formats: [openai-chat, passthrough]
 async fn models_are_kept_a_while_once_every_provider_listed() {
     let (openai, seen) = listing(&["gpt-4o"]).await;
     let gw = Gateway::start(&format!(
-        "providers:\n  openai: {{ vendor: openai, base_url: '{openai}', key: sk }}\n"
+        "providers = {{ openai = {{ vendor = \"openai\", base_url = \"{openai}\", key = \"sk\" }} }}\n"
     ))
     .await;
     get_json(&gw, "/v1/models").await;
@@ -444,7 +426,7 @@ async fn models_are_kept_a_while_once_every_provider_listed() {
 #[tokio::test]
 async fn models_from_no_provider_is_an_error_naming_each() {
     let gw = Gateway::start(&format!(
-        "providers:\n  down: {{ formats: openai-chat, base_url: '{}/v1' }}\n",
+        "providers = {{ down = {{ formats = \"openai-chat\", base_url = \"{}/v1\" }} }}\n",
         closed_port().await
     ))
     .await;
@@ -471,9 +453,7 @@ fn request_events(body: &str) -> Vec<Value> {
 async fn the_admin_api_reports_requests_as_they_happen() {
     let openai = FakeOpenAi::start().await;
     let gw = Gateway::start(&format!(
-        "providers:
-  openai: {{ vendor: openai, base_url: '{}', key: sk }}
-",
+        "providers = {{ openai = {{ vendor = \"openai\", base_url = \"{}\", key = \"sk\" }} }}\n",
         openai.base_url()
     ))
     .await;
@@ -546,7 +526,7 @@ async fn the_admin_api_reports_requests_as_they_happen() {
     assert_eq!(overview["auth_required"], false);
     assert_eq!(overview["listen"], gw.base.trim_start_matches("http://"));
     assert_eq!(overview["config_source"], "file");
-    assert!(overview["config_path"].as_str().unwrap().ends_with(".yaml"));
+    assert!(overview["config_path"].as_str().unwrap().ends_with(".toml"));
 
     let providers = get_json(&gw, "/ui/api/providers").await;
     let openai_info = &providers["providers"][0];
@@ -588,7 +568,7 @@ async fn the_admin_api_reports_requests_as_they_happen() {
 #[test]
 fn an_empty_client_key_from_the_environment_is_refused() {
     let path = support::write_config(
-        "client_keys: [env:GK]\nproviders: { p: { formats: openai-chat, base_url: 'http://x.test/v1' } }\n",
+        "client_keys = [\"env:GK\"]\nproviders = { p = { formats = \"openai-chat\", base_url = \"http://x.test/v1\" } }\n",
     );
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
         .args(["check", "--config", path.to_str().unwrap()])
@@ -614,9 +594,9 @@ fn init_keeps_the_base_url_the_environment_gives_ollama() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");
-    let written = std::fs::read_to_string(dir.join("gateway.yaml")).unwrap();
+    let written = std::fs::read_to_string(dir.join("gateway.toml")).unwrap();
     assert!(
-        written.contains("\n  ollama: { vendor: ollama, base_url: 'http://127.0.0.1:11999/v1' }"),
+        written.contains("base_url = \"http://127.0.0.1:11999/v1\""),
         "{written}"
     );
 }
@@ -638,7 +618,7 @@ async fn listen_takes_a_bare_port_or_colon_port() {
 async fn without_keys_a_cross_origin_page_cannot_spend_or_read() {
     let openai = FakeOpenAi::start().await;
     let gw = Gateway::start(&format!(
-        "providers:\n  openai: {{ vendor: openai, base_url: '{}', key: sk }}\n",
+        "providers = {{ openai = {{ vendor = \"openai\", base_url = \"{}\", key = \"sk\" }} }}\n",
         openai.base_url()
     ))
     .await;
@@ -689,7 +669,7 @@ async fn without_keys_a_cross_origin_page_cannot_spend_or_read() {
 async fn an_unreachable_provider_is_named_with_its_host_and_cause() {
     let down = closed_port().await;
     let gw = Gateway::start(&format!(
-        "providers:\n  down: {{ formats: openai-chat, base_url: '{down}/v1', key: sk-secret }}\n"
+        "providers = {{ down = {{ formats = \"openai-chat\", base_url = \"{down}/v1\", key = \"sk-secret\" }} }}\n"
     ))
     .await;
     let resp = post_chat(&gw, "gpt-4.1-mini", &[]).await;
@@ -709,7 +689,7 @@ async fn an_unreachable_provider_is_named_with_its_host_and_cause() {
 #[tokio::test]
 async fn an_open_event_stream_does_not_hold_up_shutdown() {
     let gw = Gateway::start(
-        "providers: { p: { formats: openai-chat, base_url: 'http://127.0.0.1:9/v1' } }\n",
+        "providers = { p = { formats = \"openai-chat\", base_url = \"http://127.0.0.1:9/v1\" } }\n",
     )
     .await;
     let events = client().get(gw.url("/ui/api/events")).send().await.unwrap();

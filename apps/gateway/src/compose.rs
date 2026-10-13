@@ -86,10 +86,10 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
             names(&upstreams)
         )));
     }
-    let keys = clients(&config.client_keys, config.admin_writes)?;
+    let keys = clients(&config.client_keys)?;
     if upstreams.is_empty() && config.mcp.is_empty() {
         return Err(Fault::config(
-            "providers: none configured; add one, such as `openai: { vendor: openai }`",
+            "providers: none configured; add one, such as `[providers.openai]` with `vendor = 'openai'`",
         ));
     }
     let routes = Arc::new(routes(&upstreams, table, routing.default.clone()));
@@ -311,7 +311,7 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
             let Some(key) = presets::key_from_env(preset.key_env) else {
                 let var = preset.key_env.join(" or ");
                 return Err(bad(format!(
-                    "environment variable {var} is not set; export it, put it in .env, or set `key:`"
+                    "environment variable {var} is not set; export it, put it in .env, or set `key`"
                 )));
             };
             (Some(secret(&owner, &key)?), key_source(&key))
@@ -405,16 +405,8 @@ pub fn secret(owner: &str, value: &str) -> Result<String, Fault> {
 ///
 /// A key's `admin` is what its entry says. An entry that does not say is an
 /// admin key unless some entry sets `admin: true`, when only those are.
-/// `admin_writes` needs an entry that sets `admin: true`.
-fn clients(entries: &[ClientKey], admin_writes: bool) -> Result<Vec<Client>, Fault> {
+fn clients(entries: &[ClientKey]) -> Result<Vec<Client>, Fault> {
     let named_admins = entries.iter().any(|e| e.admin() == Some(true));
-    if admin_writes && !named_admins {
-        return Err(Fault::config(
-            "admin_writes: needs a client key with `admin: true` \
-             (`client_keys: [{ name: ops, key: ..., admin: true }]`), so that not \
-             every key can rewrite the config",
-        ));
-    }
     let mut clients: Vec<Client> = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
         let key = secret("client_keys", entry.key())?;

@@ -1,4 +1,4 @@
-//! OAuth for an HTTP MCP server, machine to machine: `oauth:` on an `mcp:`
+//! OAuth for an HTTP MCP server, machine to machine: `oauth` on an `mcp`
 //! server has the gateway get its own access token from a token endpoint and
 //! send it as `Authorization: Bearer`, the way `key` sends a fixed one.
 //!
@@ -20,7 +20,7 @@
 
 use std::time::{Duration, Instant};
 
-use respan_gateway_core::{Fault, Upstream};
+use respan_gateway_core::Fault;
 use respan_gateway_http::http::{HeaderValue, header};
 use respan_gateway_http_transport::reqwest;
 use serde::Deserialize;
@@ -38,7 +38,7 @@ const DEFAULT_LIFETIME: Duration = Duration::from_secs(3600);
 /// The longest a token may live in the cache, whatever the endpoint says.
 const MAX_LIFETIME: Duration = Duration::from_secs(24 * 3600);
 
-/// `oauth:` of an `mcp:` server.
+/// `oauth` of an `mcp` server.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthConfig {
@@ -231,33 +231,33 @@ impl OAuth {
         // The error would name the URL; the cause alone is for a person.
         let resp = sent.map_err(|e| {
             let cause = crate::formats::unreachable(&e);
-            Upstream::fault(format!("the OAuth token endpoint {cause}"))
+            Fault::upstream(format!("the OAuth token endpoint {cause}"))
         })?;
         let status = resp.status();
         let body = resp
             .bytes()
             .await
-            .map_err(|_| Upstream::fault("the OAuth token endpoint's answer broke off"))?;
+            .map_err(|_| Fault::upstream("the OAuth token endpoint's answer broke off"))?;
         let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
         if !status.is_success() {
             // `error` is a code from RFC 6749 (5.2); anything odd is left out.
             let code = json["error"].as_str().filter(|c| {
                 c.len() <= 64 && c.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             });
-            return Err(Upstream::fault(match code {
+            return Err(Fault::upstream(match code {
                 Some(code) => format!("the OAuth token endpoint refused: {status} ({code})"),
                 None => format!("the OAuth token endpoint refused: {status}"),
             }));
         }
         let Some(token) = json["access_token"].as_str().filter(|t| !t.is_empty()) else {
-            return Err(Upstream::fault(
+            return Err(Fault::upstream(
                 "the OAuth token endpoint's answer has no access_token",
             ));
         };
         if let Some(kind) = json["token_type"].as_str()
             && !kind.eq_ignore_ascii_case("bearer")
         {
-            return Err(Upstream::fault(
+            return Err(Fault::upstream(
                 "the OAuth token endpoint gave a token that is not a bearer token",
             ));
         }
@@ -281,25 +281,27 @@ impl OAuth {
 mod tests {
     use super::*;
 
-    fn config(yaml: &str) -> Result<OAuth, String> {
-        let config: OAuthConfig = serde_norway::from_str(yaml).map_err(|e| e.to_string())?;
+    fn config(text: &str) -> Result<OAuth, String> {
+        let config: OAuthConfig = toml::from_str(text).map_err(|e| e.to_string())?;
         OAuth::new("mcp 'm'", &config).map_err(|e| e.message().to_owned())
     }
 
     #[test]
     fn a_grant_is_client_credentials_or_a_refresh_token() {
-        let base = "token_url: 'https://a.test/token'\nclient_id: id\nclient_secret: s3cret\n";
+        let base = "token_url = \"https://a.test/token\"\nclient_id = \"id\"\nclient_secret = \"s3cret\"\n";
         let plain = config(base).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(plain.grant(), "client credentials");
-        let refreshed = config(&format!("{base}refresh_token: r\nscopes: [a, b]"))
-            .unwrap_or_else(|e| panic!("{e}"));
+        let refreshed = config(&format!(
+            "{base}refresh_token = \"r\"\nscopes = [\"a\", \"b\"]\n"
+        ))
+        .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(refreshed.grant(), "refresh token");
         assert_eq!(refreshed.scope.as_deref(), Some("a b"));
     }
 
     #[test]
     fn debug_shows_no_secret() {
-        let base = "token_url: 'https://a.test/token'\nclient_id: id-1\nclient_secret: s3cret\nrefresh_token: r3fresh\n";
+        let base = "token_url = \"https://a.test/token\"\nclient_id = \"id-1\"\nclient_secret = \"s3cret\"\nrefresh_token = \"r3fresh\"\n";
         let shown = format!("{:?}", config(base).unwrap_or_else(|e| panic!("{e}")));
         for secret in ["s3cret", "r3fresh", "id-1"] {
             assert!(!shown.contains(secret), "{shown}");
@@ -308,30 +310,35 @@ mod tests {
 
     #[test]
     fn mistakes_are_named() {
-        let said = |yaml: &str| config(yaml).err().unwrap_or_default();
-        let ok = "client_id: i\nclient_secret: s\n";
-        assert!(said(&format!("token_url: nope\n{ok}")).contains("not a URL"));
-        assert!(said(&format!("token_url: 'ftp://a.test/t'\n{ok}")).contains("http(s)"));
-        assert!(said(&format!("token_url: 'http://a.test/t'\n{ok}")).contains("https"));
+        let said = |text: &str| config(text).err().unwrap_or_default();
+        let ok = "client_id = \"i\"\nclient_secret = \"s\"\n";
+        assert!(said(&format!("token_url = 'nope'\n{ok}")).contains("not a URL"));
+        assert!(said(&format!("token_url = 'ftp://a.test/t'\n{ok}")).contains("http(s)"));
+        assert!(said(&format!("token_url = 'http://a.test/t'\n{ok}")).contains("https"));
         for local in ["localhost:1", "127.0.0.1:1", "[::1]:1"] {
-            assert_eq!(said(&format!("token_url: 'http://{local}/t'\n{ok}")), "");
+            assert_eq!(said(&format!("token_url = 'http://{local}/t'\n{ok}")), "");
         }
         assert!(
-            said("token_url: 'https://a.test/t'\nclient_id: ''\nclient_secret: s")
+            said("token_url = \"https://a.test/t\"\nclient_id = \"\"\nclient_secret = \"s\"\n")
                 .contains("client_id")
         );
         assert!(
             said(
-                "token_url: 'https://a.test/t'\nclient_id: i\nclient_secret: 'env:NO_SUCH_OAUTH_X'"
+                "token_url = \"https://a.test/t\"\nclient_id = \"i\"\nclient_secret = \"env:NO_SUCH_OAUTH_X\"\n"
             )
             .contains("NO_SUCH_OAUTH_X")
         );
         assert!(
             said(&format!(
-                "token_url: 'https://a.test/t'\n{ok}scopes: ['a b']"
+                "token_url = \"https://a.test/t\"\n{ok}scopes = [\"a b\"]\n"
             ))
             .contains("scope")
         );
-        assert!(said(&format!("token_url: 'https://a.test/t'\n{ok}extra: 1")).contains("extra"));
+        assert!(
+            said(&format!(
+                "token_url = \"https://a.test/t\"\n{ok}extra = 1\n"
+            ))
+            .contains("extra")
+        );
     }
 }

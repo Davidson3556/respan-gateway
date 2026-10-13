@@ -1,5 +1,5 @@
 //! End-to-end tests of the shipped binary's aggregate MCP endpoint (`/mcp`,
-//! `plugins: mcp_aggregate`) and of OAuth for an HTTP MCP server (`oauth:`).
+//! `plugins.mcp_aggregate`) and of OAuth for an HTTP MCP server (`oauth`).
 //!
 //! The upstream servers and the token endpoint are small strict fakes in
 //! this file. Run: `cargo test -p respan-gateway --test e2e_mcp_aggregate`.
@@ -450,7 +450,7 @@ async fn record(gw: &Gateway, model: &str) -> Value {
 
 fn aggregate_config(alpha: &Fake, beta: &Fake, extra: &str) -> String {
     format!(
-        "client_keys: [{KEY}, {OTHER}]\nmcp:\n  alpha: {{ url: '{}' }}\n  beta: {{ url: '{}' }}\n{extra}",
+        "client_keys = [\"{KEY}\", \"{OTHER}\"]\nmcp = {{ alpha = {{ url = \"{}\" }}, beta = {{ url = \"{}\" }} }}\n{extra}",
         alpha.url(),
         beta.url()
     )
@@ -465,7 +465,7 @@ async fn one_endpoint_fronts_every_server() {
     let config = aggregate_config(
         &alpha,
         &beta,
-        "plugins: { mcp_aggregate: { deny: ['beta__secret'] } }\n",
+        "plugins = { mcp_aggregate = { deny = [\"beta__secret\"] } }\n",
     );
     let gw = Gateway::start(&config).await;
 
@@ -667,7 +667,7 @@ async fn a_client_keys_tools_limit_what_the_aggregate_lists_and_calls() {
     let alpha = Fake::start("alpha", false, None).await;
     let beta = Fake::start("beta", false, None).await;
     let config = format!(
-        "client_keys:\n  - {{ name: wide, key: {KEY} }}\n  - {{ name: narrow, key: {OTHER}, tools: ['beta__*'] }}\nmcp:\n  alpha: {{ url: '{}' }}\n  beta: {{ url: '{}' }}\nplugins: {{ mcp_aggregate: {{}} }}\n",
+        "client_keys = [{{ name = \"wide\", key = \"{KEY}\" }}, {{ name = \"narrow\", key = \"{OTHER}\", tools = [\"beta__*\"] }}]\nmcp = {{ alpha = {{ url = \"{}\" }}, beta = {{ url = \"{}\" }} }}\nplugins = {{ mcp_aggregate = {{  }} }}\n",
         alpha.url(),
         beta.url()
     );
@@ -718,8 +718,8 @@ async fn a_client_keys_tools_limit_what_the_aggregate_lists_and_calls() {
 async fn a_reload_ends_the_old_builds_sessions_with_the_servers() {
     let alpha = Fake::start("alpha", false, None).await;
     let beta = Fake::start("beta", false, None).await;
-    let config = aggregate_config(&alpha, &beta, "plugins: { mcp_aggregate: {} }\n");
-    let path = support::write_config(&format!("listen: 127.0.0.1:0\n{config}"));
+    let config = aggregate_config(&alpha, &beta, "plugins = { mcp_aggregate = {  } }\n");
+    let path = support::write_config(&format!("listen = \"127.0.0.1:0\"\n{config}"));
     let gw = Gateway::run(&["--config", path.to_str().unwrap()]).await;
 
     let (session, _) = open(&gw, KEY).await;
@@ -765,7 +765,7 @@ async fn the_aggregate_names_a_subset_and_refuses_what_it_cannot_front() {
     let config = aggregate_config(
         &alpha,
         &beta,
-        "plugins: { mcp_aggregate: { servers: [beta] } }\n",
+        "plugins = { mcp_aggregate = { servers = [\"beta\"] } }\n",
     );
     let gw = Gateway::start(&config).await;
     let (session, _) = open(&gw, KEY).await;
@@ -794,17 +794,20 @@ async fn the_aggregate_names_a_subset_and_refuses_what_it_cannot_front() {
 
     for (extra, said) in [
         (
-            "plugins: { mcp_aggregate: { servers: [nope] } }",
+            "plugins = { mcp_aggregate = { servers = [\"nope\"] } }\n",
             "unknown mcp server 'nope'",
         ),
         (
-            "plugins: { mcp_aggregate: { servers: [alpha, alpha] } }",
+            "plugins = { mcp_aggregate = { servers = [\"alpha\", \"alpha\"] } }\n",
             "listed twice",
         ),
-        ("plugins: { mcp_aggregate: { deny: [''] } }", "pattern"),
+        (
+            "plugins = { mcp_aggregate = { deny = [\"\"] } }\n",
+            "pattern",
+        ),
     ] {
         let config = aggregate_config(&alpha, &beta, extra);
-        let path = support::write_config(&format!("listen: 127.0.0.1:0\n{config}"));
+        let path = support::write_config(&format!("listen = \"127.0.0.1:0\"\n{config}"));
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
             .args(["check", "--config", path.to_str().unwrap()])
             .output()
@@ -825,7 +828,7 @@ async fn client_credentials_get_a_token_and_a_refusal_gets_a_new_one() {
     let tokens = Tokens::start().await;
     let up = Fake::start("beta", false, Some("tok-1")).await;
     let config = format!(
-        "client_keys: [{KEY}]\nmcp:\n  beta:\n    url: '{}'\n    oauth:\n      token_url: '{}'\n      client_id: the-id\n      client_secret: 's3cret & more'\n      scopes: [read, write]\n",
+        "client_keys = [\"{KEY}\"]\nmcp = {{ beta = {{ url = \"{}\", oauth = {{ token_url = \"{}\", client_id = \"the-id\", client_secret = \"s3cret & more\", scopes = [\"read\", \"write\"] }} }} }}\n",
         up.url(),
         tokens.url
     );
@@ -898,11 +901,11 @@ async fn a_refresh_token_is_used_and_its_rotation_kept() {
     let tokens = Tokens::start().await;
     let up = Fake::start("beta", false, Some("tok-1")).await;
     let config = format!(
-        "client_keys: [{KEY}]\nmcp:\n  beta:\n    url: '{}'\n    oauth:\n      token_url: '{}'\n      client_id: the-id\n      client_secret: 'env:OAUTH_TEST_SECRET'\n      refresh_token: 'env:OAUTH_TEST_REFRESH'\n",
+        "client_keys = [\"{KEY}\"]\nmcp = {{ beta = {{ url = \"{}\", oauth = {{ token_url = \"{}\", client_id = \"the-id\", client_secret = \"env:OAUTH_TEST_SECRET\", refresh_token = \"env:OAUTH_TEST_REFRESH\" }} }} }}\n",
         up.url(),
         tokens.url
     );
-    let path = support::write_config(&format!("listen: 127.0.0.1:0\n{config}"));
+    let path = support::write_config(&format!("listen = \"127.0.0.1:0\"\n{config}"));
     let env = [
         ("OAUTH_TEST_SECRET", "from-env"),
         ("OAUTH_TEST_REFRESH", "refresh-0"),
@@ -942,8 +945,8 @@ async fn a_refresh_token_is_used_and_its_rotation_kept() {
 #[tokio::test]
 async fn oauth_mistakes_are_named_at_load() {
     let check = |extra: &str| {
-        let config = format!("mcp:\n  m:\n    url: 'http://127.0.0.1:1/mcp'\n{extra}");
-        let path = support::write_config(&format!("listen: 127.0.0.1:0\n{config}"));
+        let config = format!("[mcp.m]\nurl = \"http://127.0.0.1:1/mcp\"\n{extra}");
+        let path = support::write_config(&format!("listen = \"127.0.0.1:0\"\n{config}"));
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
             .args(["check", "--config", path.to_str().unwrap()])
             .env_remove("NO_SUCH_OAUTH_VAR")
@@ -953,13 +956,12 @@ async fn oauth_mistakes_are_named_at_load() {
             + &String::from_utf8_lossy(&out.stderr);
         (out.status.success(), text)
     };
-    let oauth =
-        "    oauth: { token_url: 'http://127.0.0.1:1/t', client_id: i, client_secret: s }\n";
-    let (ok, text) = check(&format!("    key: k\n{oauth}"));
+    let oauth = "oauth = { token_url = \"http://127.0.0.1:1/t\", client_id = \"i\", client_secret = \"s\" }\n";
+    let (ok, text) = check(&format!("key = \"k\"\n{oauth}"));
     assert!(!ok && text.contains("only one"), "{text}");
-    let (ok, text) = check(&format!("    forward_auth: true\n{oauth}"));
+    let (ok, text) = check(&format!("forward_auth = true\n{oauth}"));
     assert!(!ok && text.contains("forward_auth"), "{text}");
-    let missing = "    oauth: { token_url: 'http://127.0.0.1:1/t', client_id: i, client_secret: 'env:NO_SUCH_OAUTH_VAR' }\n";
+    let missing = "oauth = { token_url = \"http://127.0.0.1:1/t\", client_id = \"i\", client_secret = \"env:NO_SUCH_OAUTH_VAR\" }\n";
     let (ok, text) = check(missing);
     assert!(!ok && text.contains("NO_SUCH_OAUTH_VAR"), "{text}");
 }

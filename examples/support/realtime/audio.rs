@@ -1,7 +1,6 @@
 //! Audio validation and a conservative token bound for PCM24k and G.711.
 //! Rates: https://developers.openai.com/api/docs/guides/voice-latency-cost
 use base64::{Engine, engine::general_purpose::STANDARD};
-use respan_gateway_core::BadRequest;
 use respan_gateway_core::ErrorCode;
 use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{ClientContext, EventStream, Fault, Plugin, Response, async_trait};
@@ -22,7 +21,7 @@ pub(super) fn contains_audio(value: &Value) -> bool {
 pub(super) fn tokens(encoded: &str) -> Result<i64, Fault> {
     let bytes = STANDARD
         .decode(encoded)
-        .map_err(|_| BadRequest::fault("audio must be valid base64").with(CloseCode(1008)))?;
+        .map_err(|_| Fault::bad_request("audio must be valid base64").with(CloseCode(1008)))?;
     Ok(bound(bytes.len()))
 }
 
@@ -69,12 +68,12 @@ fn check(session: &Session) -> Result<(), Fault> {
         return Ok(());
     };
     if !session.is_object() {
-        return Err(BadRequest::fault("session must be an object").with(CloseCode(1008)));
+        return Err(Fault::bad_request("session must be an object").with(CloseCode(1008)));
     }
     for path in ["/audio", "/audio/input", "/audio/output"] {
         if session.pointer(path).is_some_and(|v| !v.is_object()) {
             return Err(
-                BadRequest::fault("audio configuration must be an object").with(CloseCode(1008))
+                Fault::bad_request("audio configuration must be an object").with(CloseCode(1008))
             );
         }
     }

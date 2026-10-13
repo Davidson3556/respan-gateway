@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_core::FaultKind;
 
 #[tokio::test]
 async fn unedited_messages_relay_what_they_say_and_a_filter_reads_their_usage() -> Result<(), Fault>
@@ -28,7 +29,7 @@ fn an_input_this_kind_cannot_read_is_refused_before_any_call() {
         r#"{"model":"m","input":["a"],"encoding_format":"base64"}"#,
     ] {
         let refused = read_request(Bytes::from(body)).expect_err(body);
-        assert!(refused.is::<BadRequest>(), "{body}");
+        assert!(refused.is(FaultKind::Client), "{body}");
     }
     let float = r#"{"model":"m","input":"a","encoding_format":"float"}"#;
     assert!(read_request(Bytes::from(float)).is_ok());

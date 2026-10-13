@@ -5,7 +5,7 @@
 use base64::Engine;
 use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD};
-use respan_gateway_core::{BadRequest, ErrorCode, Fault, NativeFields, Upstream};
+use respan_gateway_core::{ErrorCode, Fault, NativeFields};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_ws::CloseCode;
 use serde_json::{Map, Value};
@@ -120,13 +120,13 @@ pub(crate) fn own<'a>(
 /// client's fault, closing its session 1008.
 pub(crate) fn untranslatable_input(format: &str, what: &str) -> Fault {
     let message = format!("{what} cannot be translated to {format}");
-    BadRequest::fault(message).with(CloseCode(1008))
+    Fault::bad_request(message).with(CloseCode(1008))
 }
 
 /// An output `format` cannot write, which fails the session.
 pub(crate) fn untranslatable_output(format: &str, what: &str) -> Fault {
     let message = format!("{what} cannot be translated to {format}");
-    Upstream::fault(message).with(ErrorCode("untranslatable".into()))
+    Fault::upstream(message).with(ErrorCode("untranslatable".into()))
 }
 
 /// `v` as a frame.

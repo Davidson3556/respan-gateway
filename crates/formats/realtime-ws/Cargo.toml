@@ -12,7 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-respan-gateway-http-syntax.workspace = true
+form_urlencoded.workspace = true
 respan-gateway-http-faults.workspace = true
 base64.workspace = true
 respan-gateway-conversation.workspace = true

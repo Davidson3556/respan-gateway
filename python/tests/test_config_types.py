@@ -20,7 +20,6 @@ def test_a_full_typed_config_parses() -> None:
         "client_keys": ["client-key", {"name": "ci", "key": "ci-key"}],
         "log": "off",
         "ui": True,
-        "admin_writes": False,
         "providers": {
             "openai": {"vendor": "openai", "key": "sk-fake"},
             "custom": {

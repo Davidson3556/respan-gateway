@@ -52,11 +52,7 @@ async fn trickler(status: &'static str, gap: Duration, closed: Arc<AtomicBool>) 
 
 async fn gateway(base: &str) -> Gateway {
     Gateway::start(&format!(
-        "providers:
-  any: {{ formats: passthrough, base_url: '{base}' }}
-formats: [passthrough]
-plugins: {{ routing: {{ default: any }} }}
-"
+        "providers = {{ any = {{ formats = \"passthrough\", base_url = \"{base}\" }} }}\nformats = [\"passthrough\"]\nplugins = {{ routing = {{ default = \"any\" }} }}\n"
     ))
     .await
 }
@@ -99,12 +95,7 @@ async fn an_endless_error_is_answered_at_the_limit() {
     let closed = Arc::new(AtomicBool::new(false));
     let base = trickler("500 Internal Server Error", Duration::ZERO, closed.clone()).await;
     let gw = Gateway::start(&format!(
-        "body_limit: 1048576
-providers:
-  any: {{ formats: passthrough, base_url: '{base}' }}
-formats: [passthrough]
-plugins: {{ routing: {{ default: any }} }}
-"
+        "body_limit = 1048576\nproviders = {{ any = {{ formats = \"passthrough\", base_url = \"{base}\" }} }}\nformats = [\"passthrough\"]\nplugins = {{ routing = {{ default = \"any\" }} }}\n"
     ))
     .await;
     let addr = gw.base.trim_start_matches("http://").to_owned();

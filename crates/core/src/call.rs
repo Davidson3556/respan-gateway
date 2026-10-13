@@ -65,7 +65,7 @@ impl Call {
 
     /// Send `input`, such as a judge's prompt, in place of the client's. It
     /// must be the provider's input type, of any kind, or the call fails
-    /// with [`Internal`](crate::Internal).
+    /// with [`internal`](crate::Fault::internal).
     pub fn with_input<T: Any + Send + Sync>(mut self, input: T) -> Self {
         self.own = Some(Arc::new(input));
         self
@@ -355,7 +355,7 @@ impl OpenCalls {
         true
     }
 
-    /// End every call [`Abandoned`](crate::Abandoned).
+    /// End every call [`Abandoned`](crate::FaultKind::Abandoned).
     pub(crate) fn abandon(&self) {
         let calls = locked(&self.0).take().unwrap_or_default();
         for call in calls.iter().filter_map(Weak::upgrade) {

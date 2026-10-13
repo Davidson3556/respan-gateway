@@ -27,7 +27,7 @@ WORKDIR /home/gateway
 # The image listens on every address (port $PORT, 8080 by default; RESPAN_LISTEN overrides), so the gateway
 # refuses to start without a client key:
 #   docker run -p 8080:8080 -e OPENAI_API_KEY -e RESPAN_CLIENT_KEYS=sk-gw-change-me IMAGE
-# or `client_keys:` in a mounted config (-v $PWD/gateway.yaml:/home/gateway/gateway.yaml:ro).
+# or `client_keys:` in a mounted config (-v $PWD/gateway.toml:/home/gateway/gateway.toml:ro).
 # Provider keys come from the environment (-e OPENAI_API_KEY ...) or the config.
 ENV PORT=8080
 EXPOSE 8080

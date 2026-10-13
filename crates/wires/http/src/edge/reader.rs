@@ -14,6 +14,12 @@ pub(crate) type Failure = Arc<OnceLock<Fault>>;
 /// `Pending` that wakes itself at once follows each, and ending with the
 /// upload's `failed` fault once one is set. `limit` is its binding's
 /// ([`Body::limit`]).
+///
+/// The `Pending` between frames is load-bearing: without it, an answer
+/// already buffered is read whole in one poll, ahead of its client, so a
+/// client that leaves mid-stream would find its call already ended well.
+/// One frame per poll makes a call's outcome follow its client's pace, not
+/// how the provider's bytes happened to arrive (the relay lifecycle tests).
 pub(crate) fn observed(body: Body, failed: Failure, limit: usize) -> Body {
     let mut body = Body::stream(Observed {
         body,

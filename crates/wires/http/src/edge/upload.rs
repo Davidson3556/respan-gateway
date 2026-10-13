@@ -1,139 +1,92 @@
-//! Per-item request encoding, an item's messages a frame each, and
-//! independent transport completion.
+//! A call's outgoing sink: its live input encoded an item at a time, an
+//! item's messages a frame each, and the transport's independent delivery.
 
-use super::PANICKED;
 use super::reader::Failure;
 use super::writer::Writer;
+use super::{end_encoder, guarded};
 use crate::{Body, Completion, Encoder};
 use futures::future::{BoxFuture, Shared};
 use futures::{Future, Sink};
-use respan_gateway_core::{EventSink, Fault};
-use std::panic::AssertUnwindSafe;
+use respan_gateway_core::Fault;
 use std::pin::Pin;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use std::task::{Context, Poll, ready};
 
+/// The call's delivery ([`ProviderIo::bind`](crate::ProviderIo::bind)).
 pub(crate) type Delivery = Shared<BoxFuture<'static, Result<(), Fault>>>;
 
-/// Marks the failure of an encoding sink whose transport dropped its body:
-/// the delivery, not the sink, says how the upload ended.
-#[derive(Clone, Copy, Debug)]
-struct Discarded;
-pub(crate) struct Handoff {
-    pub(crate) draining: Completion,
-    pub(crate) failed: Failure,
-    pub(crate) settled: Arc<AtomicBool>,
+/// Live input's encoder and the byte writer a transport's body reads.
+pub(crate) struct Encoding<T> {
+    /// `None` once ended.
+    encoder: Option<Box<dyn Encoder<T>>>,
+    writer: Writer,
+    failed: Failure,
 }
 
-pub(crate) fn encoding<T: 'static>(encoder: Box<dyn Encoder<T>>) -> (EventSink<T>, Body) {
+/// Encode live input with `encoder`, its failure kept in `failed`: its
+/// sink's half, the body a transport reads, and the writer's completion
+/// once its reader drained it.
+pub(crate) fn encoding<T: 'static>(
+    encoder: Box<dyn Encoder<T>>,
+    failed: Failure,
+) -> (Encoding<T>, Body, Completion) {
     let (writer, frames, draining) = Writer::new();
-    let failed = Failure::default();
-    let mut body = Body::stream(frames);
-    let settled = Arc::new(AtomicBool::new(false));
-    body.upload = Some(Handoff {
-        draining,
-        failed: failed.clone(),
-        settled: settled.clone(),
-    });
     let mut encoding = Encoding {
-        encoder,
+        encoder: Some(encoder),
         writer,
         failed,
-        settled,
-        ended: false,
     };
     let mut out = Vec::new();
-    let started = std::panic::catch_unwind(AssertUnwindSafe(|| encoding.encoder.start(&mut out)))
-        .unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
+    let started = match &mut encoding.encoder {
+        Some(encoder) => guarded(|| encoder.start(&mut out)),
+        None => Ok(()),
+    };
     match started {
         Ok(()) => out
             .into_iter()
             .for_each(|frame| encoding.writer.send(frame)),
         Err(fault) => encoding.finish(Err(fault)),
     }
-    (EventSink::new(encoding), body)
+    (encoding, Body::stream(frames), draining)
 }
 
-struct Encoding<T> {
-    encoder: Box<dyn Encoder<T>>,
-    writer: Writer,
-    failed: Failure,
-    settled: Arc<AtomicBool>,
-    ended: bool,
-}
-impl<T> Unpin for Encoding<T> {}
 impl<T: 'static> Encoding<T> {
-    /// The writer's readiness: its own failure, or, once its reader is gone,
-    /// that it was [`Discarded`].
-    fn ready(&self, cx: &mut Context<'_>, requested: bool) -> Poll<Result<(), Fault>> {
-        self.writer.poll_ready(cx, requested).map_err(|gone| {
-            self.failed
-                .get()
-                .cloned()
-                .unwrap_or_else(|| gone.with(Discarded))
-        })
-    }
-    fn finish(&mut self, mut end: Result<(), Fault>) {
-        if self.ended {
+    fn push(&mut self, item: Result<T, Fault>) {
+        let Some(encoder) = &mut self.encoder else {
             return;
-        }
-        self.ended = true;
-        let mut out = Vec::new();
-        let ended = end.clone();
-        let encoded =
-            std::panic::catch_unwind(AssertUnwindSafe(|| self.encoder.end(ended, &mut out)))
-                .unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
-        if let Err(fault) = encoded {
-            out.clear();
-            end = Err(fault);
-        }
-        if let Err(fault) = &end {
-            let _ = self.failed.set(fault.clone());
-        }
-        for frame in out {
-            self.writer.send(frame);
-        }
-        self.writer.end(end.clone(), end.err());
-    }
-}
-impl<T: 'static> Sink<Result<T, Fault>> for Encoding<T> {
-    type Error = Fault;
-    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        self.ready(cx, true)
-    }
-    fn start_send(mut self: Pin<&mut Self>, item: Result<T, Fault>) -> Result<(), Fault> {
-        if self.ended {
-            return Ok(());
-        }
+        };
         let mut out = Vec::new();
         let encoded = match item {
-            Ok(value) => {
-                std::panic::catch_unwind(AssertUnwindSafe(|| self.encoder.encode(&value, &mut out)))
-                    .unwrap_or_else(|_| Err(Fault::internal(PANICKED)))
-            }
+            Ok(value) => guarded(|| encoder.encode(&value, &mut out)),
             Err(fault) => Err(fault),
         };
         match encoded {
-            Ok(()) => out
-                .into_iter()
-                .for_each(|message| self.writer.send(message)),
+            Ok(()) => out.into_iter().for_each(|frame| self.writer.send(frame)),
             Err(fault) => self.finish(Err(fault)),
         }
-        Ok(())
     }
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        self.ready(cx, false)
-    }
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        if self.settled.load(Ordering::Acquire) {
-            return Poll::Ready(self.failed.get().cloned().map_or(Ok(()), Err));
+
+    /// End the upload as `end` says. Any failure breaks the body off after
+    /// its error framing, so no transport takes it for a whole upload.
+    fn finish(&mut self, end: Result<(), Fault>) {
+        let Some(mut encoder) = self.encoder.take() else {
+            return;
+        };
+        let mut out = Vec::new();
+        let (end, _) = end_encoder(encoder.as_mut(), end, &mut out);
+        if let Err(fault) = &end {
+            let _ = self.failed.set(fault.clone());
         }
-        if !self.ended {
+        out.into_iter().for_each(|frame| self.writer.send(frame));
+        self.writer.end(end.clone(), end.err());
+    }
+
+    /// Finish and wait until the transport took every frame. A transport
+    /// that dropped the body ends it `Ok` unless the upload itself failed:
+    /// the delivery says how such a call ended.
+    fn close(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
+        if self.encoder.is_some() {
             if let Err(fault) = ready!(self.writer.poll_ready(cx, false)) {
-                return Poll::Ready(self.failed.get().cloned().map_or(Ok(()), |_| Err(fault)));
+                return Poll::Ready(self.failed.get().map_or(Ok(()), |_| Err(fault)));
             }
             self.finish(Ok(()));
         }
@@ -144,88 +97,87 @@ impl<T: 'static> Sink<Result<T, Fault>> for Encoding<T> {
     }
 }
 
-/// Couples an arbitrary real sink to the request's independent delivery work.
-/// A refused response may discard its byte reader; transport completion, rather
-/// than that discard, decides the call's final delivery result.
+/// A call's sink: its live input's [`Encoding`], or none for a call encoded
+/// whole, coupled to the call's delivery. A refused answer may discard the
+/// byte reader; the delivery, not that discard, decides how the call ended.
 pub(crate) struct Upload<T> {
-    sink: EventSink<T>,
+    encoding: Option<Encoding<T>>,
     delivery: Delivery,
     delivered: Option<Result<(), Fault>>,
     failed: Failure,
     closed: bool,
 }
+
 impl<T> Unpin for Upload<T> {}
+
 impl<T: 'static> Upload<T> {
-    pub(crate) fn new(sink: EventSink<T>, delivery: Delivery, failed: Failure) -> Self {
+    pub(crate) fn new(encoding: Option<Encoding<T>>, delivery: Delivery, failed: Failure) -> Self {
         Self {
-            sink,
+            encoding,
             delivery,
             delivered: None,
             failed,
             closed: false,
         }
     }
+
+    /// The delivery's end, once it ended, a failed upload's fault in place
+    /// of its `Ok`.
     fn progress(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
         if self.delivered.is_none() {
-            if let Poll::Ready(end) = Pin::new(&mut self.delivery).poll(cx) {
-                self.delivered =
-                    Some(end.and_then(|()| self.failed.get().cloned().map_or(Ok(()), Err)));
-            } else {
-                return Poll::Pending;
-            }
+            self.delivered = Some(ready!(Pin::new(&mut self.delivery).poll(cx)));
         }
-        Poll::Ready(self.delivered.clone().expect("delivery completed"))
+        let failed = self.failed.get().cloned().map_or(Ok(()), Err);
+        Poll::Ready(self.delivered.clone().unwrap_or(Ok(())).and(failed))
     }
-    /// The sink's readiness, or the delivery's once it has finished or the
-    /// sink was discarded; a failed delivery always wins.
-    fn readiness(&mut self, cx: &mut Context<'_>, flush: bool) -> Poll<Result<(), Fault>> {
+
+    /// The writer's readiness, or the delivery's once it has finished or
+    /// the body was discarded; a failed delivery always wins. `requested`
+    /// waits for the transport to ask for more.
+    fn readiness(&mut self, cx: &mut Context<'_>, requested: bool) -> Poll<Result<(), Fault>> {
         let delivery = self.progress(cx);
         if matches!(delivery, Poll::Ready(Err(_))) {
             return delivery;
         }
-        let ready = if flush {
-            Pin::new(&mut self.sink).poll_flush(cx)
-        } else {
-            Pin::new(&mut self.sink).poll_ready(cx)
+        let Some(encoding) = &self.encoding else {
+            return Poll::Ready(Ok(()));
         };
-        if let Poll::Ready(Err(fault)) = &ready {
-            // The delivery, whose waker is set, says how a discarded upload ended.
-            return if fault.get::<Discarded>().is_some() {
-                delivery
-            } else {
-                ready
-            };
-        }
-        // A finished delivery makes the upload ready; an unfinished one
-        // leaves it as the sink says.
-        match delivery {
-            Poll::Pending => ready,
-            delivery => delivery,
+        match encoding.writer.poll_ready(cx, requested) {
+            Poll::Ready(Err(_)) if self.failed.get().is_none() => delivery,
+            Poll::Ready(Err(_)) => Poll::Ready(Err(self
+                .failed
+                .get()
+                .cloned()
+                .unwrap_or_else(Fault::abandoned))),
+            ready if delivery.is_pending() => ready,
+            _ => delivery,
         }
     }
 }
+
 impl<T: 'static> Sink<Result<T, Fault>> for Upload<T> {
     type Error = Fault;
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        self.readiness(cx, false)
-    }
-    fn start_send(mut self: Pin<&mut Self>, item: Result<T, Fault>) -> Result<(), Fault> {
-        Pin::new(&mut self.sink).start_send(item)
-    }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
         self.readiness(cx, true)
     }
+    fn start_send(mut self: Pin<&mut Self>, item: Result<T, Fault>) -> Result<(), Fault> {
+        if let Some(encoding) = &mut self.encoding {
+            encoding.push(item);
+        }
+        Ok(())
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
+        self.readiness(cx, false)
+    }
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        let delivery = self.progress(cx);
-        if matches!(delivery, Poll::Ready(Err(_))) {
-            return delivery;
+        if let Poll::Ready(end) = self.progress(cx) {
+            return Poll::Ready(end);
         }
         if !self.closed {
-            match Pin::new(&mut self.sink).poll_close(cx) {
-                Poll::Ready(Ok(())) => self.closed = true,
-                Poll::Ready(Err(fault)) => return Poll::Ready(Err(fault)),
-                Poll::Pending => return Poll::Pending,
+            if let Some(encoding) = &mut self.encoding {
+                ready!(encoding.close(cx))?;
             }
+            self.closed = true;
         }
         self.progress(cx)
     }

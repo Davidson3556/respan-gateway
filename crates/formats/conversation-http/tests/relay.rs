@@ -32,8 +32,8 @@ use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::Details;
 use respan_gateway_core::async_trait;
 use respan_gateway_core::{
-    BadRequest, ClientContext, Connection, ErrorCode, Fault, Filter, Format, Gateway, Plugin,
-    ProviderContext, Response, Upstream,
+    ClientContext, Connection, ErrorCode, Fault, Filter, Format, Gateway, Plugin, ProviderContext,
+    Response,
 };
 use respan_gateway_http::Body;
 use respan_gateway_http::raw::Original;
@@ -217,7 +217,7 @@ impl Local {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .pop_front()
-                    .ok_or_else(|| Upstream::fault("no scripted provider response"))?;
+                    .ok_or_else(|| Fault::upstream("no scripted provider response"))?;
                 let (mut head, frames) = answer.into_parts();
                 respan_gateway_http::call::strip_origin_headers(&mut head.headers);
                 Ok((
@@ -455,7 +455,7 @@ struct Fallback(Vec<&'static str>);
 #[async_trait]
 impl Plugin for Fallback {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let mut last = Err(Upstream::fault("no providers"));
+        let mut last = Err(Fault::upstream("no providers"));
         for name in &self.0 {
             match cx.call(*name).await {
                 Ok(mut resp) => {
@@ -982,7 +982,7 @@ struct ArchFallback(Vec<&'static str>);
 #[async_trait]
 impl Plugin for ArchFallback {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let mut last = Err(Upstream::fault("no provider to try"));
+        let mut last = Err(Fault::upstream("no provider to try"));
         for name in &self.0 {
             match cx.call(*name).await {
                 Ok(mut resp) => {
@@ -1090,7 +1090,7 @@ impl Plugin for Pii {
         px.filter(move |chat: &mut Input| {
             for message in &mut chat.messages {
                 if !message.is_plain() {
-                    return Err(BadRequest::fault("content PII redaction cannot read"));
+                    return Err(Fault::bad_request("content PII redaction cannot read"));
                 }
                 for part in &mut message.content {
                     if let Content::Text { text, .. } = part {
@@ -1117,7 +1117,7 @@ struct Fallback11(Vec<&'static str>);
 #[async_trait]
 impl Plugin for Fallback11 {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let mut last = Err(Upstream::fault("no provider to fall back on"));
+        let mut last = Err(Fault::upstream("no provider to fall back on"));
         for name in &self.0 {
             // A provider's error answer is the failure
             // `until_content` returns, not a status to check first.

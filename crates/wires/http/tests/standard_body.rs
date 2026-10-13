@@ -9,7 +9,6 @@ use h::bytes::Bytes;
 use h::http::{HeaderMap, HeaderValue, Request, Response};
 use h::http_body::Frame;
 use h::http_body_util::{BodyExt, Empty, Full, StreamBody};
-use respan_gateway_core::Upstream;
 use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{EventStream, Fault};
 use respan_gateway_http as h;
@@ -18,8 +17,8 @@ async fn open(
     request: Request<h::Body>,
     decoded: Arc<AtomicUsize>,
 ) -> Result<EventStream<Bytes>, Fault> {
-    let (incoming, _answer) = h::ClientIo::accept(request, h::Framing::Whole, LIMIT);
-    let (opening, _sink) = incoming.with_error(h::rules::plain).bind(
+    let (incoming, _answer) = h::ClientIo::accept(request, LIMIT);
+    let (opening, _sink) = incoming.bind(
         move |_request| {
             {
                 Box::new(move |bytes: Bytes, out: &mut Vec<_>| {
@@ -87,7 +86,7 @@ async fn standard_frame_adapter_preserves_data_and_head_but_discards_trailers() 
 async fn standard_body_collection_keeps_wire_failure_out_of_semantic_decoding() {
     let frames = stream::iter([
         Ok(Frame::data(Bytes::from_static(b"partial"))),
-        Err(Upstream::fault("broken native body")),
+        Err(Fault::upstream("broken native body")),
     ]);
     let body = StreamBody::new(frames);
     let decoded = Arc::new(AtomicUsize::new(0));
@@ -97,7 +96,7 @@ async fn standard_body_collection_keeps_wire_failure_out_of_semantic_decoding() 
     )
     .await;
     let fault = result.expect_err("wire failure must fail opening");
-    assert_eq!(respan_gateway_http_faults::error_code(&fault), "upstream");
+    assert_eq!(fault.code(), "upstream");
     assert_eq!(fault.message(), "broken native body");
     assert_eq!(decoded.load(Ordering::SeqCst), 0);
 }

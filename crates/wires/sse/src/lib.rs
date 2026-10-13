@@ -6,13 +6,13 @@
 //! HTTP: reading a response body as SSE is `respan_gateway_http`'s.
 
 use bytes::{Bytes, BytesMut};
-use respan_gateway_core::{Fault, Upstream};
+use respan_gateway_core::Fault;
 use serde_json::Value;
 
 /// The fault of a provider's answer that holds more than `limit` bytes at
-/// once.
-fn over(limit: usize) -> Fault {
-    Upstream::fault(format!(
+/// once: an event, or a whole body.
+pub fn over_limit(limit: usize) -> Fault {
+    Fault::upstream(format!(
         "the provider's answer is over the limit of {limit} bytes"
     ))
 }
@@ -37,8 +37,8 @@ pub struct Parser {
 
 impl Parser {
     /// Create an incremental synchronous event splitter that holds up to
-    /// `limit` bytes of an event not yet ended, such as its body's
-    /// (`respan_gateway_http::Body::limit`), or any number for `None`.
+    /// `limit` bytes of an event not yet ended, such as its transport's
+    /// (`respan_gateway_http::connect`), or any number for `None`.
     pub fn new(limit: Option<usize>) -> Self {
         Self {
             limit,
@@ -51,7 +51,7 @@ impl Parser {
     pub fn push(&mut self, bytes: Bytes) -> Result<Vec<Bytes>, Fault> {
         let events = self.split(&bytes, false);
         match self.limit.filter(|&limit| self.buf.len() > limit) {
-            Some(limit) => Err(over(limit)),
+            Some(limit) => Err(over_limit(limit)),
             None => Ok(events),
         }
     }
@@ -338,6 +338,6 @@ mod tests {
         );
         assert!(d.push(Bytes::from_static(b"data: 1")).is_ok());
         let over = d.push(Bytes::from_static(b"23")).err();
-        assert!(over.is_some_and(|f| f.is::<respan_gateway_core::Upstream>()));
+        assert!(over.is_some_and(|f| f.is(respan_gateway_core::FaultKind::Provider)));
     }
 }

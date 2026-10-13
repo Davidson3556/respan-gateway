@@ -15,7 +15,7 @@ use http_body_util::BodyExt;
 use respan_gateway_core::Fault;
 
 pub use body::Body;
-pub use client::{ClientIo, Framing, Reply, handle};
+pub use client::{ClientIo, Reply, handle, handle_live};
 pub use provider::{ProviderIo, connect};
 
 /// A body, its bytes one item per data frame, ending with an `Err` if it
@@ -27,6 +27,47 @@ pub type Completion = BoxFuture<'static, Result<(), Fault>>;
 
 const PANICKED: &str = "a plugin or format panicked";
 pub(crate) type Written = (http::Response<Body>, crate::Completion);
+
+/// `f`'s result, or an `internal` fault if it panicked: a format's code is
+/// run so a panic in it fails its exchange, not the gateway.
+pub(crate) fn guarded<R>(f: impl FnOnce() -> Result<R, Fault>) -> Result<R, Fault> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .unwrap_or_else(|_| Err(Fault::internal(PANICKED)))
+}
+
+/// `mutex`'s guard, poisoned or not: every value behind one stays whole
+/// between statements, so a panic elsewhere leaves nothing half-written.
+pub(crate) fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// End `encoder` as `end` says, its closing frames in `out`, as
+/// [`Encoder::end`](crate::Encoder::end) promises: if ending well fails, it
+/// ends once more with that failure, to write its error framing. How it
+/// ended, and the fault to break the body off with if even that failed or
+/// it panicked, its frames dropped.
+pub(crate) fn end_encoder<T: 'static>(
+    encoder: &mut dyn crate::Encoder<T>,
+    end: Result<(), Fault>,
+    out: &mut Vec<Bytes>,
+) -> (Result<(), Fault>, Option<Fault>) {
+    let well = end.is_ok();
+    let first = guarded(|| encoder.end(end.clone(), out));
+    let Err(fault) = first else {
+        return (end, None);
+    };
+    out.clear();
+    if !well {
+        return (Err(fault.clone()), Some(fault));
+    }
+    match guarded(|| encoder.end(Err(fault.clone()), out)) {
+        Ok(()) => (Err(fault), None),
+        Err(_) => {
+            out.clear();
+            (Err(fault.clone()), Some(fault))
+        }
+    }
+}
 
 /// Drive the gateway alongside an HTTP reply, then let its body own the
 /// remaining work. Cancelling either stage cancels the gateway exchange.
@@ -118,7 +159,7 @@ impl http_body::Body for Pump {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use respan_gateway_core::{EventSink, EventStream, Format, Upstream};
+    use respan_gateway_core::{EventSink, EventStream, Format};
 
     /// A format that reads one message and writes nothing: only the reply's
     /// refusal matters here.
@@ -150,19 +191,67 @@ mod tests {
         }
     }
 
+    /// Ends well unless told to fail, then writes `error` as its framing.
+    struct Framed {
+        fail: bool,
+        ends: usize,
+    }
+
+    impl crate::Encoder<()> for Framed {
+        fn encode(&mut self, _: &(), _: &mut Vec<Bytes>) -> Result<(), Fault> {
+            Ok(())
+        }
+        fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+            self.ends += 1;
+            out.push(Bytes::from_static(b"partial"));
+            match end {
+                Ok(()) if self.fail => Err(Fault::upstream("no usage")),
+                Ok(()) => Ok(()),
+                Err(_) => {
+                    out.push(Bytes::from_static(b"error"));
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_encoder_that_fails_to_end_well_writes_its_error_framing() {
+        let mut encoder = Framed {
+            fail: true,
+            ends: 0,
+        };
+        let mut out = Vec::new();
+        let (end, abort) = end_encoder(&mut encoder, Ok(()), &mut out);
+        assert!(end.is_err() && abort.is_none());
+        assert_eq!(
+            out,
+            [Bytes::from_static(b"partial"), Bytes::from_static(b"error")]
+        );
+        assert_eq!(encoder.ends, 2);
+    }
+
+    #[test]
+    fn an_encoder_that_cannot_frame_a_failure_breaks_the_body_off() {
+        let mut out = Vec::new();
+        let encoder = &mut |_: &(), _: &mut Vec<Bytes>| Ok(());
+        let (end, abort) = end_encoder(encoder, Err(Fault::upstream("x")), &mut out);
+        assert!(end.is_err() && abort.is_some() && out.is_empty());
+    }
+
     /// A reply prepared before handling ends is kept, however it ended.
     #[tokio::test]
     async fn a_completed_handler_keeps_an_already_ready_reply() {
         let request = http::Request::post("/x").body(Body::full("q"));
         let request = request.unwrap_or_default();
-        let (incoming, answer) = ClientIo::accept(request, Framing::Whole, 1024);
+        let (incoming, answer) = ClientIo::accept(request, 1024);
         let Ok((opening, mut outgoing)) = Silent.bind(incoming) else {
             panic!("bound")
         };
         assert!(opening.await.is_ok());
-        let mut refused = EventStream::refused(Upstream::fault("refused"));
+        let mut refused = EventStream::refused(Fault::upstream("refused"));
         assert!(outgoing.prepare(&mut refused).is_ok());
-        let handled = futures::future::ready(Err(Upstream::fault("handling failed"))).boxed();
+        let handled = futures::future::ready(Err(Fault::upstream("handling failed"))).boxed();
         let response = drive(handled, answer)
             .await
             .map(|(response, _)| response.status());

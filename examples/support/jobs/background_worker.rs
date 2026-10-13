@@ -2,7 +2,7 @@
 //! holds and the webhook outbox; task handles only speed up local cancellation.
 
 use super::*;
-use respan_gateway_core::Upstream;
+use respan_gateway_core::Fault;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn now() -> i64 {
@@ -72,9 +72,7 @@ impl Jobs {
         });
         req.extensions_mut().insert(extensions);
         // Register with gateway.idle before the spawning request can finish.
-        let whole = respan_gateway_http::Framing::Whole;
-        let served =
-            respan_gateway_http::handle(gateway, req, whole, respan_gateway_examples::LIMIT);
+        let served = respan_gateway_http::handle(gateway, req, respan_gateway_examples::LIMIT);
         let (jobs, id) = (self.clone(), id.to_owned());
         let active_id = id.clone();
         let (start, started) = tokio::sync::oneshot::channel();
@@ -155,7 +153,7 @@ impl Jobs {
             .timeout(Duration::from_secs(3))
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|e| Upstream::fault(e.to_string()))?;
+            .map_err(|e| Fault::upstream(e.to_string()))?;
         for (id, url, body) in notices {
             let sent = client
                 .post(url)

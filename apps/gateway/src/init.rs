@@ -1,4 +1,4 @@
-//! `respan-gateway init`: a commented starter `gateway.yaml`, with a
+//! `respan-gateway init`: a commented starter `gateway.toml`, with a
 //! provider for each vendor whose key is in the environment, or that was
 //! asked for.
 
@@ -60,97 +60,66 @@ pub fn starter_config() -> String {
 /// A new client key: `sk-gw-` and 32 url-safe characters (192 bits) from
 /// the system's CSPRNG.
 pub fn new_client_key() -> Result<String, getrandom::Error> {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut bytes = [0u8; 32];
+    use base64::Engine;
+    let mut bytes = [0u8; 24];
     getrandom::fill(&mut bytes)?;
-    // 64 divides 256, so masking a byte to 6 bits is unbiased.
-    let random: String = bytes
-        .iter()
-        .map(|b| char::from(ALPHABET[usize::from(b & 63)]))
-        .collect();
+    let random = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     Ok(format!("sk-gw-{random}"))
 }
 
 /// The starter config: the vendors with keys in the environment, and those
 /// `chosen`, enabled, with any base URL the environment moves them to
-/// (`OLLAMA_HOST`, `RESPAN_<VENDOR>_BASE_URL`), the rest commented out;
+/// (`OLLAMA_HOST`, `RESPAN_<VENDOR>_BASE_URL`);
 /// OpenAI enabled if there are none. `client_key` is written into
-/// `client_keys:`, else a hint is. A chosen vendor's entry names its key.
+/// `client_keys`, else a hint is. A chosen vendor's entry names its key.
 pub fn starter(chosen: &[Chosen], client_key: Option<&str>) -> String {
     let detected = presets::detected();
-    let found = |vendor: &str| detected.iter().find(|(p, ..)| p.id == vendor);
-    let picked = |vendor: &str| chosen.iter().find(|c| c.vendor.id == vendor);
-    let enabled = |vendor: &str| match detected.is_empty() && chosen.is_empty() {
-        true => vendor == "openai",
-        false => found(vendor).is_some() || picked(vendor).is_some(),
-    };
-    let client_keys = match client_key {
-        Some(key) => format!("client_keys: ['{}']", key.replace('\'', "''")),
-        None => {
-            "# client_keys: [env:GATEWAY_KEY]   # or `respan-gateway init --client-key`".to_owned()
-        }
-    };
-    let mut providers = String::new();
-    for vendor in ALL {
-        let key = match vendor.key_env {
-            [] => "no key".to_owned(),
-            names => format!("key: env:{}", names.join(" or env:")),
-        };
-        let mark = if enabled(vendor.id) { "" } else { "# " };
-        let base_url = found(vendor.id).and_then(|(.., base_url)| base_url.as_deref());
-        // A vendor with no base URL of its own needs one.
-        let base_url = base_url.or(vendor.base_url.is_none().then_some("<base URL>"));
-        let base_url = base_url.map_or(String::new(), |url| {
-            format!(", base_url: '{}'", url.replace('\'', "''"))
-        });
-        let named = picked(vendor.id).and_then(|c| c.key.as_deref());
-        let named = named.map_or(String::new(), |k| {
-            format!(", key: '{}'", k.replace('\'', "''"))
-        });
-        let entry = format!(
-            "{}: {{ vendor: {}{base_url}{named} }}",
-            vendor.id, vendor.id
-        );
-        providers.push_str(&format!("  {mark}{entry:<36} # {key}\n"));
+    let quote = |text: &str| toml::Value::String(text.to_owned()).to_string();
+    let mut text = String::from(
+        "# Respan Gateway\n\
+         # Check: respan-gateway check    Run: respan-gateway\n\
+         # More options: gateway.example.toml\n\n\
+         # Server settings (keep these above all [tables]).\n\
+         listen = \"127.0.0.1:8080\"\n\
+         log = \"text\"                 # text | json | off\n\
+         ui = true                    # Dashboard at /ui/\n\n\
+         # Require a client key before listening beyond localhost.\n",
+    );
+    match client_key {
+        Some(key) => text.push_str(&format!("client_keys = [{}]\n", quote(key))),
+        None => text.push_str("# client_keys = [\"env:GATEWAY_KEY\"]\n"),
     }
-    format!(
-        "# respan-gateway configuration. Check it with `respan-gateway check`,
-# run it with `respan-gateway`. Every setting: gateway.example.yaml.
-
-listen: 127.0.0.1:8080
-
-# Client keys: when set, every request needs one (Authorization: Bearer,
-# x-api-key or x-goog-api-key). Without them, anyone who can reach the
-# gateway spends your provider keys: keep it local (the gateway refuses to
-# listen beyond loopback without one).
-{client_keys}
-
-# Providers, by name. A vendor preset brings its base URL, its key from the
-# environment, every format the gateway speaks for it, and its model names
-# (gpt-* to openai, claude-* to anthropic, ...). Any provider is also
-# reached as `<name>/<model>`, such as `groq/llama-3.3-70b-versatile`.
-# Override a preset's `base_url` or `key` in place (with a config file,
-# RESPAN_<VENDOR>_BASE_URL is not read). The first provider
-# serving a kind (chat, realtime, ...) is that kind's default.
-providers:
-{providers}
-# Plugins, each under its name. Routing sends model names to providers,
-# before the presets' own names, and a default for requests nothing else
-# routes; fallback tries other providers when one refuses:
-# plugins:
-#   routing:
-#     models:
-#       - {{ prefix: llama, provider: groq }}
-#     default: openai
-#   fallback:
-#     after: {{ openai: [openai-eu] }}
-
-# Print each request to stderr as text or json (or off); serve the web UI
-# at /ui/.
-log: text
-ui: true
-"
-    )
+    text.push_str("\n# Providers: presets supply URLs, formats, and model routing.\n");
+    for vendor in ALL {
+        let found = detected.iter().find(|(p, ..)| p.id == vendor.id);
+        let picked = chosen.iter().find(|c| c.vendor.id == vendor.id);
+        let enabled = found.is_some()
+            || picked.is_some()
+            || (detected.is_empty() && chosen.is_empty() && vendor.id == "openai");
+        if !enabled {
+            continue;
+        }
+        text.push_str(&format!(
+            "\n[providers.{}]\nvendor = {}\n",
+            vendor.id,
+            quote(vendor.id)
+        ));
+        let key = picked
+            .and_then(|c| c.key.clone())
+            .or_else(|| found.and_then(|(_, key, _)| key.clone()))
+            .or_else(|| vendor.key_env.first().map(|var| format!("env:{var}")));
+        if let Some(key) = key {
+            text.push_str(&format!("key = {}\n", quote(&key)));
+        }
+        let base_url = found
+            .and_then(|(.., url)| url.as_deref())
+            .or(vendor.base_url.is_none().then_some("<base URL>"));
+        if let Some(url) = base_url {
+            text.push_str(&format!("base_url = {}\n", quote(url)));
+        }
+    }
+    text.push_str("\n# Add providers and optional plugins using gateway.example.toml.\n");
+    text
 }
 
 #[cfg(test)]
@@ -165,10 +134,10 @@ mod tests {
 
     #[test]
     fn the_starter_config_parses() {
-        let text = starter_config();
+        let text = starter(&[], None);
         let config = crate::Config::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
         assert!(!config.providers.is_empty(), "{text}");
-        assert!(text.contains("vendor: anthropic"), "{text}");
+        assert!(text.contains("[providers."), "{text}");
     }
 
     #[test]
@@ -180,15 +149,17 @@ mod tests {
         let config = crate::Config::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
         assert!(config.providers.len() >= 3, "{text}");
         for vendor in ["groq", "mistral", "openai"] {
-            assert!(text.contains(&format!("\n  {vendor}: {{")), "{text}");
+            assert!(text.contains(&format!("[providers.{vendor}]")), "{text}");
         }
-        assert!(
-            text.contains("vendor: groq, key: 'env:GROQ_API_KEY'"),
-            "{text}"
+        assert_eq!(
+            config.providers["groq"].key.as_deref(),
+            Some("env:GROQ_API_KEY")
         );
-        assert!(text.contains("key: 'env:MY_MISTRAL'"), "{text}");
-        assert!(text.contains("key: 'sk-''odd'"), "{text}");
-        assert!(text.contains("  # anthropic:"), "{text}");
+        assert_eq!(
+            config.providers["mistral"].key.as_deref(),
+            Some("env:MY_MISTRAL")
+        );
+        assert_eq!(config.providers["openai"].key.as_deref(), Some("sk-'odd"));
     }
 
     #[test]

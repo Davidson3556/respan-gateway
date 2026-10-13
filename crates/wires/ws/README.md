@@ -17,15 +17,15 @@ the vendors that speak them
   `wss://` provider. It prepares a call as `HttpTransport` does
   (`respan_gateway_http::call::prepare_call`), so a client's key passes only where
   a plugin put it back. `.with_headers(map)` sets the transport's own keys,
-  `.with_limits(limits)` its `Limits`, `.with_handshake_timeout(d)` how long
-  the provider has to answer the upgrade (default 10 s), and
-  `.with_client(client)` a client in place of the shared one.
+  `.with_limits(limits)` its `Limits`, and `.with_client(client)` a client
+  in place of the shared one. The provider has 10 s to answer the upgrade,
+  a refusal's body included.
 - `.with_binary_text(true)` accepts a provider's binary messages containing
   UTF-8 text, such as Gemini Live's JSON. These become text messages toward
   the client; invalid UTF-8 is a fault. Disabled by default.
-- `CloseCode(u16)`: a fact on a `Fault` that picks the code the client is
+- `CloseCode(u16)`: an extension on a `Fault` that picks the code the client is
   closed with, in place of 1011. A code no Close may carry (1004 to 1006,
-  1015, outside 1000 to 4999) is sent as 1011 (`CloseCode::sendable`).
+  1015, outside 1000 to 4999) is sent as 1011.
 - `ProviderClose(u16)`: the code a provider closed with, other than 1000, on
   the `upstream` fault the transport ends the answer with. The client is told
   it only as a `CloseCode`, which the transport adds on a call `Relayed`
@@ -105,7 +105,7 @@ into a session. Where that shows:
 - **Frame kinds.** A body item carries text bytes, so its original frame kind
   is lost. Opt-in binary UTF-8 normalization supports JSON protocols; raw
   binary audio would require a format that carried each event's frame kind.
-- **Close mapping.** A close is only a clean end, or an `Err` with typed facts
+- **Close mapping.** A close is only a clean end, or an `Err` with typed extensions
   (`ProviderClose`, `CloseCode`) on the fault. The client's close code and
   reason, and the provider's reason text, cannot cross.
 - **The Upgrade dance.** A call keeps `Upgrade`, `prepare_call` gives it

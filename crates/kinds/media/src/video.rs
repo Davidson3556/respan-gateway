@@ -18,8 +18,8 @@ use bytes::Bytes;
 use respan_gateway_conversation::{Media, MediaSource};
 use respan_gateway_core::futures::StreamExt;
 use respan_gateway_core::{
-    BadRequest, ClientContext, ErrorCode, Fault, FormatId, NativeFields, NativeValue, Plugin,
-    Response, Upstream, async_trait,
+    ClientContext, ErrorCode, Fault, FormatId, NativeFields, NativeValue, Plugin, Response,
+    async_trait,
 };
 use serde_json::Value;
 
@@ -351,16 +351,16 @@ impl Plugin for LocateContent {
                 job = Some(found);
             }
         }
-        let job = job.ok_or_else(|| Upstream::fault("the provider retrieved no job"))?;
+        let job = job.ok_or_else(|| Fault::upstream("the provider retrieved no job"))?;
         let url = match (&job.status, job.video_url()) {
             (Status::Completed, Some(url)) => url.to_owned(),
             (Status::Completed, None) => {
-                return Err(Upstream::fault(
+                return Err(Fault::upstream(
                     "the provider's finished job names no video",
                 ));
             }
             (status, _) => {
-                return Err(BadRequest::fault(format!(
+                return Err(Fault::bad_request(format!(
                     "the video is not ready: its job is {status:?}"
                 ))
                 .with(ErrorCode("video_not_ready".into())));

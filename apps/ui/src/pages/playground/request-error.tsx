@@ -14,16 +14,15 @@ export function RequestError({ error, what }: { error: unknown; what: string }) 
     return (
       <EmptyState icon={PlugZap} title={`No provider serves ${what} yet`}>
         <p>
-          The gateway answered 404: none of its providers handles {what}. Add a provider whose
-          format covers it to <code className="text-foreground">gateway.yaml</code>, serve that
-          format, and restart.
+          Add a provider for {what} in <code>gateway.toml</code>.
         </p>
         <Button asChild variant="outline" size="sm">
-          <Link to="/providers">See configured providers</Link>
+          <Link to="/providers">View providers</Link>
         </Button>
       </EmptyState>
     );
   }
+  const interrupted = error instanceof Error && error.message === "stream ended before completion";
   return (
     <div
       role="alert"
@@ -32,9 +31,9 @@ export function RequestError({ error, what }: { error: unknown; what: string }) 
       <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
       <div className="min-w-0">
         <p className="font-medium">
-          {error instanceof ApiError ? `The gateway answered ${error.status}` : "Request failed"}
+          {interrupted ? "Response interrupted" : error instanceof ApiError ? `Request failed · ${error.status}` : "Request failed"}
         </p>
-        <p className="break-words text-muted-foreground">{describeError(error)}</p>
+        <p className="mt-1 leading-relaxed whitespace-pre-wrap break-words text-foreground/90">{interrupted ? "The stream ended early. You can continue chatting." : describeError(error)}</p>
       </div>
     </div>
   );

@@ -26,10 +26,10 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    /// Starts the binary with `config` (YAML without `listen`), listening on
+    /// Starts the binary with `config` (TOML without `listen`), listening on
     /// a port the OS picks, and waits, bounded, until it says where.
     pub async fn start(config: &str) -> Self {
-        let path = write_config(&format!("listen: 127.0.0.1:0\n{config}"));
+        let path = write_config(&format!("listen = \"127.0.0.1:0\"\n{config}"));
         Self::run(&["--config", path.to_str().unwrap()]).await
     }
 
@@ -100,13 +100,13 @@ impl Gateway {
     }
 }
 
-/// Writes `yaml` to a fresh file under Cargo's temp dir for tests.
-pub fn write_config(yaml: &str) -> std::path::PathBuf {
+/// Writes `text` to a fresh file under Cargo's temp dir for tests.
+pub fn write_config(text: &str) -> std::path::PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let path = dir.join(format!("e2e-{}-{n}.yaml", std::process::id()));
-    std::fs::write(&path, yaml).unwrap_or_else(|e| panic!("write config: {e}"));
+    let path = dir.join(format!("e2e-{}-{n}.toml", std::process::id()));
+    std::fs::write(&path, text).unwrap_or_else(|e| panic!("write config: {e}"));
     path
 }
 

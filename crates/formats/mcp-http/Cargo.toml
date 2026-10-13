@@ -13,7 +13,6 @@ workspace = true
 
 [dependencies]
 respan-gateway-sse.workspace = true
-respan-gateway-http-syntax.workspace = true
 respan-gateway-http-faults.workspace = true
 getrandom = { workspace = true, features = ["std"] }
 respan-gateway-core.workspace = true

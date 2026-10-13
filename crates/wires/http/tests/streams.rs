@@ -26,16 +26,16 @@ use respan_gateway_passthrough_http as passthrough;
 
 use respan_gateway_conversation::{Delta, Input, Message, Output, Role};
 use respan_gateway_conversation_http::openai::OpenAiChat;
+use respan_gateway_core::Provider;
 use respan_gateway_core::futures;
-use respan_gateway_core::{BadRequest, Provider, Upstream};
 use respan_gateway_core::{
     ClientContext, EventSink, Fault, Filter, Format, Gateway, Plugin, ProviderContext, Response,
     async_trait,
 };
 use respan_gateway_http::Encoder;
+use respan_gateway_http::path::set_path;
 use respan_gateway_http::{ClientIo, Completion, ProviderIo, raw::Original};
 use respan_gateway_http::{http, http_body, http_body_util};
-use respan_gateway_http_syntax::set_path;
 use serde_json::{Value, json};
 
 /// A provider registration used only by this suite.
@@ -121,10 +121,10 @@ fn read_talk(
                     let text = match v.as_ref().and_then(Value::as_str) {
                         _ if raw.is_empty() && !strict => String::new(),
                         _ if raw.is_empty() => {
-                            return Err(BadRequest::fault("an empty message is not talk"));
+                            return Err(Fault::bad_request("an empty message is not talk"));
                         }
                         Some(s) => s.to_owned(),
-                        None => return Err(BadRequest::fault("not talk")),
+                        None => return Err(Fault::bad_request("not talk")),
                     };
                     Ok(Say(text, rest))
                 }
@@ -238,7 +238,7 @@ impl respan_gateway_http::Decoder<Heard> for Messages {
         let heard = serde_json::from_slice::<Value>(&bytes).ok();
         match heard.as_ref().and_then(|v| v["heard"].as_str()) {
             Some(h) => out.push(Heard(h.into())),
-            None => return Err(Upstream::fault("not talk")),
+            None => return Err(Fault::upstream("not talk")),
         }
         Ok(())
     }
@@ -354,7 +354,7 @@ impl Echo {
 /// recording every call.
 fn talk(echo: &Echo, plugins: Vec<Arc<dyn Plugin>>) -> (Gateway, Calls) {
     // Most tests never call OpenAI; an unexpected call must fail explicitly.
-    let unexpected = sender(|_| async { Err(Upstream::fault("unexpected OpenAI call")) });
+    let unexpected = sender(|_| async { Err(Fault::upstream("unexpected OpenAI call")) });
     talk_with_openai(echo, unexpected, plugins)
 }
 
@@ -596,11 +596,7 @@ async fn a_whole_request_carries_one_input_even_empty_and_an_upgrading_head_none
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let input = match cx.input::<Say>() {
                 Ok(say) => format!("{say:?}"),
-                Err(f) => format!(
-                    "{}: {}",
-                    respan_gateway_http_faults::error_code(&f),
-                    f.message()
-                ),
+                Err(f) => format!("{}: {}", f.code(), f.message()),
             };
             let asked = cx.extensions().get::<Original>().and_then(Original::get);
             let count = match asked.is_some_and(|a| a.headers().contains_key(UPGRADE)) {
@@ -869,7 +865,7 @@ async fn an_input_filters_failure_ends_every_input_filter_with_it() {
             let code = end
                 .as_ref()
                 .err()
-                .map_or("ok", respan_gateway_http_faults::error_code);
+                .map_or("ok", respan_gateway_core::Fault::code);
             self.0.note(format!("{} {code}", self.1));
             Ok(())
         }
@@ -879,7 +875,7 @@ async fn an_input_filters_failure_ends_every_input_filter_with_it() {
     impl Plugin for Guard {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(|say: &mut Say| match say.0.as_str() {
-                "bad" => Err(BadRequest::fault("blocked")),
+                "bad" => Err(Fault::bad_request("blocked")),
                 _ => Ok(()),
             })?;
             cx.filter(NoteEnd(self.0.clone(), "client"))?;
@@ -939,7 +935,7 @@ async fn a_panic_ending_a_call_keeps_its_end() {
             let code = o
                 .as_ref()
                 .err()
-                .map_or("ok", respan_gateway_http_faults::error_code);
+                .map_or("ok", respan_gateway_core::Fault::code);
             self.0.note(code.to_owned());
         }
     }
@@ -975,10 +971,7 @@ async fn a_call_pending_at_the_requests_end_ends_abandoned_before_it() {
                 // Polled once, so the call is sent and pending.
                 let _ = futures::poll!(call.as_mut());
                 let _ = sent.send(());
-                let end = call
-                    .await
-                    .err()
-                    .map(|f| respan_gateway_http_faults::error_code(&f).to_owned());
+                let end = call.await.err().map(|f| f.code().to_owned());
                 notes.note(format!("call {}", end.unwrap_or_default()));
             });
             let _ = pending.await;
@@ -1001,10 +994,7 @@ async fn a_call_pending_at_the_requests_end_ends_abandoned_before_it() {
             _px: &ProviderContext,
             o: &Result<(), respan_gateway_core::Fault>,
         ) {
-            let end = o
-                .as_ref()
-                .err()
-                .map(|f| respan_gateway_http_faults::error_code(f).to_owned());
+            let end = o.as_ref().err().map(|f| f.code().to_owned());
             self.0
                 .note(format!("on_provider_end {}", end.unwrap_or_default()));
         }
@@ -1059,7 +1049,7 @@ async fn a_retry_after_a_call_that_failed_unread_gets_every_input() {
             Talk,
             sender(|call| async move {
                 let _call = call;
-                Err(Upstream::fault("unreachable"))
+                Err(Fault::upstream("unreachable"))
             }),
         ),
         add_provider("echo", Talk, echo.sender()),
@@ -1201,9 +1191,7 @@ async fn a_framed_requests_inputs_go_only_to_a_call_that_switches_protocols() {
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let _ = frames(resp).await;
     assert_eq!(
-        ended
-            .await
-            .map_err(|f| respan_gateway_http_faults::error_code(&f).to_owned()),
+        ended.await.map_err(|f| f.code().to_owned()),
         Err("config".into())
     );
     gw.idle().await;
@@ -1229,9 +1217,7 @@ impl Format<ClientIo, passthrough::Input<Raw>, passthrough::Output<Raw>> for Raw
         respan_gateway_core::Connection<passthrough::Input<Raw>, passthrough::Output<Raw>>,
         Fault,
     > {
-        Ok(io
-            .with_error(respan_gateway_http::rules::plain)
-            .bind(passthrough::read_request, passthrough::write_response))
+        Ok(io.bind(passthrough::read_request, passthrough::write_response))
     }
 }
 impl Format<ProviderIo, passthrough::Output<Raw>, passthrough::Input<Raw>> for Raw {
@@ -1320,9 +1306,7 @@ async fn a_101_goes_only_to_a_request_that_asked() {
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     let _ = frames(resp).await;
     assert_eq!(
-        ended
-            .await
-            .map_err(|f| respan_gateway_http_faults::error_code(&f).to_owned()),
+        ended.await.map_err(|f| f.code().to_owned()),
         Err("upstream".into())
     );
 }
@@ -1346,13 +1330,10 @@ async fn a_clone_of_a_polled_call_keeps_its_settings() {
     let (resp, ended) = serve(&gw, post("/v1/talk", r#"{"say":"x"}"#)).await;
     let status = resp.status();
     let _ = BodyExt::collect(resp.into_body()).await;
-    let end = ended.await.err().map(|f| {
-        format!(
-            "{} {}",
-            respan_gateway_http_faults::error_code(&f),
-            f.message()
-        )
-    });
+    let end = ended
+        .await
+        .err()
+        .map(|f| format!("{} {}", f.code(), f.message()));
     assert_eq!((status, end), (StatusCode::OK, None));
 }
 
@@ -1389,10 +1370,7 @@ async fn a_pending_call_left_unpolled_still_ends_with_its_request() {
             _px: &ProviderContext,
             o: &Result<(), respan_gateway_core::Fault>,
         ) {
-            let end = o
-                .as_ref()
-                .err()
-                .map(|f| respan_gateway_http_faults::error_code(f).to_owned());
+            let end = o.as_ref().err().map(|f| f.code().to_owned());
             self.0
                 .note(format!("on_provider_end {}", end.unwrap_or_default()));
         }
@@ -1480,7 +1458,7 @@ async fn a_retry_after_a_call_that_read_the_end_gets_a_clean_end() {
     impl ReadThenFail {
         pub async fn send(&self, call: http::Request<Body>) -> WireResult {
             let _ = StreamExt::collect::<Vec<_>>(call.into_body()).await;
-            Err(Upstream::fault("unreachable after reading"))
+            Err(Fault::upstream("unreachable after reading"))
         }
     }
     impl ReadThenFail {
@@ -1527,10 +1505,7 @@ async fn a_retry_after_a_call_that_read_the_end_gets_a_clean_end() {
             Err(f) => got.push(format!("aborted {f}")),
         }
     }
-    let end = ended
-        .await
-        .err()
-        .map(|f| respan_gateway_http_faults::error_code(&f).to_owned());
+    let end = ended.await.err().map(|f| f.code().to_owned());
     assert_eq!((got, end), (Vec::<String>::new(), None));
 }
 
@@ -1764,7 +1739,7 @@ async fn r6_on_provider_sees_the_requests_task_locals() {
             Talk,
             sender(|call| async move {
                 let _call = call;
-                Err(Upstream::fault("unreachable"))
+                Err(Fault::upstream("unreachable"))
             }),
         )],
         vec![Arc::new(seen.clone())],
@@ -1889,9 +1864,7 @@ async fn r8_an_input_filter_added_after_the_inputs_ended_ends_at_once() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let read = cx.take_inputs::<Say>().count().await;
             let added = cx.filter(Ends(self.0.clone()));
-            let code = added
-                .err()
-                .map(|f| respan_gateway_http_faults::error_code(&f).to_owned());
+            let code = added.err().map(|f| f.code().to_owned());
             self.0
                 .lock()
                 .map(|mut n| n.push(format!("{read} {code:?}")))

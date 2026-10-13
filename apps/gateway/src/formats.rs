@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use respan_gateway_conversation as conversation;
-use respan_gateway_core::{Extensions, Fault, Format, Gateway, Provider, Upstream};
+use respan_gateway_core::{Extensions, Fault, Format, Gateway, Provider};
 use respan_gateway_http::http::{HeaderMap, Uri};
 use respan_gateway_http::{ClientIo, ProviderIo, raw::Original};
 use respan_gateway_http_transport::{HttpTransport, reqwest};
@@ -65,7 +65,7 @@ pub mod kind {
         label: "embedding",
         translates: true,
     };
-    /// MCP: tools and resources over streamable HTTP, served by the `mcp:`
+    /// MCP: tools and resources over streamable HTTP, served by the `mcp`
     /// section, which no other format translates.
     pub const MCP: Kind = Kind {
         label: "mcp",
@@ -474,7 +474,7 @@ pub(crate) fn explained(
                         return fault;
                     };
                     let message = format!("{who} {}", unreachable(e));
-                    Upstream::fault(message).with_source(fault)
+                    Fault::upstream(message).with_source(fault)
                 })
             }
         },

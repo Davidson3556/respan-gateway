@@ -6,8 +6,7 @@
 mod support;
 
 use respan_gateway_core::{
-    ClientContext, Config, Fault, Filter, Gateway, Plugin, Provider, ProviderContext, Response,
-    async_trait,
+    ClientContext, Fault, Filter, Gateway, Plugin, Provider, ProviderContext, Response, async_trait,
 };
 use respan_gateway_http::call::CallHeaders;
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
@@ -244,11 +243,7 @@ fn a_transport_takes_only_ws_urls_and_no_connection_headers() {
         "wss://h/#frag",
     ] {
         let refused = WsTransport::new(bad).unwrap_err();
-        assert_eq!(
-            respan_gateway_http_faults::error_code(&refused),
-            "config",
-            "{bad}"
-        );
+        assert_eq!(refused.code(), "config", "{bad}");
         assert!(
             !refused.message().contains("pw") && !refused.message().contains("key=k"),
             "{bad}"
@@ -264,7 +259,8 @@ fn a_transport_takes_only_ws_urls_and_no_connection_headers() {
             .unwrap()
             .with_headers(hop)
             .unwrap_err()
-            .is::<Config>()
+            .code()
+            == "config"
     );
     let mut key = HeaderMap::new();
     key.insert("sec-websocket-key", HeaderValue::from_static("x"));

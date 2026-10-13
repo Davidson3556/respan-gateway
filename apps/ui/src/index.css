@@ -5,76 +5,77 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Theme tokens from https://www.respan.ai/brand and its shared site stylesheet. */
 :root {
-  --radius: 0.625rem;
-  --background: oklch(0.993 0.001 286);
-  --foreground: oklch(0.21 0.006 286);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.21 0.006 286);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.21 0.006 286);
-  --primary: oklch(0.21 0.006 286);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.967 0.001 286);
-  --secondary-foreground: oklch(0.21 0.006 286);
-  --muted: oklch(0.967 0.001 286);
-  --muted-foreground: oklch(0.552 0.016 286);
-  --accent: oklch(0.967 0.001 286);
-  --accent-foreground: oklch(0.21 0.006 286);
-  --destructive: oklch(0.577 0.245 27.3);
-  --border: oklch(0.92 0.004 286);
-  --input: oklch(0.92 0.004 286);
-  --ring: oklch(0.585 0.2 277);
+  --radius: 12px;
+  --background: #fff;
+  --foreground: #0a0a0a;
+  --card: #fff;
+  --card-foreground: #0a0a0a;
+  --popover: #fff;
+  --popover-foreground: #0a0a0a;
+  --primary: #171717;
+  --primary-foreground: #fafafa;
+  --secondary: #f5f5f5;
+  --secondary-foreground: #171717;
+  --muted: #f5f5f5;
+  --muted-foreground: #737373;
+  --accent: #f5f5f5;
+  --accent-foreground: #171717;
+  --destructive: #e40014;
+  --border: #d7d7d7;
+  --input: #d7d7d7;
+  --ring: #a1a1a1;
 
-  /* The one accent: a calm indigo, plus status hues used sparingly. */
-  --brand: oklch(0.545 0.2 277);
-  --brand-soft: oklch(0.955 0.03 277);
-  --success: oklch(0.6 0.13 155);
-  --warning: oklch(0.72 0.15 70);
+  /* Respan uses monochrome accents; status colors retain their meaning. */
+  --brand: var(--primary);
+  --brand-soft: var(--secondary);
+  --success: #16a34a;
+  --warning: #a16207;
 
-  --sidebar: oklch(0.985 0.001 286);
-  --sidebar-foreground: oklch(0.37 0.013 286);
-  --sidebar-primary: oklch(0.21 0.006 286);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.955 0.003 286);
-  --sidebar-accent-foreground: oklch(0.21 0.006 286);
-  --sidebar-border: oklch(0.92 0.004 286);
-  --sidebar-ring: oklch(0.585 0.2 277);
+  --sidebar: #fafafa;
+  --sidebar-foreground: #0a0a0a;
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: #f5f5f5;
+  --sidebar-accent-foreground: #171717;
+  --sidebar-border: #d7d7d7;
+  --sidebar-ring: #a1a1a1;
 }
 
 .dark {
-  --background: oklch(0.155 0.004 286);
-  --foreground: oklch(0.96 0.002 286);
-  --card: oklch(0.185 0.005 286);
-  --card-foreground: oklch(0.96 0.002 286);
-  --popover: oklch(0.2 0.006 286);
-  --popover-foreground: oklch(0.96 0.002 286);
-  --primary: oklch(0.94 0.003 286);
-  --primary-foreground: oklch(0.21 0.006 286);
-  --secondary: oklch(0.25 0.006 286);
-  --secondary-foreground: oklch(0.96 0.002 286);
-  --muted: oklch(0.24 0.006 286);
-  --muted-foreground: oklch(0.68 0.012 286);
-  --accent: oklch(0.25 0.006 286);
-  --accent-foreground: oklch(0.96 0.002 286);
-  --destructive: oklch(0.68 0.19 22);
-  --border: oklch(1 0 0 / 9%);
-  --input: oklch(1 0 0 / 13%);
-  --ring: oklch(0.68 0.16 277);
+  --background: #0a0a0a;
+  --foreground: #fafafa;
+  --card: #171717;
+  --card-foreground: #fafafa;
+  --popover: #171717;
+  --popover-foreground: #fafafa;
+  --primary: #e5e5e5;
+  --primary-foreground: #171717;
+  --secondary: #262626;
+  --secondary-foreground: #fafafa;
+  --muted: #262626;
+  --muted-foreground: #a1a1a1;
+  --accent: #262626;
+  --accent-foreground: #fafafa;
+  --destructive: #ff6568;
+  --border: #ffffff1a;
+  --input: #ffffff26;
+  --ring: #737373;
 
-  --brand: oklch(0.7 0.15 277);
-  --brand-soft: oklch(0.3 0.06 277);
-  --success: oklch(0.72 0.14 155);
-  --warning: oklch(0.8 0.14 75);
+  --brand: var(--primary);
+  --brand-soft: var(--secondary);
+  --success: #31de4b;
+  --warning: #ffd426;
 
-  --sidebar: oklch(0.17 0.005 286);
-  --sidebar-foreground: oklch(0.8 0.008 286);
-  --sidebar-primary: oklch(0.7 0.15 277);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.24 0.006 286);
-  --sidebar-accent-foreground: oklch(0.96 0.002 286);
-  --sidebar-border: oklch(1 0 0 / 8%);
-  --sidebar-ring: oklch(0.68 0.16 277);
+  --sidebar: #171717;
+  --sidebar-foreground: #fafafa;
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: #262626;
+  --sidebar-accent-foreground: #fafafa;
+  --sidebar-border: #ffffff1a;
+  --sidebar-ring: #737373;
 }
 
 @theme inline {
@@ -140,3 +141,20 @@
 @utility tabular {
   font-variant-numeric: tabular-nums;
 }
+
+/* Subtle code colors with readable counterparts in both themes. */
+.toml-code .token { display: inline; }
+.toml-code .token.comment { color: var(--muted-foreground); }
+.toml-code .token.table { color: #1d4ed8; font-weight: 600; }
+.toml-code .token.key { color: #6d28d9; }
+.toml-code .token.string { color: #047857; }
+.toml-code .token.boolean,
+.toml-code .token.number,
+.toml-code .token.date { color: #b45309; }
+.toml-code .token.punctuation { color: var(--muted-foreground); }
+.dark .toml-code .token.table { color: #93c5fd; }
+.dark .toml-code .token.key { color: #c4b5fd; }
+.dark .toml-code .token.string { color: #6ee7b7; }
+.dark .toml-code .token.boolean,
+.dark .toml-code .token.number,
+.dark .toml-code .token.date { color: #fcd34d; }

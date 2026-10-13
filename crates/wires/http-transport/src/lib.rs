@@ -11,11 +11,11 @@ use bytes::Bytes;
 use http::header::{AUTHORIZATION, COOKIE, LOCATION, PROXY_AUTHORIZATION};
 use http::{HeaderMap, Method, StatusCode, Uri};
 use http_body_util::BodyExt;
-use respan_gateway_core::{Fault, Upstream};
+use respan_gateway_core::Fault;
 
+use respan_gateway_http::rules::is_connection_header;
 use respan_gateway_http::{Body, Completion, ProviderIo};
 use respan_gateway_http::{call::is_credential, call::prepare_call, call::strip_origin_headers};
-use respan_gateway_http_syntax::is_connection_header;
 
 /// The Reqwest this transport is built on, at its version, such as for
 /// [`HttpTransport::with_client`].
@@ -55,7 +55,6 @@ pub struct HttpTransport {
     /// The base URL, without a trailing `/`.
     base: String,
     headers: HeaderMap,
-    limit: usize,
     follow: Option<Arc<Allow>>,
 }
 
@@ -65,7 +64,6 @@ impl std::fmt::Debug for HttpTransport {
         f.debug_struct("HttpTransport")
             .field("base", &self.base)
             .field("headers", &self.headers.keys().collect::<Vec<_>>())
-            .field("limit", &self.limit)
             .finish_non_exhaustive()
     }
 }
@@ -96,7 +94,6 @@ impl HttpTransport {
             client: shared_client()?,
             base: respan_gateway_http::call::base_url(&base_url.into(), &["http", "https"])?,
             headers: HeaderMap::new(),
-            limit: LIMIT,
             follow: None,
         })
     }
@@ -144,12 +141,6 @@ impl HttpTransport {
         Ok(self)
     }
 
-    /// Read up to `bytes` of one answer at once ([`connect`](respan_gateway_http::connect)).
-    pub fn with_limit(mut self, bytes: usize) -> Self {
-        self.limit = bytes;
-        self
-    }
-
     /// Send an encoded call and return its response.
     pub async fn send(
         &self,
@@ -181,7 +172,7 @@ impl HttpTransport {
                 // The error names the provider's URL, which is for logs only.
                 .map_err(|e| match e.is_builder() {
                     true => invalid(e),
-                    false => Upstream::fault("the provider could not be reached").with_source(e),
+                    false => Fault::upstream("the provider could not be reached").with_source(e),
                 })?;
             let next = follow.and_then(|allow| redirect(&resp, &parts.uri, allow.as_ref()));
             match next {
@@ -196,11 +187,11 @@ impl HttpTransport {
             }
         };
         if resp.status() == http::StatusCode::SWITCHING_PROTOCOLS {
-            return Err(Upstream::fault(
+            return Err(Fault::upstream(
                 "the provider switched protocols, which this transport does not",
             ));
         }
-        let broke = |e| Upstream::fault("the provider's body broke off").with_source(e);
+        let broke = |e| Fault::upstream("the provider's body broke off").with_source(e);
         let mut resp = http::Response::from(resp)
             .map(|body| Body::stream(body.map_err(broke).into_data_stream()));
         strip_origin_headers(resp.headers_mut());
@@ -212,14 +203,13 @@ impl HttpTransport {
         self,
     ) -> impl Fn(respan_gateway_core::Extensions) -> ProviderIo + Clone + Send + Sync + 'static
     {
-        let limit = self.limit;
         let client = Arc::new(self);
         respan_gateway_http::connect(
             move |request| {
                 let client = client.clone();
                 async move { client.send(request).await }
             },
-            limit,
+            LIMIT,
         )
     }
 }

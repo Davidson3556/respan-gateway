@@ -4,6 +4,7 @@ import { CodeBlock } from "@/components/code-block";
 import { CopyButton } from "@/components/copy-button";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
+import { ProviderIcon } from "@/components/provider-icon";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -11,11 +12,9 @@ import { useMcpServers, useProviders } from "@/hooks/queries";
 import type { McpServer, Provider, Quirk } from "@/lib/api";
 import { formatCount, formatMs, formatPercent } from "@/lib/format";
 
-const exampleConfig = `providers:
-  openai:
-    format: openai-chat
-    base_url: https://api.openai.com/v1
-    auth: { type: bearer, key: env:OPENAI_API_KEY }`;
+const exampleConfig = `[providers.openai]
+vendor = "openai"
+key = "env:OPENAI_API_KEY"`;
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
@@ -76,12 +75,7 @@ function ProviderCard({ provider: p }: { provider: Provider }) {
       <CardHeader className="gap-1">
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2.5">
-            <span
-              aria-hidden="true"
-              className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-sm font-semibold text-brand uppercase"
-            >
-              {p.name[0]}
-            </span>
+            <ProviderIcon name={p.name} baseUrl={p.base_url} />
             <div className="min-w-0">
               <CardTitle className="truncate text-base">{p.name}</CardTitle>
               {p.vendor && p.vendor !== p.name && (
@@ -224,7 +218,7 @@ export function ProvidersPage() {
         </div>
       ) : mcp?.length ? null : (
         <EmptyState icon={Server} title="No providers configured">
-          <p>Add a provider to gateway.yaml and restart the gateway:</p>
+          <p>Add a provider to gateway.toml and restart the gateway:</p>
           <CodeBlock className="w-full text-left" code={exampleConfig} />
         </EmptyState>
       )}

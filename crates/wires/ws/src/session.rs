@@ -1,6 +1,7 @@
 //! One WebSocket connection pumped both ways, the same at either edge, and
 //! [`serve`], the client edge's upgrade.
 
+use respan_gateway_core::FaultKind;
 use std::future::Future;
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,12 +10,12 @@ use std::time::Duration;
 use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::stream::{SplitSink, SplitStream};
 use respan_gateway_core::futures::{SinkExt, StreamExt, stream};
-use respan_gateway_core::{Abandoned, BadRequest, Fault, Gateway, Truncated, Upstream};
+use respan_gateway_core::{Fault, Gateway};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::header::{self, HeaderValue};
 use respan_gateway_http::http::{self, Method, StatusCode, Version};
-use respan_gateway_http::{Body, Credential, Frames, Framing};
-use respan_gateway_http_faults::{error_code, status};
+use respan_gateway_http::{Body, Credential, Frames};
+use respan_gateway_http_faults::status;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::WebSocketStream;
@@ -23,7 +24,7 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig
 use tokio_tungstenite::tungstenite::{Error, Message, Utf8Bytes};
 
 use crate::{CloseCode, Limits, ProviderClose};
-use respan_gateway_http_syntax::header_tokens;
+use respan_gateway_http::rules::header_tokens;
 
 /// Hand a client's WebSocket upgrade, `head`, to `gateway`, and pump its
 /// frames both ways once `upgraded` gives the connection: the HTTP
@@ -54,9 +55,9 @@ use respan_gateway_http_syntax::header_tokens;
 /// ahead, so its connection dropping behind a frame not yet taken is seen
 /// at once; a peer quiet for `limits.ping_after` while read is pinged, and
 /// quiet that long again, is gone. A Close is given `limits.close_send` to
-/// leave, and its reason is a fault's error code ([`error_code`]), never
-/// its message. A `CloseCode` no Close may carry is sent as 1011
-/// ([`CloseCode::sendable`]). What the client and the provider are told:
+/// leave, and its reason is a fault's code ([`Fault::code`](respan_gateway_core::Fault::code)), never
+/// its message. A `CloseCode` no Close may carry (RFC 6455 7.4) is sent
+/// as 1011. What the client and the provider are told:
 ///
 /// | The end | Provider (input) | Client (output) |
 /// |---|---|---|
@@ -86,7 +87,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let Some(key) = handshake(&head) else {
-        let fault = BadRequest::fault("the request is no WebSocket handshake");
+        let fault = Fault::bad_request("the request is no WebSocket handshake");
         return text(&fault);
     };
     // The subprotocols the client offered that are no key.
@@ -98,8 +99,7 @@ where
     let accept = HeaderValue::from_str(&derive_accept_key(key.as_bytes()));
     let (frames, end, input) = inbound(Fault::abandoned);
     let req = http::Request::from_parts(head, Body::stream(input));
-    let (resp, _ended) =
-        respan_gateway_http::handle(gateway, req, Framing::Live, limits.max_message).await;
+    let (resp, _ended) = respan_gateway_http::handle_live(gateway, req, limits.max_message).await;
     let (mut head, output) = resp.into_parts();
     if head.status != StatusCode::SWITCHING_PROTOCOLS {
         return refusal(head, output, limits).await;
@@ -188,7 +188,7 @@ fn text(fault: &Fault) -> http::Response<Body> {
     head.status = status(fault);
     let plain = HeaderValue::from_static("text/plain; charset=utf-8");
     head.headers.insert(header::CONTENT_TYPE, plain);
-    http::Response::from_parts(head, Body::full(error_code(fault).to_owned()))
+    http::Response::from_parts(head, Body::full(fault.code().to_owned()))
 }
 
 /// Which edge a connection is, for what its peer's end means.
@@ -297,11 +297,11 @@ where
             }
             Sent::Failed(fault) => {
                 end.fail(fault.clone());
-                let code = match fault.is::<Abandoned>() {
+                let code = match fault.is(FaultKind::Abandoned) {
                     true => 1001,
                     false => fault.get::<CloseCode>().map_or(1011, |c| c.sendable()),
                 };
-                close(&mut sink, code, error_code(&fault), limits.close_send).await;
+                close(&mut sink, code, fault.code(), limits.close_send).await;
                 return Err(fault);
             }
             Sent::Stopped => {
@@ -317,7 +317,7 @@ where
         Heard::Ended(refused) => {
             end.finish();
             if let Some((code, fault)) = refused {
-                close(&mut sink, code, error_code(&fault), limits.close_send).await;
+                close(&mut sink, code, fault.code(), limits.close_send).await;
             }
             // The response's end says how the request ended: it is read on, unsent.
             if let Edge::Client = edge {
@@ -437,8 +437,8 @@ async fn read<S: AsyncRead + AsyncWrite + Unpin>(
     let binary_text = matches!(edge, Edge::Provider { binary_text, .. } if binary_text);
     let refused = |code, text: &str| {
         let fault = match edge {
-            Edge::Client => BadRequest::fault(text).with(CloseCode(code)),
-            Edge::Provider { .. } => Upstream::fault(text),
+            Edge::Client => Fault::bad_request(text).with(CloseCode(code)),
+            Edge::Provider { .. } => Fault::upstream(text),
         };
         (Some(code), fault)
     };
@@ -467,7 +467,7 @@ async fn read<S: AsyncRead + AsyncWrite + Unpin>(
                 let code = frame.map(|f| u16::from(f.code));
                 let clean = closing.load(Ordering::SeqCst) || matches!(code, None | Some(1000));
                 if let (Edge::Provider { relayed, .. }, false, Some(code)) = (edge, clean, code) {
-                    let mut fault = Upstream::fault("the provider closed the session")
+                    let mut fault = Fault::upstream("the provider closed the session")
                         .with(ProviderClose(code));
                     if relayed {
                         fault = fault.with(CloseCode(code));
@@ -482,7 +482,7 @@ async fn read<S: AsyncRead + AsyncWrite + Unpin>(
             // No Close came. After ours, that is how a peer may end.
             Some(Err(_)) | None if closing.load(Ordering::SeqCst) => return Heard::Ended(None),
             Some(Err(Error::Capacity(_))) => break refused(1009, "a message is too large"),
-            Some(Err(_)) | None if provider => break (None, Truncated::fault()),
+            Some(Err(_)) | None if provider => break (None, Fault::truncated()),
             Some(Err(_)) | None => return Heard::Gone,
         };
         let mut send = pin!(frames.send(Ok(frame)));
@@ -555,7 +555,7 @@ mod tests {
             .expect("taken");
         drop((frames, end));
         let fault = stream.next().await.expect("an end").expect_err("gone");
-        assert!(fault.is::<Abandoned>());
+        assert!(fault.is(FaultKind::Abandoned));
         assert!(stream.next().await.is_none());
     }
 }

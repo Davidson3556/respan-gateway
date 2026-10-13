@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ApiError, KEY_STORAGE, api, onUnauthorized, setGatewayKey } from "./api";
+import { ApiError, KEY_STORAGE, api, gatewayFetch, onForbidden, onUnauthorized, setGatewayKey } from "./api";
 
 function mockFetch(status: number, body: unknown) {
   const fetch = vi.fn<typeof globalThis.fetch>(
@@ -50,4 +50,15 @@ describe("api client", () => {
     off();
     expect(listener).not.toHaveBeenCalled();
   });
+});
+
+it.each([401, 403])("keeps upstream %s errors out of gateway sign-in", async (status) => {
+  mockFetch(status, { error: { message: "provider key refused" } });
+  const listener = vi.fn();
+  const offUnauthorized = onUnauthorized(listener);
+  const offForbidden = onForbidden(listener);
+  await expect(gatewayFetch("/v1/chat/completions")).rejects.toMatchObject({ status });
+  offUnauthorized();
+  offForbidden();
+  expect(listener).not.toHaveBeenCalled();
 });

@@ -1,4 +1,5 @@
-use respan_gateway_core::{BadRequest, Fault};
+use respan_gateway_core::Fault;
+use respan_gateway_core::FaultKind;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_realtime::{AudioFormat, Input, Modality, Output, Session, Status, Turns};
 use respan_gateway_ws::CloseCode;
@@ -163,7 +164,7 @@ fn a_client_must_set_up_first_and_once_one_thing_a_message() {
         (vec![json!("setup")], "one"),
     ] {
         let fault = inputs(&messages).expect_err("refused");
-        assert!(fault.is::<BadRequest>(), "{fault}");
+        assert!(fault.is(FaultKind::Client), "{fault}");
         assert_eq!(
             fault.get::<CloseCode>(),
             Some(&CloseCode(1007)),

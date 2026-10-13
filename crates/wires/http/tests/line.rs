@@ -4,7 +4,7 @@
 //! provider-edge filter, so these tests show what such a filter sees.
 
 use respan_gateway_conversation::Input;
-use respan_gateway_core::{BadRequest, ErrorCode, Provider, Truncated, Upstream};
+use respan_gateway_core::{ErrorCode, Provider};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -139,7 +139,7 @@ impl respan_gateway_http::Decoder<LOut> for LineDecoder {
 
 /// A call as Line writes it: at `/line`, each input as its text.
 fn line_call(head: &mut RequestHead, _: Option<&LIn>) -> Result<Box<dyn Encoder<LIn>>, Fault> {
-    respan_gateway_http_syntax::set_path(head, "/line")?;
+    respan_gateway_http::path::set_path(head, "/line")?;
     Ok(Box::new(Lines))
 }
 
@@ -208,7 +208,7 @@ impl LineDecoder {
                     let u = Usage::new(0, n.parse().unwrap_or(0));
                     LOut(String::new(), u)
                 }
-                Some(("x", m)) => return Err(Upstream::fault(m)),
+                Some(("x", m)) => return Err(Fault::upstream(m)),
                 _ if line == "e" => {
                     self.1 = true;
                     continue;
@@ -223,8 +223,8 @@ impl LineDecoder {
     /// Like a JSON format, an empty body is not a response of this format.
     fn end(&mut self, _out: &mut Vec<LOut>) -> Result<(), Fault> {
         match (self.0, self.1) {
-            (false, _) => Err(Upstream::fault("not a line body")),
-            (true, false) => Err(Truncated::fault()),
+            (false, _) => Err(Fault::upstream("not a line body")),
+            (true, false) => Err(Fault::truncated()),
             (true, true) => Ok(()),
         }
     }
@@ -497,7 +497,7 @@ async fn f2_usage_is_metered_on_the_call_though_the_client_edge_failed_first() {
     impl Plugin for Guard {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(|o: &mut LOut| match o.0.as_str() {
-                "bad" => Err(BadRequest::fault("blocked")),
+                "bad" => Err(Fault::bad_request("blocked")),
                 _ => Ok(()),
             })?;
             Ok(None)
@@ -566,7 +566,7 @@ async fn f4_a_filter_whose_edit_failed_still_gets_its_end() {
     impl Filter<LOut> for Once {
         fn edit(&mut self, o: LOut, out: &mut Vec<LOut>) -> Result<(), Fault> {
             if o.0 == "bad" {
-                return Err(BadRequest::fault("blocked"));
+                return Err(Fault::bad_request("blocked"));
             }
             out.push(o);
             Ok(())
@@ -624,9 +624,7 @@ async fn f5_until_content_then_drop_ends_the_call_at_the_bodys_end_only() {
     for frames in [vec!["i:hi\ne\n"], vec!["i:hi\n", "e\n"]] {
         let end = until_content_then_drop(frames).await;
         assert_eq!(
-            end.err()
-                .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
-                .as_deref(),
+            end.err().map(|f| f.code().to_owned()).as_deref(),
             Some("abandoned")
         );
     }
@@ -641,7 +639,7 @@ async fn f6_a_refused_head_request_ends_with_its_fault() {
     #[async_trait]
     impl Plugin for No {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            Err(BadRequest::fault("no"))
+            Err(Fault::bad_request("no"))
         }
     }
 
@@ -651,9 +649,7 @@ async fn f6_a_refused_head_request_ends_with_its_fault() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let end = log.clients()[0].clone();
     assert_eq!(
-        end.err()
-            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
-            .as_deref(),
+        end.err().map(|f| f.code().to_owned()).as_deref(),
         Some("bad_request")
     );
 }
@@ -669,7 +665,7 @@ async fn f7_usage_decoded_after_a_calls_filter_failed_reaches_no_meter() {
     impl Plugin for Guard {
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
             px.filter(|o: &mut LOut| match o.0.as_str() {
-                "bad" => Err(BadRequest::fault("blocked")),
+                "bad" => Err(Fault::bad_request("blocked")),
                 _ => Ok(()),
             })
         }
@@ -707,16 +703,11 @@ async fn f8_a_client_edge_panic_ends_the_call_internal() {
     let client = log.clients()[0].clone();
     let call = log.calls()[0].clone();
     assert_eq!(
-        client
-            .err()
-            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
-            .as_deref(),
+        client.err().map(|f| f.code().to_owned()).as_deref(),
         Some("internal")
     );
     assert_eq!(
-        call.err()
-            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
-            .as_deref(),
+        call.err().map(|f| f.code().to_owned()).as_deref(),
         Some("internal")
     );
 }
@@ -735,10 +726,8 @@ async fn f9_a_101_to_a_whole_request_is_refused_whoever_sent_it() {
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     let end = log.clients()[0].clone();
     assert_eq!(
-        end.err().map(|f| (
-            respan_gateway_http_faults::error_code(&f).to_owned(),
-            f.message().to_owned()
-        )),
+        end.err()
+            .map(|f| (f.code().to_owned(), f.message().to_owned())),
         Some((
             "upstream".to_owned(),
             "the provider returned 101".to_owned()
@@ -839,9 +828,9 @@ async fn r8_1_an_input_filter_added_after_a_failed_one_still_gets_its_end() {
     #[async_trait]
     impl Plugin for Two {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let _ = cx.filter(|_: &mut LIn| Err(BadRequest::fault("first fails")));
+            let _ = cx.filter(|_: &mut LIn| Err(Fault::bad_request("first fails")));
             let _ = cx.filter(Ends(self.0.clone(), "second"));
-            Err(BadRequest::fault("refused"))
+            Err(Fault::bad_request("refused"))
         }
     }
 
@@ -872,10 +861,7 @@ async fn r8_3_a_panic_before_the_head_ends_the_call_internal_not_abandoned() {
     let (status, _) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let calls = log.calls();
-    let code = calls[0]
-        .as_ref()
-        .err()
-        .map(|f| respan_gateway_http_faults::error_code(f).to_owned());
+    let code = calls[0].as_ref().err().map(|f| f.code().to_owned());
     assert_eq!(code.as_deref(), Some("internal"), "{:?}", calls[0]);
 }
 
@@ -888,7 +874,7 @@ async fn r8_a_failed_filter_releases_nothing_at_its_end() {
         fn edit(&mut self, v: LOut, out: &mut Vec<LOut>) -> Result<(), Fault> {
             match v.0.as_str() {
                 "A bo" => self.0.push(v),
-                "mb" => return Err(BadRequest::fault("blocked")),
+                "mb" => return Err(Fault::bad_request("blocked")),
                 _ => out.push(v),
             }
             Ok(())
@@ -1121,7 +1107,7 @@ async fn r9_4_a_filter_failing_at_close_does_not_rewrite_the_outcome() {
                 }
             }
             cx.filter(Fails)?;
-            Err(BadRequest::fault("no"))
+            Err(Fault::bad_request("no"))
         }
     }
 
@@ -1175,9 +1161,7 @@ async fn r9_4b_an_abandoned_call_stays_abandoned() {
     let _ = run(&gw, req(http::Method::POST)).await;
     let end = log.calls()[0].clone();
     assert_eq!(
-        end.err()
-            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
-            .as_deref(),
+        end.err().map(|f| f.code().to_owned()).as_deref(),
         Some("abandoned")
     );
 }
@@ -1203,7 +1187,7 @@ async fn r9_5_a_panicking_output_filter_end_at_close_skips_no_other_filter() {
             // Applied the last added first: Panics, then the noting one.
             cx.filter(noting::<LOut>(&self.0, "outputs"))?;
             cx.filter(Panics)?;
-            Err(BadRequest::fault("no"))
+            Err(Fault::bad_request("no"))
         }
     }
 
@@ -1386,7 +1370,7 @@ impl respan_gateway_core::Format<respan_gateway_http::ProviderIo, LOut, LIn> for
                 let model = input.map_or("none", |input| input.0.as_str());
                 let model = model.replace(' ', "%20");
                 head.method = http::Method::POST;
-                respan_gateway_http_syntax::set_path(head, &format!("/models/{model}"))?;
+                respan_gateway_http::path::set_path(head, &format!("/models/{model}"))?;
                 Ok(Box::new(Untranslatable) as Box<dyn Encoder<LIn>>)
             },
             line_outputs,
@@ -1400,7 +1384,7 @@ struct Untranslatable;
 impl Encoder<LIn> for Untranslatable {
     fn encode(&mut self, input: &LIn, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         match input.0.contains("untranslatable") {
-            true => Err(BadRequest::fault("pathed cannot say it")),
+            true => Err(Fault::bad_request("pathed cannot say it")),
             false => Lines.encode(input, out),
         }
     }
@@ -1563,7 +1547,7 @@ async fn r10_1_a_late_input_filter_gets_the_inputs_real_end() {
     let gw = gateway(Script::default(), &log, Drain(log.clone()));
     let r = upgrading(vec![
         Ok("a"),
-        Err(Upstream::fault("the client's body broke")),
+        Err(Fault::upstream("the client's body broke")),
     ]);
     let (resp, ended) = serve_live(&gw, r).await;
     let _ = BodyExt::collect(resp.into_body()).await;
@@ -1601,11 +1585,7 @@ async fn r10_2_a_204_dropped_after_until_content_ends_ok() {
     // The 200's end is its body's, which `until_content` did not reach; the 204's
     // comes with its head.
     let ends = log.calls();
-    let code = |e: &Result<(), Fault>| {
-        e.as_ref()
-            .err()
-            .map(|f| respan_gateway_http_faults::error_code(f).to_owned())
-    };
+    let code = |e: &Result<(), Fault>| e.as_ref().err().map(|f| f.code().to_owned());
     assert_eq!(code(&ends[0]).as_deref(), Some("abandoned"));
     assert!(ends[1].is_ok());
 }
@@ -1629,7 +1609,7 @@ async fn r10_3_a_panic_while_closing_ends_the_edge_internal() {
                 }
             }
             cx.filter(Panics)?;
-            Err(BadRequest::fault("no"))
+            Err(Fault::bad_request("no"))
         }
     }
 
@@ -1639,9 +1619,7 @@ async fn r10_3_a_panic_while_closing_ends_the_edge_internal() {
     let end = log.clients()[0].clone();
     // The end is known at close, so a panic changes it no more than a failure.
     assert_eq!(
-        end.err()
-            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
-            .as_deref(),
+        end.err().map(|f| f.code().to_owned()).as_deref(),
         Some("bad_request")
     );
 }
@@ -1830,9 +1808,7 @@ async fn r11_a_heads_post_call_ends_abandoned_unread() {
     let (status, body) = run(&gw, req(http::Method::HEAD)).await;
     assert_eq!((status, body.ok()), (StatusCode::OK, Some(Bytes::new())));
     let call = &log.calls()[0];
-    let end = call
-        .clone()
-        .map_err(|f| respan_gateway_http_faults::error_code(&f).to_owned());
+    let end = call.clone().map_err(|f| f.code().to_owned());
     assert_eq!(
         (t(&log.metered()[0]), end),
         (None, Err("abandoned".to_owned()))
@@ -1917,9 +1893,7 @@ async fn r11_a_filter_that_panics_fails_the_call_internal() {
     let gw = gateway(script, &log, PanicsOnOutput);
     let _ = run(&gw, req(http::Method::POST)).await;
     let call = &log.calls()[0];
-    let internal = call
-        .as_ref()
-        .is_err_and(|f| respan_gateway_http_faults::error_code(f) == "internal");
+    let internal = call.as_ref().is_err_and(|f| f.code() == "internal");
     assert_eq!((t(&log.metered()[0]), internal), (None, true));
 }
 

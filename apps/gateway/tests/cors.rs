@@ -46,7 +46,7 @@ async fn mcp_server() -> String {
 
 async fn gateway(extra: &str) -> Gateway {
     let up = mcp_server().await;
-    let config = format!("mcp:\n  files: {{ url: '{up}/mcp' }}\n{extra}");
+    let config = format!("mcp = {{ files = {{ url = \"{up}/mcp\" }} }}\n{extra}");
     Gateway::start(&config).await
 }
 
@@ -57,8 +57,7 @@ async fn preflight(gw: &Gateway, path: &str, origin: &str) -> reqwest::Response 
         .header("access-control-request-method", "POST")
         .header(
             "access-control-request-headers",
-            "authorization, x-api-key, x-goog-api-key, anthropic-version, content-type, \
-             mcp-session-id, mcp-protocol-version",
+            "authorization, x-api-key, x-goog-api-key, anthropic-version, content-type, mcp-session-id, mcp-protocol-version",
         )
         .send()
         .await
@@ -73,7 +72,7 @@ fn header(resp: &reqwest::Response, name: &str) -> Option<String> {
 #[tokio::test]
 async fn an_allowed_origins_preflight_is_answered_without_a_key() {
     let gw = gateway(&format!(
-        "client_keys: [{KEY}]\ncors: {{ origins: ['{APP}'] }}\n"
+        "client_keys = [\"{KEY}\"]\ncors = {{ origins = [\"{APP}\"] }}\n"
     ))
     .await;
     for path in ["/v1/chat/completions", "/mcp/files", "/v1/models"] {
@@ -106,11 +105,10 @@ async fn an_allowed_origins_preflight_is_answered_without_a_key() {
 #[tokio::test]
 async fn a_preflight_gets_the_headers_it_asks_for_that_are_header_names() {
     let gw = gateway(&format!(
-        "client_keys: [{KEY}]\ncors: {{ origins: ['{APP}'] }}\n"
+        "client_keys = [\"{KEY}\"]\ncors = {{ origins = [\"{APP}\"] }}\n"
     ))
     .await;
-    let asked = "authorization, x-stainless-os, x-stainless-lang, \
-        anthropic-dangerous-direct-browser-access, openai-organization, bad header, x\"y";
+    let asked = "authorization, x-stainless-os, x-stainless-lang, anthropic-dangerous-direct-browser-access, openai-organization, bad header, x\"y";
     let resp = client()
         .request(Method::OPTIONS, gw.url("/v1/messages"))
         .header("origin", APP)
@@ -123,15 +121,14 @@ async fn a_preflight_gets_the_headers_it_asks_for_that_are_header_names() {
     let allowed = header(&resp, "access-control-allow-headers").unwrap();
     assert_eq!(
         allowed,
-        "authorization, x-stainless-os, x-stainless-lang, \
-         anthropic-dangerous-direct-browser-access, openai-organization"
+        "authorization, x-stainless-os, x-stainless-lang, anthropic-dangerous-direct-browser-access, openai-organization"
     );
 }
 
 #[tokio::test]
 async fn an_allowed_origin_reads_the_mcp_session_header_and_needs_a_key() {
     let gw = gateway(&format!(
-        "client_keys: [{KEY}]\ncors: {{ origins: ['{APP}'] }}\n"
+        "client_keys = [\"{KEY}\"]\ncors = {{ origins = [\"{APP}\"] }}\n"
     ))
     .await;
     let hello = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
@@ -169,7 +166,7 @@ async fn an_allowed_origin_reads_the_mcp_session_header_and_needs_a_key() {
 #[tokio::test]
 async fn another_origin_gets_no_cors_headers() {
     let gw = gateway(&format!(
-        "client_keys: [{KEY}]\ncors: {{ origins: ['{APP}'] }}\n"
+        "client_keys = [\"{KEY}\"]\ncors = {{ origins = [\"{APP}\"] }}\n"
     ))
     .await;
     let resp = preflight(&gw, "/v1/chat/completions", "https://evil.example").await;
@@ -190,7 +187,7 @@ async fn another_origin_gets_no_cors_headers() {
 
 #[tokio::test]
 async fn without_keys_only_the_listed_origin_gets_through_and_without_cors_none() {
-    let gw = gateway(&format!("cors: {{ origins: ['{APP}'] }}\n")).await;
+    let gw = gateway(&format!("cors = {{ origins = [\"{APP}\"] }}\n")).await;
     let from = |origin: &'static str| {
         client()
             .get(gw.url("/v1/models"))
@@ -216,14 +213,14 @@ async fn without_keys_only_the_listed_origin_gets_through_and_without_cors_none(
 #[tokio::test]
 async fn star_needs_client_keys_and_origins_are_checked() {
     let any = gateway(&format!(
-        "client_keys: [{KEY}]\ncors: {{ origins: ['*'] }}\n"
+        "client_keys = [\"{KEY}\"]\ncors = {{ origins = [\"*\"] }}\n"
     ))
     .await;
     let resp = preflight(&any, "/v1/chat/completions", "https://whatever.example").await;
     assert_eq!(resp.status(), 204);
 
-    let check = |yaml: &str| {
-        let path = support::write_config(yaml);
+    let check = |text: &str| {
+        let path = support::write_config(text);
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
             .args(["check", "--config", path.to_str().unwrap()])
             .env_clear()
@@ -233,8 +230,8 @@ async fn star_needs_client_keys_and_origins_are_checked() {
             + &String::from_utf8_lossy(&out.stdout);
         (out.status.success(), text)
     };
-    let base = "providers:\n  p: { formats: openai-chat, base_url: 'http://x.test/v1', key: k }\n";
-    let (ok, text) = check(&format!("{base}cors: {{ origins: ['*'] }}\n"));
+    let base = "providers = { p = { formats = \"openai-chat\", base_url = \"http://x.test/v1\", key = \"k\" } }\n";
+    let (ok, text) = check(&format!("{base}cors = {{ origins = [\"*\"] }}\n"));
     assert!(!ok && text.contains("client_keys"), "{text}");
     for bad in [
         "https://app.example.com/",
@@ -243,16 +240,16 @@ async fn star_needs_client_keys_and_origins_are_checked() {
         "https://a.test/x",
     ] {
         let (ok, text) = check(&format!(
-            "{base}client_keys: [k]\ncors: {{ origins: ['{bad}'] }}\n"
+            "{base}client_keys = [\"k\"]\ncors = {{ origins = [\"{bad}\"] }}\n"
         ));
         assert!(!ok && text.contains(bad), "{bad}: {text}");
     }
     let (ok, text) = check(&format!(
-        "{base}client_keys: [k]\ncors: {{ origins: [] }}\n"
+        "{base}client_keys = [\"k\"]\ncors = {{ origins = [] }}\n"
     ));
     assert!(!ok && text.contains("names no origin"), "{text}");
     let (ok, text) = check(&format!(
-        "{base}client_keys: [k]\ncors: {{ origins: ['{APP}', 'http://localhost:3000'] }}\n"
+        "{base}client_keys = [\"k\"]\ncors = {{ origins = [\"{APP}\", \"http://localhost:3000\"] }}\n"
     ));
     assert!(ok, "{text}");
 }

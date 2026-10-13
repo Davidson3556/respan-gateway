@@ -22,9 +22,9 @@ const PATH_BYTES: &str = "/-_.~:@+=,!";
 /// same names, as an escaped `/` splits a name without moving it: what
 /// [`clean_path`] reads.
 ///
-/// [`clean_path`]: respan_gateway_http_syntax::clean_path
+/// [`clean_path`]: respan_gateway_http::path::clean_path
 pub(crate) fn reads_one_way(path: &str) -> bool {
-    let decoded = respan_gateway_http_syntax::percent_decode(path);
+    let decoded = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
     decoded
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || PATH_BYTES.contains(c))
@@ -38,8 +38,14 @@ pub(crate) fn reads_one_way(path: &str) -> bool {
 #[cfg(test)]
 mod path_readers {
     use super::reads_one_way;
-    use respan_gateway_http_syntax::percent_decode;
-    use respan_gateway_http_syntax::{clean_path, forwarded_path};
+    use respan_gateway_http::path::{clean_path, forwarded_path};
+
+    /// `s` decoded once, as a reader decodes a path.
+    fn percent_decode(s: &str) -> String {
+        percent_encoding::percent_decode_str(s)
+            .decode_utf8_lossy()
+            .into_owned()
+    }
 
     fn dots(segments: impl Iterator<Item = String>) -> String {
         let mut kept: Vec<String> = Vec::new();

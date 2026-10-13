@@ -16,7 +16,6 @@ use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, Provider, ProviderContext, Response, async_trait,
 };
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_http_faults::error_code;
 use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_plugin_tool_loop::{Outcome, Sink, Step, StepReport, ToolLoop, Toolbox, Tools};
 use serde_json::{Value, json};
@@ -669,7 +668,6 @@ async fn a_provider_refusal_in_the_first_step_is_the_clients_error() {
     rig.openai.answer(Answer::error(429));
     let (status, text) = rig.ask("/v1/chat/completions", ask_gpt()).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{text}");
-    let _ = error_code;
 }
 
 fn anthropic_stream(frames: &[&str]) -> Answer {

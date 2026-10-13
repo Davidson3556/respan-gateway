@@ -51,9 +51,7 @@ impl Format<ClientIo, passthrough::Input<Raw>, passthrough::Output<Raw>> for Raw
         &self,
         io: ClientIo,
     ) -> Result<Connection<passthrough::Input<Raw>, passthrough::Output<Raw>>, Fault> {
-        Ok(io
-            .with_error(respan_gateway_http::rules::plain)
-            .bind(passthrough::read_request, passthrough::write_response))
+        Ok(io.bind(passthrough::read_request, passthrough::write_response))
     }
 }
 impl Format<ProviderIo, passthrough::Output<Raw>, passthrough::Input<Raw>> for Raw {
@@ -471,7 +469,7 @@ async fn a_meter_registered_after_a_cutting_filter_sees_every_increment() {
         let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
         assert!(body.contains("\"a\"") && !body.contains("\"b\""), "{body}");
         let call = &calls.all()[0];
-        assert!(matches!(call, Err(f) if respan_gateway_http_faults::error_code(f) == "cap"));
+        assert!(matches!(call, Err(f) if f.code() == "cap"));
         let usage = meter.total();
         assert_eq!(usage.output_tokens, metered, "after: {after}");
     }

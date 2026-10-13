@@ -8,7 +8,8 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 /// [`ClientIo`](crate::ClientIo) lifts out of its head into the request's
 /// extensions, so nothing passes them on by accident. A name is
 /// one if its last `-` or `_` segment is `authorization`, `auth`, `key`,
-/// `token`, `secret`, `password`, `credential` or `credentials`, but not an
+/// `apikey`, `token`, `secret`, `password`, `credential`, `credentials`,
+/// `sig` or `signature`, but not an
 /// idempotency key; names are read percent-decoded. A key offered as a
 /// WebSocket subprotocol (`Sec-WebSocket-Protocol: realtime,
 /// openai-insecure-api-key.<key>`) is one too: an entry `name.value` whose
@@ -67,7 +68,7 @@ impl Credential {
     }
 
     /// Whether it holds nothing.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.headers.is_empty() && self.query.is_empty()
     }
 
@@ -102,7 +103,7 @@ impl Credential {
         let before = self.query.len();
         self.query.retain(|param| {
             let value = param.split_once('=').map_or("", |(_, v)| v);
-            !is_key(&respan_gateway_http_syntax::percent_decode(value))
+            !is_key(&crate::path::decoded(value))
         });
         let mut taken = self.query.len() != before;
         let entries: Vec<String> = self
@@ -254,7 +255,9 @@ pub(crate) fn take_protocol_keys(headers: &mut HeaderMap, markers: bool) -> Opti
 /// WebSocket handshake's own `Sec-WebSocket-*` headers (its `Key` nonce, its
 /// `Accept`) are the connection's, not a secret.
 pub fn is_credential(name: &str) -> bool {
-    const CREDENTIALS: [&str; 9] = [
+    // `sig` and `signature` sign a URL: an Azure SAS's `sig`, a presigned
+    // S3 URL's `X-Amz-Signature`.
+    const CREDENTIALS: [&str; 11] = [
         "authorization",
         "auth",
         "key",
@@ -264,8 +267,10 @@ pub fn is_credential(name: &str) -> bool {
         "password",
         "credential",
         "credentials",
+        "sig",
+        "signature",
     ];
-    let name = respan_gateway_http_syntax::percent_decode(name).to_ascii_lowercase();
+    let name = crate::path::decoded(name).to_ascii_lowercase();
     let last = name.rsplit(['-', '_']).next().unwrap_or_default();
     !name.contains("idempotency")
         && !name.starts_with("sec-websocket-")
@@ -424,6 +429,17 @@ mod tests {
         assert_eq!(parts.uri, "/v1/x?alt=sse");
         assert_eq!(credential.query().count(), 3);
         assert!(credential.get("x-apikey").is_some());
+    }
+
+    #[test]
+    fn a_url_signature_is_a_credential() {
+        let mut parts = head(
+            "/blob?sv=2024&sig=abc&X-Amz-Signature=def&X-Amz-Date=1",
+            &[],
+        );
+        let credential = Credential::lift(&mut parts).unwrap_or_default();
+        assert_eq!(parts.uri, "/blob?sv=2024&X-Amz-Date=1");
+        assert_eq!(credential.query().count(), 2);
     }
 
     #[test]

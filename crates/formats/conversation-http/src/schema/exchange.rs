@@ -7,12 +7,14 @@
 //! the client's own format carries the client's spec headers and query
 //! parameters ([`Schema::CARRIED`]).
 
+use respan_gateway_core::FaultKind;
 use std::sync::Arc;
 
 use respan_gateway_conversation::Usage;
 use respan_gateway_conversation::{Assembled, Input, Output};
-use respan_gateway_core::{BadRequest, Fault, Upstream};
+use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::{BufMut, Bytes, BytesMut};
+use respan_gateway_http::content::{content_type, is_stream};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{
     Decoder, Encoder, Sse, Whole,
@@ -21,7 +23,6 @@ use respan_gateway_http::{
     raw::{Original, RawReply},
     rules::bodiless,
 };
-use respan_gateway_http::{framing::sse::content_type, framing::sse::is_stream};
 use respan_gateway_sse::event_data;
 use serde_json::{Map, Value};
 
@@ -80,7 +81,7 @@ pub(crate) fn post<C: Schema>(
                 Fault::internal(format!("a call's path {target:?} is no path")).with_source(e)
             })?;
         }
-        None => respan_gateway_http_syntax::set_path(head, C::PATH)?,
+        None => respan_gateway_http::path::set_path(head, C::PATH)?,
     }
     if let Some(query) = original.and_then(|r| carried_query::<C>(r.uri())) {
         let at = match head.uri.query() {
@@ -112,13 +113,13 @@ struct RequestEncoder<C> {
 
 impl<C: Schema> RequestEncoder<C> {
     pub(crate) fn encode_into(&mut self, chat: &Input, out: &mut BytesMut) -> Result<(), Fault> {
-        let mut v = self
-            .schema
-            .encode_request(chat)
-            .map_err(|f| match f.is::<BadRequest>() {
-                true => f,
-                false => BadRequest::fault(f.message()).with_source(f),
-            })?;
+        let mut v =
+            self.schema
+                .encode_request(chat)
+                .map_err(|f| match f.is(FaultKind::Client) {
+                    true => f,
+                    false => Fault::bad_request(f.message()).with_source(f),
+                })?;
         if self.stream && C::STREAM_FLAG {
             v.insert("stream".into(), true.into());
         }
@@ -263,7 +264,7 @@ fn unary_reply<C: Schema>(schema: C, status: StatusCode, raw: Bytes) -> Result<V
     }
     Err(match failure_json(&raw).filter(says_error) {
         Some(v) => said_error(status, raw, &v),
-        None => Upstream::fault("the provider's success is not a response of its format"),
+        None => Fault::upstream("the provider's success is not a response of its format"),
     })
 }
 

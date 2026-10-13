@@ -574,9 +574,10 @@ impl Plugin for Meter {
 
     async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
         if let Some(Metered(session, turns)) = px.extensions().get::<Metered>() {
-            let code = end.as_ref().err().map_or("ok".into(), |f| {
-                respan_gateway_http_faults::error_code(f).to_owned()
-            });
+            let code = end
+                .as_ref()
+                .err()
+                .map_or("ok".into(), |f| f.code().to_owned());
             let turns = turns.load(Ordering::SeqCst);
             lock(&self.ended).push(Ended {
                 session: *session,

@@ -429,7 +429,7 @@ impl Filter<Output> for Footer {
 
 /// The code a client's error body would carry for `fault`.
 pub fn fault_code(fault: &Fault) -> String {
-    respan_gateway_http_faults::error_code(fault).to_owned()
+    fault.code().to_owned()
 }
 
 /// `r` with its fault as its message, which tests can compare.

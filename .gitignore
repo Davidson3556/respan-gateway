@@ -1,6 +1,7 @@
 /target
 **/*.rs.bk
 .env
+gateway.toml
 .DS_Store
 *.swp
 node_modules/

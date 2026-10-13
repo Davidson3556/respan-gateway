@@ -9,7 +9,7 @@ use respan_gateway_conversation::{
     Content, Effort, Input, Media, MediaSource, Message, Reasoning, ResponseFormat, Role, Tool,
     ToolChoice,
 };
-use respan_gateway_core::{BadRequest, Fault, NativeFields};
+use respan_gateway_core::{Fault, NativeFields};
 use serde_json::{Map, Value, json};
 
 use super::{GEMINI, ROLES, SYNTHETIC};
@@ -216,7 +216,7 @@ pub(super) fn split_system(chat: &Input) -> Result<(Option<Value>, &[Message]), 
     let lead = chat.messages.iter().take_while(|m| is_system(m)).count();
     let (system, rest) = chat.messages.split_at(lead);
     if rest.iter().any(is_system) {
-        return Err(BadRequest::fault(
+        return Err(Fault::bad_request(
             "Gemini has no place for a system message after the conversation starts",
         ));
     }
@@ -224,7 +224,7 @@ pub(super) fn split_system(chat: &Input) -> Result<(Option<Value>, &[Message]), 
     let mut parts = Vec::new();
     for m in system {
         if !m.native.is_empty() {
-            return Err(BadRequest::fault(
+            return Err(Fault::bad_request(
                 "Gemini's system instruction has no place for a message's other fields",
             ));
         }
@@ -287,7 +287,7 @@ fn args_json(arguments: &str) -> Result<Value, Fault> {
     }
     match serde_json::from_str::<Value>(arguments) {
         Ok(args) if args.is_object() => Ok(args),
-        _ => Err(BadRequest::fault(
+        _ => Err(Fault::bad_request(
             "a tool call's arguments are not a JSON object, as Gemini's are",
         )),
     }
@@ -339,7 +339,7 @@ fn write_part(c: &Content, names: &mut Vec<(String, String)>) -> Result<Value, F
         } => {
             let name = names.iter().rev().find(|(i, _)| i == id).map(|(_, n)| n);
             let name = name.ok_or_else(|| {
-                BadRequest::fault(format!(
+                Fault::bad_request(format!(
                     "a tool result answers call '{id}', which no message makes; Gemini's \
                      response names its tool"
                 ))

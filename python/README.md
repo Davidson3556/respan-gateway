@@ -42,7 +42,7 @@ arrives. `arequest` and `astream` are the asyncio versions.
 
 Each kind is an OpenAI endpoint the gateway serves when a provider speaks its
 format (`openai-images`, `openai-transcriptions`, `openai-speech`,
-`openai-embeddings`, `openai-videos`; see `gateway.example.yaml`), and works
+`openai-embeddings`, `openai-videos`; see `gateway.example.toml`), and works
 through the same client:
 
 ```python
@@ -83,9 +83,9 @@ gw.requests(limit=20)      # the request log, newest first; filters such as clie
 
 `amodels()`, `aproviders()` and `arequests()` are the asyncio versions.
 `providers()` and `requests()` read the web UI's admin API in-process, so
-`ui: false` turns them off (the log is in memory, always on with the UI).
+`ui = false` turns them off (the log is in memory, always on with the UI).
 A gateway in your process prints nothing per request: `log` defaults to
-`off` here (the binary's is `text`). Set `log: text` or `log: json` in the
+`off` here (the binary's is `text`). Set `log = 'text'` or `log = 'json'` in the
 config for stderr lines, `serve_forever()` included.
 
 ## Serve
@@ -131,10 +131,10 @@ python -m respan_gateway proxy --openai
 
 ## Configuration
 
-`Gateway(config=...)` takes a dict (typed as `rg.GatewayConfig` for editor completion) or a YAML string in the format of
-[`gateway.example.yaml`](../gateway.example.yaml); `Gateway.from_file(path)`
+`Gateway(config=...)` takes a dict (typed as `rg.GatewayConfig` for editor completion) or a TOML string in the format of
+[`gateway.example.toml`](../gateway.example.toml); `Gateway.from_file(path)`
 reads a file. With no config, `Gateway()` starts as the binary does with no
-arguments: from `./gateway.yaml` if it exists, else from the environment:
+arguments: from `./gateway.toml` if it exists, else from the environment:
 every vendor whose key is set (`OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, ...) becomes a
 provider, models route by name (`claude-*` to Anthropic, `gemini-*` to

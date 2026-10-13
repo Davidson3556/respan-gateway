@@ -1,50 +1,28 @@
-//! Facts a test names its faults by, as an adapter or plugin would: the
-//! kernel knows none of these.
+//! How a test names its faults, as an adapter or plugin would.
 #![allow(dead_code)]
 use respan_gateway_core::*;
-
-/// A provider failed.
-#[derive(Clone, Copy, Debug)]
-pub struct Upstream;
-
-/// The client's input is not one the format can take.
-#[derive(Clone, Copy, Debug)]
-pub struct BadRequest;
-
-/// A stream stopped before its end.
-#[derive(Clone, Copy, Debug)]
-pub struct Truncated;
 
 /// A code of a plugin's own.
 #[derive(Clone, Copy, Debug)]
 pub struct Code(pub &'static str);
 
 pub fn upstream(message: &str) -> Fault {
-    Fault::new(message).with(Upstream)
+    Fault::upstream(message)
 }
 
 pub fn bad_request(message: &str) -> Fault {
-    Fault::new(message).with(BadRequest)
+    Fault::bad_request(message)
 }
 
 pub fn truncated() -> Fault {
-    Fault::new("stream ended before completion").with(Truncated)
+    Fault::truncated()
 }
 
-/// A name for the fact `fault` carries, "error" if none is known.
-pub fn code(fault: &Fault) -> &'static str {
-    if let Some(Code(code)) = fault.get() {
-        return code;
-    }
-    match () {
-        _ if fault.is::<NotFound>() => "not_found",
-        _ if fault.is::<BadRequest>() => "bad_request",
-        _ if fault.is::<Upstream>() => "upstream",
-        _ if fault.is::<Truncated>() => "truncated",
-        _ if fault.is::<Abandoned>() => "abandoned",
-        _ if fault.is::<Config>() => "config",
-        _ if fault.is::<Internal>() => "internal",
-        _ => "error",
+/// A name for `fault`: its plugin's [`Code`], else its own.
+pub fn code(fault: &Fault) -> &str {
+    match fault.get() {
+        Some(Code(code)) => code,
+        None => fault.code(),
     }
 }
 

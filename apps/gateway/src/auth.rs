@@ -312,7 +312,7 @@ impl Cors {
         let any = origins.iter().any(|o| o == "*");
         if any && !keys {
             return Err(
-                "cors: origin '*' needs `client_keys:`; without keys any web page \
+                "cors: origin '*' needs `client_keys`; without keys any web page \
                         could spend the gateway's provider keys"
                     .to_owned(),
             );
@@ -455,7 +455,7 @@ impl LocalOnly {
             if !self.answers_to(&name) {
                 return Some(format!(
                     "Host '{name}' is not this gateway's: without client keys it answers \
-                     only to localhost; set `client_keys:` to reach it by another name"
+                     only to localhost; set `client_keys` to reach it by another name"
                 ));
             }
         }
@@ -471,7 +471,7 @@ impl LocalOnly {
         if cross_site || origin.is_some_and(|at| !same_origin(at)) {
             return Some(
                 "a cross-origin browser request is refused: without client keys any web \
-                 page could spend the gateway's provider keys; set `client_keys:` to allow it"
+                 page could spend the gateway's provider keys; set `client_keys` to allow it"
                     .to_owned(),
             );
         }

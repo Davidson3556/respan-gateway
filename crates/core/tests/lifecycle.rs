@@ -5,6 +5,7 @@
 mod edge;
 mod faults;
 
+use respan_gateway_core::Fault;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -288,8 +289,8 @@ async fn an_unregistered_input_is_rejected_before_sending() {
     impl Plugin for TryWrongInput {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             let call = cx.call("a").with_input(WrongInput);
-            assert!(call.clone().await.unwrap_err().is::<Internal>());
-            assert!(call.await.unwrap_err().is::<Internal>());
+            assert!(call.clone().await.unwrap_err().code() == "internal");
+            assert!(call.await.unwrap_err().code() == "internal");
             Ok(Some(Response::stream(
                 futures::stream::empty::<Result<Out>>(),
             )))

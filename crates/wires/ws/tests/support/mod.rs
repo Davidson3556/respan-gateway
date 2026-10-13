@@ -13,7 +13,7 @@ use futures::{SinkExt, StreamExt};
 use respan_gateway_core::{Connection, Fault, Format, Gateway, Provider};
 use respan_gateway_http::http::header::UPGRADE;
 use respan_gateway_http::http::{HeaderMap, Method};
-use respan_gateway_http::{self as h, ClientIo, ProviderIo};
+use respan_gateway_http::{ClientIo, ProviderIo};
 use respan_gateway_passthrough_http as passthrough;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -43,7 +43,7 @@ impl Format<ClientIo, passthrough::Input<Raw>, passthrough::Output<Raw>> for Raw
         &self,
         io: ClientIo,
     ) -> Result<Connection<passthrough::Input<Raw>, passthrough::Output<Raw>>, Fault> {
-        Ok(io.with_error(h::rules::plain).bind(
+        Ok(io.bind(
             passthrough::read_request::<Raw>,
             passthrough::write_response::<Raw>,
         ))
@@ -651,6 +651,6 @@ impl Via {
 pub fn code(end: &Result<(), Fault>) -> String {
     match end {
         Ok(()) => "ok".to_owned(),
-        Err(fault) => respan_gateway_http_faults::error_code(fault).to_owned(),
+        Err(fault) => fault.code().to_owned(),
     }
 }

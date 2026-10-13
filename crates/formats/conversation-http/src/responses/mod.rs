@@ -219,7 +219,7 @@ impl Schema for OpenAiResponses {
     }
 
     fn error_body(fault: &Fault) -> Value {
-        let code = respan_gateway_http_faults::error_code(fault);
+        let code = fault.code();
         let error =
             json!({ "message": fault.message(), "type": code, "param": null, "code": code });
         json!({ "error": merge_details(error, fault) })

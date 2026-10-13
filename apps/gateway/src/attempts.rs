@@ -1,5 +1,5 @@
-//! The binary's fallback and hedge plugins (`plugins: fallback` and
-//! `plugins: hedge`): their chains, which name configured providers, as
+//! The binary's fallback and hedge plugins (`plugins.fallback` and
+//! `plugins.hedge`): their chains, which name configured providers, as
 //! the core providers a request is targeted at.
 //!
 //! A provider is one core provider per format it speaks, so each format of

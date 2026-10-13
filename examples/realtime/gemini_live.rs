@@ -13,10 +13,10 @@ mod budget;
 mod serve;
 use budget::{Budget, OUTPUT};
 use respan_gateway_core::futures::{StreamExt, TryStreamExt};
-use respan_gateway_core::{BadRequest, ErrorCode, NativeFields, Provider};
 use respan_gateway_core::{
     ClientContext, EventStream, Fault, Gateway, Plugin, Response, async_trait,
 };
+use respan_gateway_core::{ErrorCode, NativeFields, Provider};
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
@@ -53,10 +53,10 @@ fn configure(setup: &mut Session, model: &str) -> Result<(), Fault> {
         .iter()
         .any(|path| kept.pointer(path).is_some_and(|v| !v.is_object()))
     {
-        return Err(BadRequest::fault("setup configuration must be an object"));
+        return Err(Fault::bad_request("setup configuration must be an object"));
     }
     if setup.model.as_deref().is_some_and(|m| m != model) {
-        return Err(BadRequest::fault(
+        return Err(Fault::bad_request(
             "model is outside the configured budget policy",
         ));
     }

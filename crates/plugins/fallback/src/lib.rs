@@ -31,9 +31,7 @@ use std::time::Duration;
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::stream::FuturesUnordered;
 use respan_gateway_core::futures::{FutureExt, StreamExt};
-use respan_gateway_core::{
-    Call, ClientContext, Fault, Plugin, Response, RetryAfter, Upstream, async_trait,
-};
+use respan_gateway_core::{Call, ClientContext, Fault, Plugin, Response, RetryAfter, async_trait};
 
 /// How often to try one call, and how long to wait between tries.
 #[derive(Debug, Clone, Copy)]
@@ -240,7 +238,7 @@ fn win(answer: Answer) -> Result<Response, Fault> {
 
 /// The last answer; with none, `upstream`.
 fn last(answer: Option<Answer>) -> Result<Response, Fault> {
-    win(answer.ok_or_else(|| Upstream::fault("no provider to try"))?)
+    win(answer.ok_or_else(|| Fault::upstream("no provider to try"))?)
 }
 
 /// Prefer an opened candidate over a fallback that never opened. Replacing
@@ -260,7 +258,7 @@ fn keep(previous: &mut Option<Answer>, answer: Answer) {
 /// `Ok(Response)` before applying `until`; it does not mean the request was
 /// sent, a refusal occurred, or bytes were delivered. Returning false skips
 /// retries of that target but still permits the next fallback. Only opened
-/// responses contribute their [`RetryAfter`] fact to the backoff wait. HTTP
+/// responses contribute their [`RetryAfter`] extension to the backoff wait. HTTP
 /// callers can select `respan_gateway_http_faults::retryable`; other transports can
 /// supply their own policy. Neither policy nor timing makes an input replayable.
 pub async fn first_success(

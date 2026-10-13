@@ -4,8 +4,8 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use respan_gateway_core::Fault;
 use respan_gateway_core::futures::stream;
-use respan_gateway_core::{BadRequest, Fault, Upstream};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
@@ -121,9 +121,9 @@ impl Session {
         let mut child = command
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| Upstream::fault("the MCP server could not be started").with_source(e))?;
+            .map_err(|e| Fault::upstream("the MCP server could not be started").with_source(e))?;
         let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            return Err(Upstream::fault("the MCP server has no stdio"));
+            return Err(Fault::upstream("the MCP server has no stdio"));
         };
         let group = child.id().and_then(|id| i32::try_from(id).ok());
         let (lines, mut written) = mpsc::channel::<Bytes>(limits.backlog);
@@ -250,7 +250,7 @@ impl Session {
                 .iter()
                 .any(|id| routes.posts.iter().any(|post| post.ids.contains(id)))
             {
-                return Err(BadRequest::fault("an MCP request ID is already pending"));
+                return Err(Fault::bad_request("an MCP request ID is already pending"));
             }
             (!ids.is_empty()).then(|| {
                 let number = routes.next;
@@ -416,7 +416,7 @@ fn signal(child: &mut Child, group: Option<i32>, kill: bool) {
 
 /// The fault of a child that stopped taking messages.
 fn stopped() -> Fault {
-    Upstream::fault("the MCP server stopped")
+    Fault::upstream("the MCP server stopped")
 }
 
 /// Waits until `due`, or forever for `None`: a time past what an

@@ -74,19 +74,14 @@ async fn check_reports_what_the_environment_configures_without_the_key() {
 async fn check_says_where_each_key_comes_from() {
     let dir = empty_dir();
     std::fs::write(
-        dir.join("gateway.yaml"),
-        "client_keys: [one, two]
-providers:
-  literal: { formats: openai-chat, base_url: 'http://a.test/v1', key: sk-literal }
-  named: { formats: openai-chat, base_url: 'http://b.test/v1', auth: { type: bearer, key: 'env:B_KEY' } }
-  open: { formats: openai-chat, base_url: 'http://c.test/v1' }
-",
+        dir.join("gateway.toml"),
+        "client_keys = [\"one\", \"two\"]\nproviders = { literal = { formats = \"openai-chat\", base_url = \"http://a.test/v1\", key = \"sk-literal\" }, named = { formats = \"openai-chat\", base_url = \"http://b.test/v1\", auth = { type = \"bearer\", key = \"env:B_KEY\" } }, open = { formats = \"openai-chat\", base_url = \"http://c.test/v1\" } }\n",
     )
     .unwrap();
     let out = run(&dir, &["check"], &[("B_KEY", "b")]).await;
     assert!(out.ok, "{}", out.stderr);
     let report = &out.stdout;
-    assert!(report.contains("config     gateway.yaml"), "{report}");
+    assert!(report.contains("config     gateway.toml"), "{report}");
     assert!(report.contains("key     config"), "{report}");
     assert!(report.contains("key     env B_KEY"), "{report}");
     assert!(report.contains("key     client credentials"), "{report}");
@@ -112,13 +107,13 @@ async fn check_composes_with_proxy_by_a_flag() {
 #[tokio::test]
 async fn problems_are_one_precise_error_and_a_failure() {
     let dir = empty_dir();
-    let write = |yaml: &str| std::fs::write(dir.join("gateway.yaml"), yaml).unwrap();
+    let write = |text: &str| std::fs::write(dir.join("gateway.toml"), text).unwrap();
 
-    write("log: text\nserve: [openai-chat]\n");
+    write("log = \"text\"\nserve = [\"openai-chat\"]\n");
     let out = run(&dir, &["check"], &[]).await;
     assert!(!out.ok && out.stdout.is_empty());
     assert!(
-        out.stderr.starts_with("error: gateway.yaml: "),
+        out.stderr.starts_with("error: gateway.toml: "),
         "{}",
         out.stderr
     );
@@ -130,7 +125,7 @@ async fn problems_are_one_precise_error_and_a_failure() {
     assert!(out.stderr.contains("`formats`"), "{}", out.stderr);
     assert!(out.stderr.contains("line 2"), "{}", out.stderr);
 
-    write("providers: { p: { vendor: nope } }\n");
+    write("providers = { p = { vendor = \"nope\" } }\n");
     let out = run(&dir, &["check"], &[]).await;
     assert!(!out.ok);
     assert!(
@@ -140,7 +135,7 @@ async fn problems_are_one_precise_error_and_a_failure() {
         out.stderr
     );
 
-    write("providers: { p: { formats: nope, base_url: 'http://x' } }\n");
+    write("providers = { p = { formats = \"nope\", base_url = \"http://x\" } }\n");
     let out = run(&dir, &["check"], &[]).await;
     assert!(
         out.stderr
@@ -149,11 +144,11 @@ async fn problems_are_one_precise_error_and_a_failure() {
         out.stderr
     );
 
-    write("providers: { openai: { vendor: openai } }\n");
+    write("providers = { openai = { vendor = \"openai\" } }\n");
     let out = run(&dir, &["check"], &[]).await;
     assert!(!out.ok);
     assert!(out.stderr.contains("OPENAI_API_KEY"), "{}", out.stderr);
-    assert!(out.stderr.contains("set `key:`"), "{}", out.stderr);
+    assert!(out.stderr.contains("set `key`"), "{}", out.stderr);
 }
 
 #[tokio::test]
@@ -164,9 +159,10 @@ async fn the_version_is_the_workspaces() {
     let out = run(&empty_dir(), &["--version"], &[]).await;
     assert_eq!(out.stdout.trim(), format!("respan-gateway {version}"));
 
-    let gw =
-        Gateway::start("providers: { p: { formats: openai-chat, base_url: 'http://x.test/v1' } }")
-            .await;
+    let gw = Gateway::start(
+        "providers = { p = { formats = \"openai-chat\", base_url = \"http://x.test/v1\" } }\n",
+    )
+    .await;
     let resp = client()
         .get(gw.url("/ui/api/overview"))
         .send()
@@ -185,28 +181,28 @@ async fn the_version_is_the_workspaces() {
 async fn dotenv_gives_keys_and_settings_but_never_beats_the_environment() {
     let dir = empty_dir();
     std::fs::write(
-        dir.join("a.yaml"),
-        "providers: { a: { formats: openai-chat, base_url: 'http://a.test/v1' } }",
+        dir.join("a.toml"),
+        "providers = { a = { formats = \"openai-chat\", base_url = \"http://a.test/v1\" } }\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("b.yaml"),
-        "providers: { b: { formats: openai-chat, base_url: 'http://b.test/v1' } }",
+        dir.join("b.toml"),
+        "providers = { b = { formats = \"openai-chat\", base_url = \"http://b.test/v1\" } }\n",
     )
     .unwrap();
     std::fs::write(
         dir.join(".env"),
-        "# comment\nexport OPENAI_API_KEY=\"sk-from-dotenv\"\nRESPAN_CONFIG=b.yaml\n",
+        "# comment\nexport OPENAI_API_KEY=\"sk-from-dotenv\"\nRESPAN_CONFIG=b.toml\n",
     )
     .unwrap();
     // The key comes from .env, and so does the config file.
     let out = run(&dir, &["check"], &[]).await;
     assert!(out.ok, "{}", out.stderr);
-    assert!(out.stdout.contains("config     b.yaml"), "{}", out.stdout);
+    assert!(out.stdout.contains("config     b.toml"), "{}", out.stdout);
 
     // The environment wins over .env.
-    let out = run(&dir, &["check"], &[("RESPAN_CONFIG", "a.yaml")]).await;
-    assert!(out.stdout.contains("config     a.yaml"), "{}", out.stdout);
+    let out = run(&dir, &["check"], &[("RESPAN_CONFIG", "a.toml")]).await;
+    assert!(out.stdout.contains("config     a.toml"), "{}", out.stdout);
 
     // Without a config, the key in .env makes a provider; PORT sets the port (with a client key).
     std::fs::write(
@@ -266,8 +262,8 @@ async fn models_lists_each_providers_models_with_their_kind() {
     tokio::spawn(async move { axum::serve(listener, server).await });
     let dir = empty_dir();
     std::fs::write(
-        dir.join("gateway.yaml"),
-        format!("providers: {{ openai: {{ vendor: openai, base_url: '{base}', key: sk }} }}"),
+        dir.join("gateway.toml"),
+        format!("providers = {{ openai = {{ vendor = \"openai\", base_url = \"{base}\", key = \"sk\" }} }}\n"),
     )
     .unwrap();
     let out = run(&dir, &["models"], &[]).await;
@@ -297,8 +293,8 @@ async fn models_lists_each_providers_models_with_their_kind() {
     // Nobody answering is a failure naming the provider.
     let down = support::closed_port().await;
     std::fs::write(
-        dir.join("gateway.yaml"),
-        format!("providers: {{ openai: {{ vendor: openai, base_url: '{down}/v1', key: sk }} }}"),
+        dir.join("gateway.toml"),
+        format!("providers = {{ openai = {{ vendor = \"openai\", base_url = \"{down}/v1\", key = \"sk\" }} }}\n"),
     )
     .unwrap();
     let out = run(&dir, &["models"], &[]).await;
@@ -340,12 +336,9 @@ async fn check_online_says_per_provider_whether_it_answers_the_key() {
     let down = support::closed_port().await;
     let dir = empty_dir();
     std::fs::write(
-        dir.join("gateway.yaml"),
+        dir.join("gateway.toml"),
         format!(
-            "providers:
-  fine: {{ vendor: openai, base_url: '{good}', key: sk-good }}
-  stale: {{ vendor: groq, base_url: '{wrong}', key: sk-good }}
-  gone: {{ vendor: mistral, base_url: '{down}/v1', key: sk-good }}"
+            "providers = {{ fine = {{ vendor = \"openai\", base_url = \"{good}\", key = \"sk-good\" }}, stale = {{ vendor = \"groq\", base_url = \"{wrong}\", key = \"sk-good\" }}, gone = {{ vendor = \"mistral\", base_url = \"{down}/v1\", key = \"sk-good\" }} }}\n"
         ),
     )
     .unwrap();
@@ -374,8 +367,8 @@ async fn check_online_says_per_provider_whether_it_answers_the_key() {
 
     // All reachable is success.
     std::fs::write(
-        dir.join("gateway.yaml"),
-        format!("providers: {{ fine: {{ vendor: openai, base_url: '{good}', key: sk-good }} }}"),
+        dir.join("gateway.toml"),
+        format!("providers = {{ fine = {{ vendor = \"openai\", base_url = \"{good}\", key = \"sk-good\" }} }}\n"),
     )
     .unwrap();
     let out = run(&dir, &["check", "--online"], &[]).await;
@@ -390,15 +383,9 @@ async fn init_enables_a_vendor_by_an_env_reference_and_says_how_to_set_it() {
     assert!(out.ok, "{}", out.stderr);
     assert!(out.stdout.contains("set GROQ_API_KEY"), "{}", out.stdout);
     assert!(out.stdout.contains("set MY_MISTRAL"), "{}", out.stdout);
-    let file = std::fs::read_to_string(dir.join("gateway.yaml")).unwrap();
-    assert!(
-        file.contains("vendor: groq, key: 'env:GROQ_API_KEY'"),
-        "{file}"
-    );
-    assert!(
-        file.contains("vendor: mistral, key: 'env:MY_MISTRAL'"),
-        "{file}"
-    );
+    let file = std::fs::read_to_string(dir.join("gateway.toml")).unwrap();
+    assert!(file.contains("key = \"env:GROQ_API_KEY\""), "{file}");
+    assert!(file.contains("key = \"env:MY_MISTRAL\""), "{file}");
 
     // With the variable set, the file checks and nothing is left to say.
     let env = [("GROQ_API_KEY", "gsk-x"), ("MY_MISTRAL", "m-x")];
@@ -421,9 +408,9 @@ async fn init_writes_a_literal_key_only_when_given_and_keeps_the_file_private() 
     assert!(out.ok, "{}", out.stderr);
     assert!(out.stderr.contains("plain text"), "{}", out.stderr);
     assert!(!out.stdout.contains("gsk-literal") && !out.stderr.contains("gsk-literal"));
-    let path = dir.join("gateway.yaml");
+    let path = dir.join("gateway.toml");
     let file = std::fs::read_to_string(&path).unwrap();
-    assert!(file.contains("key: 'gsk-literal'"), "{file}");
+    assert!(file.contains("key = \"gsk-literal\""), "{file}");
     let mode = std::fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o077, 0, "{mode:o}");
     let out = run(&dir, &["check"], &[]).await;
@@ -442,15 +429,15 @@ async fn port_binds_every_address_but_only_when_nothing_else_says_where() {
     let gw = Gateway::run_with(&[], &dir, &env).await;
     assert!(gw.base.starts_with("http://0.0.0.0:"), "{}", gw.base);
 
-    // The config's `listen:`, RESPAN_LISTEN and --listen all beat PORT.
+    // The config's `listen`, RESPAN_LISTEN and --listen all beat PORT.
     std::fs::write(
-        dir.join("gateway.yaml"),
-        "listen: 127.0.0.1:0\nproviders: { openai: { vendor: openai } }\n",
+        dir.join("gateway.toml"),
+        "listen = \"127.0.0.1:0\"\nproviders = { openai = { vendor = \"openai\" } }\n",
     )
     .unwrap();
     let gw = Gateway::run_with(&[], &dir, &env).await;
     assert!(gw.base.starts_with("http://127.0.0.1:"), "{}", gw.base);
-    std::fs::remove_file(dir.join("gateway.yaml")).unwrap();
+    std::fs::remove_file(dir.join("gateway.toml")).unwrap();
     let with = |extra: (&'static str, &'static str)| [env[0], env[1], env[2], extra];
     let gw = Gateway::run_with(&[], &dir, &with(("RESPAN_LISTEN", "127.0.0.1:0"))).await;
     assert!(gw.base.starts_with("http://127.0.0.1:"), "{}", gw.base);
@@ -495,10 +482,10 @@ async fn an_open_gateway_beyond_loopback_is_refused_with_what_to_do() {
         out.stderr
     );
     assert!(!out.stderr.contains("wins over PORT"), "{}", out.stderr);
-    // A config's `listen:` beats PORT, and the refusal says so.
+    // A config's `listen` beats PORT, and the refusal says so.
     std::fs::write(
-        dir.join("gateway.yaml"),
-        "listen: 0.0.0.0:8\nproviders: { openai: { vendor: openai } }\n",
+        dir.join("gateway.toml"),
+        "listen = \"0.0.0.0:8\"\nproviders = { openai = { vendor = \"openai\" } }\n",
     )
     .unwrap();
     let out = run(&dir, &[], &[env[0], ("PORT", "9")]).await;
@@ -508,13 +495,13 @@ async fn an_open_gateway_beyond_loopback_is_refused_with_what_to_do() {
         out.stderr
     );
     assert!(
-        out.stderr.contains("`listen:` wins over PORT") && out.stderr.contains("remove `listen:`"),
+        out.stderr.contains("`listen` wins over PORT") && out.stderr.contains("remove `listen`"),
         "{}",
         out.stderr
     );
     let out = run(&dir, &[], &[env[0]]).await;
     assert!(!out.stderr.contains("wins over PORT"), "{}", out.stderr);
-    std::fs::remove_file(dir.join("gateway.yaml")).unwrap();
+    std::fs::remove_file(dir.join("gateway.toml")).unwrap();
     // Loopback is fine without keys (`check` shows the plan).
     let out = run(&dir, &["check", "--listen", "127.0.0.1:0"], &env).await;
     assert!(out.ok, "{}", out.stderr);
@@ -563,13 +550,16 @@ async fn init_client_key_writes_a_strong_key_and_prints_it_once() {
     let dir = empty_dir();
     let out = run(&dir, &["init", "--client-key"], &[("OPENAI_API_KEY", "sk")]).await;
     assert!(out.ok, "{}", out.stderr);
-    let file = std::fs::read_to_string(dir.join("gateway.yaml")).unwrap();
+    let file = std::fs::read_to_string(dir.join("gateway.toml")).unwrap();
     let key = out
         .stdout
         .split_whitespace()
         .find(|w| w.starts_with("sk-gw-") && w.len() == 38)
         .unwrap_or_else(|| panic!("{}", out.stdout));
-    assert!(file.contains(&format!("client_keys: ['{key}']")), "{file}");
+    assert!(
+        file.contains(&format!("client_keys = [\"{key}\"]")),
+        "{file}"
+    );
     assert_eq!(out.stdout.matches(key).count(), 3, "{}", out.stdout);
     assert!(
         out.stdout.contains("Authorization: Bearer"),
@@ -580,7 +570,7 @@ async fn init_client_key_writes_a_strong_key_and_prints_it_once() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(dir.join("gateway.yaml"))
+        let mode = std::fs::metadata(dir.join("gateway.toml"))
             .unwrap()
             .permissions()
             .mode();
@@ -603,6 +593,74 @@ async fn init_client_key_writes_a_strong_key_and_prints_it_once() {
     // Without the flag, the key stays a hint.
     let out = run(&dir, &["init", "--force"], &[]).await;
     assert!(out.ok && !out.stdout.contains("sk-gw-"), "{}", out.stdout);
-    let file = std::fs::read_to_string(dir.join("gateway.yaml")).unwrap();
-    assert!(file.contains("\n# client_keys: ["), "{file}");
+    let file = std::fs::read_to_string(dir.join("gateway.toml")).unwrap();
+    assert!(file.contains("\n# client_keys = ["), "{file}");
+}
+
+#[tokio::test]
+async fn toml_discovery_reports_errors_without_falling_back() {
+    let dir = empty_dir();
+    std::fs::write(
+        dir.join("gateway.toml"),
+        "[providers.local]\nvendor = 'ollama'\n",
+    )
+    .unwrap();
+    let out = run(&dir, &["check"], &[]).await;
+    assert!(out.ok, "{}", out.stderr);
+    assert!(out.stdout.contains("gateway.toml"));
+    assert!(!out.stdout.contains("\x1b["));
+    let out = run(&dir, &["check", "--color", "always"], &[]).await;
+    assert!(out.ok && out.stdout.contains("\x1b["));
+    let out = run(&dir, &["check", "--color", "never"], &[]).await;
+    assert!(out.ok && !out.stdout.contains("\x1b["));
+    std::fs::write(dir.join("gateway.toml"), "log = 'sk-secret-value'").unwrap();
+    let out = run(&dir, &["check"], &[]).await;
+    assert!(!out.ok);
+    assert!(out.stderr.contains("gateway.toml") && out.stderr.contains("line 1"));
+    assert!(!out.stderr.contains("sk-secret-value"));
+}
+
+#[tokio::test]
+async fn init_writes_toml_to_an_explicit_path() {
+    let dir = empty_dir();
+    let out = run(&dir, &["init", "-o", "custom.toml", "-p", "ollama"], &[]).await;
+    assert!(out.ok, "{}", out.stderr);
+    let out = run(&dir, &["check", "-c", "custom.toml"], &[]).await;
+    assert!(out.ok, "{}", out.stderr);
+}
+
+#[tokio::test]
+async fn dotenv_searches_parents_preserves_exports_and_redacts_parse_errors() {
+    let root = empty_dir();
+    let child = root.join("nested");
+    std::fs::create_dir(&child).unwrap();
+    std::fs::write(
+        root.join(".env"),
+        "OPENAI_API_KEY=sk-dotenv\nRESPAN_LISTEN=8100\n",
+    )
+    .unwrap();
+    let out = run(&child, &["check"], &[("RESPAN_LISTEN", "8101")]).await;
+    assert!(out.ok, "{}", out.stderr);
+    assert!(out.stdout.contains("127.0.0.1:8101"));
+    assert!(!format!("{}{}", out.stdout, out.stderr).contains("sk-dotenv"));
+    std::fs::write(child.join(".env"), "OPENAI_API_KEY='sk-broken-secret\n").unwrap();
+    let out = run(&child, &["check"], &[]).await;
+    assert!(!out.ok && out.stderr.contains(".env: invalid syntax"));
+    assert!(!out.stderr.contains("sk-broken-secret"));
+}
+
+#[tokio::test]
+async fn yaml_is_not_discovered_or_accepted() {
+    let dir = empty_dir();
+    std::fs::write(
+        dir.join("gateway.yaml"),
+        "providers: { local: { vendor: ollama } }",
+    )
+    .unwrap();
+    let out = run(&dir, &["check"], &[]).await;
+    assert!(!out.ok && out.stderr.contains("no configuration found"));
+    assert!(!out.stderr.contains("ANTHROPIC_API_KEY"));
+    assert!(out.stderr.lines().all(|line| line.chars().count() < 90));
+    let out = run(&dir, &["check", "-c", "gateway.yaml"], &[]).await;
+    assert!(!out.ok && out.stderr.contains("line 1"));
 }

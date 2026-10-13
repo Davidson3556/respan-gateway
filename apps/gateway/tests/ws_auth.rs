@@ -38,12 +38,7 @@ async fn upgrade(gw: &Gateway, path: &str, protocols: &str) -> Result<Option<Str
 async fn gateway(openai: &realtime::Fake, gemini: &realtime::Fake) -> Gateway {
     let http = |ws: String| ws.replace("ws://", "http://");
     Gateway::start(&format!(
-        "client_keys: [gw-key]
-providers:
-  openai: {{ vendor: openai, base_url: '{}', key: sk-provider }}
-  gemini: {{ vendor: gemini, base_url: '{}/v1beta/openai', key: AIza-provider }}
-formats: [openai-realtime, gemini-live]
-",
+        "client_keys = [\"gw-key\"]\nproviders = {{ openai = {{ vendor = \"openai\", base_url = \"{}\", key = \"sk-provider\" }}, gemini = {{ vendor = \"gemini\", base_url = \"{}/v1beta/openai\", key = \"AIza-provider\" }} }}\nformats = [\"openai-realtime\", \"gemini-live\"]\n",
         http(openai.base_url()),
         http(gemini.base_url())
     ))
@@ -120,11 +115,7 @@ async fn a_browsers_session_is_logged_under_its_keys_name() {
     );
     let http = |ws: String| ws.replace("ws://", "http://");
     let gw = Gateway::start(&format!(
-        "client_keys: [{{ name: web, key: gw-key }}]
-providers:
-  openai: {{ vendor: openai, base_url: '{}', key: sk-provider }}
-formats: [openai-realtime]
-",
+        "client_keys = [{{ name = \"web\", key = \"gw-key\" }}]\nproviders = {{ openai = {{ vendor = \"openai\", base_url = \"{}\", key = \"sk-provider\" }} }}\nformats = [\"openai-realtime\"]\n",
         http(openai.base_url()),
     ))
     .await;

@@ -86,21 +86,13 @@ fn stream_generate(model: &str) -> String {
 
 fn gemini_config(fake: &str) -> String {
     format!(
-        "providers:
-  g: {{ vendor: gemini, formats: gemini-generate, base_url: '{fake}/v1beta/openai', key: gw-gemini-key }}
-formats: [gemini-generate]
-plugins: {{ routing: {{ default: g }} }}
-"
+        "providers = {{ g = {{ vendor = \"gemini\", formats = \"gemini-generate\", base_url = \"{fake}/v1beta/openai\", key = \"gw-gemini-key\" }} }}\nformats = [\"gemini-generate\"]\nplugins = {{ routing = {{ default = \"g\" }} }}\n"
     )
 }
 
 fn gemini_over_openai_config(fake: &str) -> String {
     format!(
-        "providers:
-  o: {{ formats: openai-chat, base_url: '{fake}', auth: {{ type: bearer, key: sk-gw }} }}
-formats: [gemini-generate]
-plugins: {{ routing: {{ default: o }} }}
-"
+        "providers = {{ o = {{ formats = \"openai-chat\", base_url = \"{fake}\", auth = {{ type = \"bearer\", key = \"sk-gw\" }} }} }}\nformats = [\"gemini-generate\"]\nplugins = {{ routing = {{ default = \"o\" }} }}\n"
     )
 }
 
@@ -257,11 +249,7 @@ const RESPONSES: &str = "/v1/responses";
 
 fn responses_config(format: &str, provider: &str) -> String {
     format!(
-        "providers:
-  p: {{ formats: {format}, base_url: '{provider}', auth: {{ type: bearer, key: sk-gw }} }}
-formats: [openai-responses]
-plugins: {{ routing: {{ default: p }} }}
-"
+        "providers = {{ p = {{ formats = \"{format}\", base_url = \"{provider}\", auth = {{ type = \"bearer\", key = \"sk-gw\" }} }} }}\nformats = [\"openai-responses\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
     )
 }
 
@@ -344,11 +332,7 @@ async fn a_responses_request_is_relayed_whole_and_streamed_to_an_openai_provider
 async fn a_responses_request_is_translated_to_an_anthropic_provider() {
     let fake = FakeAnthropic::start().await;
     let config = format!(
-        "providers:
-  a: {{ formats: anthropic-messages, base_url: '{}', auth: {{ type: header, name: x-api-key, key: sk-ant-gw }} }}
-formats: [openai-responses]
-plugins: {{ routing: {{ default: a }} }}
-",
+        "providers = {{ a = {{ formats = \"anthropic-messages\", base_url = \"{}\", auth = {{ type = \"header\", name = \"x-api-key\", key = \"sk-ant-gw\" }} }} }}\nformats = [\"openai-responses\"]\nplugins = {{ routing = {{ default = \"a\" }} }}\n",
         fake.base_url()
     );
     let gw = Gateway::start(&config).await;

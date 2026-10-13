@@ -10,15 +10,14 @@ use super::{
     whole_json, write_field,
 };
 use crate::edge::{bind_provider, content};
-use respan_gateway_core::{BadRequest, Connection, ErrorCode, Fault, Format, Upstream};
+use respan_gateway_core::{Connection, ErrorCode, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{
     self, HeaderValue, Method, Uri, request::Parts as RequestHead, response::Parts as ResponseHead,
 };
-use respan_gateway_http::{ClientIo, Decoder, Encoder, ProviderIo, Whole};
-use respan_gateway_http_syntax::forwarded_path;
-use respan_gateway_http_syntax::percent_decode;
+use respan_gateway_http::path::forwarded_path;
+use respan_gateway_http::{All, ClientIo, Decoder, Encoder, ProviderIo, Whole};
 use respan_gateway_media::video::{Create, Input, Job, JobError, Jobs, Output, Status, Variant};
 use serde_json::{Map, Value, json};
 
@@ -89,7 +88,12 @@ fn route(method: &Method, uri: &Uri) -> Option<Route> {
     let segments: Vec<String> = path
         .split('/')
         .filter(|s| !s.is_empty())
-        .map(|s| percent_decode(s.split(';').next().unwrap_or_default()))
+        .map(|s| {
+            let name = s.split(';').next().unwrap_or_default();
+            percent_encoding::percent_decode_str(name)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
         .collect();
     let at = |back: usize| segments.len().checked_sub(back).map(|i| &segments[i]);
     let word = |back: usize, word: &str| at(back).is_some_and(|s| s.eq_ignore_ascii_case(word));
@@ -107,12 +111,9 @@ fn route(method: &Method, uri: &Uri) -> Option<Route> {
 
 /// A URI's query parameters, unescaped.
 fn query(uri: &Uri) -> Vec<(String, String)> {
-    let unescaped = |s: &str| percent_decode(&s.replace('+', " "));
-    let pairs = uri.query().unwrap_or_default().split('&');
-    pairs
-        .filter(|p| !p.is_empty())
-        .map(|p| p.split_once('=').unwrap_or((p, "")))
-        .map(|(k, v)| (unescaped(k), unescaped(v)))
+    let query = uri.query().unwrap_or_default();
+    form_urlencoded::parse(query.as_bytes())
+        .into_owned()
         .collect()
 }
 
@@ -140,22 +141,19 @@ fn variant(uri: &Uri) -> Result<Variant, Fault> {
 /// `text` escaped as a path segment or query value: all but RFC 3986's
 /// unreserved characters.
 fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for b in text.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(char::from(b));
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+    const UNRESERVED: &percent_encoding::AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
+    utf8_percent_encode(text, UNRESERVED).to_string()
 }
 
 /// A client's request.
 fn decode_request(head: &RequestHead, form: &Form) -> Result<Input, Fault> {
     let route = route(&head.method, &head.uri)
-        .ok_or_else(|| BadRequest::fault("the request is to no videos endpoint"))?;
+        .ok_or_else(|| Fault::bad_request("the request is to no videos endpoint"))?;
     Ok(match route {
         Route::Create => Input::Create(decode_create(form)?),
         Route::Remix(id) => {
@@ -232,7 +230,7 @@ fn call(head: &mut RequestHead, input: &Input) -> Result<Box<dyn Encoder<Input>>
                 Variant::Video => "",
                 Variant::Thumbnail => "?variant=thumbnail",
                 Variant::Spritesheet => "?variant=spritesheet",
-                _ => return Err(BadRequest::fault("a variant this format has no form for")),
+                _ => return Err(Fault::bad_request("a variant this format has no form for")),
             };
             (Method::GET, path(id, &format!("/content{query}")), None)
         }
@@ -255,7 +253,7 @@ fn call(head: &mut RequestHead, input: &Input) -> Result<Box<dyn Encoder<Input>>
             (Method::GET, uri, None)
         }
         _ => {
-            return Err(BadRequest::fault(
+            return Err(Fault::bad_request(
                 "a video request this format has no form for",
             ));
         }
@@ -286,7 +284,7 @@ fn create_body(create: &Create) -> Result<(Bytes, String), Fault> {
         return Ok((json_bytes(&v)?, "application/json".to_owned()));
     };
     let Some(bytes) = bytes_of(reference) else {
-        return Err(BadRequest::fault(
+        return Err(Fault::bad_request(
             "an input_reference by URL cannot be sent: OpenAI takes the image's bytes",
         ));
     };
@@ -404,7 +402,7 @@ fn response_encoder(
         Some(Route::Content(_))
     ) {
         super::content_type(head, "application/json");
-        return Box::new(Whole::new(encode_whole));
+        return Box::new(All::new(encode_whole));
     }
     super::content_type(
         head,
@@ -442,7 +440,7 @@ fn encode_whole(events: &[Output]) -> Result<Bytes, Fault> {
             _ => {}
         }
     }
-    json_bytes(&body.ok_or_else(|| Upstream::fault("the provider's answer said no video"))?)
+    json_bytes(&body.ok_or_else(|| Fault::upstream("the provider's answer said no video"))?)
 }
 
 /// A 502 for a status `what`, which this format cannot write.

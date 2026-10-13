@@ -13,10 +13,10 @@ use respan_gateway_conversation::Usage;
 use respan_gateway_conversation::{Block, Content, Finish, Input, Message, Output, Role, Tool};
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
+use respan_gateway_core::ErrorCode;
 use respan_gateway_core::{
     ClientContext, Fault, Filter, Gateway, Plugin, Provider, Response, async_trait,
 };
-use respan_gateway_core::{ErrorCode, Upstream};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http_faults::Status;
@@ -179,9 +179,7 @@ fn a_match_ending_in_its_own_start_is_seen_whole() {
 fn a_match_across_deltas_is_seen_whole() {
     let out = run(&mut Holdback::new(Terms), said(0, &["a bo", "m", "b!"]));
     assert_eq!(
-        out.err()
-            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
-            .as_deref(),
+        out.err().map(|f| f.code().to_owned()).as_deref(),
         Some("blocked")
     );
 }
@@ -232,7 +230,7 @@ fn content_that_cannot_be_read_is_refused() {
     assert_eq!(
         chat.read_all()
             .err()
-            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
+            .map(|f| f.code().to_owned())
             .as_deref(),
         Some(UNREADABLE)
     );
@@ -650,11 +648,7 @@ async fn a_violation_in_the_held_start_is_refused_before_any_byte() -> Result<()
             "{target}: {body}"
         );
         assert_eq!(
-            outcome
-                .await
-                .err()
-                .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
-                .as_deref(),
+            outcome.await.err().map(|f| f.code().to_owned()).as_deref(),
             Some("blocked")
         );
     }
@@ -760,7 +754,7 @@ async fn a_stream_cut_while_text_is_held_sends_it_then_the_error() -> Result<(),
     let gw = gateway_with(
         local(vec![
             Ok(Bytes::from(chunk("Mail <EMA"))),
-            Err(Upstream::fault("reset")),
+            Err(Fault::upstream("reset")),
         ]),
         http_transport(&anthropic.base_url(), "x-api-key", "sk-ant-test")?,
         "openai",

@@ -1,6 +1,6 @@
-mod facts;
+mod extensions;
 
-pub use facts::{BadRequest, Details, ErrorCode, RetryAfter, Truncated, Upstream};
+pub use extensions::{Details, ErrorCode, RetryAfter};
 
 use std::error::Error;
 use std::fmt;
@@ -16,44 +16,64 @@ pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     caught.unwrap_or_else(|_| Err(Fault::internal(PANICKED)))
 }
 
-/// The client left, a response was dropped, or its request ended first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Abandoned;
+/// Who a fault is on, which decides what follows it in any protocol: who
+/// is told, whether a call is tried again, whether anyone is alerted. What
+/// went wrong in particular is its code ([`Fault::code`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FaultKind {
+    /// The client's input or ask: never tried again.
+    Client,
+    /// A provider: unreachable, refusing, or broken off. Another attempt
+    /// may succeed.
+    Provider,
+    /// The gateway: its setup, a bug, or a plugin's own refusal.
+    Gateway,
+    /// No one is waiting: the client left or a response was dropped. Not
+    /// reported.
+    Abandoned,
+}
 
-/// A bug: a panic, or a type of another kind than the client's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Internal;
+impl FaultKind {
+    /// Its code, for a fault with none of its own: `bad_request`,
+    /// `upstream`, `error` or `abandoned`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Client => "bad_request",
+            Self::Provider => "upstream",
+            Self::Gateway => "error",
+            Self::Abandoned => "abandoned",
+        }
+    }
+}
 
-/// The gateway is set up in a way that cannot work.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Config;
-
-/// No format accepts the request, or nothing answers it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NotFound;
-
-/// The one error type: a message for the client, a source for logs, and
-/// typed facts the edges read ([`Fault::with`]), such as an HTTP status.
-/// The kernel reads only its own markers: [`Abandoned`], [`Internal`],
-/// [`Config`] and [`NotFound`]. Implement `From<YourError> for Fault` so `?`
-/// works in hooks.
+/// The one error type: a message for the client, its [`FaultKind`], a source
+/// for logs, and typed extensions the edges read ([`Fault::with`]), such as an
+/// HTTP status. Implement `From<YourError> for Fault` so `?` works in hooks.
 #[derive(Clone)]
-pub struct Fault(Arc<Fields>);
+pub struct Fault(Arc<Inner>);
 
 #[derive(Clone)]
-struct Fields {
+struct Inner {
     message: String,
+    kind: FaultKind,
     source: Option<Arc<dyn Error + Send + Sync>>,
-    facts: Extensions,
+    extensions: Extensions,
 }
 
 impl Fault {
-    /// A fault with this message, safe to show a client.
+    /// A fault with this message, safe to show a client, on the gateway.
     pub fn new(message: impl Into<String>) -> Self {
-        Self(Arc::new(Fields {
+        Self::of(FaultKind::Gateway, message)
+    }
+
+    /// A fault of `kind` with this message.
+    pub fn of(kind: FaultKind, message: impl Into<String>) -> Self {
+        Self(Arc::new(Inner {
             message: message.into(),
+            kind,
             source: None,
-            facts: Extensions::new(),
+            extensions: Extensions::new(),
         }))
     }
 
@@ -69,21 +89,26 @@ impl Fault {
         self
     }
 
-    /// A fact for the edges, such as the status a transport writes. A value
+    /// An extension for the edges, such as the status a transport writes. A value
     /// of the same type replaces the last.
-    pub fn with<T: Clone + Send + Sync + 'static>(mut self, fact: T) -> Self {
-        Arc::make_mut(&mut self.0).facts.insert(fact);
+    pub fn with<T: Clone + Send + Sync + 'static>(mut self, extension: T) -> Self {
+        Arc::make_mut(&mut self.0).extensions.insert(extension);
         self
     }
 
-    /// The fact of type `T`, if any.
+    /// The extension of type `T`, if any.
     pub fn get<T: 'static>(&self) -> Option<&T> {
-        self.0.facts.get()
+        self.0.extensions.get()
     }
 
-    /// Whether there is a fact of type `T`.
-    pub fn is<T: 'static>(&self) -> bool {
-        self.get::<T>().is_some()
+    /// Its kind.
+    pub fn kind(&self) -> FaultKind {
+        self.0.kind
+    }
+
+    /// Whether it is of `kind`.
+    pub fn is(&self, kind: FaultKind) -> bool {
+        self.0.kind == kind
     }
 
     /// The first error of type `E` in the source chain, if any
@@ -99,30 +124,57 @@ impl Fault {
         None
     }
 
+    /// What went wrong, for the client: its [`ErrorCode`], else its kind's
+    /// ([`FaultKind::as_str`]).
+    pub fn code(&self) -> &str {
+        match self.get() {
+            Some(ErrorCode(code)) => code,
+            None => self.kind().as_str(),
+        }
+    }
+
     /// The message for the client.
     pub fn message(&self) -> &str {
         &self.0.message
     }
 
-    /// No one waits for it: [`Abandoned`], such as a response whose client
-    /// left.
-    pub fn abandoned() -> Self {
-        Self::new("abandoned").with(Abandoned)
+    /// The client's input is not one its format or kind can take.
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::of(FaultKind::Client, message)
     }
 
-    /// A bug: [`Internal`].
-    pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(message).with(Internal)
-    }
-
-    /// A setup that cannot work: [`Config`].
-    pub fn config(message: impl Into<String>) -> Self {
-        Self::new(message).with(Config)
-    }
-
-    /// Nothing takes the request: [`NotFound`].
+    /// Nothing takes the request: the client's, coded `not_found`.
     pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(message).with(NotFound)
+        Self::of(FaultKind::Client, message).coded("not_found")
+    }
+
+    /// A provider failed.
+    pub fn upstream(message: impl Into<String>) -> Self {
+        Self::of(FaultKind::Provider, message)
+    }
+
+    /// A provider's stream stopped before its end, coded `truncated`.
+    pub fn truncated() -> Self {
+        Self::of(FaultKind::Provider, "stream ended before completion").coded("truncated")
+    }
+
+    /// No one waits for it, such as a response whose client left.
+    pub fn abandoned() -> Self {
+        Self::of(FaultKind::Abandoned, "abandoned")
+    }
+
+    /// A setup that cannot work, coded `config`.
+    pub fn config(message: impl Into<String>) -> Self {
+        Self::of(FaultKind::Gateway, message).coded("config")
+    }
+
+    /// A bug, coded `internal`.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::of(FaultKind::Gateway, message).coded("internal")
+    }
+
+    fn coded(self, code: &'static str) -> Self {
+        self.with(ErrorCode(code.into()))
     }
 
     /// Something asked for `T`, not of the client's kind: a bug.
@@ -141,7 +193,8 @@ impl fmt::Debug for Fault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Fault")
             .field("message", &self.0.message)
-            .field("facts", &self.0.facts)
+            .field("kind", &self.0.kind)
+            .field("extensions", &self.0.extensions)
             .field("source", &self.0.source.as_ref().map(|s| s.to_string()))
             .finish()
     }
@@ -178,7 +231,7 @@ mod tests {
         limit: u32,
     }
 
-    /// A fact an edge reads: the limit a client is told.
+    /// An extension an edge reads: the limit a client is told.
     #[derive(Clone, Debug, PartialEq)]
     struct Limit(u32);
 
@@ -211,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fact_is_read_by_its_type() {
+    fn an_extension_is_read_by_its_type() {
         let f = Fault::new("x").with(7_u8).with("s");
         assert_eq!((f.get::<u8>(), f.get::<&str>()), (Some(&7), Some(&"s")));
         assert_eq!(f.get::<u16>(), None);
@@ -224,18 +277,26 @@ mod tests {
         let f = Fault::from_error(PluginError { limit: 5 });
         assert_eq!(f.message(), "over the limit of 5");
         assert_eq!(f.cause::<PluginError>().map(|e| e.limit), Some(5));
-        assert!(!f.is::<Limit>());
+        assert!(f.get::<Limit>().is_none());
         let wrapped = Fault::new("outer").with_source(f);
         assert_eq!(wrapped.cause::<PluginError>().map(|e| e.limit), Some(5));
     }
 
     #[test]
-    fn the_kernel_outcomes_carry_their_markers() {
-        assert!(Fault::abandoned().is::<Abandoned>());
-        assert_eq!(Fault::abandoned().message(), "abandoned");
-        assert!(Fault::internal("x").is::<Internal>());
-        assert!(Fault::config("x").is::<Config>());
-        assert!(Fault::not_found("x").is::<NotFound>());
-        assert!(!Fault::config("x").is::<Internal>());
+    fn each_constructor_makes_its_kind_and_code() {
+        for (fault, kind, code) in [
+            (Fault::bad_request("x"), FaultKind::Client, "bad_request"),
+            (Fault::not_found("x"), FaultKind::Client, "not_found"),
+            (Fault::upstream("x"), FaultKind::Provider, "upstream"),
+            (Fault::truncated(), FaultKind::Provider, "truncated"),
+            (Fault::config("x"), FaultKind::Gateway, "config"),
+            (Fault::internal("x"), FaultKind::Gateway, "internal"),
+            (Fault::new("x"), FaultKind::Gateway, "error"),
+            (Fault::abandoned(), FaultKind::Abandoned, "abandoned"),
+        ] {
+            assert_eq!((fault.kind(), fault.code()), (kind, code));
+        }
+        let coded = Fault::internal("x").with(ErrorCode("mine".into()));
+        assert_eq!(coded.code(), "mine");
     }
 }

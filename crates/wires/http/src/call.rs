@@ -3,52 +3,33 @@
 
 use futures::future::BoxFuture;
 use http::header::{self, CONNECTION, HeaderName, UPGRADE};
-use http::{HeaderMap, HeaderValue, request::Parts as RequestHead};
-use respan_gateway_core::{BadRequest, Extensions, Fault};
+use http::{HeaderMap, HeaderValue};
+use respan_gateway_core::{Extensions, Fault};
 
 use crate::credential::{take_protocol_keys, take_query};
-use crate::rules::{HOP_BY_HOP, remove_if, strip_named};
+use crate::rules::{CONNECTION_HEADERS, remove_if, strip_named};
 use crate::{Body, Completion};
 use futures::{FutureExt, StreamExt, stream};
-use respan_gateway_core::Upstream;
 use std::sync::Arc;
 use std::time::Duration;
 
 /// `url` as a transport's base URL, without a trailing `/`: one of
-/// `schemes`, a host (a name, an IPv4 address, or an IPv6 one in brackets)
-/// with an optional port other than 0, an optional path prefix such as
-/// `/v1`, and no query, fragment or credentials, else `Err` with `config`.
-/// The error does not echo the URL, which may hold a key.
+/// `schemes`, a host with an optional port other than 0, an optional path
+/// prefix such as `/v1`, and no query, fragment or credentials, else `Err`
+/// with `config`. It is read and normalized as the URL standard says
+/// ([`url::Url`]). The error does not echo the URL, which may hold a key.
 pub fn base_url(url: &str, schemes: &[&str]) -> Result<String, Fault> {
-    let host = |host: &str| match host.strip_prefix('[') {
-        Some(v6) => v6
-            .strip_suffix(']')
-            .is_some_and(|v6| v6.parse::<std::net::Ipv6Addr>().is_ok()),
-        None if host.bytes().all(|b| b.is_ascii_digit() || b == b'.') => {
-            host.parse::<std::net::Ipv4Addr>().is_ok()
-        }
-        None => host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_')),
-    };
-    let parsed = url.parse::<http::Uri>().ok().filter(|u| {
-        let authority = u.authority().map_or("", |a| a.as_str());
-        // A port follows the host, past an IPv6 address's brackets.
-        let after_host = authority
-            .rsplit_once(']')
-            .map_or(authority, |(_, rest)| rest);
-        let port = after_host
-            .split_once(':')
-            .map(|(_, port)| port.parse::<u16>());
-        u.scheme_str().is_some_and(|s| schemes.contains(&s))
-            && u.host().is_some_and(|h| !h.is_empty() && host(h))
-            && !authority.contains('@')
-            && port.is_none_or(|p| p.is_ok_and(|p| p != 0))
+    let parsed = url::Url::parse(url).ok().filter(|u| {
+        schemes.contains(&u.scheme())
+            && u.host_str().is_some_and(|h| !h.is_empty())
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.port() != Some(0)
             && u.query().is_none()
-            && !url.contains('#')
+            && u.fragment().is_none()
     });
     match parsed {
-        Some(url) => Ok(url.to_string().trim_end_matches('/').to_owned()),
+        Some(url) => Ok(url.as_str().trim_end_matches('/').to_owned()),
         None => Err(Fault::config(format!(
             "bad base URL: {} with a host, and no query, fragment or credentials \
              (those go in its headers)",
@@ -72,7 +53,7 @@ pub fn prepare_call(
     credentials(call, headers);
     let path = call.uri().path_and_query().map_or("/", |p| p.as_str());
     if has_dot_segment(call.uri().path()) {
-        return Err(BadRequest::fault("the request path has a dot segment"));
+        return Err(Fault::bad_request("the request path has a dot segment"));
     }
     let uri = format!("{base}{path}").parse::<http::Uri>();
     *call.uri_mut() =
@@ -82,7 +63,7 @@ pub fn prepare_call(
 
 /// Whether `path` has a `.` or `..` segment, after one percent-decoding.
 fn has_dot_segment(path: &str) -> bool {
-    respan_gateway_http_syntax::percent_decode(path)
+    crate::path::decoded(path)
         .split(['/', '\\'])
         .any(|segment| matches!(segment, "." | ".."))
 }
@@ -90,8 +71,10 @@ fn has_dot_segment(path: &str) -> bool {
 /// Strip from a call, whose head may be the client's, what a proxy does not
 /// pass on: a hop's headers (RFC 9110 7.6.1) but `Upgrade`, which gets its
 /// `Connection: upgrade` (7.8); `Host`; `Expect`; conditions and ranges
-/// (13, 14); method overrides; and `Accept-Encoding`, as the gateway
-/// decodes what it reads.
+/// (13, 14); method overrides; `Accept-Encoding`, as the gateway decodes
+/// what it reads; and the gateway origin's `Cookie`, `Forwarded`, `Via`,
+/// `X-Forwarded-*` and `X-Real-IP`, which plugins still see
+/// ([`Original`](crate::raw::Original)) and a call's [`CallHeaders`] may set.
 pub(crate) fn proxy_call(head: &mut http::request::Parts) {
     strip_named(&mut head.headers);
     remove_if(&mut head.headers, |n| !passes(n));
@@ -103,7 +86,7 @@ pub(crate) fn proxy_call(head: &mut http::request::Parts) {
 
 /// Whether a proxy passes on header `name` ([`proxy_call`]).
 fn passes(name: &HeaderName) -> bool {
-    let hop = HOP_BY_HOP.contains(name) && name != UPGRADE;
+    let hop = CONNECTION_HEADERS.contains(name) && name != UPGRADE;
     let name = name.as_str();
     let denied = matches!(
         name,
@@ -116,23 +99,16 @@ fn passes(name: &HeaderName) -> bool {
             | "x-original-url"
             | "x-rewrite-url"
             | "accept-encoding"
+            | "cookie"
+            | "forwarded"
+            | "via"
+            | "x-real-ip"
     );
-    !hop && !denied && !name.starts_with("if-")
+    !hop && !denied && !name.starts_with("if-") && !name.starts_with("x-forwarded-")
 }
 
 pub use crate::credential::is_credential;
-use respan_gateway_http_syntax::is_connection_header;
-
-/// Remove from a call the headers of the gateway's origin: `Cookie`,
-/// `Forwarded`, `Via`, `X-Forwarded-*` and `X-Real-IP`. Plugins still see
-/// them ([`Original`](crate::raw::Original)); a call's [`CallHeaders`] may set them.
-pub(crate) fn strip_client_origin_headers(headers: &mut HeaderMap) {
-    remove_if(headers, |name| {
-        let name = name.as_str();
-        matches!(name, "cookie" | "forwarded" | "via" | "x-real-ip")
-            || name.starts_with("x-forwarded-")
-    });
-}
+use crate::rules::is_connection_header;
 
 /// Remove from a response the headers bound to the provider's origin:
 /// cookies, alternative services and HSTS.
@@ -165,18 +141,8 @@ impl std::fmt::Debug for CallHeaders {
 /// [`Relayed`](crate::raw::Relayed), else only credentials explicitly
 /// supplied in the head: the exchange's `Credential` is never copied unasked.
 pub fn credentials(call: &mut http::Request<crate::Body>, headers: &HeaderMap) {
-    let extensions = call
-        .extensions()
-        .get::<Extensions>()
-        .cloned()
-        .unwrap_or_default();
     let (mut head, body) = std::mem::take(call).into_parts();
-    keys(&mut head, &extensions, headers);
-    *call = http::Request::from_parts(head, body);
-}
-
-/// [`credentials`] for a call of `head` and `extensions`.
-pub(crate) fn keys(head: &mut RequestHead, extensions: &Extensions, headers: &HeaderMap) {
+    let extensions = head.extensions.remove::<Extensions>().unwrap_or_default();
     let mut own = headers.clone();
     if let Some(CallHeaders(call)) = extensions.get::<CallHeaders>() {
         let sent = |n: &&HeaderName| !is_connection_header(n);
@@ -187,24 +153,22 @@ pub(crate) fn keys(head: &mut RequestHead, extensions: &Extensions, headers: &He
             own.append(name, value.clone());
         }
     }
-    if own.is_empty() {
-        // The only credentials already present are deliberately supplied by
-        // the caller (for example a format's own head); exchange Credential
-        // goes only where the call asks.
-        if extensions.get::<crate::raw::Relayed>().is_some()
-            && let Some(credential) = extensions.get::<crate::Credential>()
-        {
-            credential.restore(head);
+    if !own.is_empty() {
+        remove_if(&mut head.headers, |n| is_credential(n.as_str()));
+        take_protocol_keys(&mut head.headers, true);
+        take_query(&mut head.uri, is_credential);
+        for name in own.keys() {
+            head.headers.remove(name);
         }
-        return;
+        head.headers.extend(own);
+    } else if extensions.get::<crate::raw::Relayed>().is_some()
+        && let Some(credential) = extensions.get::<crate::Credential>()
+    {
+        // With no keys of its own, only a relayed call carries the client's.
+        credential.restore(&mut head);
     }
-    remove_if(&mut head.headers, |n| is_credential(n.as_str()));
-    take_protocol_keys(&mut head.headers, true);
-    take_query(&mut head.uri, is_credential);
-    for name in own.keys() {
-        head.headers.remove(name);
-    }
-    head.headers.extend(own);
+    head.extensions.insert(extensions);
+    *call = http::Request::from_parts(head, body);
 }
 
 /// Decorate an async sending function with head and per-polled-frame timeouts.
@@ -233,7 +197,7 @@ where
         let inner = inner.clone();
         async move {
             let stalled =
-                |d: Duration| Upstream::fault(format!("the provider sent nothing for {d:?}"));
+                |d: Duration| Fault::upstream(format!("the provider sent nothing for {d:?}"));
             let (response, completion) = tokio::time::timeout(head, inner(call))
                 .await
                 .map_err(|_| stalled(head))??;
@@ -254,10 +218,11 @@ where
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use crate::Credential;
     use bytes::Bytes;
+    use http::request::Parts as RequestHead;
+    use respan_gateway_core::FaultKind;
 
     fn head(headers: &[(&'static str, &'static str)]) -> http::request::Parts {
         let mut req = http::Request::new(());
@@ -396,7 +361,7 @@ mod tests {
             "/v1/./x?a=1",
         ] {
             let refused = send(path).err();
-            assert!(refused.is_some_and(|f| f.is::<BadRequest>()), "{path}");
+            assert!(refused.is_some_and(|f| f.is(FaultKind::Client)), "{path}");
         }
         // Only one decoding counts: a twice-encoded dot is a name.
         assert!(send("/v1/%252e%252e/x").is_ok());
@@ -408,12 +373,19 @@ mod tests {
     fn a_base_url_host_may_hold_an_underscore() {
         assert!(base_url("http://vllm_server:8000/v1", &["http"]).is_ok());
     }
+
+    #[test]
+    fn a_base_url_is_normalized() {
+        let url = base_url("HTTPS://API.Example.test:443/v1/", &["https"]);
+        assert_eq!(url.ok().as_deref(), Some("https://api.example.test/v1"));
+    }
 }
 
 #[cfg(test)]
 mod watchdog_tests {
     use super::*;
     use bytes::Bytes;
+    use respan_gateway_core::FaultKind;
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
     }
@@ -426,7 +398,7 @@ mod watchdog_tests {
         let send = watchdog(|_| async { std::future::pending().await }, secs(5), secs(1));
         let start = tokio::time::Instant::now();
         let fault = send(request()).await.err().expect("head timeout");
-        assert!(fault.is::<Upstream>());
+        assert!(fault.is(FaultKind::Provider));
         assert_eq!(fault.message(), "the provider sent nothing for 5s");
         assert_eq!(start.elapsed(), secs(5));
     }
@@ -461,7 +433,7 @@ mod watchdog_tests {
             .await
             .expect("expected value")
             .expect_err("expected failure");
-        assert!(fault.is::<Upstream>());
+        assert!(fault.is(FaultKind::Provider));
         assert_eq!(fault.message(), "the provider sent nothing for 1s");
         assert_eq!(start.elapsed(), secs(1));
         assert!(resp.body_mut().next().await.is_none());
@@ -501,7 +473,7 @@ mod watchdog_tests {
                     .insert("x-provider", "there".parse().expect("expected value"));
                 response.extensions_mut().insert(Marker("preserved"));
                 let completion: Completion =
-                    async { Err(Upstream::fault("late write failure")) }.boxed();
+                    async { Err(Fault::upstream("late write failure")) }.boxed();
                 Ok((response, Some(completion)))
             },
             secs(5),

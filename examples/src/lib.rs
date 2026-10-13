@@ -122,7 +122,7 @@ pub mod chat_bound {
     //! `wallet.rs` and `cost_cap.rs`.
 
     use respan_gateway_conversation::{Content, Input, ResponseFormat};
-    use respan_gateway_core::{BadRequest, Fault};
+    use respan_gateway_core::Fault;
     use serde_json::{self, Map, Value};
 
     /// The most input tokens `chat` can be. A token is at least a byte, so
@@ -180,7 +180,7 @@ pub mod chat_bound {
                     ..
                 } => id.len() + name.len() + arguments.len(),
                 Content::ToolResult { id, content, .. } => id.len() + content_bytes(content)?,
-                _ => return Err(BadRequest::fault("no cost bound for non-text input")),
+                _ => return Err(Fault::bad_request("no cost bound for non-text input")),
             };
         }
         Ok(bytes)
@@ -194,7 +194,7 @@ pub mod chat_bound {
             .and_then(|n| n.fields.get("n"))
             .map_or(Some(1), Value::as_u64);
         n.map(|n| n.max(1))
-            .ok_or_else(|| BadRequest::fault("n must be a whole number"))
+            .ok_or_else(|| Fault::bad_request("n must be a whole number"))
     }
 }
 

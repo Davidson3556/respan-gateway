@@ -19,8 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[derive(Clone)]
 pub struct Original {
     request: Arc<OnceLock<Request<Bytes>>>,
-    memo: Arc<OnceLock<Box<dyn Any + Send + Sync>>>,
-    live: bool,
+    memo: Arc<Memo>,
 }
 impl std::fmt::Debug for Original {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,24 +36,22 @@ impl std::fmt::Debug for Original {
             }
             None => debug.field("request", &"unread"),
         };
-        debug.field("live", &self.live).finish()
+        debug.finish()
     }
 }
 impl Original {
-    /// Supply an owned request; `live` means its body is a handshake prefix.
-    pub fn new(request: Request<Bytes>, live: bool) -> Self {
+    /// The request as it came.
+    pub fn new(request: Request<Bytes>) -> Self {
         Self {
             request: Arc::new(OnceLock::from(request)),
             memo: Arc::default(),
-            live,
         }
     }
     /// A wire its request fills later, once read.
-    pub(crate) fn unread(live: bool) -> Self {
+    pub(crate) fn unread() -> Self {
         Self {
             request: Arc::default(),
             memo: Arc::default(),
-            live,
         }
     }
     /// Fill it, once.
@@ -65,21 +62,43 @@ impl Original {
     pub fn get(&self) -> Option<&Request<Bytes>> {
         self.request.get()
     }
-    /// A value `make` derives from the request, computed once for every
-    /// holder of this wire, such as what a format must read of the body to
-    /// frame its response. The first `T` asked for is the one kept: none for
-    /// another type, or while the request is unread.
+    /// A value `make` derives from the request, computed once per type `T`
+    /// for every holder of this wire, such as what a format must read of
+    /// the body to frame its response: the first `T` made is the one every
+    /// later ask of `T` gets. `None` while the request is unread.
     pub fn memo<T: Send + Sync + 'static>(
         &self,
         make: impl FnOnce(&Request<Bytes>) -> T,
     ) -> Option<&T> {
         let request = self.request.get()?;
-        let kept = self.memo.get_or_init(|| Box::new(make(request)));
-        kept.downcast_ref()
+        Some(self.memo.get_or_init(|| make(request)))
     }
-    /// Whether subsequent input consists of live events.
-    pub fn is_live(&self) -> bool {
-        self.live
+}
+
+/// Values derived from a request, one per type: a chain of slots, each
+/// filled once and never emptied, so a value lives as long as its wire.
+#[derive(Default)]
+struct Memo {
+    value: OnceLock<Box<dyn Any + Send + Sync>>,
+    next: OnceLock<Box<Memo>>,
+}
+
+impl Memo {
+    /// The `T` kept, else `make`'s, kept in the first empty slot.
+    fn get_or_init<T: Send + Sync + 'static>(&self, make: impl FnOnce() -> T) -> &T {
+        let mut make = Some(make);
+        let mut at = self;
+        loop {
+            let value = at.value.get_or_init(|| match make.take() {
+                Some(make) => Box::new(make()),
+                // `make` runs at most once, in the slot that keeps it.
+                None => Box::new(()),
+            });
+            if let Some(value) = value.downcast_ref() {
+                return value;
+            }
+            at = at.next.get_or_init(Box::default);
+        }
     }
 }
 
@@ -92,12 +111,12 @@ pub(crate) struct ClientHead(Arc<Mutex<Option<Parts>>>);
 impl ClientHead {
     /// The head chosen, if any.
     pub(crate) fn get(&self) -> Option<Parts> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        crate::edge::locked(&self.0).clone()
     }
 
     /// Choose `head`.
     pub(crate) fn set(&self, head: Parts) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(head);
+        *crate::edge::locked(&self.0) = Some(head);
     }
 }
 
@@ -138,6 +157,16 @@ mod tests {
     use http::{HeaderValue, Uri};
 
     #[test]
+    fn each_type_is_memoized_apart_and_once() {
+        let wire = Original::new(Request::new(Bytes::from_static(b"body")));
+        assert_eq!(wire.memo(|r| r.body().len()), Some(&4));
+        assert_eq!(wire.memo(|_| "text"), Some(&"text"));
+        assert_eq!(wire.memo(|_| 0usize), Some(&4), "kept, not made again");
+        assert_eq!(wire.memo(|_| "again"), Some(&"text"));
+        assert!(Original::unread().memo(|_| 1u8).is_none());
+    }
+
+    #[test]
     fn debug_shows_header_names_only() {
         let mut request = Request::new(Bytes::from_static(b"body"));
         request.headers_mut().insert(
@@ -145,7 +174,7 @@ mod tests {
             HeaderValue::from_static("Bearer sk-secret"),
         );
         *request.uri_mut() = Uri::from_static("/v1/x?key=sk-secret");
-        let shown = format!("{:?}", Original::new(request, false));
+        let shown = format!("{:?}", Original::new(request));
         assert!(shown.contains("authorization"), "{shown}");
         assert!(!shown.contains("sk-secret"), "{shown}");
     }

@@ -10,7 +10,6 @@
 //!
 //! `cargo run -p respan-gateway-examples --example custom_transport`
 
-use respan_gateway_core::BadRequest;
 use std::sync::Arc;
 
 use respan_gateway_conversation::Usage;
@@ -49,7 +48,7 @@ impl Format<Model, Output, Input> for Local {
             let chat = flow
                 .value()
                 .transpose()?
-                .ok_or_else(|| BadRequest::fault("no conversation"))?;
+                .ok_or_else(|| Fault::bad_request("no conversation"))?;
             let answer = model(chat)?;
 
             // One reply per word, then the finish with usage (a word is a token here).

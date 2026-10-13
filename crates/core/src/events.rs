@@ -518,7 +518,7 @@ mod tests {
             let Some(Err(fault)) = events.value() else {
                 panic!("fault expected")
             };
-            assert!(fault.is::<crate::Internal>());
+            assert!(fault.code() == "internal");
         }
         assert_eq!(decodes.load(Ordering::SeqCst), 1);
     }

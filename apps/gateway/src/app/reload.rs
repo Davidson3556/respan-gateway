@@ -46,7 +46,6 @@ impl std::error::Error for ReloadError {}
 
 type Loader = dyn Fn() -> Result<Config, Error> + Send + Sync;
 type Reload = dyn Fn() -> Result<Reloaded, ReloadError> + Send + Sync;
-type Check = dyn Fn(Config) -> Result<(), Error> + Send + Sync;
 
 /// What outlives a reload: the request log and totals, the clock, the
 /// bound address, the signal that the server is stopping.
@@ -62,7 +61,6 @@ pub(crate) struct Process {
     /// When the config was last reloaded.
     pub reloaded_at: Mutex<Option<SystemTime>>,
     pub(super) reload: OnceLock<Box<Reload>>,
-    pub(super) check: OnceLock<Box<Check>>,
 }
 
 impl Process {
@@ -71,15 +69,6 @@ impl Process {
         match self.reload.get() {
             Some(reload) => reload(),
             None => Err(ReloadError::Unavailable),
-        }
-    }
-
-    /// Whether `config` would reload: composed and served as a reload
-    /// would, but built and dropped, with no effect on what serves.
-    pub fn check(&self, config: Config) -> Result<(), Error> {
-        match self.check.get() {
-            Some(check) => check(config),
-            None => Err(Error::new("the gateway is stopping")),
         }
     }
 }
@@ -107,19 +96,6 @@ impl Shared {
         let mut all = vec![self.current().gateway.clone()];
         all.extend(retired.iter().cloned());
         all
-    }
-
-    pub(super) fn check(&self, config: Config) -> Result<(), Error> {
-        let built = Built::new(config, &self.process)?;
-        match self
-            .process
-            .listen
-            .get()
-            .and_then(|a| built.open_refusal(*a))
-        {
-            Some(refusal) => Err(Error::new(refusal)),
-            None => Ok(()),
-        }
     }
 
     pub(super) fn reload(&self) -> Result<Reloaded, ReloadError> {

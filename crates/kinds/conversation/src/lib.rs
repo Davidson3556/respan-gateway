@@ -33,7 +33,7 @@
 //! The crate is the kind's types alone, with no I/O; its formats over HTTP
 //! are `respan-gateway-conversation-http`'s.
 
-use respan_gateway_core::{Fault, Upstream};
+use respan_gateway_core::Fault;
 
 use serde_json::Value;
 
@@ -766,12 +766,13 @@ impl Assembled {
 
 /// A sequence of events that is no response.
 fn malformed(what: &str) -> Fault {
-    Upstream::fault(format!("the response is malformed: {what}"))
+    Fault::upstream(format!("the response is malformed: {what}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use respan_gateway_core::FaultKind;
     use serde_json::json;
 
     fn fold(events: &[Output]) -> Result<Assembled, Fault> {
@@ -897,7 +898,7 @@ mod tests {
             vec![Output::start("a", "m"), Output::start("b", "m")],
         ] {
             let end = fold(&events).err();
-            assert!(end.is_some_and(|f| f.is::<Upstream>()), "{events:?}");
+            assert!(end.is_some_and(|f| f.is(FaultKind::Provider)), "{events:?}");
         }
         // A start repeated for an open block, as a filter adding to it writes.
         assert!(fold(&[text(), Output::text(0, "a"), text(), Output::text(0, "b")]).is_ok());
@@ -954,7 +955,7 @@ mod tests {
                 .expect("opens");
             let end = all.push(&wrong).err();
             assert!(
-                end.is_some_and(|f| f.is::<Upstream>()),
+                end.is_some_and(|f| f.is(FaultKind::Provider)),
                 "{kind:?} {wrong:?}"
             );
         }

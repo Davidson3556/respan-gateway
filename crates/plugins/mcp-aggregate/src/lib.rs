@@ -118,7 +118,7 @@ impl Plugin for Aggregate {
             .extensions()
             .get::<Original>()
             .and_then(|wire| wire.get());
-        let path = path.map(|request| respan_gateway_http_syntax::clean_path(request.uri().path()));
+        let path = path.map(|request| respan_gateway_http::path::clean_path(request.uri().path()));
         if path.as_deref() != Some(ROOT) {
             return Ok(None);
         }

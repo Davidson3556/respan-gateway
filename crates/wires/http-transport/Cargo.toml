@@ -12,7 +12,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-respan-gateway-http-syntax.workspace = true
 bytes.workspace = true
 http.workspace = true
 http-body-util.workspace = true

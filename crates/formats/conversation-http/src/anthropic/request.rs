@@ -12,8 +12,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use respan_gateway_conversation::{
     Content, Effort, Input, Media, MediaSource, Reasoning, ResponseFormat, Tool, ToolChoice,
 };
+use respan_gateway_core::Fault;
 use respan_gateway_core::NativeFields;
-use respan_gateway_core::{BadRequest, Fault};
 use serde_json::{Map, Value, json};
 
 use crate::anthropic::{ANTHROPIC, AnthropicMessages};
@@ -23,7 +23,7 @@ pub(crate) fn arguments_json(arguments: &str) -> Result<Value, Fault> {
     if arguments.trim().is_empty() {
         return Ok(json!({}));
     }
-    let not_json = |_| BadRequest::fault("a tool call's arguments are not JSON");
+    let not_json = |_| Fault::bad_request("a tool call's arguments are not JSON");
     serde_json::from_str(arguments).map_err(not_json)
 }
 

@@ -228,9 +228,9 @@ struct Native {
     router: Router,
 }
 
-/// Whether the YAML in `text` sets `log` itself.
+/// Whether the TOML in `text` sets `log` itself.
 fn sets_log(text: &str) -> bool {
-    serde_norway::from_str::<serde_norway::Value>(text)
+    toml::from_str::<toml::Value>(text)
         .ok()
         .and_then(|v| v.get("log").map(|_| true))
         .unwrap_or(false)
@@ -239,11 +239,11 @@ fn sets_log(text: &str) -> bool {
 impl Native {
     /// A library prints nothing per request unless its configuration asks:
     /// `log` defaults to `off` here (the binary's default is `text`).
-    /// `text` is the configuration's source, if it has one.
-    fn new(config: Result<Config, respan_gateway::Error>, text: Option<&str>) -> PyResult<Self> {
+    /// `log_explicit` records whether the caller supplied the log setting.
+    fn new(config: Result<Config, respan_gateway::Error>, log_explicit: bool) -> PyResult<Self> {
         let config_error = |e: respan_gateway::Error| ConfigError::new_err(e.to_string());
         let mut config = config.map_err(config_error)?;
-        if !text.is_some_and(sets_log) {
+        if !log_explicit {
             config.log = LogFormat::Off;
         }
         // Providers may need the runtime to set up their clients.
@@ -282,27 +282,41 @@ impl Native {
 
 #[pymethods]
 impl Native {
-    /// A gateway from YAML (JSON is YAML).
+    /// A gateway from TOML.
     #[staticmethod]
-    fn from_yaml(text: &str) -> PyResult<Self> {
-        Self::new(Config::parse(text), Some(text))
+    fn from_toml(text: &str) -> PyResult<Self> {
+        Self::new(Config::parse(text), sets_log(text))
     }
 
-    /// A gateway from the YAML file at `path`.
+    /// Structured Python mappings cross the FFI boundary as JSON.
+    #[staticmethod]
+    fn from_json(text: &str) -> PyResult<Self> {
+        let value: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| ConfigError::new_err(e.to_string()))?;
+        let log_explicit = value.get("log").is_some();
+        Self::new(Config::from_value(value), log_explicit)
+    }
+
+    /// A gateway from the TOML file at `path`.
     #[staticmethod]
     fn from_file(path: &str) -> PyResult<Self> {
         Self::new(
             Config::load(path),
-            std::fs::read_to_string(path).ok().as_deref(),
+            std::fs::read_to_string(path)
+                .ok()
+                .is_some_and(|text| sets_log(&text)),
         )
     }
 
-    /// A gateway as the binary starts with no arguments: `./gateway.yaml`
+    /// A gateway as the binary starts with no arguments: `./gateway.toml`
     /// if there is one, else the vendors the environment has keys for.
     #[staticmethod]
     fn discover() -> PyResult<Self> {
         let file = std::fs::read_to_string(respan_gateway::DEFAULT_FILE).ok();
-        Self::new(Config::discover(None), file.as_deref())
+        Self::new(
+            Config::discover(None),
+            file.is_some_and(|text| sets_log(&text)),
+        )
     }
 
     /// Sends one request through the router and returns once its head is

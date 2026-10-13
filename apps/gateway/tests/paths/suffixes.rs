@@ -6,14 +6,9 @@ use std::sync::{Arc, Mutex};
 use crate::path_support::{CHAT_REPLY, record_heads, send_request};
 use crate::support::Gateway;
 
-fn gateway_yaml(base: &str) -> String {
+fn gateway_toml(base: &str) -> String {
     format!(
-        "providers:
-  p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
-  any: {{ formats: passthrough, base_url: '{base}/pt' }}
-formats: [openai-chat, passthrough]
-plugins: {{ routing: {{ default: p }} }}
-"
+        "providers = {{ p = {{ formats = \"openai-chat\", base_url = \"{base}/chatv1\" }}, any = {{ formats = \"passthrough\", base_url = \"{base}/pt\" }} }}\nformats = [\"openai-chat\", \"passthrough\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
     )
 }
 
@@ -41,7 +36,7 @@ async fn vendor_saw(
 #[tokio::test]
 async fn a_suffix_pattern_reader_reads_no_passthrough_call_as_chat() {
     let (base, seen) = record_heads(CHAT_REPLY).await;
-    let gw = Gateway::start(&gateway_yaml(&base)).await;
+    let gw = Gateway::start(&gateway_toml(&base)).await;
     let addr = gw.base.trim_start_matches("http://").to_owned();
     let mut wrong = Vec::new();
     for target in ["/v1/chat/completions.json", "/v1/chat/completions.x"] {
@@ -58,7 +53,7 @@ async fn a_suffix_pattern_reader_reads_no_passthrough_call_as_chat() {
 #[tokio::test]
 async fn more_real_client_paths_pass() {
     let (base, seen) = record_heads(CHAT_REPLY).await;
-    let gw = Gateway::start(&gateway_yaml(&base)).await;
+    let gw = Gateway::start(&gateway_toml(&base)).await;
     let addr = gw.base.trim_start_matches("http://").to_owned();
     let mut wrong = Vec::new();
     for (method, target) in [

@@ -8,7 +8,7 @@ use std::time::Instant;
 use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::futures::stream::{self, select_all};
 use respan_gateway_core::futures::{StreamExt, future};
-use respan_gateway_core::{BadRequest, Call, ErrorCode, Fault, Upstream};
+use respan_gateway_core::{Call, ErrorCode, Fault};
 use respan_gateway_http::http::{Method, StatusCode};
 use respan_gateway_http_faults::Status;
 use respan_gateway_mcp::{Input, Message, Output, RpcCode};
@@ -38,7 +38,7 @@ impl Run {
             Method::POST => self.post(input).await,
             Method::GET => self.listen(input).await,
             Method::DELETE => self.end(input).await,
-            _ => Err(BadRequest::fault("not a method of an MCP endpoint")),
+            _ => Err(Fault::bad_request("not a method of an MCP endpoint")),
         }
     }
 
@@ -48,7 +48,7 @@ impl Run {
         if input.messages.iter().any(hello) {
             return match input.messages.as_slice() {
                 [one] => self.initialize(one).await,
-                _ => Err(BadRequest::fault("`initialize` is not batched")),
+                _ => Err(Fault::bad_request("`initialize` is not batched")),
             };
         }
         let session = self.session(&input)?;
@@ -69,7 +69,7 @@ impl Run {
 
     // The session `input` names: this client's, else no such session.
     pub(super) fn session(&self, input: &Input) -> Result<Arc<Session>, Fault> {
-        let missing = || BadRequest::fault("the Mcp-Session-Id header is required");
+        let missing = || Fault::bad_request("the Mcp-Session-Id header is required");
         let id = input.session.as_deref().ok_or_else(missing)?;
         let mut sessions = lock(&self.inner.sessions);
         let found = sessions.get(id).filter(|s| s.owner == self.owner);
@@ -93,7 +93,7 @@ impl Run {
     /// A new session, opened with every server.
     pub(super) async fn initialize(self, hello: &Message) -> Result<Outputs, Fault> {
         let Message::Request { id, params, .. } = hello else {
-            return Err(BadRequest::fault("`initialize` is a request"));
+            return Err(Fault::bad_request("`initialize` is a request"));
         };
         let id: Value = id.clone().into();
         let asked = params.as_ref().and_then(|p| p["protocolVersion"].as_str());
@@ -124,7 +124,7 @@ impl Run {
         }
         if capabilities.is_empty() {
             let why = why.map_or(String::new(), |f| format!(": {}", f.message()));
-            return Err(Upstream::fault(format!(
+            return Err(Fault::upstream(format!(
                 "no mcp server answered `initialize`{why}"
             )));
         }

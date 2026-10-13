@@ -1,4 +1,4 @@
-//! The configuration: where it comes from (a YAML file, the environment or
+//! The configuration: where it comes from (a TOML file, the environment or
 //! `proxy`) and what it says. [`App::new`](crate::App::new) checks and
 //! composes it.
 
@@ -61,10 +61,10 @@ impl std::fmt::Debug for NamedKey {
 impl<'de> Deserialize<'de> for ClientKey {
     fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         use serde::de::Error;
-        let value = serde_norway::Value::deserialize(de)?;
+        let value = serde_json::Value::deserialize(de)?;
         match value {
-            serde_norway::Value::String(key) => Ok(Self::Key(key)),
-            serde_norway::Value::Mapping(_) => serde_norway::from_value(value)
+            serde_json::Value::String(key) => Ok(Self::Key(key)),
+            serde_json::Value::Object(_) => serde_json::from_value(value)
                 .map(Self::Named)
                 .map_err(|e| D::Error::custom(format!("a client key entry: {e}"))),
             _ => Err(D::Error::custom(
@@ -134,7 +134,7 @@ impl std::fmt::Debug for Auth {
     }
 }
 
-/// A gateway's configuration, as `gateway.yaml` writes it.
+/// A gateway's configuration, as `gateway.toml` writes it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -176,11 +176,6 @@ pub struct Config {
     /// Whether the web UI and its admin API are served under `/ui/`.
     #[serde(default = "enabled")]
     pub ui: bool,
-    /// Whether the admin API may rewrite the config file (`PUT
-    /// /ui/api/config`, the web UI's editor); off if unset. Needs
-    /// `client_keys` and a config file.
-    #[serde(default)]
-    pub admin_writes: bool,
     /// Providers by name, in order: the first serving a kind is that
     /// kind's default.
     #[serde(default)]
@@ -227,7 +222,6 @@ impl Default for Config {
             client_keys: Vec::new(),
             log: LogFormat::Text,
             ui: true,
-            admin_writes: false,
             providers: IndexMap::new(),
             formats: None,
             mcp: IndexMap::new(),
@@ -286,9 +280,9 @@ pub struct PluginsConfig {
     /// Race a request's target against other providers started a little
     /// later; off if unset.
     pub hedge: Option<HedgeConfig>,
-    /// Run tools of `mcp:` servers inside chat requests; off if unset.
+    /// Run tools of `mcp` servers inside chat requests; off if unset.
     pub tool_loop: Option<ToolLoopConfig>,
-    /// One MCP endpoint, `/mcp`, that fronts the `mcp:` servers as a single
+    /// One MCP endpoint, `/mcp`, that fronts the `mcp` servers as a single
     /// server (tools and prompts as `{server}__{name}`); off if unset.
     pub mcp_aggregate: Option<AggregateConfig>,
     /// The request history the web UI and admin API read; always on.
@@ -389,13 +383,13 @@ pub struct CorsConfig {
     pub origins: Vec<String>,
 }
 
-/// The tool loop: the gateway offers the tools of `mcp:` servers to the
+/// The tool loop: the gateway offers the tools of `mcp` servers to the
 /// model and runs the ones it calls, so a client that knows nothing of MCP
 /// gets answers that used them.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolLoopConfig {
-    /// The `mcp:` servers whose tools the gateway offers and runs, as
+    /// The `mcp` servers whose tools the gateway offers and runs, as
     /// `<server>__<tool>`.
     pub servers: Vec<String>,
     /// Which of their tools are offered, as the model names them
@@ -469,12 +463,18 @@ pub enum ProxyVendor {
 }
 
 /// The file read when none is named.
-pub const DEFAULT_FILE: &str = "gateway.yaml";
+pub const DEFAULT_FILE: &str = "gateway.toml";
 
 impl Config {
-    /// A configuration from YAML text.
-    pub fn parse(yaml: &str) -> Result<Config, Error> {
-        serde_norway::from_str(yaml).map_err(|e| Error::new(redacted(&e.to_string())))
+    /// A configuration from TOML text. Errors omit source excerpts, which may
+    /// contain credentials, while retaining the line and column.
+    pub fn parse(text: &str) -> Result<Config, Error> {
+        toml::from_str(text).map_err(|e| Error::new(toml_error(text, &e)))
+    }
+
+    /// Structured configuration for language bindings, with secret-safe errors.
+    pub fn from_value(value: serde_json::Value) -> Result<Config, Error> {
+        serde_json::from_value(value).map_err(|e| Error::new(redacted(&e.to_string())))
     }
 
     /// The configuration in the file at `path`.
@@ -515,7 +515,7 @@ impl Config {
         })
     }
 
-    /// `path` if given, else `./gateway.yaml` if there is one, else
+    /// `path` if given, else `./gateway.toml`, else
     /// [`from_env`](Self::from_env).
     pub fn discover(path: Option<&Path>) -> Result<Config, Error> {
         match path {
@@ -562,6 +562,25 @@ impl Config {
     }
 }
 
+pub(crate) fn toml_error(text: &str, error: &toml::de::Error) -> String {
+    let message = redacted(error.message());
+    match error.span() {
+        Some(span) => {
+            let prefix = &text[..span.start.min(text.len())];
+            let line = prefix.bytes().filter(|b| *b == b'\n').count() + 1;
+            let column = prefix
+                .rsplit('\n')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .count()
+                + 1;
+            format!("{message} at line {line} column {column}")
+        }
+        None => message,
+    }
+}
+
 /// `message` with the values serde echoes in it left out: a string
 /// (`invalid type: string "..."`), and a variant name (`unknown variant
 /// `...``), which a misplaced secret would be.
@@ -586,15 +605,12 @@ fn redacted(message: &str) -> String {
 
 /// What to do when there is no config file and no key in the environment.
 pub fn no_keys_message() -> String {
-    let names: Vec<&str> = respan_gateway_providers::ALL
-        .iter()
-        .flat_map(|p| p.key_env.iter().copied())
-        .collect();
     format!(
-        "no {DEFAULT_FILE} here and no provider key in the environment.\n\
-         Set one, such as `export OPENAI_API_KEY=sk-...`, and run again; the keys read are\n  {}\n\
-         (and OLLAMA_HOST for Ollama). Or write a config: `respan-gateway init`.",
-        names.join(", ")
+        "no configuration found.\n\n\
+         Create a config:\n  respan-gateway init\n\n\
+         Or start with a provider key:\n  export OPENAI_API_KEY=sk-...\n  respan-gateway\n\n\
+         Config file: {DEFAULT_FILE}\n\
+         More options: respan-gateway --help"
     )
 }
 
@@ -625,8 +641,16 @@ pub fn parse_listen(text: &str) -> Result<SocketAddr, String> {
 }
 
 fn listen_address<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SocketAddr>, D::Error> {
-    let Some(text) = Option::<String>::deserialize(d)? else {
-        return Ok(None);
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Address {
+        Text(String),
+        Port(u16),
+    }
+    let text = match Option::<Address>::deserialize(d)? {
+        None => return Ok(None),
+        Some(Address::Text(text)) => text,
+        Some(Address::Port(port)) => port.to_string(),
     };
     parse_listen(&text)
         .map(Some)
@@ -703,7 +727,9 @@ fn prices<'de, D: Deserializer<'de>>(d: D) -> Result<IndexMap<String, Price>, D:
 }
 
 fn request_log_history<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    match Option::<usize>::deserialize(d)? {
+    match Option::<usize>::deserialize(d)
+        .map_err(|e| serde::de::Error::custom(format!("plugins.request_log.history: {e}")))?
+    {
         Some(0) => Err(serde::de::Error::custom(
             "plugins: request_log: history: must be above 0",
         )),
@@ -821,19 +847,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn toml_preserves_provider_order_and_reads_readable_values() {
+        let config = Config::parse(
+            r#"
+listen = 8080
+body_limit = "2MiB"
+shutdown_grace = "500ms"
+client_keys = [{ name = "ops", key = "env:OPS_KEY", admin = true }]
+[providers.z]
+vendor = "openai"
+[providers.a]
+vendor = "anthropic"
+"#,
+        )
+        .expect("TOML config");
+        assert_eq!(
+            config
+                .providers
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["z", "a"]
+        );
+        assert_eq!(config.listen.expect("listen").port(), 8080);
+        assert_eq!(config.body_limit, Some(2 << 20));
+        assert_eq!(config.shutdown_grace, Some(Duration::from_millis(500)));
+        assert_eq!(config.client_keys[0].name(), Some("ops"));
+    }
+
+    #[test]
+    fn toml_diagnostics_have_locations_without_source_secrets() {
+        for text in [
+            "log = 'sk-secret-1'",
+            "client_keys = 'sk-secret-1'",
+            "[providers.p]\nkey = 'sk-secret-1'\nbogus = true",
+            "[providers.p]\nkey = \"sk-secret-1",
+        ] {
+            let error = Config::parse(text).expect_err("invalid").to_string();
+            assert!(error.contains("line"), "{error}");
+            assert!(!error.contains("sk-secret-1"), "{error}");
+        }
+    }
+
+    #[test]
+    fn toml_example_and_generated_starter_parse() {
+        Config::parse(include_str!("../../../gateway.example.toml")).expect("example");
+        let picks = [crate::init::Chosen::parse("openai=key\"with\ncontrols").expect("vendor")];
+        let text = crate::init::starter(&picks, Some("client-secret"));
+        let config = Config::parse(&text).expect("starter");
+        assert_eq!(
+            config.providers["openai"].key.as_deref(),
+            Some("key\"with\ncontrols")
+        );
+        assert_eq!(config.client_keys[0].key(), "client-secret");
+    }
+
+    #[test]
     fn debug_shows_no_secret() {
         let config = Config::parse(
-            "client_keys: [bare-secret, { name: ops, key: named-secret, admin: true }]
-providers:
-  a: { vendor: openai, key: prov-secret, base_url: 'https://user:url-secret@h.test/v1?k=q-secret' }
-  b: { formats: openai-chat, base_url: 'http://b.test', auth: { type: bearer, key: auth-secret } }
-mcp:
-  m: { command: [npx, --token, arg-secret], env: { T: env-secret } }
-  h:
-    url: 'https://h.test/mcp/tok-in-path'
-    key: mcp-secret
-    oauth: { token_url: 'https://o.test/t', client_id: cid, client_secret: oauth-secret }
-",
+            "client_keys = [\"bare-secret\", { name = \"ops\", key = \"named-secret\", admin = true }]\nproviders = { a = { vendor = \"openai\", key = \"prov-secret\", base_url = \"https://user:url-secret@h.test/v1?k=q-secret\" }, b = { formats = \"openai-chat\", base_url = \"http://b.test\", auth = { type = \"bearer\", key = \"auth-secret\" } } }\nmcp = { m = { command = [\"npx\", \"--token\", \"arg-secret\"], env = { T = \"env-secret\" } }, h = { url = \"https://h.test/mcp/tok-in-path\", key = \"mcp-secret\", oauth = { token_url = \"https://o.test/t\", client_id = \"cid\", client_secret = \"oauth-secret\" } } }\n",
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let shown = format!("{config:?}");
@@ -856,22 +928,25 @@ mcp:
 
     #[test]
     fn a_client_key_entry_with_a_typo_is_named() {
-        let said = |yaml: &str| Config::parse(yaml).err().map(|e| e.to_string());
-        let bad = said("client_keys: [{ name: ci, ky: x }]").unwrap_or_default();
+        let said = |text: &str| Config::parse(text).err().map(|e| e.to_string());
+        let bad = said("client_keys = [{ name = \"ci\", ky = \"x\" }]\n").unwrap_or_default();
         assert!(bad.contains("ky") && bad.contains("client key"), "{bad}");
         assert!(
-            said("client_keys: [{ name: ci, key: x, admin: true, tools: ['a__*'] }]").is_none()
+            said(
+                "client_keys = [{ name = \"ci\", key = \"x\", admin = true, tools = [\"a__*\"] }]\n"
+            )
+            .is_none()
         );
-        assert!(said("client_keys: [3]").is_some());
+        assert!(said("client_keys = [3]\n").is_some());
     }
 
     #[test]
     fn a_listen_address_is_a_socket_address() {
-        let bad = Config::parse("listen: 127.0.0.1").err();
+        let bad = Config::parse("listen = \"127.0.0.1\"\n").err();
         assert!(bad.is_some_and(|e| e.to_string().contains("listen")));
-        let good = Config::parse("listen: 127.0.0.1:8080");
+        let good = Config::parse("listen = \"127.0.0.1:8080\"\n");
         assert!(good.is_ok_and(|c| c.listen.is_some_and(|a| a.port() == 8080)));
-        let named = Config::parse("listen: localhost:8081");
+        let named = Config::parse("listen = \"localhost:8081\"\n");
         assert!(named.is_ok_and(|c| c.listen.is_some_and(|a| a.port() == 8081)));
     }
 
@@ -893,16 +968,8 @@ mcp:
 
     #[test]
     fn presets_lists_keys_and_switches_parse() {
-        let yaml = "client_keys: [env:GATEWAY_KEY, sk-local]
-log: off
-ui: false
-providers:
-  openai: { vendor: openai }
-  claude: { vendor: anthropic, key: env:MY_KEY, base_url: 'http://x.test' }
-  both: { formats: [openai-chat, anthropic-messages], base_url: 'http://y.test' }
-  one: { formats: openai-chat, base_url: 'http://z.test' }
-";
-        let config = Config::parse(yaml).unwrap_or_else(|e| panic!("{e}"));
+        let text = "client_keys = [\"env:GATEWAY_KEY\", \"sk-local\"]\nlog = \"off\"\nui = false\nproviders = { openai = { vendor = \"openai\" }, claude = { vendor = \"anthropic\", key = \"env:MY_KEY\", base_url = \"http://x.test\" }, both = { formats = [\"openai-chat\", \"anthropic-messages\"], base_url = \"http://y.test\" }, one = { formats = \"openai-chat\", base_url = \"http://z.test\" } }\n";
+        let config = Config::parse(text).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             config.client_keys,
             [
@@ -937,17 +1004,19 @@ providers:
     #[test]
     fn a_body_limit_is_bytes_or_a_size() {
         let limit = |text: &str| Config::parse(text).map(|c| c.body_limit);
-        assert_eq!(limit("body_limit: 1000"), Ok(Some(1000)));
-        assert_eq!(limit("body_limit: 32MiB"), Ok(Some(32 << 20)));
-        assert_eq!(limit("body_limit: 2 kb"), Ok(Some(2000)));
-        let bad = limit("body_limit: lots").err().map(|e| e.to_string());
+        assert_eq!(limit("body_limit = 1000\n"), Ok(Some(1000)));
+        assert_eq!(limit("body_limit = \"32MiB\"\n"), Ok(Some(32 << 20)));
+        assert_eq!(limit("body_limit = \"2 kb\"\n"), Ok(Some(2000)));
+        let bad = limit("body_limit = \"lots\"\n")
+            .err()
+            .map(|e| e.to_string());
         assert!(bad.is_some_and(|e| e.contains("body_limit")));
     }
 
     #[test]
     fn limits_are_sizes_counts_and_durations() {
         let config = Config::parse(
-            "ws_message_limit: 1MiB\nplugins: { request_log: { history: 50 } }\nshutdown_grace: 2m",
+            "ws_message_limit = \"1MiB\"\nplugins = { request_log = { history = 50 } }\nshutdown_grace = \"2m\"\n",
         )
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(config.ws_message_limit, Some(1 << 20));
@@ -955,33 +1024,36 @@ providers:
         assert_eq!(config.shutdown_grace, Some(Duration::from_secs(120)));
         let grace = |text: &str| Config::parse(text).map(|c| c.shutdown_grace);
         assert_eq!(
-            grace("shutdown_grace: 30s"),
+            grace("shutdown_grace = \"30s\"\n"),
             Ok(Some(Duration::from_secs(30)))
         );
         assert_eq!(
-            grace("shutdown_grace: 45"),
+            grace("shutdown_grace = 45\n"),
             Ok(Some(Duration::from_secs(45)))
         );
         assert_eq!(
-            grace("shutdown_grace: 500ms"),
+            grace("shutdown_grace = \"500ms\"\n"),
             Ok(Some(Duration::from_millis(500)))
         );
-        let defaults = Config::parse("{}").unwrap_or_else(|e| panic!("{e}"));
+        let defaults = Config::parse("").unwrap_or_else(|e| panic!("{e}"));
         assert!(
             defaults.plugins.request_log.history.is_none() && defaults.shutdown_grace.is_none()
         );
         for (text, key) in [
-            ("shutdown_grace: soon", "shutdown_grace"),
-            ("shutdown_grace: 5 days", "shutdown_grace"),
-            ("plugins: { request_log: { history: 0 } }", "history"),
-            ("plugins: { request_log: { history: many } }", "history"),
+            ("shutdown_grace = \"soon\"\n", "shutdown_grace"),
+            ("shutdown_grace = \"5 days\"\n", "shutdown_grace"),
+            ("plugins = { request_log = { history = 0 } }\n", "history"),
             (
-                "plugins: { fallback: { after: {}, backoff: soon } }",
+                "plugins = { request_log = { history = \"many\" } }\n",
+                "history",
+            ),
+            (
+                "plugins = { fallback = { after = {  }, backoff = \"soon\" } }\n",
                 "backoff",
             ),
-            ("ws_message_limit: 0", "ws_message_limit"),
-            ("ws_message_limit: big", "ws_message_limit"),
-            ("body_limit: 0", "body_limit"),
+            ("ws_message_limit = 0\n", "ws_message_limit"),
+            ("ws_message_limit = \"big\"\n", "ws_message_limit"),
+            ("body_limit = 0\n", "body_limit"),
         ] {
             let said = Config::parse(text).err().map(|e| e.to_string());
             assert!(said.is_some_and(|e| e.contains(key)), "{text}");
@@ -991,17 +1063,17 @@ providers:
     #[test]
     fn old_names_are_refused() {
         let old = [
-            "serve: []",
-            "target: p",
-            "keys: []",
-            "providers: { p: { format: x } }",
-            "request_history: 10",
-            "tool_loop: { servers: [m] }",
-            "mcp_aggregate: {}",
-            "default: p",
-            "plugins: [{ models: [] }]",
-            "plugins: { quirks: false }",
-            "plugins: { video_jobs: false }",
+            "serve = []\n",
+            "target = \"p\"\n",
+            "keys = []\n",
+            "providers = { p = { format = \"x\" } }\n",
+            "request_history = 10\n",
+            "tool_loop = { servers = [\"m\"] }\n",
+            "mcp_aggregate = {  }\n",
+            "default = \"p\"\n",
+            "plugins = [{ models = [] }]\n",
+            "plugins = { quirks = false }\n",
+            "plugins = { video_jobs = false }\n",
         ];
         for text in old {
             assert!(Config::parse(text).is_err(), "{text}");
@@ -1010,7 +1082,7 @@ providers:
 
     #[test]
     fn defaults_serve_the_ui_and_log() {
-        let config = Config::parse("{}").unwrap_or_else(|e| panic!("{e}"));
+        let config = Config::parse("").unwrap_or_else(|e| panic!("{e}"));
         assert!(config.log == LogFormat::Text && config.ui && config.client_keys.is_empty());
         assert_eq!(config.source(), &Source::Inline);
     }
@@ -1018,13 +1090,13 @@ providers:
     #[test]
     fn an_error_does_not_echo_a_value_that_may_be_a_secret() {
         for text in [
-            "client_keys: sk-secret-1",
-            "providers: { p: { vendor: openai, key: [sk-secret-1] } }",
-            "providers: { p: { vendor: openai, auth: sk-secret-1 } }",
-            "mcp: { m: { command: [x], env: sk-secret-1 } }",
-            "mcp: { m: { url: 'http://h.test', key: { a: 1 }, forward_auth: sk-secret-1 } }",
-            "log: sk-secret-1",
-            "providers: { p: { vendor: openai, auth: { type: sk-secret-1, key: k } } }",
+            "client_keys = \"sk-secret-1\"\n",
+            "providers = { p = { vendor = \"openai\", key = [\"sk-secret-1\"] } }\n",
+            "providers = { p = { vendor = \"openai\", auth = \"sk-secret-1\" } }\n",
+            "mcp = { m = { command = [\"x\"], env = \"sk-secret-1\" } }\n",
+            "mcp = { m = { url = \"http://h.test\", key = { a = 1 }, forward_auth = \"sk-secret-1\" } }\n",
+            "log = \"sk-secret-1\"\n",
+            "providers = { p = { vendor = \"openai\", auth = { type = \"sk-secret-1\", key = \"k\" } } }\n",
         ] {
             let said = Config::parse(text)
                 .err()
@@ -1033,7 +1105,7 @@ providers:
             assert!(!said.is_empty(), "{text}");
             assert!(!said.contains("sk-secret-1"), "{text}: {said}");
         }
-        let said = Config::parse("client_keys: sk-secret-1")
+        let said = Config::parse("client_keys = \"sk-secret-1\"\n")
             .err()
             .map(|e| e.to_string())
             .unwrap_or_default();
@@ -1042,17 +1114,8 @@ providers:
 
     #[test]
     fn tool_loop_and_cors_keys_parse() {
-        let yaml = "plugins:
-  tool_loop:
-    servers: [github]
-    allow: ['github__*']
-    deny: ['github__delete_*']
-    tool_list_ttl: 1m
-    parallel: 2
-    max_result: 8KiB
-    max_results: 64KiB
-cors: { origins: ['https://app.example.com'] }";
-        let config = Config::parse(yaml).unwrap_or_else(|e| panic!("{e}"));
+        let text = "plugins = { tool_loop = { servers = [\"github\"], allow = [\"github__*\"], deny = [\"github__delete_*\"], tool_list_ttl = \"1m\", parallel = 2, max_result = \"8KiB\", max_results = \"64KiB\" } }\ncors = { origins = [\"https://app.example.com\"] }\n";
+        let config = Config::parse(text).unwrap_or_else(|e| panic!("{e}"));
         let tool_loop = config
             .plugins
             .tool_loop
@@ -1068,11 +1131,8 @@ cors: { origins: ['https://app.example.com'] }";
 
     #[test]
     fn plugins_parse_under_their_names() {
-        let yaml = "plugins:
-  routing: { models: [{ prefix: llama, provider: groq }], default: openai }
-  fallback: { after: { openai: [anthropic] }, tries: 2, backoff: 100ms, until: end }
-  hedge: { after: { openai: [openai-eu] }, stagger: 300ms }";
-        let plugins = Config::parse(yaml)
+        let text = "plugins = { routing = { models = [{ prefix = \"llama\", provider = \"groq\" }], default = \"openai\" }, fallback = { after = { openai = [\"anthropic\"] }, tries = 2, backoff = \"100ms\", until = \"end\" }, hedge = { after = { openai = [\"openai-eu\"] }, stagger = \"300ms\" } }\n";
+        let plugins = Config::parse(text)
             .unwrap_or_else(|e| panic!("{e}"))
             .plugins;
         assert_eq!(plugins.routing.models[0].provider, "groq");
@@ -1085,15 +1145,13 @@ cors: { origins: ['https://app.example.com'] }";
         let hedge = plugins.hedge.unwrap_or_else(|| panic!("hedge"));
         assert_eq!(hedge.stagger, Some(Duration::from_millis(300)));
         assert_eq!(hedge.until, Commit::Head);
-        let defaults = Config::parse("{}")
-            .unwrap_or_else(|e| panic!("{e}"))
-            .plugins;
+        let defaults = Config::parse("").unwrap_or_else(|e| panic!("{e}")).plugins;
         assert!(defaults.fallback.is_none() && defaults.hedge.is_none());
     }
 
     #[test]
     fn unknown_fields_are_refused() {
-        let said = Config::parse("providers: { p: { vendor: openai, bogus: 1 } }")
+        let said = Config::parse("providers = { p = { vendor = \"openai\", bogus = 1 } }\n")
             .err()
             .map(|e| e.to_string())
             .unwrap_or_default();

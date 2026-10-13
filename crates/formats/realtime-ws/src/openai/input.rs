@@ -2,7 +2,7 @@
 //! [`Input`], read at the client's edge and written at the provider's.
 
 use respan_gateway_conversation::{Content, Message, Role};
-use respan_gateway_core::{BadRequest, Fault, NativeValue};
+use respan_gateway_core::{Fault, NativeValue};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_realtime::{Audio, AudioFormat, Input, Session, ToolResult};
 use serde_json::{Value, json};
@@ -53,7 +53,7 @@ impl Client {
 
     pub(super) fn read(&mut self, raw: Bytes, out: &mut Vec<Input>) -> Result<(), Fault> {
         let v: Value = serde_json::from_slice(&raw)
-            .map_err(|_| BadRequest::fault("a client's frame is not a JSON event"))?;
+            .map_err(|_| Fault::bad_request("a client's frame is not a JSON event"))?;
         let mut event = decode(v, self.input);
         if let Some(model) = self.opening.take() {
             match &mut event {

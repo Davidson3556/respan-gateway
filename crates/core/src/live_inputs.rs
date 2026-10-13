@@ -192,11 +192,10 @@ impl Drop for Reading {
 mod tests {
     use std::sync::Arc;
 
-    use crate::Abandoned;
-
     use futures::StreamExt;
 
     use super::*;
+    use crate::FaultKind;
 
     /// Inputs cut by the request's end end `Err(abandoned)`, however
     /// the end and the first poll are ordered: here the request has ended
@@ -209,7 +208,7 @@ mod tests {
         later.close(Err(Fault::abandoned()));
         let mut inputs = inputs(later, None, &ended);
         let first = inputs.next().await.map(|r| r.err());
-        assert!(matches!(first, Some(Some(f)) if f.is::<Abandoned>()));
+        assert!(matches!(first, Some(Some(f)) if f.is(FaultKind::Abandoned)));
         assert!(inputs.next().await.is_none());
     }
 }

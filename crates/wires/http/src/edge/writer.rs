@@ -11,6 +11,7 @@ use futures::channel::oneshot;
 use futures::{FutureExt, Stream, StreamExt};
 use respan_gateway_core::Fault;
 
+use super::locked;
 use crate::{Completion, Frames};
 
 #[derive(Default)]
@@ -70,7 +71,7 @@ impl Writer {
         cx: &mut Context<'_>,
         requested: bool,
     ) -> Poll<Result<(), Fault>> {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = locked(&self.0);
         if let Some(Err(fault)) = &state.delivered {
             return Poll::Ready(Err(fault.clone()));
         }
@@ -86,7 +87,7 @@ impl Writer {
     }
 
     pub(crate) fn send(&self, bytes: Bytes) {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = locked(&self.0);
         state.frames.push_back(bytes);
         if let Some(waker) = state.reader.take() {
             waker.wake();
@@ -94,7 +95,7 @@ impl Writer {
     }
 
     pub(crate) fn end(&self, end: Result<(), Fault>, abort: Option<Fault>) {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = locked(&self.0);
         state.end = Some(end);
         state.abort = abort;
         state.drained();
@@ -104,7 +105,7 @@ impl Writer {
     }
 
     pub(crate) fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = locked(&self.0);
         match state.delivered.clone() {
             Some(end) => Poll::Ready(end),
             None => {
@@ -117,7 +118,7 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = locked(&self.0);
         if state.end.is_none() {
             let fault = Fault::abandoned();
             state.end = Some(Err(fault.clone()));
@@ -135,7 +136,7 @@ impl Stream for Pipe {
     type Item = Result<Bytes, Fault>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = locked(&self.0);
         if let Some(bytes) = state.frames.pop_front() {
             if state.frames.is_empty() {
                 state.drained();
@@ -164,7 +165,7 @@ impl Stream for Pipe {
 
 impl Drop for Pipe {
     fn drop(&mut self) {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = locked(&self.0);
         state.acknowledge(Err(Fault::abandoned()));
     }
 }

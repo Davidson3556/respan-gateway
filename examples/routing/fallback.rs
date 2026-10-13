@@ -85,7 +85,7 @@ impl Plugin for Log {
         let end = end
             .as_ref()
             .err()
-            .map_or("ok", respan_gateway_http_faults::error_code);
+            .map_or("ok", respan_gateway_core::Fault::code);
         let chat = px.input::<Input>().ok();
         let model = chat.and_then(|c| c.model.as_deref()).unwrap_or("-");
         let line = format!("{} {model} #{index} {role:?} {end}", px.provider());

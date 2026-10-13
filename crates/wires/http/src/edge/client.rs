@@ -1,27 +1,26 @@
 //! Client input and its one response handoff.
 
 use super::writer::Writer;
-use super::{PANICKED, Written};
+use super::{PANICKED, Written, end_encoder, guarded, locked};
 use crate::codec::{self, decode_one};
 use crate::rules::{bodiless, error_head, outgoing, plain_response, strip_hops};
 use crate::{
     Body, Completion, Credential, Decoder, Encoder, Frames, raw::ClientHead, raw::Original,
     raw::RawReply,
 };
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::future::{BoxFuture, ready};
-use futures::{FutureExt, Sink, StreamExt, TryStreamExt};
+use futures::{FutureExt, Sink, StreamExt};
 use http::Method;
 use http::StatusCode;
 use http::header::CONTENT_LENGTH;
 use http::request::Parts as RequestHead;
 use http::response::Parts as ResponseHead;
 use http_body_util::BodyExt;
+use respan_gateway_core::Gateway;
 use respan_gateway_core::{Connection, ErrorCode, EventSink, EventStream, Extensions, Fault};
-use respan_gateway_core::{Gateway, NotFound};
 use respan_gateway_http_faults::Status;
-use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,24 +58,12 @@ impl Handoff {
     }
 }
 
-/// How an accepted request's body carries its messages.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Framing {
-    /// One message, the whole body, collected before it is decoded: an
-    /// ordinary HTTP request, however the network chunked it.
-    Whole,
-    /// One message per body frame, decoded as each comes: a session's, such
-    /// as a WebSocket's after its upgrade. Its response opens at once, so a
-    /// duplex peer can send without waiting for its own first reply.
-    Live,
-}
-
 /// One accepted request. It is consumed once, rather than shared and runtime-locked.
 ///
 /// An accepted request cannot be cloned:
 /// ```compile_fail
-/// use respan_gateway_http::{Body, Framing, ClientIo, http::Request};
-/// let (incoming, _) = ClientIo::accept(Request::new(Body::default()), Framing::Whole, 1024);
+/// use respan_gateway_http::{Body, ClientIo, http::Request};
+/// let (incoming, _) = ClientIo::accept(Request::new(Body::default()), 1024);
 /// let duplicate = incoming.clone();
 /// ```
 /// Binding consumes it, preventing a second binding:
@@ -85,7 +72,7 @@ pub enum Framing {
 /// use respan_gateway_core::{Fault, EventSink};
 /// use h::bytes::Bytes;
 /// let request = h::http::Request::new(h::Body::default());
-/// let (incoming, _) = h::ClientIo::accept(request, h::Framing::Whole, 1024);
+/// let (incoming, _) = h::ClientIo::accept(request, 1024);
 /// fn bind(io: h::ClientIo) {
 ///     let _ = io.bind::<Bytes, Bytes>(
 ///         |_| Box::new(|raw: Bytes, out: &mut Vec<Bytes>| Ok(out.push(raw))),
@@ -106,21 +93,39 @@ pub struct ClientIo {
     error: Arc<ErrorWriter>,
 }
 impl ClientIo {
-    /// Accept an HTTP request, its credentials lifted out of its head into a
-    /// [`Credential`], its body framed as `framing`. `limit` is the most
-    /// bytes of one message it takes, a whole body or a live frame: past it,
-    /// the request fails 413 (`too_large`). Hand the gateway its
-    /// [`extensions`](Self::extensions), and drive the returned answer
+    /// Accept an HTTP request whose body is one message, collected whole
+    /// however the network chunked it, its credentials lifted out of its
+    /// head into a [`Credential`]. `limit` is the most bytes of the body it
+    /// takes: past it, the request fails 413 (`too_large`). Hand the gateway
+    /// its [`extensions`](Self::extensions), and drive the returned answer
     /// together with `Gateway::handle`.
     pub fn accept(
         request: http::Request<Body>,
-        framing: Framing,
         limit: usize,
-    ) -> (Self, futures::future::BoxFuture<'static, Option<Written>>) {
-        let live = framing == Framing::Live;
+    ) -> (Self, BoxFuture<'static, Option<Written>>) {
+        Self::accepted(request, false, limit)
+    }
+
+    /// Accept a session, such as a WebSocket's after its upgrade, as
+    /// [`accept`](Self::accept) does, but each frame of its body one message
+    /// decoded as it comes, `limit` the most bytes of one. Its response
+    /// opens at once, so a duplex peer can send without waiting for its own
+    /// first reply.
+    pub fn accept_live(
+        request: http::Request<Body>,
+        limit: usize,
+    ) -> (Self, BoxFuture<'static, Option<Written>>) {
+        Self::accepted(request, true, limit)
+    }
+
+    fn accepted(
+        request: http::Request<Body>,
+        live: bool,
+        limit: usize,
+    ) -> (Self, BoxFuture<'static, Option<Written>>) {
         let (mut head, body) = request.into_parts();
         let credential = Credential::lift(&mut head);
-        let wire = Original::unread(live);
+        let wire = Original::unread();
         if live {
             wire.fill(http::Request::from_parts(head.clone(), Bytes::new()));
         }
@@ -158,7 +163,7 @@ impl ClientIo {
 
     /// Write a refusal's body with `error`, which may edit its head, whose
     /// status and `Retry-After` the fault's are ([`status`], [`RetryAfter`]),
-    /// in place of [`plain`](crate::rules::plain) text. An explicit
+    /// in place of the default, the fault's message as plain text. An explicit
     /// [`RawReply`] is written instead, as it came.
     ///
     /// [`status`]: respan_gateway_http_faults::status
@@ -208,7 +213,7 @@ impl ClientIo {
                 let decoder = decode(&head);
                 return Ok(codec::decode(Body::stream(frames), decoder));
             }
-            let whole = read_whole(body, limit).await;
+            let whole = codec::collect(body, limit, too_large).await;
             let raw = whole.as_ref().cloned().unwrap_or_default();
             filled.fill(http::Request::from_parts(head.clone(), raw));
             let decoder = decode(&head);
@@ -238,29 +243,33 @@ impl ClientIo {
             };
             let fallback = reply.fallback();
             let slot = fallback.slot.clone();
-            let sink = if let Some(fault) = events.refusal().cloned() {
-                events.stop();
-                reply.failure(fault, false)
-            } else {
-                match std::panic::catch_unwind(AssertUnwindSafe(|| encode(reply))) {
-                    Ok(Ok(sink)) => {
-                        if slot.lock().unwrap_or_else(|e| e.into_inner()).unread {
-                            events.stop();
+            let sink = match events.refusal().cloned() {
+                Some(fault) => {
+                    events.stop();
+                    reply.refusal(fault)
+                }
+                None => {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| encode(reply))) {
+                        Ok(Ok(sink)) => {
+                            if locked(&slot).unread {
+                                events.stop();
+                            }
+                            sink
                         }
-                        sink
-                    }
-                    result => {
-                        events.stop();
-                        slot.lock().unwrap_or_else(|e| e.into_inner()).staged.take();
-                        match result {
-                            Ok(Err(fault)) => fallback.failure(fault, false),
-                            Err(_) => fallback.failure(Fault::internal(PANICKED), true),
-                            Ok(Ok(_)) => unreachable!(),
+                        failed => {
+                            events.stop();
+                            locked(&slot).staged.take();
+                            match failed.ok().and_then(Result::err) {
+                                Some(fault) => fallback.refusal(fault),
+                                // A panicking format may have left its error
+                                // writer unusable too: it goes as plain text.
+                                None => fallback.unwritable(Fault::internal(PANICKED)),
+                            }
                         }
                     }
                 }
             };
-            slot.lock().unwrap_or_else(|e| e.into_inner()).commit();
+            locked(&slot).commit();
             Ok(sink)
         });
         (incoming, outgoing)
@@ -306,14 +315,18 @@ impl Reply {
         &self.request
     }
     /// Encode a response, delaying its head until bytes or completion, but
-    /// for [`Framing::Live`] ingress, whose head goes at once.
+    /// for a live session's ([`ClientIo::accept_live`]), whose head goes at once.
     pub fn write<T: 'static>(
         self,
         head: ResponseHead,
         encoder: Box<dyn Encoder<T>>,
     ) -> EventSink<T> {
-        let open = self.live;
-        self.writer(head, encoder, open)
+        let live = self.live;
+        let mut client = self.client(head, encoder);
+        if live {
+            client.open();
+        }
+        EventSink::new(client)
     }
     /// Open a quiet response at once, with what its encoder
     /// [starts](Encoder::start) with.
@@ -322,53 +335,43 @@ impl Reply {
         head: ResponseHead,
         encoder: Box<dyn Encoder<T>>,
     ) -> EventSink<T> {
-        self.writer(head, encoder, true)
+        let mut client = self.client(head, encoder);
+        client.open();
+        EventSink::new(client)
     }
-    fn writer<T: 'static>(
-        self,
-        head: ResponseHead,
-        encoder: Box<dyn Encoder<T>>,
-        open: bool,
-    ) -> EventSink<T> {
+    /// The sink of `head` and `encoder`, started.
+    fn client<T: 'static>(self, head: ResponseHead, encoder: Box<dyn Encoder<T>>) -> Client<T> {
         if bodiless(self.request.method(), head.status) {
-            self.slot.lock().unwrap_or_else(|e| e.into_inner()).unread = true;
+            locked(&self.slot).unread = true;
             let mut client = Client::new(self, head, None);
             client.writer.end(Ok(()), None);
-            client.ended = true;
             client.open();
-            return EventSink::new(client);
+            return client;
         }
         let mut client = Client::new(self, head, Some(encoder));
         let mut out = Vec::new();
-        let started = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            client
-                .encoder
-                .as_mut()
-                .expect("response encoder")
-                .start(&mut out)
-        }))
-        .unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
+        let started = match &mut client.encoder {
+            Some(encoder) => guarded(|| encoder.start(&mut out)),
+            None => Ok(()),
+        };
         match started {
             Ok(()) => {
-                let live = client.reply.live;
-                for frame in out.into_iter().filter(|frame| live || !frame.is_empty()) {
-                    client.writer.send(frame);
-                }
+                client.send(out);
             }
             Err(fault) => client.finish(Err(fault)),
         }
-        if open {
-            client.open();
-        }
+        client
+    }
+    /// The sink of a refusal: `fault` written as the format writes errors.
+    fn refusal<T: 'static>(self, fault: Fault) -> EventSink<T> {
+        let mut client = Client::new(self, http::Response::new(()).into_parts().0, None);
+        client.refuse(fault);
         EventSink::new(client)
     }
-    fn failure<T: 'static>(self, fault: Fault, plain: bool) -> EventSink<T> {
+    /// The sink of a refusal no format can write: `fault` as plain text.
+    fn unwritable<T: 'static>(self, fault: Fault) -> EventSink<T> {
         let mut client = Client::new(self, http::Response::new(()).into_parts().0, None);
-        if plain {
-            client.unwritable(fault);
-        } else {
-            client.refuse(fault);
-        }
+        client.unwritable(fault);
         EventSink::new(client)
     }
 }
@@ -380,34 +383,13 @@ fn too_large() -> Fault {
         .with(Status(StatusCode::PAYLOAD_TOO_LARGE))
 }
 
-/// A whole body of up to `limit` bytes.
-async fn read_whole(body: Body, limit: usize) -> Result<Bytes, Fault> {
-    if let Some(bytes) = body.full_bytes() {
-        return match bytes.len() > limit {
-            true => Err(too_large()),
-            false => Ok(bytes.clone()),
-        };
-    }
-    // Release each frame before polling again: a producer may recycle its buffer.
-    body.try_fold(BytesMut::new(), |mut all, frame| {
-        let kept = all.len() + frame.len() <= limit;
-        if kept {
-            all.extend_from_slice(&frame);
-        }
-        futures::future::ready(kept.then_some(all).ok_or_else(too_large))
-    })
-    .await
-    .map(BytesMut::freeze)
-}
-
+/// A response's sink. Its encoder is `None` once it ended; its head, body
+/// and completion are `unopened` until handed to the adapter.
 struct Client<T> {
     reply: Reply,
-    head: Option<ResponseHead>,
-    frames: Option<Frames>,
-    completion: Option<Completion>,
+    unopened: Option<(ResponseHead, Frames, Completion)>,
     encoder: Option<Box<dyn Encoder<T>>>,
     writer: Writer,
-    ended: bool,
 }
 impl<T> Unpin for Client<T> {}
 impl<T: 'static> Client<T> {
@@ -415,41 +397,41 @@ impl<T: 'static> Client<T> {
         let (writer, frames, completion) = Writer::new();
         Self {
             reply,
-            head: Some(head),
-            frames: Some(frames),
-            completion: Some(completion),
+            unopened: Some((head, frames, completion)),
             encoder,
             writer,
-            ended: false,
         }
     }
     fn open(&mut self) {
-        if let Some(head) = self.head.take() {
-            let body = Body::stream(self.frames.take().expect("response handed once"));
-            let completion = self.completion.take().expect("response handed once");
-            self.reply
-                .slot
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .publish((http::Response::from_parts(head, body), completion));
+        if let Some((head, frames, completion)) = self.unopened.take() {
+            let response = http::Response::from_parts(head, Body::stream(frames));
+            locked(&self.reply.slot).publish((response, completion));
         }
     }
+    /// Send `frames`, but an empty chunk of a body, which is nothing (a live
+    /// message may be empty). Whether any went.
+    fn send(&mut self, frames: Vec<Bytes>) -> bool {
+        let live = self.reply.live;
+        let mut sent = false;
+        for frame in frames.into_iter().filter(|frame| live || !frame.is_empty()) {
+            self.writer.send(frame);
+            sent = true;
+        }
+        sent
+    }
     fn unwritable(&mut self, fault: Fault) {
-        self.ended = true;
+        self.encoder = None;
         self.writer.end(Err(fault.clone()), None);
         let mut response = plain_response(&fault);
         response.extensions_mut().insert(Unwritten);
-        self.head.take();
-        let end = self.completion.take().expect("response handed once");
-        self.reply
-            .slot
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .publish((response, end));
+        if let Some((_, _, completion)) = self.unopened.take() {
+            locked(&self.reply.slot).publish((response, completion));
+        }
     }
     /// Write `fault` as the response: an explicit [`RawReply`] as it came,
     /// else its status and `Retry-After` and the format's error body.
     fn refuse(&mut self, fault: Fault) {
+        self.encoder = None;
         let mut head = http::Response::new(()).into_parts().0;
         let bytes = match fault.get::<RawReply>() {
             Some(RawReply(raw)) => {
@@ -461,8 +443,7 @@ impl<T: 'static> Client<T> {
                 error_head(&mut head, &fault);
                 let error = &self.reply.error;
                 let request = &self.reply.request;
-                let written = AssertUnwindSafe(|| error(&fault, request, &mut head));
-                let Ok(bytes) = std::panic::catch_unwind(written) else {
+                let Ok(bytes) = guarded(|| Ok(error(&fault, request, &mut head))) else {
                     self.unwritable(Fault::internal(PANICKED));
                     return;
                 };
@@ -472,54 +453,33 @@ impl<T: 'static> Client<T> {
         if !bytes.is_empty() && !bodiless(self.reply.request.method(), head.status) {
             self.writer.send(bytes);
         }
-        self.head = Some(head);
+        if let Some(unopened) = &mut self.unopened {
+            unopened.0 = head;
+        }
         self.writer.end(Err(fault), None);
-        self.ended = true;
         self.open();
     }
-    fn finish(&mut self, mut end: Result<(), Fault>) {
-        if self.ended {
+    fn finish(&mut self, end: Result<(), Fault>) {
+        let Some(mut encoder) = self.encoder.take() else {
             return;
-        }
+        };
         let mut out = Vec::new();
-        let mut abort = None;
-        if let Some(encoder) = &mut self.encoder {
-            let encoded = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                if let Err(fault) = encoder.end(end.clone(), &mut out) {
-                    end = Err(fault.clone());
-                    out.clear();
-                    if encoder.end(end.clone(), &mut out).is_err() {
-                        out.clear();
-                        abort = Some(fault);
-                    }
-                }
-            }));
-            if encoded.is_err() {
-                let fault = Fault::internal(PANICKED);
-                out.clear();
-                end = Err(fault.clone());
-                abort = Some(fault);
-            }
-        }
-        if self.head.is_some()
+        let (end, abort) = end_encoder(encoder.as_mut(), end, &mut out);
+        if self.unopened.is_some()
             && let Err(fault) = end
         {
             self.refuse(fault);
             return;
         }
-        let live = self.reply.live;
-        for frame in out.into_iter().filter(|frame| live || !frame.is_empty()) {
-            self.writer.send(frame);
-        }
+        self.send(out);
         self.writer.end(end, abort);
-        self.ended = true;
         self.open();
     }
 }
 impl<T> Drop for Client<T> {
     fn drop(&mut self) {
-        let mut slot = self.reply.slot.lock().unwrap_or_else(|e| e.into_inner());
-        if self.head.is_some() && slot.committed && slot.sender.is_some() {
+        let mut slot = locked(&self.reply.slot);
+        if self.unopened.is_some() && slot.committed && slot.sender.is_some() {
             let fault = Fault::abandoned();
             let end = futures::future::ready(Err(fault.clone())).boxed();
             slot.publish((plain_response(&fault), end));
@@ -529,45 +489,26 @@ impl<T> Drop for Client<T> {
 impl<T: 'static> Sink<Result<T, Fault>> for Client<T> {
     type Error = Fault;
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        if let Some(fault) = self
-            .reply
-            .slot
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .failed
-            .clone()
-        {
+        if let Some(fault) = locked(&self.reply.slot).failed.clone() {
             return Poll::Ready(Err(fault));
         }
-        if self.ended {
-            self.writer.poll_close(cx)
-        } else {
-            self.writer.poll_ready(cx, false)
+        match self.encoder {
+            Some(_) => self.writer.poll_ready(cx, false),
+            None => self.writer.poll_close(cx),
         }
     }
     fn start_send(mut self: Pin<&mut Self>, item: Result<T, Fault>) -> Result<(), Fault> {
-        if self.ended {
+        let Some(encoder) = &mut self.encoder else {
             return Ok(());
-        }
+        };
         let mut out = Vec::new();
         let encoded = match item {
-            Ok(value) => std::panic::catch_unwind(AssertUnwindSafe(|| {
-                self.encoder
-                    .as_mut()
-                    .expect("response encoder")
-                    .encode(&value, &mut out)
-            }))
-            .unwrap_or_else(|_| Err(Fault::internal(PANICKED))),
+            Ok(value) => guarded(|| encoder.encode(&value, &mut out)),
             Err(fault) => Err(fault),
         };
         match encoded {
             Ok(()) => {
-                // A live message may be empty; an empty chunk of a body is nothing.
-                let live = self.reply.live;
-                out.retain(|message| live || !message.is_empty());
-                if !out.is_empty() {
-                    out.into_iter()
-                        .for_each(|message| self.writer.send(message));
+                if self.send(out) {
                     self.open();
                 }
             }
@@ -579,18 +520,11 @@ impl<T: 'static> Sink<Result<T, Fault>> for Client<T> {
         self.poll_ready(cx)
     }
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        if !self.ended {
+        if self.encoder.is_some() {
             ready!(self.writer.poll_ready(cx, false))?;
             self.finish(Ok(()));
         }
-        if let Some(fault) = self
-            .reply
-            .slot
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .failed
-            .clone()
-        {
+        if let Some(fault) = locked(&self.reply.slot).failed.clone() {
             return Poll::Ready(Err(fault));
         }
         self.writer.poll_close(cx)
@@ -614,13 +548,15 @@ impl std::fmt::Debug for Reply {
 }
 
 /// Hand `req` to `gateway` as an HTTP adapter does, as an [`ClientIo`]
-/// handle, to [`Gateway::handle`], its body framed as `framing` with `limit`
-/// the most bytes of one message it takes ([`ClientIo::accept`]). Before:
-/// the hop's headers go (RFC 9110 7.6.1), and `Upgrade` too unless the
-/// body is [`Framing::Live`], as only a session switches protocols: a whole
+/// handle, to [`Gateway::handle`], its body one message of at most `limit`
+/// bytes ([`ClientIo::accept`]). Before:
+/// the hop's headers go (RFC 9110 7.6.1), and `Upgrade` too, as only a
+/// session switches protocols ([`handle_live`]): a whole
 /// request's `Upgrade`, such as `h2c`, is no format's to pass on. The
-/// [`ClientIo`]'s [extensions](ClientIo::extensions) join those `req`
-/// carries. After: what no format can write, or a 101 to a whole request,
+/// [`ClientIo`]'s [extensions](ClientIo::extensions) join the gateway
+/// [`Extensions`] `req` carries; its other `http::Extensions`, such as a
+/// server's connection data, are dropped, as no format or plugin reads
+/// them: a server puts what plugins should see in that [`Extensions`]. After: what no format can write, or a 101 to a whole request,
 /// goes as text/plain; the response loses a hop's headers; a [`bodiless`]
 /// one goes with none, the gateway's body read apart.
 ///
@@ -631,9 +567,39 @@ impl std::fmt::Debug for Reply {
 pub fn handle<B>(
     gateway: &Gateway,
     req: http::Request<B>,
-    framing: Framing,
     limit: usize,
-) -> impl Future<Output = (http::Response<Body>, BoxFuture<'static, Result<(), Fault>>)> + Send + 'static
+) -> impl Future<Output = Handled> + Send + 'static
+where
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Fault>,
+{
+    handled(gateway, req, false, limit)
+}
+
+/// [`handle`] for a session, such as a WebSocket's after its upgrade: each
+/// frame of its body one message of at most `limit` bytes
+/// ([`ClientIo::accept_live`]), its `Upgrade` kept.
+pub fn handle_live<B>(
+    gateway: &Gateway,
+    req: http::Request<B>,
+    limit: usize,
+) -> impl Future<Output = Handled> + Send + 'static
+where
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Fault>,
+{
+    handled(gateway, req, true, limit)
+}
+
+/// What [`handle`] gives: the response, and its delivery's end.
+type Handled = (http::Response<Body>, BoxFuture<'static, Result<(), Fault>>);
+
+fn handled<B>(
+    gateway: &Gateway,
+    req: http::Request<B>,
+    live: bool,
+    limit: usize,
+) -> impl Future<Output = Handled> + Send + 'static
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
@@ -641,11 +607,10 @@ where
     let (mut head, body) = req.into_parts();
     let mut extensions = head.extensions.remove::<Extensions>().unwrap_or_default();
     head.extensions = http::Extensions::new();
-    strip_hops(&mut head.headers, framing == Framing::Live);
+    strip_hops(&mut head.headers, live);
     let to = (head.method.clone(), head.uri.path().to_owned());
     let body = Body::stream(body.map_err(Into::into).into_data_stream());
-    let (incoming, answer) =
-        ClientIo::accept(http::Request::from_parts(head, body), framing, limit);
+    let (incoming, answer) = ClientIo::accepted(http::Request::from_parts(head, body), live, limit);
     extensions.extend(incoming.extensions());
     let handled = gateway.handle(incoming, extensions);
     async move {
@@ -653,7 +618,7 @@ where
             Ok((resp, ended)) => (Ok(resp), ended),
             Err(fault) => (Err(fault.clone()), ready(Err(fault)).boxed()),
         };
-        (depart(&to, framing, resp), ended)
+        (depart(&to, live, resp), ended)
     }
 }
 
@@ -668,7 +633,7 @@ pub(crate) struct Unwritten;
 /// gateway's body read apart.
 fn depart(
     (method, path): &(Method, String),
-    framing: Framing,
+    live: bool,
     resp: Result<http::Response<Body>, Fault>,
 ) -> http::Response<Body> {
     // A refusal no codec could write goes as the client edge wrote it.
@@ -680,14 +645,12 @@ fn depart(
         Err(fault) => Err(fault),
     };
     match resp {
-        Err(fault) if fault.is::<NotFound>() => {
+        Err(fault) if fault.code() == "not_found" => {
             let text = format!("no format served accepts {method} {path}");
             plain_response(&Fault::not_found(text))
         }
         Err(fault) => plain_response(&fault),
-        Ok(resp)
-            if resp.status() == StatusCode::SWITCHING_PROTOCOLS && framing == Framing::Whole =>
-        {
+        Ok(resp) if resp.status() == StatusCode::SWITCHING_PROTOCOLS && !live => {
             // RFC 9110 15.2.2: a 101 only to a request that asked.
             let asked = "a 101 to a request that did not ask to switch protocols";
             plain_response(&Fault::internal(asked))

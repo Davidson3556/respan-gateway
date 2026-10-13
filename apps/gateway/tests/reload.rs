@@ -26,10 +26,10 @@ fn config(listen: &str, providers: &[(&str, &str)], extra: &str) -> String {
     let providers: String = providers
         .iter()
         .map(|(name, url)| {
-            format!("  {name}: {{ formats: openai-chat, base_url: '{url}', key: k }}\n")
+            format!("{name} = {{ formats = \"openai-chat\", base_url = \"{url}\", key = \"k\" }}\n")
         })
         .collect();
-    format!("listen: {listen}\n{extra}\nproviders:\n{providers}")
+    format!("listen = \"{listen}\"\n{extra}\n[providers]\n{providers}")
 }
 
 async fn get(gw: &Gateway, path: &str) -> Value {
@@ -88,7 +88,7 @@ async fn the_admin_api_reloads_the_file_and_keeps_the_old_config_when_the_new_is
     assert_eq!(overview["totals"]["requests"], 2, "{overview}");
 
     // An invalid file: refused with the reason, the previous config serves.
-    std::fs::write(&path, "providers: [nonsense").unwrap();
+    std::fs::write(&path, "providers = [nonsense").unwrap();
     let resp = client()
         .post(gw.url("/ui/api/reload"))
         .send()
@@ -101,13 +101,13 @@ async fn the_admin_api_reloads_the_file_and_keeps_the_old_config_when_the_new_is
         error["error"]["message"]
             .as_str()
             .unwrap()
-            .contains(".yaml")
+            .contains(".toml")
     );
     assert_eq!(names(&gw).await, ["alpha", "beta"]);
     assert_eq!(chat(&gw, "alpha/m").await.status(), 200);
 
     // A value of the bad file is not echoed: it may be a secret.
-    std::fs::write(&path, "client_keys: sk-secret-77\n").unwrap();
+    std::fs::write(&path, "client_keys = \"sk-secret-77\"\n").unwrap();
     let resp = client()
         .post(gw.url("/ui/api/reload"))
         .send()
@@ -180,7 +180,7 @@ async fn watch_reloads_when_the_file_changes() {
 #[tokio::test]
 async fn reloading_needs_a_client_key_when_there_are_keys_and_a_source_to_read() {
     let a = FakeOpenAi::start().await;
-    let extra = "client_keys: [gw-key]";
+    let extra = "client_keys = [\"gw-key\"]\n";
     let path = write_config(&config("0.0.0.0:0", &[("alpha", &a.base_url())], extra));
     let gw = serve(&path, &[]).await;
     let resp = client()
@@ -207,7 +207,7 @@ async fn the_request_log_keeps_the_configured_number_of_requests_across_reloads(
     let path = write_config(&config(
         "127.0.0.1:0",
         &[("alpha", &a.base_url())],
-        "plugins: { request_log: { history: 3 } }",
+        "plugins = { request_log = { history = 3 } }\n",
     ));
     let gw = serve(&path, &[]).await;
     for _ in 0..5 {
@@ -220,7 +220,7 @@ async fn the_request_log_keeps_the_configured_number_of_requests_across_reloads(
         config(
             "127.0.0.1:0",
             &[("alpha", &a.base_url())],
-            "plugins: { request_log: { history: 2 } }",
+            "plugins = { request_log = { history = 2 } }\n",
         ),
     )
     .unwrap();
@@ -342,7 +342,7 @@ async fn shutdown_grace_lets_a_fast_request_finish_and_cuts_a_slow_one() {
     let config = config(
         "127.0.0.1:0",
         &[("fast", &fast.base_url()), ("slow", &slow)],
-        "shutdown_grace: 2s",
+        "shutdown_grace = \"2s\"\n",
     );
     let path = write_config(&config);
     let mut gw = serve(&path, &[]).await;

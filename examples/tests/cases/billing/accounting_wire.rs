@@ -2,7 +2,7 @@
 //! edge contract itself, with no bytes and no heads. The ledger reads
 //! neither, so it settles here by the same rules as over HTTP.
 
-use respan_gateway_core::{BadRequest, ErrorCode, Provider, Upstream};
+use respan_gateway_core::{ErrorCode, Provider};
 use std::sync::{Arc, Mutex};
 
 use crate::accounting::{Accounting, Quote, Tally};
@@ -84,7 +84,7 @@ impl Format<Io, Reply, Question> for Pipe {
                 .transpose()?
                 .is_some_and(|q| q.0 == "unwritable")
             {
-                return Err(BadRequest::fault("unwritable"));
+                return Err(Fault::bad_request("unwritable"));
             }
             Ok(sink::unfold(
                 Some((send, next)),
@@ -92,7 +92,7 @@ impl Format<Io, Reply, Question> for Pipe {
                     item?;
                     if let Some((send, next)) = state {
                         let (ok, frames) =
-                            next.unwrap_or_else(|| Err(Upstream::fault("no reply")))?;
+                            next.unwrap_or_else(|| Err(Fault::upstream("no reply")))?;
                         let flow = if !ok {
                             EventStream::refused(
                                 Fault::new("busy")
@@ -152,11 +152,11 @@ async fn accounting_settles_on_a_wire_of_its_own() {
         ("reported", "hi", Ok((true, vec!["hello:4"])), 4),
         ("not reported", "hi", Ok((true, vec!["hello"])), RESERVE),
         ("provider refused", "hi", Ok((false, vec!["busy"])), 0),
-        ("sent, no head", "hi", Err(Upstream::fault("lost")), RESERVE),
+        ("sent, no head", "hi", Err(Fault::upstream("lost")), RESERVE),
         (
             "never sent",
             "unwritable",
-            Err(Upstream::fault("unused")),
+            Err(Fault::upstream("unused")),
             0,
         ),
     ];

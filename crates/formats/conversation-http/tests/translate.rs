@@ -12,7 +12,7 @@ use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::NativeFields;
 use respan_gateway_core::async_trait;
-use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, Response, Upstream};
+use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, Response};
 #[allow(dead_code)] // Shared hooks also expose a call log not used by this suite.
 #[path = "../../../../tests/support/hooks.rs"]
 mod hooks;
@@ -148,7 +148,7 @@ impl Plugin for ByModel {
 
 impl Harness {
     /// Plugins, in order: the log, [`Cross`], `native`, and a router sending
-    /// Claude models to Anthropic, as gateway.example.yaml does.
+    /// Claude models to Anthropic, as gateway.example.toml does.
     async fn new(native: Vec<Arc<dyn Plugin>>) -> Self {
         let mut chain: Vec<Arc<dyn Plugin>> = vec![Arc::new(Cross)];
         chain.extend(native);
@@ -492,7 +492,7 @@ impl Filter<Output> for Audit {
     fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
         match end {
             Ok(()) => Ok(()),
-            _ => Err(Upstream::fault("audit: failed response")),
+            _ => Err(Fault::upstream("audit: failed response")),
         }
     }
 }

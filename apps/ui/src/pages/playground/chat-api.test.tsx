@@ -90,3 +90,31 @@ describe("ChatTab API selector", () => {
     expect(screen.queryByRole("combobox", { name: "API" })).not.toBeInTheDocument();
   });
 });
+
+it("keeps partial replies in the conversation after a stream error", async () => {
+  let count = 0;
+  const calls = serve({
+    "GET /v1/models": () => json({ object: "list", data: [] }),
+    "GET /ui/api/routes": () => json({ serve: serveAll.slice(0, 1), routes: [], defaults: [] }),
+    "GET /ui/api/providers": () => json({ providers: [] }),
+    "GET /ui/api/requests": () => json({ requests: [] }),
+    "POST /v1/chat/completions": () => ++count === 1
+      ? stream(
+          ["message", { choices: [{ delta: { content: "The answer starts here." } }] }],
+          ["message", { error: { message: "stream ended before completion", code: "truncated" } }],
+        )
+      : stream(["message", { choices: [{ delta: { content: "And continues here." }, finish_reason: "stop" }] }]),
+  });
+  renderApp(<ChatTab />);
+  await userEvent.type(await screen.findByLabelText("Message"), "Start{Enter}");
+  expect(await screen.findByText("Response interrupted")).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("Message"), "Continue{Enter}");
+  expect(await screen.findByText("And continues here.")).toBeInTheDocument();
+  expect(screen.getByText("The answer starts here.")).toBeInTheDocument();
+  const request = calls.filter((c) => c.key === "POST /v1/chat/completions")[1];
+  expect(JSON.parse(String(request.init.body)).messages).toEqual([
+    { role: "user", content: "Start" },
+    { role: "assistant", content: "The answer starts here." },
+    { role: "user", content: "Continue" },
+  ]);
+});

@@ -43,14 +43,13 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 
 | Location | Sort | Owns | Internal production dependencies |
 | --- | --- | --- | --- |
-| `crates/core/` | Kernel | Execution, typed streams, plugin hooks, call and response lifecycles, fault facts and tagged native values | None |
+| `crates/core/` | Kernel | Execution, typed streams, plugin hooks, call and response lifecycles, fault extensions and tagged native values | None |
 | `crates/kinds/conversation/` | Kind | Conversation requests, reply events, typed usage and assembly | Core |
 | `crates/kinds/media/` | Kind | A kind per media operation (images, transcription, speech, embeddings, video jobs) over the conversation kind's media and usage | Core, conversation |
 | `crates/kinds/realtime/` | Kind | A live session's events both ways: configuration, audio, messages, responses, barge-in and tool calls, over the conversation kind's messages, tools and usage | Core, conversation |
 | `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes | Core |
-| `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the raw request and answer, and what a transport does to a call | Core, HTTP faults, HTTP syntax, SSE |
+| `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, path matching and forwarding, the raw request and answer, and what a transport does to a call | Core, HTTP faults, SSE |
 | `crates/wires/http-faults/` | Wire | Faults in HTTP terms, with no I/O: a fault's status and error code, retry eligibility, a provider's error answer as a fault | Core |
-| `crates/wires/http-syntax/` | Wire | How paths and headers are read, with no I/O: percent-decoding, path matching and forwarding, header tokens, a hop's own headers | Core |
 | `crates/wires/sse/` | Wire | Server-sent events as bytes: an incremental splitter, and events written so no value forges a field | Core |
 | `crates/wires/http-transport/` | Wire | `HttpTransport`, a pooled Reqwest backend for the provider edge | Core, HTTP |
 | `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`) | Core, HTTP |
@@ -65,7 +64,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/plugins/relay/` | Plugin | `Relay`: a client's request, key, response head and error body forwarded as they came, to a provider of its own format | Core, HTTP |
 | `crates/plugins/credentials/` | Plugin | `ClientCredentials`: a client's own key headers to the named providers that have no key of their own, of the client's format | Core, HTTP |
 | `crates/plugins/mcp-aggregate/` | Plugin | `Aggregate`: one MCP endpoint, `/mcp`, fronting many MCP servers as a single server | Core, HTTP, MCP, mcp-http, tool loop (`ToolFilter`, `ToolScope`) |
-| `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | The kinds, wires, formats, providers and plugins above, and MCP (`mcp:` servers at `/mcp/{name}`) |
+| `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (TOML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | The kinds, wires, formats, providers and plugins above, and MCP (`mcp:` servers at `/mcp/{name}`) |
 | `apps/ui/` | Web UI | React and shadcn/ui admin UI (providers, routes, live requests), built by `pnpm build` to `apps/ui/dist` and embedded in the binary by `apps/gateway/build.rs`; a placeholder page stands in when it is not built | None (talks to the admin API) |
 | `python/` | Python package | PyO3 extension hosting the `apps/gateway` library in-process, plus httpx transports and SDK clients | `apps/gateway` |
 | `examples/` | Examples | Application policies and runnable integrations of public APIs | Libraries needed by each example |
@@ -169,7 +168,7 @@ format the router was not given keeps its target.
 
 - The core owns execution and lifecycle contracts. It has no HTTP, provider,
   credential or LLM message dependency.
-- Plugin authors use core directly. It supplies kind-neutral fault facts and
+- Plugin authors use core directly. It supplies kind-neutral fault extensions and
   native values; usage is typed by the kind that reports it.
   Protocol implementations depend on core; core does not depend on them.
 - Plugins are compiled in. Applications register concrete components using
@@ -304,10 +303,8 @@ accounts and stores.
 
 The config is reloaded from its source (SIGHUP, `POST /ui/api/reload`,
 `--watch`) by building a new gateway and swapping it in for new requests,
-the old one finishing its open ones. With `admin_writes: true` and a client
-key marked `admin: true`, `PUT /ui/api/config` validates a new file, writes
-it atomically beside a `.bak`, and reloads; `GET /ui/api/config` shows the
-config with every secret redacted.
+the old one finishing its open ones. `GET /ui/api/config` shows a read-only
+view with every secret redacted.
 
 ## MCP in the binary
 

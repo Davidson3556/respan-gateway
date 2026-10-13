@@ -208,7 +208,7 @@ async fn send(
     let body = String::from_utf8_lossy(&body?).into_owned();
     let first = body
         .split_inclusive("\n\n")
-        .filter_map(respan_gateway_http::framing::json)
+        .filter_map(respan_gateway_http::content::json)
         .find(|message| {
             id.is_some_and(|id| message["id"] == id) && message.get("method").is_none()
         });
@@ -230,7 +230,7 @@ async fn initialize(gw: &Gateway) -> Result<(StatusCode, Option<String>, Value),
     )
     .await?;
     if initialized.2["result"]["protocolVersion"] != PROTOCOL_VERSION {
-        return Err(respan_gateway_core::Upstream::fault(
+        return Err(respan_gateway_core::Fault::upstream(
             "the MCP server did not negotiate the requested protocol",
         ));
     }
@@ -243,7 +243,7 @@ async fn initialize(gw: &Gateway) -> Result<(StatusCode, Option<String>, Value),
     )
     .await?;
     if status != StatusCode::ACCEPTED {
-        return Err(respan_gateway_core::Upstream::fault(
+        return Err(respan_gateway_core::Fault::upstream(
             "the MCP server did not accept initialization",
         ));
     }

@@ -10,10 +10,10 @@ use crate::edge::ended_events;
 use respan_gateway_conversation::Usage;
 use respan_gateway_core::{Connection, Fault, Format, NativeValue};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::framing::sse;
+use respan_gateway_http::content;
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
+use respan_gateway_http::path::path_ends_with;
 use respan_gateway_http::{ClientIo, Decoder, Encoder, ProviderIo};
-use respan_gateway_http_syntax::path_ends_with;
 use respan_gateway_media::speech::{Input, Output};
 use serde_json::{Map, Value};
 
@@ -118,7 +118,7 @@ fn post(
 /// The decoder of a provider's answer of `head`: a stream of events, or the
 /// audio's bytes, a chunk per frame as it comes.
 fn read_response(head: &http::response::Parts) -> Box<dyn Decoder<Output>> {
-    if sse::is_stream(head) {
+    if content::is_stream(head) {
         return ended_events(stream_event);
     }
     Box::new(|bytes: Bytes, out: &mut Vec<Output>| {

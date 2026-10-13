@@ -47,10 +47,7 @@ fn a_translated_error_keeps_each_formats_schema() {
         let mut refused = http::Response::new(Bytes::from(shape.to_string()));
         *refused.status_mut() = StatusCode::BAD_REQUEST;
         let fault = answer(&OpenAiChat, refused);
-        let words = (
-            json!(respan_gateway_http_faults::error_code(&fault)),
-            json!(fault.message()),
-        );
+        let words = (json!(fault.code()), json!(fault.message()));
         let openai = OpenAiChat::error_body(&fault);
         let anthropic = AnthropicMessages::error_body(&fault);
         assert!(!fault.message().is_empty(), "{shape}");

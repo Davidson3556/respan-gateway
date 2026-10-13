@@ -8,7 +8,7 @@ use crate::schema::{
     Totals, ended, error_event, native_fields, rest_of, says, says_error, unreadable_event,
 };
 use respan_gateway_conversation::{Block, Finish, Output, Start};
-use respan_gateway_core::{Fault, Upstream};
+use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_sse::event_json;
 use serde_json::{Map, Value, json};
@@ -320,9 +320,9 @@ impl ResponsesDecoder {
             },
             Some(other) => {
                 let message = format!("the response ended as '{other}', not completed");
-                return Err(Upstream::fault(message));
+                return Err(Fault::upstream(message));
             }
-            None => return Err(Upstream::fault("the response has no status")),
+            None => return Err(Fault::upstream("the response has no status")),
         };
         out.push(Output::finished(finish));
         Ok(())
@@ -768,7 +768,7 @@ impl ResponsesDecoder {
                 return Err(failure(&error));
             }
             Some("in_progress" | "queued") => {
-                return Err(Upstream::fault("the response is not complete"));
+                return Err(Fault::upstream("the response is not complete"));
             }
             _ => {}
         }

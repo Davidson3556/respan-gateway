@@ -20,10 +20,10 @@ fn model(var: &str, default: &str) -> String {
 
 fn openai_config(serve: &str) -> String {
     let base = model("OPENAI_BASE_URL", "https://api.openai.com/v1");
-    // JSON strings are also YAML strings; do not interpolate URLs as YAML.
+    // Quote URLs before inserting them into TOML.
     let base = serde_json::to_string(&base).unwrap();
     format!(
-        "providers:\n  p:\n    formats: openai-chat\n    base_url: {base}\n    auth: {{ type: bearer, key: env:OPENAI_API_KEY }}\nformats: [{serve}]\ndefault: p\n"
+        "providers = {{ p = {{ formats = \"openai-chat\", base_url = {base}, auth = {{ type = \"bearer\", key = \"env:OPENAI_API_KEY\" }} }} }}\nformats = [\"{serve}\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
     )
 }
 
@@ -127,7 +127,7 @@ async fn real_anthropic_streamed_tool_call_translates_to_openai() {
     }
     let base =
         serde_json::to_string(&model("ANTHROPIC_BASE_URL", "https://api.anthropic.com")).unwrap();
-    let gw = Gateway::start(&format!("providers:\n  p:\n    formats: anthropic-messages\n    base_url: {base}\n    auth: {{ type: header, name: x-api-key, key: env:ANTHROPIC_API_KEY }}\nformats: [openai-chat]\ndefault: p\n")).await;
+    let gw = Gateway::start(&format!("providers = {{ p = {{ formats = \"anthropic-messages\", base_url = {base}, auth = {{ type = \"header\", name = \"x-api-key\", key = \"env:ANTHROPIC_API_KEY\" }} }} }}\nformats = [\"openai-chat\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n")).await;
     let request = serde_json::json!({
         "model":model("ANTHROPIC_MODEL","claude-haiku-4-5"),"max_tokens":256,"stream":true,
         "messages":[{"role":"user","content":"Call echo with text exactly 雪😀."}],
@@ -174,7 +174,7 @@ async fn real_gemini_native_stream_through_passthrough() {
     if !has("GEMINI_API_KEY") {
         return;
     }
-    let gw = Gateway::start("providers:\n  p:\n    formats: passthrough\n    base_url: https://generativelanguage.googleapis.com\n    auth: { type: header, name: x-goog-api-key, key: env:GEMINI_API_KEY }\nformats: [passthrough]\ndefault: p\n").await;
+    let gw = Gateway::start("providers = { p = { formats = \"passthrough\", base_url = \"https://generativelanguage.googleapis.com\", auth = { type = \"header\", name = \"x-goog-api-key\", key = \"env:GEMINI_API_KEY\" } } }\nformats = [\"passthrough\"]\nplugins = { routing = { default = \"p\" } }\n").await;
     let path = format!(
         "/v1beta/models/{}:streamGenerateContent?alt=sse",
         model("GEMINI_MODEL", "gemini-3.8-flash")
@@ -210,7 +210,7 @@ async fn real_gemini_native_stream_through_passthrough() {
 fn gemini_config(serve: &str) -> String {
     // The vendor, so its quirks run, speaking only the native format.
     format!(
-        "providers:\n  p:\n    vendor: gemini\n    formats: gemini-generate\nformats: [{serve}]\ndefault: p\n"
+        "providers = {{ p = {{ vendor = \"gemini\", formats = \"gemini-generate\" }} }}\nformats = [\"{serve}\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
     )
 }
 
@@ -373,7 +373,7 @@ async fn real_typesafe_custom_decisions_through_passthrough() {
     if !has("TYPESAFE_API_KEY") {
         return;
     }
-    let gw = Gateway::start("providers:\n  p:\n    formats: passthrough\n    base_url: https://api.typesafe.ai\n    auth: { type: bearer, key: env:TYPESAFE_API_KEY }\nformats: [passthrough]\ndefault: p\n").await;
+    let gw = Gateway::start("providers = { p = { formats = \"passthrough\", base_url = \"https://api.typesafe.ai\", auth = { type = \"bearer\", key = \"env:TYPESAFE_API_KEY\" } } }\nformats = [\"passthrough\"]\nplugins = { routing = { default = \"p\" } }\n").await;
     let request = serde_json::json!({"model":"jev-latest","state":"The sky is blue.","questions":{"blue":{"type":"noul","instructions":"Is the sky blue?"}}});
     let resp = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(45))
@@ -410,7 +410,7 @@ async fn real_compatible_native_tool_stream_through_passthrough() {
     }
     let base =
         serde_json::to_string(&model("OPENAI_BASE_URL", "https://api.openai.com/v1")).unwrap();
-    let gw = Gateway::start(&format!("providers:\n  p:\n    formats: passthrough\n    base_url: {base}\n    auth: {{ type: bearer, key: env:OPENAI_API_KEY }}\nformats: [passthrough]\ndefault: p\n")).await;
+    let gw = Gateway::start(&format!("providers = {{ p = {{ formats = \"passthrough\", base_url = {base}, auth = {{ type = \"bearer\", key = \"env:OPENAI_API_KEY\" }} }} }}\nformats = [\"passthrough\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n")).await;
     let request = serde_json::json!({
         "model":model("OPENAI_MODEL","gpt-4o-mini"),"max_tokens":256,"stream":true,
         "stream_options":{"include_usage":true},
@@ -467,14 +467,7 @@ async fn real_openai_client_to_anthropic_streamed() {
         return;
     }
     let gw = Gateway::start(
-        "providers:
-  anthropic:
-    formats: anthropic-messages
-    base_url: https://api.anthropic.com
-    auth: { type: header, name: x-api-key, key: env:ANTHROPIC_API_KEY }
-formats: [openai-chat]
-default: anthropic
-",
+        "providers = { anthropic = { formats = \"anthropic-messages\", base_url = \"https://api.anthropic.com\", auth = { type = \"header\", name = \"x-api-key\", key = \"env:ANTHROPIC_API_KEY\" } } }\nformats = [\"openai-chat\"]\nplugins = { routing = { default = \"anthropic\" } }\n",
     )
     .await;
     let request = format!(
@@ -508,7 +501,7 @@ fn responses_config(serve: &str) -> String {
     let base = model("OPENAI_BASE_URL", "https://api.openai.com/v1");
     let base = serde_json::to_string(&base).unwrap();
     format!(
-        "providers:\n  p:\n    formats: openai-responses\n    base_url: {base}\n    auth: {{ type: bearer, key: env:OPENAI_API_KEY }}\nformats: [{serve}]\ndefault: p\n"
+        "providers = {{ p = {{ formats = \"openai-responses\", base_url = {base}, auth = {{ type = \"bearer\", key = \"env:OPENAI_API_KEY\" }} }} }}\nformats = [\"{serve}\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
     )
 }
 
@@ -613,7 +606,15 @@ async fn real_openai_chat_client_to_responses_provider() {
 
 /// A vendor preset (its key comes from the environment) serving `formats`.
 fn vendor_config(vendor: &str, formats: &str) -> String {
-    format!("providers:\n  p:\n    vendor: {vendor}\nformats: [{formats}]\ndefault: p\n")
+    let formats = formats
+        .split(',')
+        .map(str::trim)
+        .map(|f| serde_json::to_string(f).unwrap())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "providers = {{ p = {{ vendor = \"{vendor}\" }} }}\nformats = [{formats}]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
+    )
 }
 
 /// A client that waits for slow media.

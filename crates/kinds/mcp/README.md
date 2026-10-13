@@ -24,7 +24,7 @@ and filtering. Inspect each envelope's `messages` as typed JSON-RPC messages.
 The crate is the kind's types alone, with no I/O: `http` for a request's
 method, `serde` and `serde_json`.
 
-- `RpcCode`: the JSON-RPC error code a fault is written with, as a fact.
+- `RpcCode`: the JSON-RPC error code a fault is written with, as an extension.
   A server's non-success answer whose body is a JSON-RPC error is read back
   into one: its code, message and `data` (as `Details`) reach the client's
   error, with the HTTP status kept; any other body gives -32603.

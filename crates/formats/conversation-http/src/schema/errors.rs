@@ -5,7 +5,7 @@
 //! Cloudflare's lists, Mistral's and FastAPI's `detail`, and a problem's
 //! `title` (RFC 9457).
 
-use respan_gateway_core::{Details, ErrorCode, Fault, RetryAfter, Upstream};
+use respan_gateway_core::{Details, ErrorCode, Fault, RetryAfter};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http_faults::{ProviderError, Status, provider_fault};
@@ -73,7 +73,7 @@ fn read(fault: Fault, status: StatusCode, v: &Value) -> Fault {
     };
     let mut read = match code {
         Some(code) => Fault::new(message).with(ErrorCode(code.to_owned().into())),
-        None => Upstream::fault(message),
+        None => Fault::upstream(message),
     };
     read = read.with(Status(to));
     if let Some(&wait) = fault.get::<RetryAfter>() {
@@ -177,7 +177,6 @@ fn read_answer(status: StatusCode, mut answer: http::Response<Bytes>) -> Fault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use respan_gateway_http_faults::error_code;
     use serde_json::json;
 
     /// What an answer of `status` whose body is `v` says.
@@ -310,17 +309,13 @@ mod tests {
             (Value::Null, "upstream", answered),
         ] {
             let fault = provider_error(StatusCode::BAD_REQUEST, &body);
-            assert_eq!(
-                (error_code(&fault), fault.message()),
-                (code, message),
-                "{body}"
-            );
+            assert_eq!((fault.code(), fault.message()), (code, message), "{body}");
         }
     }
 
     #[test]
     fn an_envelopes_tag_is_no_error_code() {
-        let code = |v: Value| error_code(&provider_error(StatusCode::OK, &v)).to_owned();
+        let code = |v: Value| provider_error(StatusCode::OK, &v).code().to_owned();
         assert_eq!(
             code(json!({"type": "error", "error": "Overloaded"})),
             "upstream"
@@ -336,10 +331,7 @@ mod tests {
         let cloudflare =
             json!({"errors": [{"code": "rate_limited", "message": "slow"}], "success": false});
         let fault = provider_error(StatusCode::TOO_MANY_REQUESTS, &cloudflare);
-        assert_eq!(
-            (error_code(&fault), fault.message()),
-            ("rate_limited", "slow")
-        );
+        assert_eq!((fault.code(), fault.message()), ("rate_limited", "slow"));
         assert_eq!(
             fault.get(),
             Some(&Details(
@@ -350,7 +342,7 @@ mod tests {
             StatusCode::OK,
             &json!({"error": [{"type": "t", "message": "m"}]}),
         );
-        assert_eq!((error_code(&listed), listed.message()), ("t", "m"));
+        assert_eq!((listed.code(), listed.message()), ("t", "m"));
         let message = provider_error(StatusCode::OK, &json!({"error": {"message": ""}}));
         assert_eq!(message.message(), "the provider returned 200");
     }

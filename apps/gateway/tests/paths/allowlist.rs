@@ -4,14 +4,9 @@
 use crate::path_support::{CHAT_REPLY, record_heads, send_request};
 use crate::support::Gateway;
 
-fn gateway_yaml(base: &str) -> String {
+fn gateway_toml(base: &str) -> String {
     format!(
-        "providers:
-  p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
-  any: {{ formats: passthrough, base_url: '{base}/pt' }}
-formats: [openai-chat, passthrough]
-plugins: {{ routing: {{ default: p }} }}
-"
+        "providers = {{ p = {{ formats = \"openai-chat\", base_url = \"{base}/chatv1\" }}, any = {{ formats = \"passthrough\", base_url = \"{base}/pt\" }} }}\nformats = [\"openai-chat\", \"passthrough\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
     )
 }
 
@@ -22,7 +17,7 @@ plugins: {{ routing: {{ default: p }} }}
 #[tokio::test]
 async fn no_decode_then_reparse_reader_reads_a_passthrough_call_as_chat() {
     let (base, seen) = record_heads(CHAT_REPLY).await;
-    let gw = Gateway::start(&gateway_yaml(&base)).await;
+    let gw = Gateway::start(&gateway_toml(&base)).await;
     let addr = gw.base.trim_start_matches("http://").to_owned();
     let mut wrong = Vec::new();
     for target in [
@@ -56,7 +51,7 @@ async fn no_decode_then_reparse_reader_reads_a_passthrough_call_as_chat() {
 #[tokio::test]
 async fn passthrough_forwards_case_sensitive_paths_byte_for_byte() {
     let (base, seen) = record_heads(CHAT_REPLY).await;
-    let gw = Gateway::start(&gateway_yaml(&base)).await;
+    let gw = Gateway::start(&gateway_toml(&base)).await;
     let addr = gw.base.trim_start_matches("http://").to_owned();
     let mut wrong = Vec::new();
     for (method, target) in [
@@ -97,7 +92,7 @@ async fn passthrough_forwards_case_sensitive_paths_byte_for_byte() {
 #[tokio::test]
 async fn a_path_outside_the_allowed_set_is_refused_before_the_vendor() {
     let (base, seen) = record_heads(CHAT_REPLY).await;
-    let gw = Gateway::start(&gateway_yaml(&base)).await;
+    let gw = Gateway::start(&gateway_toml(&base)).await;
     let addr = gw.base.trim_start_matches("http://").to_owned();
     let mut wrong = Vec::new();
     for target in [

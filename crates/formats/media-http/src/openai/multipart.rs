@@ -3,14 +3,13 @@
 //! panics, holds no more than the body, and refuses what it cannot read
 //! one way with a 400.
 
-use memchr::memmem;
-use respan_gateway_core::{BadRequest, Fault};
+use futures::stream;
+use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::{BufMut, Bytes, BytesMut};
+use respan_gateway_http::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 
 /// The most parts a body may have.
 const MAX_PARTS: usize = 1024;
-/// The most bytes of one part's headers.
-const MAX_HEAD: usize = 16 << 10;
 
 /// One part of a form.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,81 +26,48 @@ pub(crate) struct Part {
 
 /// The boundary of a `multipart/form-data` content type, if it is one.
 pub(crate) fn boundary(content_type: &str) -> Option<String> {
-    let mut params = split_params(content_type).into_iter();
-    let essence = params.next()?;
-    if !essence.trim().eq_ignore_ascii_case("multipart/form-data") {
-        return None;
-    }
-    let boundary = params.find_map(|p| param(&p, "boundary"))?;
+    let boundary = multer::parse_boundary(content_type).ok()?;
     // RFC 2046 5.1.1: 1 to 70 characters.
     (1..=70).contains(&boundary.len()).then_some(boundary)
 }
 
-/// The parts of `body`, delimited by `boundary`.
+/// The parts of `body`, delimited by `boundary`. The body is whole, so
+/// reading it never waits.
 pub(crate) fn parse(boundary: &str, body: &Bytes) -> Result<Vec<Part>, Fault> {
-    let delimiter = format!("--{boundary}");
-    let first = first_delimiter(body, delimiter.as_bytes()).ok_or_else(|| bad("has no parts"))?;
-    let next = format!("\r\n--{boundary}");
-    let next = memmem::Finder::new(next.as_bytes());
-    let mut at = first + delimiter.len();
-    let mut parts = Vec::new();
-    loop {
-        match body.get(at..at + 2) {
-            Some(b"--") => return Ok(parts),
-            _ => at = after_line(body, at).ok_or_else(|| bad("ends early"))?,
+    let body = stream::once(async { Ok::<_, std::convert::Infallible>(body.clone()) });
+    let mut form = multer::Multipart::new(body, boundary);
+    futures::executor::block_on(async {
+        let mut parts = Vec::new();
+        while let Some(field) = form.next_field().await.map_err(unreadable)? {
+            if parts.len() == MAX_PARTS {
+                return Err(bad("has too many parts"));
+            }
+            let headers = field.headers();
+            let one = |name| {
+                let value = headers.get(name).map(|v| v.to_str().map(str::to_owned));
+                value
+                    .transpose()
+                    .map_err(|_| bad("has headers that are not text"))
+            };
+            let disposition = one(CONTENT_DISPOSITION)?
+                .ok_or_else(|| bad("has a part with no Content-Disposition"))?;
+            let content_type = one(CONTENT_TYPE)?;
+            let (name, filename) = disposed(&disposition)?;
+            let body = field.bytes().await.map_err(unreadable)?;
+            parts.push(Part {
+                name,
+                filename,
+                content_type,
+                body,
+            });
         }
-        if parts.len() == MAX_PARTS {
-            return Err(bad("has too many parts"));
-        }
-        let head_end = memmem::find(&body[at..body.len().min(at + MAX_HEAD + 4)], b"\r\n\r\n")
-            .ok_or_else(|| bad("has a part whose headers do not end"))?;
-        let head = &body[at..at + head_end];
-        let start = at + head_end + 4;
-        let end = start + next.find(&body[start..]).ok_or_else(|| bad("ends early"))?;
-        parts.push(part(head, body.slice(start..end))?);
-        at = end + next.needle().len();
-    }
+        Ok(parts)
+    })
 }
 
-/// Where the first delimiter starts: at the start of the body or of a line.
-fn first_delimiter(body: &[u8], delimiter: &[u8]) -> Option<usize> {
-    if body.starts_with(delimiter) {
-        return Some(0);
-    }
-    let mut line = b"\r\n".to_vec();
-    line.extend_from_slice(delimiter);
-    memmem::find(body, &line).map(|i| i + 2)
-}
-
-/// Past the transport padding and line end after a delimiter that ends at
-/// `at` (RFC 2046 5.1.1).
-fn after_line(body: &[u8], mut at: usize) -> Option<usize> {
-    while matches!(body.get(at), Some(b' ' | b'\t')) {
-        at += 1;
-    }
-    (body.get(at..at + 2) == Some(b"\r\n")).then_some(at + 2)
-}
-
-/// A part of headers `head` and content `body`.
-fn part(head: &[u8], body: Bytes) -> Result<Part, Fault> {
-    let head = std::str::from_utf8(head).map_err(|_| bad("has headers that are not UTF-8"))?;
-    let (mut disposition, mut content_type) = (None, None);
-    for line in head.split("\r\n") {
-        let (name, value) = line
-            .split_once(':')
-            .ok_or_else(|| bad("has a header line with no name"))?;
-        let value = value.trim().to_owned();
-        let slot = match name.trim().to_ascii_lowercase().as_str() {
-            "content-disposition" => &mut disposition,
-            "content-type" => &mut content_type,
-            _ => continue,
-        };
-        if slot.replace(value).is_some() {
-            return Err(bad("has a part with a header twice"));
-        }
-    }
-    let disposition = disposition.ok_or_else(|| bad("has a part with no Content-Disposition"))?;
-    let mut params = split_params(&disposition).into_iter();
+/// The field name and file name of a part's `Content-Disposition`.
+fn disposed(disposition: &str) -> Result<(String, Option<String>), Fault> {
+    let mut params = split_params(disposition).into_iter();
     if !params
         .next()
         .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("form-data"))
@@ -115,12 +81,12 @@ fn part(head: &[u8], body: Bytes) -> Result<Part, Fault> {
     let filename = named("filename*")
         .and_then(|f| extended(&f))
         .or_else(|| named("filename"));
-    Ok(Part {
-        name,
-        filename,
-        content_type,
-        body,
-    })
+    Ok((name, filename))
+}
+
+/// A 400 for a body multer could not read.
+fn unreadable(e: multer::Error) -> Fault {
+    bad("cannot be read").with_source(e)
 }
 
 /// A header value split at each `;` outside quotes.
@@ -170,14 +136,16 @@ fn param(p: &str, key: &str) -> Option<String> {
 fn extended(value: &str) -> Option<String> {
     let (charset, rest) = value.split_once('\'')?;
     let (_, encoded) = rest.split_once('\'')?;
-    charset
-        .eq_ignore_ascii_case("utf-8")
-        .then(|| respan_gateway_http_syntax::percent_decode(encoded))
+    charset.eq_ignore_ascii_case("utf-8").then(|| {
+        percent_encoding::percent_decode_str(encoded)
+            .decode_utf8_lossy()
+            .into_owned()
+    })
 }
 
 /// A 400 for a body that `what`.
 fn bad(what: &str) -> Fault {
-    BadRequest::fault(format!("the multipart body {what}"))
+    Fault::bad_request(format!("the multipart body {what}"))
 }
 
 /// A random boundary, which no content holds but by a chance of 2^-128.
@@ -264,6 +232,7 @@ fn line(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use respan_gateway_core::FaultKind;
 
     fn parts(body: &'static [u8]) -> Result<Vec<Part>, Fault> {
         parse("XyZ", &Bytes::from_static(body))
@@ -329,18 +298,24 @@ mod tests {
             b"--XyZ\r\nContent-Disposition: attachment; name=a\r\n\r\nx\r\n--XyZ--",
             b"--XyZ\r\nContent-Disposition: form-data\r\n\r\nx\r\n--XyZ--",
             b"--XyZ\r\nno colon\r\n\r\nx\r\n--XyZ--",
-            b"--XyZ\r\nContent-Disposition: form-data; name=a\r\nContent-Disposition: form-data; name=b\r\n\r\nx\r\n--XyZ--",
             b"--XyZ\r\nContent-Disposition: form-data; name=a\r\n\r\nx\r\n--XyZjunk",
             b"--XyZ\r\nContent-Disposition: form-data; name=\xff\r\n\r\nx\r\n--XyZ--",
         ] {
             let read = parts(body);
             assert!(
-                read.as_ref().is_err_and(|f| f.is::<BadRequest>()),
+                read.as_ref().is_err_and(|f| f.is(FaultKind::Client)),
                 "{:?}: {read:?}",
                 String::from_utf8_lossy(body)
             );
         }
         assert_eq!(parts(b"--XyZ--\r\n").map(|p| p.len()).ok(), Some(0));
+        // A header given twice is read as its last: the form is written
+        // anew for the provider, so no reader downstream reads the first.
+        let twice = parts(
+            b"--XyZ\r\nContent-Disposition: form-data; name=a\r\n\
+              Content-Disposition: form-data; name=b\r\n\r\nx\r\n--XyZ--",
+        );
+        assert_eq!(twice.map(|p| p[0].name.clone()).ok().as_deref(), Some("b"));
     }
 
     #[test]

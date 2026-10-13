@@ -55,7 +55,7 @@ impl Gateway {
         Gateway::default()
     }
 
-    /// Add `provider`. `Err` with [`Config`](crate::Config) if a provider
+    /// Add `provider`. `Err` with [`config`](crate::Fault::config) if a provider
     /// of its name was added before, or its format's name is another kind's.
     pub fn provider(self, provider: Provider) -> Result<Gateway> {
         self.add_provider(provider)
@@ -87,7 +87,7 @@ impl Gateway {
     /// The provider called if every plugin passes and none set a target
     /// ([`ClientContext::set_target`]), replacing any set before; a request
     /// it cannot take fails as [`ClientContext::call`] does. `Err` with
-    /// [`Config`](crate::Config) for an unknown provider.
+    /// [`config`](crate::Fault::config) for an unknown provider.
     pub fn target(mut self, provider: impl Into<String>) -> Result<Gateway> {
         let target = provider.into();
         if !self.inner.providers.contains_key(&target) {

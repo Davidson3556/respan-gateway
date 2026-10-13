@@ -67,8 +67,7 @@ async fn ask(
         .into_parts();
     let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
     let request = http::Request::from_parts(head, respan_gateway_http::Body::stream(body));
-    let (incoming, answer) =
-        respan_gateway_http::ClientIo::accept(request, respan_gateway_http::Framing::Whole, LIMIT);
+    let (incoming, answer) = respan_gateway_http::ClientIo::accept(request, LIMIT);
     let extensions = incoming.extensions();
     let handled = gw.handle(incoming, extensions);
     let consume = async {

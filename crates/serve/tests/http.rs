@@ -439,7 +439,6 @@ async fn without_headers_of_its_own_a_relay_passes_the_clients_credentials() {
     let (answer, ended) = respan_gateway_http::handle(
         &gateway,
         http::Request::from_parts(head, Body::full("")),
-        respan_gateway_http::Framing::Whole,
         LIMIT,
     )
     .await;
@@ -696,7 +695,7 @@ impl Plugin for L6Ends {
         let code = end
             .as_ref()
             .err()
-            .map_or("ok", respan_gateway_http_faults::error_code)
+            .map_or("ok", respan_gateway_core::Fault::code)
             .to_owned();
         self.0
             .lock()
@@ -711,7 +710,7 @@ impl Plugin for L6Ends {
         let code = end
             .as_ref()
             .err()
-            .map_or("ok", respan_gateway_http_faults::error_code)
+            .map_or("ok", respan_gateway_core::Fault::code)
             .to_owned();
         self.0
             .lock()

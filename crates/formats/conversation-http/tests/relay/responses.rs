@@ -1,6 +1,7 @@
 //! Relay responses behavior.
 
 use super::*;
+use respan_gateway_core::Fault;
 
 #[tokio::test]
 async fn a_plugin_can_respond_itself() {
@@ -334,7 +335,7 @@ async fn collecting_the_wrong_type_fails_even_with_nothing_said() {
                 .try_collect::<Vec<_>>()
                 .await;
             assert!(got.is_ok_and(|events| events.is_empty()));
-            Err(BadRequest::fault("checked"))
+            Err(Fault::bad_request("checked"))
         }
     }
 

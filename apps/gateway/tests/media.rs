@@ -206,8 +206,8 @@ fn error(status: StatusCode, message: &str) -> Response {
 }
 
 fn app(providers: &str) -> App {
-    let yaml = format!("log: off\nproviders:\n{providers}");
-    App::new(Config::parse(&yaml).unwrap()).unwrap()
+    let text = format!("log = \"off\"\n[providers]\n{providers}");
+    App::new(Config::parse(&text).unwrap()).unwrap()
 }
 
 /// `(status, content type, body)` of `request`, whole.
@@ -267,7 +267,7 @@ async fn transcribe(app: &App, model: &str) -> (StatusCode, Value) {
 async fn each_media_kind_is_relayed_to_its_provider_and_logged() {
     let openai = Fake::start().await;
     let app = app(&format!(
-        "  openai: {{ vendor: openai, key: sk-o, base_url: '{}/v1' }}",
+        "openai = {{ vendor = \"openai\", key = \"sk-o\", base_url = \"{}/v1\" }}\n",
         openai.base
     ));
 
@@ -380,7 +380,7 @@ async fn each_media_kind_is_relayed_to_its_provider_and_logged() {
 async fn an_openai_videos_client_is_answered_by_veo() {
     let google = Fake::start().await;
     let app = app(&format!(
-        "  gemini: {{ vendor: gemini, key: AIza, base_url: '{}/v1beta/openai' }}",
+        "gemini = {{ vendor = \"gemini\", key = \"AIza\", base_url = \"{}/v1beta/openai\" }}\n",
         google.base
     ));
     let (status, job) = post(
@@ -415,8 +415,7 @@ async fn an_openai_videos_client_is_answered_by_veo() {
 async fn a_model_prefix_routes_only_within_the_kinds_its_provider_serves() {
     let (groq, openai) = (Fake::start().await, Fake::start().await);
     let app = app(&format!(
-        "  groq: {{ vendor: groq, key: gsk, base_url: '{}/v1' }}
-  openai: {{ vendor: openai, key: sk-o, base_url: '{}/v1' }}",
+        "groq = {{ vendor = \"groq\", key = \"gsk\", base_url = \"{}/v1\" }}\nopenai = {{ vendor = \"openai\", key = \"sk-o\", base_url = \"{}/v1\" }}\n",
         groq.base, openai.base
     ));
     for (model, to) in [
@@ -459,9 +458,7 @@ async fn a_video_follow_up_goes_to_the_provider_that_made_the_job() {
         Fake::start().await,
     );
     let app = app(&format!(
-        "  east: {{ formats: openai-videos, key: e, base_url: '{}/v1' }}
-  west: {{ formats: openai-videos, key: w, base_url: '{}/v1' }}
-  veo: {{ formats: gemini-veo, key: g, base_url: '{}/v1beta' }}",
+        "east = {{ formats = \"openai-videos\", key = \"e\", base_url = \"{}/v1\" }}\nwest = {{ formats = \"openai-videos\", key = \"w\", base_url = \"{}/v1\" }}\nveo = {{ formats = \"gemini-veo\", key = \"g\", base_url = \"{}/v1beta\" }}\n",
         east.base, west.base, google.base
     ));
     let create = |model: &'static str| {
@@ -502,7 +499,7 @@ async fn a_video_follow_up_goes_to_the_provider_that_made_the_job() {
 async fn models_are_listed_with_their_kinds() {
     let openai = Fake::start().await;
     let app = app(&format!(
-        "  openai: {{ vendor: openai, key: sk-o, base_url: '{}/v1' }}",
+        "openai = {{ vendor = \"openai\", key = \"sk-o\", base_url = \"{}/v1\" }}\n",
         openai.base
     ));
     let list = get_json(&app, "/v1/models").await;
@@ -527,7 +524,7 @@ async fn models_are_listed_with_their_kinds() {
     // A provider of a media format alone lists the models it serves.
     let images = Fake::start().await;
     let app = self::app(&format!(
-        "  images: {{ formats: openai-images, key: k, base_url: '{}/v1' }}",
+        "images = {{ formats = \"openai-images\", key = \"k\", base_url = \"{}/v1\" }}\n",
         images.base
     ));
     let list = get_json(&app, "/v1/models").await;

@@ -12,7 +12,7 @@ const overview: Overview = {
   reloaded_at: null,
   auth_required: true,
   config_source: "file",
-  config_path: "gateway.yaml",
+  config_path: "gateway.toml",
   totals: { requests: 200, errors: 10, in_flight: 2, input_tokens: 1500, output_tokens: 4200 },
 };
 
@@ -61,7 +61,7 @@ describe("OverviewPage", () => {
     expect(screen.getByText(/keys required/)).toBeInTheDocument();
     expect(await screen.findByText("5.0%")).toBeInTheDocument();
     expect(screen.getByText("10 errors")).toBeInTheDocument();
-    expect(screen.getByText("config: gateway.yaml")).toBeInTheDocument();
+    expect(screen.getByText("config: gateway.toml")).toBeInTheDocument();
     expect(await screen.findByText("1 configured")).toBeInTheDocument();
     expect(screen.getAllByText("anthropic").length).toBeGreaterThan(0);
     expect(await screen.findByText("claude-sonnet-4-5")).toBeInTheDocument();

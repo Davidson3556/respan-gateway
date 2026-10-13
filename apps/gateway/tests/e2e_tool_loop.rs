@@ -134,14 +134,14 @@ fn bearer() -> String {
 
 fn config(openai: &FakeOpenAi, mcp: &str, tool_loop: &str) -> String {
     format!(
-        "client_keys: [{KEY}]\nproviders:\n  openai: {{ formats: openai-chat, base_url: '{}', key: sk-gw-openai }}\n{mcp}{tool_loop}",
+        "client_keys = [\"{KEY}\"]\nproviders = {{ openai = {{ formats = \"openai-chat\", base_url = \"{}\", key = \"sk-gw-openai\" }} }}\n{mcp}{tool_loop}",
         openai.base_url()
     )
 }
 
 fn http_server(up: &FakeMcp) -> String {
     format!(
-        "mcp:\n  files: {{ url: '{}/mcp', key: {UPSTREAM_KEY} }}\n",
+        "mcp = {{ files = {{ url = \"{}/mcp\", key = \"{UPSTREAM_KEY}\" }} }}\n",
         up.base
     )
 }
@@ -200,7 +200,7 @@ async fn the_gateway_runs_a_tool_and_the_client_sees_only_the_answer() {
     let gw = Gateway::start(&config(
         &openai,
         &http_server(&up),
-        "plugins:\n  tool_loop:\n    servers: [files]\n",
+        "plugins = { tool_loop = { servers = [\"files\"] } }\n",
     ))
     .await;
 
@@ -272,7 +272,7 @@ async fn the_gateway_runs_a_tool_and_the_client_sees_only_the_answer() {
 async fn a_request_can_leave_the_loop_and_a_models_list_scopes_it() {
     let up = FakeMcp::start().await;
     let openai = FakeOpenAi::start().await;
-    let tool_loop = "plugins:\n  tool_loop:\n    servers: [files]\n    models: [gpt-4o]\n";
+    let tool_loop = "plugins = { tool_loop = { servers = [\"files\"], models = [\"gpt-4o\"] } }\n";
     let gw = Gateway::start(&config(&openai, &http_server(&up), tool_loop)).await;
 
     let (status, _) = ask(&gw, &[("x-respan-tool-loop", "off")], hello()).await;
@@ -296,7 +296,7 @@ async fn a_streaming_client_gets_the_final_step_streamed() {
     let gw = Gateway::start(&config(
         &openai,
         &http_server(&up),
-        "plugins:\n  tool_loop:\n    servers: [files]\n",
+        "plugins = { tool_loop = { servers = [\"files\"] } }\n",
     ))
     .await;
     let mut body = hello();
@@ -355,11 +355,11 @@ async fn a_stdio_server_serves_the_loop_from_one_child() {
         openai.answer(Answer::text("done"));
     }
     let script = serde_json::to_string(STDIO_SERVER).unwrap();
-    let mcp = format!("mcp:\n  tools:\n    command: [python3, -c, {script}]\n");
+    let mcp = format!("mcp = {{ tools = {{ command = [\"python3\", \"-c\", {script}] }} }}\n");
     let gw = Gateway::start(&config(
         &openai,
         &mcp,
-        "plugins:\n  tool_loop:\n    servers: [tools]\n",
+        "plugins = { tool_loop = { servers = [\"tools\"] } }\n",
     ))
     .await;
     for _ in 0..2 {
@@ -377,9 +377,9 @@ async fn a_stdio_server_serves_the_loop_from_one_child() {
     assert_eq!(pid(1), pid(3), "one child for both requests");
 }
 
-/// Serves `yaml` from a file, so it can be reloaded.
-async fn served_from_file(yaml: &str) -> (Gateway, std::path::PathBuf) {
-    let path = support::write_config(&format!("listen: 127.0.0.1:0\n{yaml}"));
+/// Serves `text` from a file, so it can be reloaded.
+async fn served_from_file(text: &str) -> (Gateway, std::path::PathBuf) {
+    let path = support::write_config(&format!("listen = \"127.0.0.1:0\"\n{text}"));
     (
         Gateway::run(&["--config", path.to_str().unwrap()]).await,
         path,
@@ -417,12 +417,12 @@ async fn a_reload_ends_the_old_sessions_once_requests_on_it_have_ended() {
     let openai = FakeOpenAi::start().await;
     openai.answer(Answer::tool_call("files__read", json!({"path": "a.txt"})));
     openai.answer(Answer::text("late").delay_first(700));
-    let yaml = config(
+    let text = config(
         &openai,
         &http_server(&up),
-        "plugins:\n  tool_loop:\n    servers: [files]\n",
+        "plugins = { tool_loop = { servers = [\"files\"] } }\n",
     );
-    let (gw, _) = served_from_file(&yaml).await;
+    let (gw, _) = served_from_file(&text).await;
 
     // A loop is in flight, its tool run, when the config reloads.
     let asked = {
@@ -475,11 +475,11 @@ async fn a_reload_stops_the_old_stdio_child() {
     openai.answer(Answer::tool_call("tools__who", json!({})));
     openai.answer(Answer::text("done"));
     let script = serde_json::to_string(STDIO_SERVER).unwrap();
-    let mcp = format!("mcp:\n  tools:\n    command: [python3, -c, {script}]\n");
+    let mcp = format!("mcp = {{ tools = {{ command = [\"python3\", \"-c\", {script}] }} }}\n");
     let (gw, _) = served_from_file(&config(
         &openai,
         &mcp,
-        "plugins:\n  tool_loop:\n    servers: [tools]\n",
+        "plugins = { tool_loop = { servers = [\"tools\"] } }\n",
     ))
     .await;
     let (status, reply) = ask(&gw, &[], hello()).await;
@@ -492,8 +492,8 @@ async fn a_reload_stops_the_old_stdio_child() {
     until("the child stopped", || !alive()).await;
 }
 
-fn check(yaml: &str) -> (bool, String) {
-    let path = support::write_config(yaml);
+fn check(text: &str) -> (bool, String) {
+    let path = support::write_config(text);
     let said = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
         .args(["check", "--config", path.to_str().unwrap()])
         .output()
@@ -508,10 +508,10 @@ fn check(yaml: &str) -> (bool, String) {
 
 #[test]
 fn the_tool_loop_section_is_checked_against_the_mcp_servers() {
-    let base = "providers:\n  p: { formats: openai-chat, base_url: 'http://x.test/v1', key: k }\n";
-    let server = "mcp:\n  files: { url: 'http://m.test/mcp', key: k }\n  open: { url: 'http://m.test/mcp', forward_auth: true }\n";
+    let base = "providers = { p = { formats = \"openai-chat\", base_url = \"http://x.test/v1\", key = \"k\" } }\n";
+    let server = "mcp = { files = { url = \"http://m.test/mcp\", key = \"k\" }, open = { url = \"http://m.test/mcp\", forward_auth = true } }\n";
     let (ok, text) = check(&format!(
-        "{base}{server}plugins:\n  tool_loop:\n    servers: [files]\n    max_steps: 4\n    timeout: 2m\n"
+        "{base}{server}plugins = {{ tool_loop = {{ servers = [\"files\"], max_steps = 4, timeout = \"2m\" }} }}\n"
     ));
     assert!(ok, "{text}");
     let said = |tool_loop: &str| {
@@ -520,26 +520,33 @@ fn the_tool_loop_section_is_checked_against_the_mcp_servers() {
         text
     };
     assert!(
-        said("plugins:\n  tool_loop:\n    servers: [nope]\n").contains("unknown mcp server 'nope'")
+        said("plugins = { tool_loop = { servers = [\"nope\"] } }\n")
+            .contains("unknown mcp server 'nope'")
     );
-    assert!(said("plugins:\n  tool_loop:\n    servers: [open]\n").contains("forward_auth"));
-    assert!(said("plugins:\n  tool_loop:\n    servers: []\n").contains("names no mcp server"));
-    assert!(said("plugins:\n  tool_loop:\n    servers: [files, files]\n").contains("listed twice"));
+    assert!(said("plugins = { tool_loop = { servers = [\"open\"] } }\n").contains("forward_auth"));
+    assert!(said("plugins = { tool_loop = { servers = [] } }\n").contains("names no mcp server"));
     assert!(
-        said("plugins:\n  tool_loop:\n    servers: [files]\n    max_steps: 0\n")
+        said("plugins = { tool_loop = { servers = [\"files\", \"files\"] } }\n")
+            .contains("listed twice")
+    );
+    assert!(
+        said("plugins = { tool_loop = { servers = [\"files\"], max_steps = 0 } }\n")
             .contains("max_steps")
     );
     assert!(
-        said("plugins:\n  tool_loop:\n    servers: [files]\n    tool_timeout: 0\n")
+        said("plugins = { tool_loop = { servers = [\"files\"], tool_timeout = 0 } }\n")
             .contains("tool_timeout")
     );
-    assert!(said("plugins:\n  tool_loop:\n    servers: [files]\n    bogus: 1\n").contains("bogus"));
-    let formats = "formats: [openai-chat]\nplugins:\n  tool_loop:\n    servers: [files]\n";
+    assert!(
+        said("plugins = { tool_loop = { servers = [\"files\"], bogus = 1 } }\n").contains("bogus")
+    );
+    let formats =
+        "formats = [\"openai-chat\"]\nplugins = { tool_loop = { servers = [\"files\"] } }\n";
     assert!(said(formats).contains("add it to `formats`"));
 }
 
-fn check_args(yaml: &str, args: &[&str]) -> (bool, String) {
-    let path = support::write_config(yaml);
+fn check_args(text: &str, args: &[&str]) -> (bool, String) {
+    let path = support::write_config(text);
     let said = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
         .arg("check")
         .args(args)
@@ -561,7 +568,7 @@ async fn allow_and_deny_pick_the_tools_the_model_is_offered_and_can_call() {
     // The denied tool is not offered, so a call of it is not the gateway's:
     // it goes back to the client, and no server is asked.
     openai.answer(Answer::tool_call("files__boom", json!({})));
-    let tool_loop = "plugins:\n  tool_loop:\n    servers: [files]\n    allow: ['files__*']\n    deny: ['files__bo*']\n";
+    let tool_loop = "plugins = { tool_loop = { servers = [\"files\"], allow = [\"files__*\"], deny = [\"files__bo*\"] } }\n";
     let gw = Gateway::start(&config(&openai, &http_server(&up), tool_loop)).await;
     let (status, reply) = ask(&gw, &[], hello()).await;
     assert_eq!(status, 200, "{reply}");
@@ -578,7 +585,8 @@ async fn allow_and_deny_pick_the_tools_the_model_is_offered_and_can_call() {
     // An allow list alone: only what it names.
     let openai = FakeOpenAi::start().await;
     openai.answer(Answer::text("ok"));
-    let tool_loop = "plugins:\n  tool_loop:\n    servers: [files]\n    allow: ['files__boom']\n";
+    let tool_loop =
+        "plugins = { tool_loop = { servers = [\"files\"], allow = [\"files__boom\"] } }\n";
     let gw = Gateway::start(&config(&openai, &http_server(&up), tool_loop)).await;
     let _ = ask(&gw, &[], hello()).await;
     let tools = openai.requests()[0].body["tools"].clone();
@@ -589,12 +597,12 @@ async fn allow_and_deny_pick_the_tools_the_model_is_offered_and_can_call() {
 async fn a_client_keys_tools_limit_what_its_requests_are_offered() {
     let up = FakeMcp::start().await;
     let openai = FakeOpenAi::start().await;
-    let yaml = format!(
-        "client_keys:\n  - {{ name: wide, key: {KEY} }}\n  - {{ name: narrow, key: gw-key-2, tools: ['files__read'] }}\n  - {{ name: none, key: gw-key-3, tools: ['other__*'] }}\nproviders:\n  openai: {{ formats: openai-chat, base_url: '{}', key: sk-gw-openai }}\n{}plugins:\n  tool_loop:\n    servers: [files]\n",
+    let text = format!(
+        "client_keys = [{{ name = \"wide\", key = \"{KEY}\" }}, {{ name = \"narrow\", key = \"gw-key-2\", tools = [\"files__read\"] }}, {{ name = \"none\", key = \"gw-key-3\", tools = [\"other__*\"] }}]\nproviders = {{ openai = {{ formats = \"openai-chat\", base_url = \"{}\", key = \"sk-gw-openai\" }} }}\n{}plugins = {{ tool_loop = {{ servers = [\"files\"] }} }}\n",
         openai.base_url(),
         http_server(&up)
     );
-    let gw = Gateway::start(&yaml).await;
+    let gw = Gateway::start(&text).await;
     let tools_for = |key: &'static str| {
         let (gw, openai) = (&gw, &openai);
         async move {
@@ -628,17 +636,17 @@ async fn a_client_keys_tools_limit_what_its_requests_are_offered() {
 #[tokio::test]
 async fn check_lists_the_offered_tools_only_online() {
     let up = FakeMcp::start().await;
-    let yaml = format!(
-        "providers:\n  p: {{ formats: openai-chat, base_url: 'http://127.0.0.1:9/v1', key: k }}\n{}plugins:\n  tool_loop:\n    servers: [files]\n    deny: ['files__boom']\n",
+    let config_text = format!(
+        "providers = {{ p = {{ formats = \"openai-chat\", base_url = \"http://127.0.0.1:9/v1\", key = \"k\" }} }}\n{}plugins = {{ tool_loop = {{ servers = [\"files\"], deny = [\"files__boom\"] }} }}\n",
         http_server(&up)
     );
-    let (ok, text) = check_args(&yaml, &[]);
+    let (ok, text) = check_args(&config_text, &[]);
     assert!(ok, "{text}");
     assert!(!text.contains("tool loop tools"), "{text}");
     assert!(text.contains("deny"), "{text}");
     assert!(up.requests().is_empty(), "plain check is offline");
 
-    let path = support::write_config(&yaml);
+    let path = support::write_config(&config_text);
     let said = tokio::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
         .args(["check", "--online", "--config", path.to_str().unwrap()])
         .output()
@@ -653,29 +661,30 @@ async fn check_lists_the_offered_tools_only_online() {
 
 #[test]
 fn the_tool_loop_keys_are_validated_and_the_old_names_say_what_replaced_them() {
-    let base = "providers:\n  p: { formats: openai-chat, base_url: 'http://x.test/v1', key: k }\n";
-    let server = "mcp:\n  files: { url: 'http://m.test/mcp', key: k }\n";
+    let base = "providers = { p = { formats = \"openai-chat\", base_url = \"http://x.test/v1\", key = \"k\" } }\n";
+    let server = "mcp = { files = { url = \"http://m.test/mcp\", key = \"k\" } }\n";
     let said = |tool_loop: &str| {
         let (ok, text) = check_args(&format!("{base}{server}{tool_loop}"), &[]);
         assert!(!ok, "{text}");
         text
     };
     assert!(
-        said("plugins:\n  tool_loop:\n    servers: [files]\n    allow: ['git.hub']\n")
+        said("plugins = { tool_loop = { servers = [\"files\"], allow = [\"git.hub\"] } }\n")
             .contains("allow: 'git.hub'")
     );
     assert!(
-        said("plugins:\n  tool_loop:\n    servers: [files]\n    deny: ['']\n").contains("deny")
+        said("plugins = { tool_loop = { servers = [\"files\"], deny = [\"\"] } }\n")
+            .contains("deny")
     );
     assert!(
-        said("plugins:\n  tool_loop:\n    servers: [files]\n    parallel: 0\n")
+        said("plugins = { tool_loop = { servers = [\"files\"], parallel = 0 } }\n")
             .contains("parallel")
     );
     assert!(
-        said("plugins:\n  tool_loop:\n    servers: [files]\n    max_results: 0\n")
+        said("plugins = { tool_loop = { servers = [\"files\"], max_results = 0 } }\n")
             .contains("max_results")
     );
-    let ok = "plugins:\n  tool_loop:\n    servers: [files]\n    allow: ['files__*']\n    parallel: 2\n    max_results: 1MiB\n    tool_list_ttl: 1m\n";
+    let ok = "plugins = { tool_loop = { servers = [\"files\"], allow = [\"files__*\"], parallel = 2, max_results = \"1MiB\", tool_list_ttl = \"1m\" } }\n";
     assert!(check_args(&format!("{base}{server}{ok}"), &[]).0);
 }
 
@@ -684,13 +693,13 @@ async fn an_mcp_server_shows_as_its_origin_or_program_name_alone() {
     let up = FakeMcp::start().await;
     let script = serde_json::to_string(STDIO_SERVER).unwrap();
     let mcp = format!(
-        "mcp:\n  files: {{ url: '{}/mcp/path-token-9', key: {UPSTREAM_KEY} }}\n  local:\n    command: [python3, -c, {script}]\n    env: {{ API_TOKEN: env-secret-7 }}\n",
+        "mcp = {{ files = {{ url = \"{}/mcp/path-token-9\", key = \"{UPSTREAM_KEY}\" }}, local = {{ command = [\"python3\", \"-c\", {script}], env = {{ API_TOKEN = \"env-secret-7\" }} }} }}\n",
         up.base
     );
-    let yaml = format!(
-        "providers:\n  p: {{ formats: openai-chat, base_url: 'http://127.0.0.1:9/v1', key: k }}\n{mcp}"
+    let text = format!(
+        "providers = {{ p = {{ formats = \"openai-chat\", base_url = \"http://127.0.0.1:9/v1\", key = \"k\" }} }}\n{mcp}"
     );
-    let (ok, text) = check_args(&yaml, &[]);
+    let (ok, text) = check_args(&text, &[]);
     assert!(ok, "{text}");
     assert!(text.contains(&format!("target  {}\n", up.base)), "{text}");
     assert!(text.contains("target  python3\n"), "{text}");
@@ -698,7 +707,7 @@ async fn an_mcp_server_shows_as_its_origin_or_program_name_alone() {
         assert!(!text.contains(secret), "{secret}: {text}");
     }
 
-    let gw = Gateway::start(&format!("client_keys: [{KEY}]\n{mcp}providers:\n  p: {{ formats: openai-chat, base_url: 'http://127.0.0.1:9/v1', key: k }}\n")).await;
+    let gw = Gateway::start(&format!("client_keys = [\"{KEY}\"]\n{mcp}providers = {{ p = {{ formats = \"openai-chat\", base_url = \"http://127.0.0.1:9/v1\", key = \"k\" }} }}\n")).await;
     let resp = client()
         .get(gw.url("/ui/api/mcp"))
         .header("authorization", bearer())
@@ -721,39 +730,42 @@ async fn an_mcp_server_shows_as_its_origin_or_program_name_alone() {
 
 #[test]
 fn a_stdio_servers_cwd_must_be_a_directory_at_start() {
-    let base = "providers:\n  p: { formats: openai-chat, base_url: 'http://x.test/v1', key: k }\n";
+    let base = "providers = { p = { formats = \"openai-chat\", base_url = \"http://x.test/v1\", key = \"k\" } }\n";
     let tmp = env!("CARGO_TARGET_TMPDIR");
-    let yaml =
-        |cwd: &str| format!("{base}mcp:\n  s: {{ command: [python3, -c, pass], cwd: '{cwd}' }}\n");
-    let (ok, text) = check_args(&yaml(&format!("{tmp}/no-such-dir")), &[]);
+    let config = |cwd: &str| {
+        format!(
+            "{base}mcp = {{ s = {{ command = [\"python3\", \"-c\", \"pass\"], cwd = \"{cwd}\" }} }}\n"
+        )
+    };
+    let (ok, text) = check_args(&config(&format!("{tmp}/no-such-dir")), &[]);
     assert!(!ok && text.contains("does not exist"), "{text}");
     let file = support::write_config("x");
-    let (ok, text) = check_args(&yaml(file.to_str().unwrap()), &[]);
+    let (ok, text) = check_args(&config(file.to_str().unwrap()), &[]);
     assert!(!ok && text.contains("not a directory"), "{text}");
-    let (ok, text) = check_args(&yaml(tmp), &[]);
+    let (ok, text) = check_args(&config(tmp), &[]);
     assert!(ok, "{text}");
 }
 
 #[test]
 fn a_config_error_never_prints_a_secret() {
-    for (yaml, secret) in [
-        ("client_keys: sk-secret-77\n", "sk-secret-77"),
+    for (text, secret) in [
+        ("client_keys = \"sk-secret-77\"\n", "sk-secret-77"),
         (
-            "providers:\n  p: { vendor: openai, key: [sk-secret-77] }\n",
+            "providers = { p = { vendor = \"openai\", key = [\"sk-secret-77\"] } }\n",
             "sk-secret-77",
         ),
         (
-            "providers:\n  p: { vendor: openai, auth: sk-secret-77 }\n",
+            "providers = { p = { vendor = \"openai\", auth = \"sk-secret-77\" } }\n",
             "sk-secret-77",
         ),
         (
-            "mcp:\n  m: { command: [python3], env: sk-secret-77 }\n",
+            "mcp = { m = { command = [\"python3\"], env = \"sk-secret-77\" } }\n",
             "sk-secret-77",
         ),
     ] {
-        let (ok, text) = check_args(yaml, &[]);
-        assert!(!ok, "{yaml}");
+        let (ok, text) = check_args(text, &[]);
+        assert!(!ok, "{text}");
         assert!(text.contains("invalid type"), "{text}");
-        assert!(!text.contains(secret), "{yaml}: {text}");
+        assert!(!text.contains(secret), "{text}: {text}");
     }
 }

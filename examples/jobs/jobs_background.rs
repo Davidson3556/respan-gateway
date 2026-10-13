@@ -32,7 +32,7 @@
 //! `cargo run -p respan-gateway-examples --example jobs_background`
 
 use hmac::{Hmac, Mac};
-use respan_gateway_core::{BadRequest, ErrorCode, Provider, Upstream};
+use respan_gateway_core::{ErrorCode, Provider};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -343,7 +343,7 @@ impl Jobs {
             return Ok(None);
         }
         let mut body: Value = serde_json::from_slice(got.0.body())
-            .map_err(|_| Upstream::fault("the provider's answer is not JSON"))?;
+            .map_err(|_| Fault::upstream("the provider's answer is not JSON"))?;
         let event = body["type"]
             .as_str()
             .is_some_and(|kind| kind.starts_with("response."));
@@ -472,7 +472,7 @@ impl Jobs {
         id: String,
     ) -> Result<Option<Response>, Fault> {
         if cx.extensions().get::<NoContent>().is_some() {
-            return Err(BadRequest::fault(
+            return Err(Fault::bad_request(
                 "background mode keeps output: not for this tenant",
             ));
         }
@@ -485,9 +485,9 @@ impl Jobs {
             .and_then(|value| value.as_str().map(str::to_owned));
         if let Some(url) = &webhook {
             let url =
-                reqwest::Url::parse(url).map_err(|_| BadRequest::fault("invalid webhook URL"))?;
+                reqwest::Url::parse(url).map_err(|_| Fault::bad_request("invalid webhook URL"))?;
             if !matches!(url.scheme(), "https" | "http") {
-                return Err(BadRequest::fault("webhook must use HTTP"));
+                return Err(Fault::bad_request("webhook must use HTTP"));
             }
         }
         let max = body
@@ -495,7 +495,7 @@ impl Jobs {
             .and_then(Value::as_u64)
             .unwrap_or(1024);
         if max > i64::MAX as u64 {
-            return Err(BadRequest::fault("invalid output cap"));
+            return Err(Fault::bad_request("invalid output cap"));
         }
         body["max_output_tokens"] = max.into();
         let reserve = (body.to_string().len() as i64).saturating_add(max as i64);
@@ -579,7 +579,7 @@ impl Plugin for Jobs {
             return self.relay(cx, job.id, deployment);
         }
         if streams(cx, &body) {
-            return Err(BadRequest::fault(
+            return Err(Fault::bad_request(
                 "streaming is not supported by this example",
             ));
         }

@@ -432,24 +432,15 @@ async fn extractor_rejects_invalid_input_and_reports_missing_poppler() {
     let bad_base64 = extract_pdf_with(missing, "!not-base64!", 1024)
         .await
         .expect_err("converter must reject invalid input or be unavailable");
-    assert_eq!(
-        respan_gateway_http_faults::error_code(&bad_base64),
-        "bad_request"
-    );
+    assert_eq!(bad_base64.code(), "bad_request");
     let not_pdf = extract_pdf_with(missing, &STANDARD.encode("plain text"), 1024)
         .await
         .expect_err("converter must reject invalid input or be unavailable");
-    assert_eq!(
-        respan_gateway_http_faults::error_code(&not_pdf),
-        "bad_request"
-    );
+    assert_eq!(not_pdf.code(), "bad_request");
     let unavailable = extract_pdf_with(missing, &pdf_document("hello"), 1024)
         .await
         .expect_err("converter must reject invalid input or be unavailable");
-    assert_eq!(
-        respan_gateway_http_faults::error_code(&unavailable),
-        "config"
-    );
+    assert_eq!(unavailable.code(), "config");
 }
 
 #[tokio::test]

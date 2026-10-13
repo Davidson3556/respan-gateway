@@ -1,0 +1,120 @@
+# Respan Gateway
+# Copy to gateway.toml, set OPENAI_API_KEY, then run:
+#   respan-gateway check
+#   respan-gateway
+# Or generate a starter from your environment: respan-gateway init
+
+# ── Server ────────────────────────────────────────────────────────────
+# Root settings must stay above the first [table].
+listen = "127.0.0.1:8080"
+log = "text"                      # text | json | off (request logs only)
+ui = true                         # Web UI at http://127.0.0.1:8080/ui/
+
+# Require a client key before listening beyond localhost.
+# Keys are consumed by the gateway; providers never receive them.
+# client_keys = ["env:GATEWAY_KEY"]
+# Or use named keys with permissions:
+# client_keys = [
+#   { name = "ops", key = "env:OPS_KEY", admin = true },
+#   { name = "app", key = "env:APP_KEY", admin = false },
+# ]
+# body_limit = "32MiB"
+# ws_message_limit = "16MiB"
+# shutdown_grace = "30s"
+# formats = ["openai-chat", "anthropic-messages"]  # Otherwise auto-detected
+
+# ── Providers ─────────────────────────────────────────────────────────
+# A vendor preset supplies its URL, formats, and model routing.
+# The first provider serving a kind is its default. You can also address
+# any provider explicitly: openai/gpt-4o-mini, groq/llama-3.3-70b-versatile.
+# Keep secrets in environment variables or .env, referenced as env:NAME.
+[providers.openai]
+vendor = "openai"
+key = "env:OPENAI_API_KEY"
+
+# Uncomment a whole block to enable another provider.
+# [providers.anthropic]
+# vendor = "anthropic"
+# key = "env:ANTHROPIC_API_KEY"
+
+# [providers.groq]
+# vendor = "groq"
+# key = "env:GROQ_API_KEY"
+
+# [providers.ollama]
+# vendor = "ollama"
+# base_url = "http://localhost:11434"
+
+# A custom OpenAI-compatible endpoint:
+# [providers.backup]
+# formats = ["openai-chat"]
+# base_url = "https://example.com/v1"
+# key = "env:BACKUP_API_KEY"
+
+# ── Routing and resilience ────────────────────────────────────────────
+# Enable the referenced providers before enabling these plugins.
+# [plugins.routing]
+# default = "openai"
+# models = [{ prefix = "llama", provider = "groq" }]
+
+# Retry failures, then try another provider.
+# [plugins.fallback]
+# after = { openai = ["backup"] }
+# tries = 2                        # Attempts per provider, including retries
+# backoff = "250ms"
+# max_backoff = "10s"
+# until = "head"                   # head | end (buffers the whole response)
+
+# Race a second provider after a delay; the first success wins.
+# [plugins.hedge]
+# after = { openai = ["backup"] }
+# stagger = "200ms"
+# until = "head"
+
+# ── Request history and pricing ───────────────────────────────────────
+# [plugins.request_log]
+# history = 1000                   # Requests retained in memory
+# file = "./requests.jsonl"        # Also persist across restarts (no bodies/keys)
+# file_max = "64MiB"               # Rotate to requests.jsonl.1 at this size
+
+# Your rates in dollars per million tokens; longest model prefix wins.
+# These are example values, not a current vendor price list.
+# [prices."my-model"]
+# input = 1.0
+# output = 2.0
+# cached_input = 0.5
+
+# ── MCP servers and tools ─────────────────────────────────────────────
+# [mcp.github]
+# url = "https://api.githubcopilot.com/mcp/"
+# key = "env:GITHUB_TOKEN"
+
+# [mcp.files]
+# command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+# Combine servers at /mcp; tool names become server__tool.
+# [plugins.mcp_aggregate]
+# servers = ["github", "files"]
+# allow = ["github__search_*", "files__read*"]
+# deny = ["files__write*"]
+
+# Let chat requests call tools using the servers' credentials.
+# [plugins.tool_loop]
+# servers = ["github"]
+# allow = ["github__search_*"]
+# max_steps = 8
+# timeout = "5m"
+# tool_timeout = "60s"
+# tool_list_ttl = "5m"
+# parallel = 4
+# max_result = "64KiB"
+# max_results = "256KiB"
+
+# ── Browser access ────────────────────────────────────────────────────
+# [cors]
+# origins = ["https://app.example.com"]
+
+# Reload: --watch, SIGHUP, or POST /ui/api/reload.
+# Existing requests finish on the old config. Changing listen needs a restart.
+# Precedence: --config / RESPAN_CONFIG, gateway.toml, then environment providers.
+# Config files and admin edits use TOML only.

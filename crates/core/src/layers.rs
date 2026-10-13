@@ -75,7 +75,7 @@ pub(crate) fn cut<T: Send + 'static>(
     .boxed()
 }
 
-/// Resolves [`Abandoned`](crate::Abandoned) once `ended`
+/// Resolves [`Abandoned`](crate::FaultKind::Abandoned) once `ended`
 /// closes, as when its request or call ended.
 pub(crate) fn on_close(ended: &Latch) -> BoxFuture<'static, Fault> {
     ended.closed().map(|()| Fault::abandoned()).boxed()

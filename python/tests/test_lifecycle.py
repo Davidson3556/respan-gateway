@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 import respan_gateway as rg
-from conftest import CHAT, WORDS, config_for
+from conftest import toml_config, CHAT, WORDS, config_for
 
 
 def test_context_manager_stops_its_servers_and_reopens(fake):
@@ -93,15 +93,15 @@ def test_export_requests_filters_and_costs(fake, tmp_path):
 
 def test_admin_api_off_is_a_gateway_error(fake):
     gw = rg.Gateway(config={**config_for(fake), "ui": False})
-    with pytest.raises(rg.GatewayError, match="ui: false"):
+    with pytest.raises(rg.GatewayError, match="ui = false"):
         gw.requests()
     assert "providers=[?]" in repr(gw)
 
 
 def test_gateway_repr(gw, tmp_path):
     assert repr(gw) == "Gateway(source='dict', providers=[openai, any])"
-    path = tmp_path / "g.yaml"
-    path.write_text(json.dumps({"providers": {"p": {"vendor": "openai", "key": "k"}}}))
+    path = tmp_path / "g.toml"
+    path.write_text(toml_config({"providers": {"p": {"vendor": "openai", "key": "k"}}}))
     assert repr(rg.Gateway.from_file(path)) == f"Gateway(source={str(path)!r}, providers=[p])"
 
 

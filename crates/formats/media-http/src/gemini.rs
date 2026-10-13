@@ -7,7 +7,7 @@ use crate::edge::{bind_provider, content, kept, sends};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use respan_gateway_conversation::{Media, MediaSource};
-use respan_gateway_core::{BadRequest, Connection, ErrorCode, Fault, Format, Upstream};
+use respan_gateway_core::{Connection, ErrorCode, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{HeaderValue, Method, Uri, request::Parts as RequestHead};
@@ -98,7 +98,7 @@ impl Format<ProviderIo, Output, Input> for GeminiVeo {
 
 /// An operation Veo has no form for, refused.
 fn unsupported(what: &str) -> Fault {
-    BadRequest::fault(format!("Veo cannot {what}")).with(ErrorCode("unsupported".into()))
+    Fault::bad_request(format!("Veo cannot {what}")).with(ErrorCode("unsupported".into()))
 }
 
 /// The operation a job `id` names, else a 404.
@@ -124,7 +124,7 @@ fn call(head: &mut RequestHead, input: &Input) -> Result<(Box<dyn Encoder<Input>
         Input::Create(create) => {
             let model = create.model.as_deref().filter(|m| is_segment(m));
             let model = model.ok_or_else(|| {
-                BadRequest::fault("a Veo video needs a model, such as veo-3.0-generate-001")
+                Fault::bad_request("a Veo video needs a model, such as veo-3.0-generate-001")
             })?;
             let path = format!("/models/{model}:predictLongRunning");
             let (body, parameters) = create_body(create)?;
@@ -168,7 +168,7 @@ fn create_body(create: &Create) -> Result<(Bytes, Value), Fault> {
     instance.insert("prompt".into(), create.prompt.clone().into());
     if let Some(reference) = &create.reference {
         let MediaSource::Bytes(bytes) = &reference.source else {
-            return Err(BadRequest::fault(
+            return Err(Fault::bad_request(
                 "Veo takes a reference image's bytes, not its URL",
             ));
         };
@@ -205,7 +205,7 @@ fn aspect_of(size: &str) -> Result<(&'static str, &'static str), Fault> {
         (w > 0 && h > 0).then_some((w, h))
     });
     let refused = || {
-        BadRequest::fault(format!(
+        Fault::bad_request(format!(
             "'size' {size} is not one Veo makes: it makes 16:9 and 9:16 videos"
         ))
     };
@@ -238,7 +238,7 @@ fn size_of(aspect: Option<&str>, resolution: Option<&str>) -> Option<String> {
 /// The path, relative to the provider's base, of content at `url`: its
 /// path after its version segment, such as `v1beta`, and its query.
 fn content_path(url: &str) -> Result<String, Fault> {
-    let unusable = || Upstream::fault("the URL of Veo's video is not one it can be fetched at");
+    let unusable = || Fault::upstream("the URL of Veo's video is not one it can be fetched at");
     let uri = url.parse::<Uri>().map_err(|_| unusable())?;
     let path = uri.path().trim_start_matches('/');
     let path = match path.split_once('/') {
@@ -284,7 +284,7 @@ fn read_response(sent: Option<&Call>) -> Box<dyn Decoder<Output>> {
 /// if this answers its creation.
 fn job_of(raw: &[u8], parameters: &Value) -> Result<Job, Fault> {
     let unreadable =
-        |what: &str| Upstream::fault(format!("the provider's {NAME} operation {what}"));
+        |what: &str| Fault::upstream(format!("the provider's {NAME} operation {what}"));
     let v = serde_json::from_slice::<Value>(raw).map_err(|_| unreadable("is not JSON"))?;
     let name = v["name"]
         .as_str()

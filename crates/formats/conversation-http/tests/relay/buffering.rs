@@ -1,6 +1,7 @@
 //! Relay buffering behavior.
 
 use super::*;
+use respan_gateway_core::Fault;
 
 #[tokio::test]
 async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
@@ -212,11 +213,11 @@ async fn synthetic_outputs_use_the_callers_predicate() {
             one.input_tokens += 1;
             let quiet = Output::usage(one);
             // A policy accepting any event commits to the quiet reply.
-            let made = [Ok(quiet.clone()), Err(Upstream::fault("gone"))];
+            let made = [Ok(quiet.clone()), Err(Fault::upstream("gone"))];
             let mut unfiltered = Response::stream(futures::stream::iter(made));
             assert!(unfiltered.buffer_until(|_: &Output| true).await.is_ok());
             drop(unfiltered);
-            let made = [Ok(quiet), Err(Upstream::fault("gone"))];
+            let made = [Ok(quiet), Err(Fault::upstream("gone"))];
             let content = |r: &Output| std::future::ready(r.is_content());
             let made = futures::stream::iter(made).try_filter(content);
             let mut made = Response::stream(made);
@@ -343,7 +344,7 @@ async fn until_end_holds_a_failure_and_it_is_delivered_as_it_would_have_been() {
         broken.body_mut().truncate(2);
         broken
             .body_mut()
-            .push(Err(Upstream::fault("connection reset")));
+            .push(Err(Fault::upstream("connection reset")));
         broken
     };
     let [relayed, read] = relayed_and_read_to_its_end(broken, chat, Some("upstream")).await;
@@ -395,7 +396,7 @@ async fn until_end_says_how_a_response_ended_and_changes_nothing() {
     let broken = || {
         let mut broken = fixture::sse(STREAM);
         broken.body_mut().truncate(2);
-        broken.body_mut().push(Err(Upstream::fault("reset")));
+        broken.body_mut().push(Err(Fault::upstream("reset")));
         broken
     };
     let clean = || fixture::sse(STREAM);
@@ -446,7 +447,7 @@ async fn a_response_dropped_after_until_end_ends_its_call_as_it_ended() {
     let broken = || {
         let mut broken = fixture::sse(STREAM);
         broken.body_mut().truncate(2);
-        broken.body_mut().push(Err(Upstream::fault("reset")));
+        broken.body_mut().push(Err(Fault::upstream("reset")));
         broken
     };
     let cases: [(fixture::Reply, &str); 3] = [

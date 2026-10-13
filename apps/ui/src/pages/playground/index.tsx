@@ -44,19 +44,18 @@ export function PlaygroundPage() {
     <div className="grid grid-cols-1 gap-6">
       <PageHeader
         title="Playground"
-        description="Try any model through the gateway. Every call here shows up under Requests."
       />
       <Tabs value={tab} onValueChange={(value) => setParams({ tab: value }, { replace: true })}>
-        <TabsList className="w-full justify-start overflow-x-auto sm:w-fit">
+        <TabsList variant="line" className="w-full justify-start overflow-x-auto border-b !h-11 !rounded-none !p-0">
           {tabs.map(({ value, label, icon: Icon }) => (
-            <TabsTrigger key={value} value={value} className="px-3">
+            <TabsTrigger key={value} value={value} className="h-full flex-none gap-2 rounded-none px-4 data-[state=active]:text-brand after:!bottom-0 after:!bg-brand">
               <Icon /> {label}
             </TabsTrigger>
           ))}
         </TabsList>
         {/* Panels stay mounted so a conversation or a running job survives a tab switch. */}
         {tabs.map(({ value, Panel }) => (
-          <TabsContent key={value} value={value} forceMount className="mt-4 data-[state=inactive]:hidden">
+          <TabsContent key={value} value={value} forceMount className="mt-3 min-w-0 data-[state=inactive]:hidden">
             {visited.has(value) && (
               <Suspense fallback={<p className="text-sm text-muted-foreground">Loading…</p>}>
                 <Panel />

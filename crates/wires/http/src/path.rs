@@ -1,74 +1,16 @@
-#![warn(missing_docs)]
-//! How HTTP's paths and headers are read, with no I/O: `%XX` decoding, a
-//! path as matching reads it and as a relay forwards it, and a header's
-//! tokens and a hop's own headers. A router or a format that recognises a
-//! request depends on this crate alone, not on the HTTP wire.
+//! How a request's path is matched and forwarded. Matching reads a path
+//! liberally, as any front end might, so a spelling cannot dodge a match;
+//! forwarding keeps the client's bytes but drops what matching dropped, so
+//! the provider never gets a structure matching did not see.
 
-use http::header::{
-    self, CONNECTION, CONTENT_LENGTH, HeaderName, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE,
-    TRAILER, TRANSFER_ENCODING, UPGRADE,
-};
-use http::{HeaderMap, request::Parts as RequestHead};
+use std::borrow::Cow;
+
+use http::request::Parts as RequestHead;
 use respan_gateway_core::Fault;
 
-/// `s` with its `%XX` escapes decoded, a bad UTF-8 sequence replaced: how a
-/// path or a parameter's name is compared, so a spelling cannot dodge a match.
-pub fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = |b: u8| char::from(b).to_digit(16);
-        let escaped = match bytes[i..] {
-            [b'%', hi, lo, ..] => hex(hi).zip(hex(lo)).map(|(h, l)| (h * 16 + l) as u8),
-            _ => None,
-        };
-        out.push(escaped.unwrap_or(bytes[i]));
-        i += if escaped.is_some() { 3 } else { 1 };
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// A hop's own headers: the connection's (RFC 9110 7.6.1), the proxy's
-/// (11.7), `Trailer`, as trailers are not delivered, and the length.
-pub const HOP_BY_HOP: [HeaderName; 10] = [
-    CONNECTION,
-    CONTENT_LENGTH,
-    HeaderName::from_static("keep-alive"),
-    HeaderName::from_static("proxy-connection"),
-    PROXY_AUTHENTICATE,
-    PROXY_AUTHORIZATION,
-    TE,
-    TRAILER,
-    TRANSFER_ENCODING,
-    UPGRADE,
-];
-
-/// Whether `name` is the connection's, never a transport's to send: a hop's
-/// own, `Expect` or `Host`.
-pub fn is_connection_header(name: &HeaderName) -> bool {
-    HOP_BY_HOP.contains(name) || name == header::EXPECT || name == header::HOST
-}
-
-/// The comma-separated tokens of every `name` header (RFC 9110 5.6.1).
-pub fn header_tokens(headers: &HeaderMap, name: HeaderName) -> impl Iterator<Item = &str> {
-    let values = headers.get_all(name).into_iter();
-    values
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .map(str::trim)
-}
-
-/// Whether `bytes` are a token (RFC 9110 5.6.2), as a subprotocol is.
-pub fn is_token(bytes: &[u8]) -> bool {
-    !bytes.is_empty()
-        && (bytes.iter()).all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b))
-}
-
-/// Whether a request is a `POST` to a path ending in `suffix`: the usual
-/// incoming format recognition.
-pub fn posts_to(head: &RequestHead, suffix: &str) -> bool {
-    head.method == http::Method::POST && path_ends_with(&head.uri, suffix)
+/// `s` with its `%XX` escapes decoded, a bad UTF-8 sequence replaced.
+pub(crate) fn decoded(s: &str) -> Cow<'_, str> {
+    percent_encoding::percent_decode_str(s).decode_utf8_lossy()
 }
 
 /// A path as every front end reads it for matching: percent escapes
@@ -82,14 +24,15 @@ pub fn clean_path(path: &str) -> String {
     // Match what is forwarded (see `forwarded_path`), so the provider never
     // gets a structure matching did not see.
     let path = &forwarded_path(path);
-    let mut kept: Vec<String> = Vec::new();
+    let mut kept: Vec<&str> = Vec::new();
+    let decoded = decoded(path);
     // The outbound client reads a backslash as a slash, so a match must too.
-    for segment in percent_decode(path).split(['/', '\\']) {
+    for segment in decoded.split(['/', '\\']) {
         let segment = segment.split(';').next().unwrap_or_default();
         match segment {
             "" | "." => {}
             ".." => drop(kept.pop()),
-            _ => kept.push(segment.to_owned()),
+            _ => kept.push(segment),
         }
     }
     // Case-insensitive routers (ASP.NET Core, Express) read `/V1/Chat` as
@@ -111,7 +54,7 @@ pub fn forwarded_path(path: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
     for raw in path.split(['/', '\\']) {
         let name = raw.split(';').next().unwrap_or_default();
-        match percent_decode(name).as_str() {
+        match &*decoded(name) {
             "" | "." => {}
             ".." => drop(kept.pop()),
             _ => kept.push(raw),
@@ -159,6 +102,10 @@ mod tests {
         req.unwrap_or_default().into_parts().0
     }
 
+    fn posts_to(head: &RequestHead, suffix: &str) -> bool {
+        head.method == http::Method::POST && path_ends_with(&head.uri, suffix)
+    }
+
     #[test]
     fn a_path_is_forwarded_as_spelled_minus_what_matching_drops() {
         for (sent, forwarded) in [
@@ -201,15 +148,21 @@ mod tests {
             let head = head(http::Method::POST, path);
             assert!(posts_to(&head, "/chat/completions"), "{path}");
         }
-        let other = head(http::Method::POST, "/v1/chat/completionsx");
-        assert!(!posts_to(&other, "/chat/completions"));
-        let other = head(http::Method::POST, "/v1/chat/x/completions");
-        assert!(!posts_to(&other, "/chat/completions"));
-        let other = head(http::Method::POST, "/v1/chat/completions/../x");
-        assert!(!posts_to(&other, "/chat/completions"));
-        let other = head(http::Method::POST, "/v1/chat/completionsx");
-        assert!(!posts_to(&other, "/chat/completions"));
+        for path in [
+            "/v1/chat/completionsx",
+            "/v1/chat/x/completions",
+            "/v1/chat/completions/../x",
+        ] {
+            let other = head(http::Method::POST, path);
+            assert!(!posts_to(&other, "/chat/completions"), "{path}");
+        }
         let get = head(http::Method::GET, "/v1/chat/completions");
         assert!(!posts_to(&get, "/chat/completions"));
+    }
+
+    #[test]
+    fn only_well_formed_escapes_decode() {
+        assert_eq!(decoded("%2e%2E%zz%4"), "..%zz%4");
+        assert_eq!(decoded("%FF"), "\u{FFFD}");
     }
 }

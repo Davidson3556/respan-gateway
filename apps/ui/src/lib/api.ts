@@ -152,24 +152,10 @@ export interface RequestRecord {
 export interface ConfigView {
   source: "file" | "environment" | "proxy" | "inline";
   path: string | null;
-  writes_enabled: boolean;
-  /** Why writes are off; null when they are on. */
-  writes_disabled_reason: string | null;
-  /** What stands for a secret in `yaml`; sent back, it keeps the file's value. */
+  /** Redaction marker for secrets. */
   placeholder: string;
-  yaml: string;
-}
-
-/** What `POST /ui/api/config/validate` answers. */
-export type Validation =
-  | { ok: true }
-  | { ok: false; error: string; line: number | null; column: number | null };
-
-/** What `PUT /ui/api/config` answers once saved and reloaded. */
-export interface Saved extends Reloaded {
-  saved: true;
-  path: string;
-  backup: string | null;
+  text: string;
+  format: "toml";
 }
 
 export interface Model {
@@ -280,12 +266,24 @@ async function errorFrom(res: Response): Promise<ApiError> {
   return new ApiError(res.status, message, type, at);
 }
 
+/** Check a candidate before storing it; failures stay in the sign-in form. */
+export async function verifyGatewayKey(key: string): Promise<void> {
+  const response = await fetch("/ui/api/overview", {
+    headers: { authorization: `Bearer ${key}`, accept: "application/json" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw await errorFrom(response);
+}
+
 /** fetch with the gateway key attached; throws ApiError on a non-2xx answer. */
 export async function gatewayFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const res = await fetch(path, { ...init, headers: authHeaders(init.headers) });
   if (res.ok) return res;
-  if (res.status === 401) unauthorizedListeners.forEach((l) => l());
-  if (res.status === 403) forbiddenListeners.forEach((l) => l());
+  // Upstream authentication failures belong to the request, not gateway sign-in.
+  if (path.startsWith("/ui/api/")) {
+    if (res.status === 401) unauthorizedListeners.forEach((l) => l());
+    if (res.status === 403) forbiddenListeners.forEach((l) => l());
+  }
   throw await errorFrom(res);
 }
 
@@ -304,19 +302,8 @@ export async function postJson<T>(path: string, body: unknown, signal?: AbortSig
   return (await res.json()) as T;
 }
 
-async function sendYaml<T>(method: string, path: string, yaml: string): Promise<T> {
-  const res = await gatewayFetch(path, {
-    method,
-    headers: { "content-type": "text/yaml", accept: "application/json" },
-    body: yaml,
-  });
-  return (await res.json()) as T;
-}
-
 export const api = {
   config: (signal?: AbortSignal) => getJson<ConfigView>("/ui/api/config", signal),
-  validateConfig: (yaml: string) => sendYaml<Validation>("POST", "/ui/api/config/validate", yaml),
-  saveConfig: (yaml: string) => sendYaml<Saved>("PUT", "/ui/api/config", yaml),
   overview: (signal?: AbortSignal) => getJson<Overview>("/ui/api/overview", signal),
   providers: (signal?: AbortSignal) =>
     getJson<{ providers: Provider[] }>("/ui/api/providers", signal).then((r) => r.providers),

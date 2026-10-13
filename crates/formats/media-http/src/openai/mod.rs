@@ -38,18 +38,15 @@ use base64::engine::general_purpose::STANDARD;
 use respan_gateway_conversation::{Media, MediaSource, Usage};
 use respan_gateway_conversation_http::fields::{merge_missing, rest_of, set, unix_now};
 use respan_gateway_conversation_http::{merge_details, read_provider_error};
-use respan_gateway_core::{
-    BadRequest, Connection, Details, ErrorCode, Fault, NativeFields, NativeValue, Upstream,
-};
+use respan_gateway_core::{Connection, Details, ErrorCode, Fault, NativeFields, NativeValue};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{
     self, HeaderMap, HeaderValue, StatusCode, request::Parts as RequestHead,
     response::Parts as ResponseHead,
 };
+use respan_gateway_http::path::path_ends_with;
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo, raw::Original, raw::RawReply};
-use respan_gateway_http_faults::error_code;
-use respan_gateway_http_syntax::path_ends_with;
 use serde_json::{Map, Value, json};
 use std::sync::LazyLock;
 
@@ -96,7 +93,7 @@ fn parse_fields(headers: &HeaderMap, raw: &Bytes) -> Result<Fields, Fault> {
                 map,
                 files: Vec::new(),
             }),
-            _ => Err(BadRequest::fault(
+            _ => Err(Fault::bad_request(
                 "the request body is neither a JSON object nor multipart/form-data",
             )),
         };
@@ -209,7 +206,7 @@ fn bytes_of(media: &Media) -> Option<&Bytes> {
 fn invalid(param: &str, what: &str) -> Fault {
     let mut details = Map::new();
     details.insert("param".into(), param.into());
-    BadRequest::fault(format!("'{param}' {what}"))
+    Fault::bad_request(format!("'{param}' {what}"))
         .with(ErrorCode("invalid_request_error".into()))
         .with(Details(details))
 }
@@ -286,7 +283,7 @@ fn read_usage(u: &Value, known: &[&str]) -> Result<(Usage, Map<String, Value>), 
         Value::Null => Ok(0),
         v => v
             .as_u64()
-            .ok_or_else(|| Upstream::fault(format!("a usage count is not a whole number: {v}"))),
+            .ok_or_else(|| Fault::upstream(format!("a usage count is not a whole number: {v}"))),
     };
     let usage = Usage::new(count("input_tokens")?, count("output_tokens")?);
     let mut taken = vec!["input_tokens", "output_tokens", "total_tokens"];
@@ -398,7 +395,7 @@ fn whole_json(format: &str, raw: Bytes, is_response: fn(&Value) -> bool) -> Resu
     }
     Err(match says_error(&v) {
         true => said_error(raw),
-        false => Upstream::fault(format!(
+        false => Fault::upstream(format!(
             "the provider's success is not a response of {format}"
         )),
     })
@@ -407,7 +404,7 @@ fn whole_json(format: &str, raw: Bytes, is_response: fn(&Value) -> bool) -> Resu
 /// A provider's answer of `format` that cannot be read, such as a
 /// malformed image.
 fn unreadable(format: &str, what: &str) -> Fault {
-    Upstream::fault(format!("the provider's {format} response {what}"))
+    Fault::upstream(format!("the provider's {format} response {what}"))
 }
 
 /// A refusal in OpenAI's error schema, under the fault's status: its
@@ -427,7 +424,7 @@ fn refusal(fault: &Fault, _request: &http::Request<Bytes>, head: &mut ResponseHe
     if let Some(RawReply(answer)) = fault.get::<RawReply>() {
         return answer.body().clone();
     }
-    let code = error_code(fault);
+    let code = fault.code();
     let error = json!({ "message": fault.message(), "type": code, "param": null, "code": code });
     json!({ "error": merge_details(error, fault) })
         .to_string()
@@ -478,7 +475,7 @@ where
 
 /// Set a call's path and content type.
 fn post_to(head: &mut RequestHead, path: &str, content_type: &str) -> Result<(), Fault> {
-    respan_gateway_http_syntax::set_path(head, path)?;
+    respan_gateway_http::path::set_path(head, path)?;
     let content_type = HeaderValue::from_str(content_type)
         .map_err(|e| Fault::internal("a content type is no header").with_source(e))?;
     head.headers.insert(CONTENT_TYPE, content_type);
@@ -604,7 +601,7 @@ mod tests {
             .header(CONTENT_TYPE, "multipart/form-data; boundary=b")
             .body(body)
             .unwrap_or_default();
-        let wire = Original::new(request, false);
+        let wire = Original::new(request);
         let request = wire.get().cloned().unwrap_or_default();
         let (head, raw) = request.into_parts();
         let decoding = Form {

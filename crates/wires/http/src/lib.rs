@@ -27,37 +27,44 @@
 //!   [`prepare_call`](crate::call::prepare_call)), and strips a provider origin's own headers from its
 //!   response ([`strip_origin_headers`](crate::call::strip_origin_headers)).
 //!
-//! The crate by job; the root holds the wire itself, `edge`'s:
+//! Its modules:
 //!
 //! - `edge`: how HTTP meets the kernel, [`ClientIo`] and [`handle`] for a
 //!   server, [`ProviderIo`] and [`connect`] for a transport, and [`Body`].
-//! - `codec`: [`Encoder`] and [`Decoder`], and the framings [`Sse`] and
-//!   [`Whole`].
-//! - [`rules`]: HTTP's semantics, a fault's [`status`](respan_gateway_http_faults::status) and [`error_code`](respan_gateway_http_faults::error_code),
-//!   [`retryable`](respan_gateway_http_faults::retryable), [`bodiless`](crate::rules::bodiless), and the headers a hop must not carry.
+//! - `codec`: [`Encoder`] and [`Decoder`]; [`Sse`] and [`Whole`], which
+//!   frame what a decoder reads, and [`All`], what an encoder writes.
+//! - [`rules`]: HTTP's semantics: what succeeds,
+//!   [`bodiless`](crate::rules::bodiless), and the headers a hop must not carry.
+//!   A fault's status and retry are `respan-gateway-http-faults`'.
 //! - [`call`]: an outbound call, its URL, keys and headers ([`prepare_call`](crate::call::prepare_call),
 //!   [`credentials`](crate::call::credentials)) and its [`watchdog`](crate::call::watchdog).
 //! - [`raw`]: the client's request and the provider's answer as they came
 //!   ([`Original`](crate::raw::Original), [`RawReply`](crate::raw::RawReply)), and the mark of a call relayed to a provider of the client's own format ([`Relayed`](crate::raw::Relayed)), which `respan-gateway-plugin-relay`'s `Relay` sets.
-//! - [`framing`]: what formats build on: JSON of a body or event, and whether
-//!   a response is a stream.
+//! - [`path`]: how a request's path is matched ([`clean_path`](crate::path::clean_path),
+//!   [`path_ends_with`](crate::path::path_ends_with)) and forwarded
+//!   ([`forwarded_path`](crate::path::forwarded_path), [`set_path`](crate::path::set_path)).
+//! - [`content`]: a body's content type, whether a response is a stream,
+//!   and the JSON of a body or event.
 //!
 //! Hosting a gateway is `respan-gateway-serve`'s, not a wire's.
 
 extern crate self as respan_gateway_http;
 
-pub mod framing;
+pub mod content;
 
 pub mod call;
 mod codec;
 mod credential;
 mod edge;
+pub mod path;
 pub mod raw;
 pub mod rules;
 
 /// The crates HTTP formats and transports use, at these versions.
 pub use {bytes, http, http_body, http_body_util};
 
-pub use codec::{Decoder, Encoder, Sse, Whole};
+pub use codec::{All, Decoder, Encoder, Sse, Whole};
 pub use credential::Credential;
-pub use edge::{Body, ClientIo, Completion, Frames, Framing, ProviderIo, Reply, connect, handle};
+pub use edge::{
+    Body, ClientIo, Completion, Frames, ProviderIo, Reply, connect, handle, handle_live,
+};

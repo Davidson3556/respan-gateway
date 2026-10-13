@@ -54,20 +54,15 @@ function Brand() {
   const { data } = useOverview();
   return (
     <div className="flex items-center gap-2.5 px-1 py-1.5">
-      <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-brand text-white shadow-sm">
-        <svg viewBox="0 0 32 32" className="size-5" aria-hidden="true">
-          <path
-            d="M6 16h6l3-6 4 12 3-6h4"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.6"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </div>
+      <img
+        src={`${import.meta.env.BASE_URL}respan-logo.svg`}
+        alt=""
+        width={26}
+        height={30}
+        className="size-8 shrink-0 object-contain invert dark:invert-0"
+      />
       <div className="grid min-w-0 leading-tight group-data-[collapsible=icon]:hidden">
-        <span className="truncate text-sm font-semibold">respan gateway</span>
+        <span className="truncate text-sm font-semibold">Respan Gateway</span>
         <span className="truncate font-mono text-[11px] text-muted-foreground">
           {data ? `v${data.version}${data.listen ? ` · ${data.listen}` : ""}` : "connecting…"}
         </span>

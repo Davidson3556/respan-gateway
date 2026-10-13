@@ -23,7 +23,7 @@ impl Format<h::ClientIo, String, Bytes> for Text {
     }
     fn bind(&self, io: h::ClientIo) -> Result<Connection<String, Bytes>, Fault> {
         let decodes = self.0.clone();
-        Ok(io.with_error(h::rules::plain).bind(
+        Ok(io.bind(
             move |_request| {
                 {
                     Box::new(move |bytes: Bytes, out: &mut Vec<_>| {

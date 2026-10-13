@@ -15,7 +15,6 @@ workspace = true
 respan-gateway-core.workspace = true
 respan-gateway-http.workspace = true
 respan-gateway-http-faults.workspace = true
-respan-gateway-http-syntax.workspace = true
 respan-gateway-mcp.workspace = true
 respan-gateway-mcp-http.workspace = true
 respan-gateway-plugin-tool-loop.workspace = true

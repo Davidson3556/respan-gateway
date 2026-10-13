@@ -1,4 +1,4 @@
-import { ArrowUp, ChevronRight, Eraser, MessageSquare, Sparkles, Square, Wrench } from "lucide-react";
+import { ArrowUp, ChevronRight, Eraser, MessageSquare, SlidersHorizontal, Sparkles, Square, Wrench } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { Link } from "react-router";
 import { CopyButton } from "@/components/copy-button";
@@ -120,7 +120,7 @@ function Message({
   if (turn.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 text-sm whitespace-pre-wrap text-secondary-foreground">
+        <div className="max-w-[85%] break-words rounded-2xl rounded-br-md border border-brand/10 bg-brand-soft/50 px-5 py-3 text-sm leading-relaxed whitespace-pre-wrap">
           {turn.content}
         </div>
       </div>
@@ -134,7 +134,7 @@ function Message({
       >
         <Sparkles className="size-3.5" />
       </span>
-      <div className="min-w-0 max-w-[92%] flex-1">
+      <div className="min-w-0 flex-1 break-words">
         {turn.content ? (
           <Markdown source={turn.content} />
         ) : (
@@ -149,7 +149,7 @@ function Message({
           </div>
         )}
         {turn.stats && (
-          <div className="mt-2 flex items-center gap-1">
+          <div className="mt-4 flex flex-wrap items-center gap-2">
             <Stats stats={turn.stats} />
             <CopyButton value={turn.content} label="Copy reply" className="size-6" />
           </div>
@@ -169,6 +169,7 @@ export function ChatTab() {
   const [apiChoice, setApiChoice] = useState<ChatApiId>("openai-chat");
   const selected = apis.find((a) => a.id === apiChoice) ?? apis[0];
   const [system, setSystem] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [input, setInput] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [controller, setController] = useState<AbortController | null>(null);
@@ -188,10 +189,10 @@ export function ChatTab() {
     e?.preventDefault();
     const text = input.trim();
     if (!text || streaming) return;
-    const history = [...turns.filter((t) => t.error === undefined), { role: "user", content: text } as Turn];
+    const history = [...turns, { role: "user", content: text } as Turn];
     const messages: ChatMessage[] = [
       ...(system.trim() ? [{ role: "system" as const, content: system.trim() }] : []),
-      ...history.map(({ role, content }) => ({ role, content })),
+      ...history.filter((t) => t.content.trim()).map(({ role, content }) => ({ role, content })),
     ];
     const ctrl = new AbortController();
     setInput("");
@@ -209,13 +210,13 @@ export function ChatTab() {
         onDelta: (delta) => updateLast((t) => ({ ...t, content: t.content + delta })),
       });
       updateLast((t) => ({ ...t, stats }));
-      void locate({ api: selected.id, model: choice.model, since })
-        .then((record) => record && updateLast((t) => ({ ...t, record })))
-        .catch(() => undefined);
     } catch (error) {
       updateLast((t) => (ctrl.signal.aborted ? { ...t, stopped: true } : { ...t, error }));
     } finally {
       setController(null);
+      void locate({ api: selected.id, model: choice.model, since })
+        .then((record) => record && updateLast((t) => ({ ...t, record })))
+        .catch(() => undefined);
     }
   };
 
@@ -227,61 +228,89 @@ export function ChatTab() {
   };
 
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[18rem_minmax(0,1fr)]">
-      <Card className="h-fit gap-5 p-4">
-        {apis.length > 1 && (
-          <SelectField
-            id="chat-api"
-            label="API"
-            value={selected.id}
-            onChange={(v) => setApiChoice(v as ChatApiId)}
-            options={apis.map((a) => a.id)}
-            optionLabel={(id) => chatApi(id).label}
-          />
-        )}
-        <ModelPicker id="chat-model" choice={choice} />
-        <div className="grid gap-2">
-          <Label htmlFor="chat-system">System prompt</Label>
-          <Textarea
-            id="chat-system"
-            value={system}
-            onChange={(e) => setSystem(e.target.value)}
-            placeholder="You are a helpful assistant."
-            className="min-h-28 text-sm"
-          />
+    <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-5 lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)]">
+      <Card className="min-w-0 gap-5 bg-muted/20 p-5 shadow-none">
+        <div className="flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2 text-xs font-medium tracking-wider text-muted-foreground uppercase">
+            <SlidersHorizontal className="size-3.5" /> Configuration
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="-my-2 -mr-2 lg:hidden"
+            aria-expanded={settingsOpen}
+            aria-controls="chat-settings"
+            onClick={() => setSettingsOpen(!settingsOpen)}
+          >
+            {settingsOpen ? "Hide" : "Edit"}
+            <ChevronRight className={`size-3.5 transition-transform ${settingsOpen ? "rotate-90" : ""}`} />
+          </Button>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setTurns([])}
-          disabled={turns.length === 0 || streaming}
-        >
-          <Eraser /> Clear conversation
-        </Button>
+        <div id="chat-settings" className={`${settingsOpen ? "grid" : "hidden"} min-w-0 gap-5 lg:grid`}>
+          {apis.length > 1 && (
+            <SelectField
+              id="chat-api"
+              label="API"
+              value={selected.id}
+              onChange={(v) => setApiChoice(v as ChatApiId)}
+              options={apis.map((a) => a.id)}
+              optionLabel={(id) => chatApi(id).label}
+            />
+          )}
+          <ModelPicker id="chat-model" choice={choice} />
+          <div className="grid min-w-0 gap-2">
+            <Label htmlFor="chat-system">System prompt</Label>
+            <Textarea
+              id="chat-system"
+              value={system}
+              onChange={(e) => setSystem(e.target.value)}
+              placeholder="You are a helpful assistant."
+              className="min-h-32 resize-y bg-background/60 text-sm leading-relaxed"
+            />
+          </div>
+
+        </div>
       </Card>
 
-      <Card className="flex h-[calc(100dvh-17rem)] min-h-[28rem] flex-col gap-0 overflow-hidden py-0">
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+      <Card className="flex h-[calc(100dvh-18rem)] min-h-[32rem] flex-col gap-0 overflow-hidden py-0 shadow-sm">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b bg-muted/15 px-4 py-3 sm:px-6">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <MessageSquare className="size-4 shrink-0 text-brand" />
+              <span className="truncate">{choice.model || "Conversation"}</span>
+            </div>
+            <p className="mt-1 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
+              <span>{selected.label}</span><code className="text-[11px]">{selected.endpoint}</code>
+            </p>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setTurns([])}
+            disabled={turns.length === 0 || streaming}
+            aria-label="Clear conversation"
+            className="shrink-0 text-muted-foreground"
+          >
+            <Eraser /> <span className="hidden sm:inline">Clear conversation</span>
+          </Button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:px-8 sm:py-8">
           {/* Announce completion only; per-token updates would be read out one by one. */}
           <p role="status" className="sr-only">
             {!streaming && turns.length > 0 ? "Response complete" : ""}
           </p>
           {turns.length === 0 ? (
-            <EmptyState icon={MessageSquare} title="Talk to any model" className="border-none">
-              <p>
-                Messages go through the gateway's <code>{selected.endpoint}</code>, streamed, so
-                you'll see routing, translation and usage exactly as a client would.
-              </p>
-              <div className="flex flex-wrap justify-center gap-2">
+            <EmptyState icon={MessageSquare} title="Talk to any model" className="mx-auto min-h-full max-w-2xl justify-center border-none px-0 py-8 [&_h3]:text-xl [&_h3]:tracking-tight">
+              <div className="mt-4 grid w-full gap-2">
                 {suggestions.map((text) => (
-                  <Button key={text} variant="outline" size="sm" onClick={() => setInput(text)}>
-                    {text}
+                  <Button key={text} variant="outline" onClick={() => setInput(text)} className="h-auto justify-between gap-3 rounded-xl bg-background/50 px-4 py-3 text-left font-normal whitespace-normal hover:border-brand/40 hover:bg-brand-soft/30">
+                    {text}<ArrowUp className="size-3.5 shrink-0 rotate-45 text-muted-foreground" />
                   </Button>
                 ))}
               </div>
             </EmptyState>
           ) : (
-            <div className="grid grid-cols-[minmax(0,1fr)] gap-6">
+            <div className="mx-auto grid w-full max-w-3xl grid-cols-[minmax(0,1fr)] gap-8">
               {turns.map((t, i) => (
                 <Message
                   key={i}
@@ -294,22 +323,22 @@ export function ChatTab() {
             </div>
           )}
         </div>
-        <form onSubmit={send} className="border-t bg-muted/20 p-3">
-          <div className="relative rounded-xl border bg-background shadow-xs focus-within:ring-[3px] focus-within:ring-ring/40">
+        <form onSubmit={send} className="shrink-0 px-3 pt-2 pb-3 sm:px-6 sm:pb-4">
+          <div className="relative mx-auto max-w-3xl rounded-2xl border bg-background shadow-sm transition-shadow focus-within:border-brand/50 focus-within:ring-[3px] focus-within:ring-brand/10">
             <Textarea
               aria-label="Message"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
               placeholder={`Message ${choice.model}…`}
-              className="max-h-48 min-h-14 resize-none border-0 pr-14 focus-visible:ring-0 dark:bg-transparent"
+              className="max-h-48 min-h-24 resize-none rounded-2xl border-0 bg-transparent px-4 py-4 pr-16 text-sm shadow-none focus-visible:ring-0 dark:bg-transparent"
             />
             {streaming ? (
               <Button
                 type="button"
                 size="icon"
                 variant="secondary"
-                className="absolute right-2 bottom-2 size-8 rounded-lg"
+                className="absolute right-3 bottom-3 size-9 rounded-xl"
                 onClick={() => controller.abort()}
                 aria-label="Stop generating"
               >
@@ -319,7 +348,7 @@ export function ChatTab() {
               <Button
                 type="submit"
                 size="icon"
-                className="absolute right-2 bottom-2 size-8 rounded-lg"
+                className="absolute right-3 bottom-3 size-9 rounded-xl"
                 disabled={!input.trim()}
                 aria-label="Send message"
               >
@@ -327,7 +356,7 @@ export function ChatTab() {
               </Button>
             )}
           </div>
-          <p className="mt-2 px-1 text-[11px] text-muted-foreground">
+          <p className="mx-auto mt-2 max-w-3xl px-1 text-[11px] text-muted-foreground">
             Enter to send · Shift+Enter for a new line
           </p>
         </form>

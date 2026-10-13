@@ -6,7 +6,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example wallet`
 
-use respan_gateway_core::{BadRequest, ErrorCode, Provider};
+use respan_gateway_core::{ErrorCode, Provider};
 use std::collections::HashMap;
 
 use mockllm::{Answer, FakeOpenAi};
@@ -59,12 +59,12 @@ fn quote(
     let chat = px.input::<Input>()?;
     let model = chat.model.as_deref().unwrap_or_default();
     let Some(&price) = prices.get(model) else {
-        return Err(BadRequest::fault(format!("no price for model '{model}'")));
+        return Err(Fault::bad_request(format!("no price for model '{model}'")));
     };
     let max_output = chat
         .options
         .max_output_tokens
-        .ok_or_else(|| BadRequest::fault("set max_tokens"))?;
+        .ok_or_else(|| Fault::bad_request("set max_tokens"))?;
     let reserve = price.cost(
         input_bound(chat)?,
         max_output.saturating_mul(answers(chat)?),

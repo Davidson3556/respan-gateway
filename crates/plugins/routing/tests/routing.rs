@@ -7,9 +7,7 @@ use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::future::BoxFuture;
-use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Internal, Plugin, Provider, Response, async_trait,
-};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Provider, Response, async_trait};
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION};
 use respan_gateway_http::{Body, Completion};
 use respan_gateway_http_transport::HttpTransport;
@@ -339,7 +337,7 @@ async fn routing_refuses_a_model_read_from_another_input_type() {
     let (resp, outcome) = serve(&gw, post("/v1/chat/completions", body)).await;
     let (status, _, _) = read_whole(resp).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(outcome.await.is_err_and(|f| f.is::<Internal>()));
+    assert!(outcome.await.is_err_and(|f| f.code() == "internal"));
     assert!(mock.sent().is_empty());
 }
 

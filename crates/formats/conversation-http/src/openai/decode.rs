@@ -5,7 +5,7 @@ use crate::schema::{
     unsupported_fields,
 };
 use respan_gateway_conversation::{Block, Delta, Finish, Output, Start};
-use respan_gateway_core::{Fault, Upstream};
+use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_sse::event_data;
 use serde_json::{Map, Value, json};
@@ -30,6 +30,11 @@ pub struct OpenAiDecoder {
     /// The response's fields as last said, from its start on.
     said: Map<String, Value>,
     done: bool,
+    /// Whether the response said its finish and its usage, which the call
+    /// always asks for: a stream that ends well after both is whole,
+    /// `[DONE]` or not, as some OpenAI-compatible servers leave it out.
+    finished: bool,
+    counted: bool,
     /// Every block opened so far; a block's number is its place.
     blocks: Vec<Opened>,
     /// Whether the response made a tool call.
@@ -62,6 +67,8 @@ impl OpenAiDecoder {
             early: Map::new(),
             said: Map::new(),
             done: false,
+            finished: false,
+            counted: false,
             blocks: Vec::new(),
             called: false,
         }
@@ -183,6 +190,7 @@ impl OpenAiDecoder {
             out.push(Output::Start(start));
         }
         let u = &v["usage"];
+        self.counted |= u.is_object();
         let usage = self.totals.increment(&usage_of(u)?);
         if !usage.is_empty() {
             out.push(Output::Usage(usage));
@@ -235,7 +243,7 @@ impl OpenAiDecoder {
                 }
                 (_, Some(block)) => block,
                 (None, None) => {
-                    return Err(Upstream::fault(
+                    return Err(Fault::upstream(
                         "a tool call's arguments come before the call starts",
                     ));
                 }
@@ -253,6 +261,7 @@ impl OpenAiDecoder {
                 (finish, _) => finish,
             };
             out.push(Output::finished(finish));
+            self.finished = true;
         }
         Ok(())
     }
@@ -284,9 +293,10 @@ impl OpenAiDecoder {
         self.chunk(&v, "delta", out)
     }
 
-    /// The events of a stream that ended well.
+    /// The events of a stream that ended well: whole once it said its
+    /// finish and usage, else cut short.
     fn end_stream(&mut self, _out: &mut Vec<Output>) -> Result<(), Fault> {
-        ended(self.done)
+        ended(self.done || self.finished && self.counted)
     }
 
     /// The events of one whole response body `v`.

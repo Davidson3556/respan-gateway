@@ -4,7 +4,12 @@
 use crate::path_support::{CHAT_REPLY, record_lines, send_post};
 use crate::support::Gateway;
 
-use respan_gateway_http_syntax::percent_decode as decode;
+/// `s` with its `%XX` escapes decoded, as a front end decodes a path.
+fn decode(s: &str) -> String {
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8_lossy()
+        .into_owned()
+}
 
 fn dots(segs: impl Iterator<Item = String>) -> String {
     let mut kept: Vec<String> = Vec::new();
@@ -27,12 +32,7 @@ fn dots(segs: impl Iterator<Item = String>) -> String {
 async fn no_front_end_reads_a_passthrough_call_as_chat() {
     let (base, seen) = record_lines(CHAT_REPLY).await;
     let gw = Gateway::start(&format!(
-        "providers:
-  p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
-  any: {{ formats: passthrough, base_url: '{base}/pt' }}
-formats: [openai-chat, passthrough]
-plugins: {{ routing: {{ default: p }} }}
-"
+        "providers = {{ p = {{ formats = \"openai-chat\", base_url = \"{base}/chatv1\" }}, any = {{ formats = \"passthrough\", base_url = \"{base}/pt\" }} }}\nformats = [\"openai-chat\", \"passthrough\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
     ))
     .await;
     let addr = gw.base.trim_start_matches("http://").to_owned();

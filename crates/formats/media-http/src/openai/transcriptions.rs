@@ -12,12 +12,12 @@ use super::{
 };
 use crate::edge::ended_events;
 use respan_gateway_conversation::Usage;
-use respan_gateway_core::{BadRequest, Connection, Fault, Format, NativeValue};
+use respan_gateway_core::{Connection, Fault, Format, NativeValue};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::framing::sse;
+use respan_gateway_http::content;
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
-use respan_gateway_http::{ClientIo, Decoder, Encoder, ProviderIo, Whole};
-use respan_gateway_http_syntax::path_ends_with;
+use respan_gateway_http::path::path_ends_with;
+use respan_gateway_http::{All, ClientIo, Decoder, Encoder, ProviderIo, Whole};
 use respan_gateway_media::transcription::{Delta, Input, Output, Segment, Task, Transcript, Word};
 use serde_json::{Map, Value};
 
@@ -119,7 +119,7 @@ fn post(
         _ => TRANSCRIPTIONS,
     };
     let audio = bytes_of(&input.audio)
-        .ok_or_else(|| BadRequest::fault("audio at a URL cannot be sent as a file"))?;
+        .ok_or_else(|| Fault::bad_request("audio at a URL cannot be sent as a file"))?;
     let mut form = Writer::with_boundary(multipart::random_boundary()?);
     post_to(head, path, &form.content_type())?;
     let name = file_name(&input.audio, "audio");
@@ -142,10 +142,10 @@ fn post(
 /// The decoder of a provider's answer of `head`: a stream of events, a JSON
 /// body, or rendered text.
 fn read_response(head: &http::response::Parts) -> Box<dyn Decoder<Output>> {
-    if sse::is_stream(head) {
+    if content::is_stream(head) {
         return ended_events(stream_event);
     }
-    let content_type = sse::content_type(head).unwrap_or_default();
+    let content_type = content::content_type(head).unwrap_or_default();
     let json = content_type.to_ascii_lowercase().contains("json");
     Box::new(Whole::new(
         move |raw: Bytes, out: &mut Vec<Output>| match json {
@@ -259,11 +259,11 @@ fn response_encoder(
         Some(format @ ("text" | "srt" | "vtt")) => {
             let format = format.to_owned();
             super::content_type(head, "text/plain; charset=utf-8");
-            Box::new(Whole::new(move |events: &[Output]| render(events, &format)))
+            Box::new(All::new(move |events: &[Output]| render(events, &format)))
         }
         _ => {
             super::content_type(head, "application/json");
-            Box::new(Whole::new(encode_json))
+            Box::new(All::new(encode_json))
         }
     }
 }

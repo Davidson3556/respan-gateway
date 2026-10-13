@@ -192,7 +192,7 @@ impl Response {
     /// calls' [`outputs`](Response::outputs); the first `Err` fails it, a
     /// refusal before any output. It passes no
     /// provider edge. Outputs of another type fail it with
-    /// [`Internal`](crate::Internal) when sent.
+    /// [`internal`](crate::Fault::internal) when sent.
     pub fn stream<T, S>(stream: S) -> Self
     where
         T: Any + Send + Sync,
@@ -301,7 +301,7 @@ impl Response {
 
     /// Read it rather than send it, such as a judge's verdict: every output
     /// as `T`, as the provider edge's filters left them, then an `Err` if it
-    /// fails; one `Err` with [`Internal`](crate::Internal)
+    /// fails; one `Err` with [`internal`](crate::Fault::internal)
     /// for another type. Its call ends with the stream, or abandoned if
     /// dropped first.
     pub fn outputs<T: Any + Clone + Send>(mut self) -> BoxStream<'static, Result<T>> {

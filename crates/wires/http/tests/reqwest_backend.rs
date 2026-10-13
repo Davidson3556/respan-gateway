@@ -85,7 +85,10 @@ async fn a_switch_of_protocols_is_an_upstream_fault() {
     call.headers_mut()
         .insert("connection", http::HeaderValue::from_static("upgrade"));
     let fault = transport.send(call).await.err().expect("a 101 is refused");
-    assert!(fault.is::<respan_gateway_core::Upstream>(), "{fault:?}");
+    assert!(
+        fault.is(respan_gateway_core::FaultKind::Provider),
+        "{fault:?}"
+    );
 }
 
 type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;

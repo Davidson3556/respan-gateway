@@ -42,7 +42,7 @@ use crate::schema::{
 use respan_gateway_conversation::{
     Assembled, AssembledItem, Block, Content, Finish, Input, Message, Output, Role, Usage,
 };
-use respan_gateway_core::{BadRequest, Connection, Fault, Format, NativeValue};
+use respan_gateway_core::{Connection, Fault, Format, NativeValue};
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo, http};
 use serde_json::{Map, Value, json};
 
@@ -150,12 +150,12 @@ fn split_system(chat: &Input) -> Result<(Vec<Content>, &[Message]), Fault> {
     let lead = chat.messages.iter().take_while(|m| is_system(m)).count();
     let (system, rest) = chat.messages.split_at(lead);
     if rest.iter().any(is_system) {
-        return Err(BadRequest::fault(
+        return Err(Fault::bad_request(
             "Anthropic has no place for a system message after the conversation starts",
         ));
     }
     if system.iter().any(|m| !m.native.is_empty()) {
-        return Err(BadRequest::fault(
+        return Err(Fault::bad_request(
             "Anthropic's system prompt has no place for a message's other fields",
         ));
     }
@@ -283,12 +283,12 @@ impl Schema for AnthropicMessages {
     fn encode_json(&self, chat: &Input) -> Result<Map<String, Value>, Fault> {
         let (system, rest) = split_system(chat)?;
         if rest.is_empty() {
-            return Err(BadRequest::fault(
+            return Err(Fault::bad_request(
                 "Anthropic needs at least one user or assistant message",
             ));
         }
         if chat.options.temperature.is_some_and(|t| t > 1.0) {
-            return Err(BadRequest::fault(
+            return Err(Fault::bad_request(
                 "Anthropic's temperature is at most 1, so a higher one cannot be translated",
             ));
         }
@@ -466,7 +466,7 @@ impl Schema for AnthropicMessages {
     }
 
     fn error_body(fault: &Fault) -> Value {
-        let error = json!({ "type": respan_gateway_http_faults::error_code(fault), "message": fault.message() });
+        let error = json!({ "type": fault.code(), "message": fault.message() });
         json!({ "type": "error", "error": merge_details(error, fault) })
     }
 }

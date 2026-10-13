@@ -48,7 +48,7 @@ pub trait Plugin: Send + Sync + 'static {
     /// The client edge, once per request, at its head. `Ok(None)` passes;
     /// `Ok(Some(response))` replies, skipping the rest; `Err` refuses. If all
     /// pass, the target is called; with none, the request is refused
-    /// [`NotFound`](crate::NotFound).
+    /// [`not_found`](crate::Fault::not_found).
     async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>> {
         Ok(None)
     }
@@ -59,7 +59,7 @@ pub trait Plugin: Send + Sync + 'static {
     /// stop the others, and [`Gateway::idle`](crate::Gateway::idle) waits.
     /// `end` is `Ok` if the response was read to its end, else the fault
     /// that refused, failed or stopped it, such as a provider's error
-    /// answer, or [`Abandoned`](crate::Abandoned) if it was
+    /// answer, or [`Abandoned`](crate::FaultKind::Abandoned) if it was
     /// dropped or cut off first.
     async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<()>) {}
 
@@ -76,7 +76,7 @@ pub trait Plugin: Send + Sync + 'static {
     /// response's end is read, or it is dropped or cut off (abandoned). Runs
     /// like `on_client_end`, before it, with the call's `end`. A call whose
     /// request encoder panicked on a later frame ends
-    /// [`Internal`](crate::Internal), wherever its transport
+    /// [`internal`](crate::Fault::internal), wherever its transport
     /// read the body. What else is known of a call is on its context, such
     /// as [`is_sent`](ProviderContext::is_sent).
     async fn on_provider_end(&self, _px: &ProviderContext, _end: &Result<()>) {}
@@ -306,7 +306,6 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::Internal;
 
     /// Notes its name at its end, failing it if `fails`; fails the output
     /// equal to its name.
@@ -425,7 +424,7 @@ mod tests {
         let mut filters = filters(&noted, &[("after", false)]);
         let _ = filters.add(Panics, false);
         let end = filters.end(Ok(()), &mut None);
-        assert!(end.err().is_some_and(|f| f.is::<Internal>()));
+        assert!(end.err().is_some_and(|f| f.code() == "internal"));
         assert_eq!(read(&noted), Some(vec!["after"]));
     }
 

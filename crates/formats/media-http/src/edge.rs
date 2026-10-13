@@ -1,7 +1,7 @@
 //! What the HTTP formats of this crate share, OpenAI's and Veo's.
 
 use respan_gateway_conversation_http::read_provider_error;
-use respan_gateway_core::{BadRequest, Connection, Fault, NativeFields, Truncated};
+use respan_gateway_core::{Connection, Fault, NativeFields};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{
     self, request::Parts as RequestHead, response::Parts as ResponseHead,
@@ -84,7 +84,7 @@ where
         end?;
         match self.done {
             true => Ok(()),
-            false => Err(Truncated::fault()),
+            false => Err(Fault::truncated()),
         }
     }
 }
@@ -112,7 +112,7 @@ pub(crate) fn kept(
 ) -> Result<Map<String, Value>, Fault> {
     match native {
         Some(n) if &*n.format == format => Ok(n.fields.clone()),
-        Some(n) if !n.is_empty() => Err(BadRequest::fault(format!(
+        Some(n) if !n.is_empty() => Err(Fault::bad_request(format!(
             "fields of format {} cannot be written in {format}",
             n.format
         ))),

@@ -14,7 +14,7 @@ const overview: Overview = {
   reloaded_at: null,
   auth_required: true,
   config_source: "file",
-  config_path: "gateway.yaml",
+  config_path: "gateway.toml",
   totals: { requests: 0, errors: 0, in_flight: 0, input_tokens: 0, output_tokens: 0 },
 };
 
@@ -47,19 +47,19 @@ describe("KeyDialog", () => {
     const calls = gatewayWithKey("sk-gw-1");
     renderGuarded();
 
-    expect(await screen.findByText("This gateway needs a key")).toBeInTheDocument();
+    expect(await screen.findByText("Gateway key required")).toBeInTheDocument();
     expect(screen.getByText("waiting")).toBeInTheDocument();
     expect(new Headers(calls[0].init.headers).has("authorization")).toBe(false);
 
     await userEvent.type(screen.getByLabelText("Gateway key"), "  sk-gw-1 ");
-    await userEvent.click(screen.getByRole("button", { name: "Save key" }));
+    await userEvent.click(screen.getByRole("button", { name: "Connect" }));
 
     expect(await screen.findByText("version 9.9.9")).toBeInTheDocument();
     expect(getGatewayKey()).toBe("sk-gw-1");
     const last = calls[calls.length - 1];
     expect(new Headers(last.init.headers).get("authorization")).toBe("Bearer sk-gw-1");
     await waitFor(() =>
-      expect(screen.queryByText("This gateway needs a key")).not.toBeInTheDocument(),
+      expect(screen.queryByText("Gateway key required")).not.toBeInTheDocument(),
     );
   });
 
@@ -68,23 +68,27 @@ describe("KeyDialog", () => {
     gatewayWithKey("sk-gw-1");
     renderGuarded();
 
-    expect(await screen.findByText("That key was refused")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save key" })).toBeDisabled();
+    expect(await screen.findByText("Invalid key. Try another.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
   });
 
-  it("stays closed after 'Not now' while background calls keep failing", async () => {
-    const calls = gatewayWithKey("sk-gw-1");
-    const { client } = renderGuarded();
-
-    await userEvent.click(await screen.findByRole("button", { name: "Not now" }));
-    await waitFor(() =>
-      expect(screen.queryByText("This gateway needs a key")).not.toBeInTheDocument(),
-    );
-    const before = calls.length;
-    await client.refetchQueries();
-    await waitFor(() => expect(calls.length).toBeGreaterThan(before));
-    expect(screen.queryByText("This gateway needs a key")).not.toBeInTheDocument();
+  it("keeps invalid submissions open without saving the key or allowing dismissal", async () => {
+    gatewayWithKey("sk-gw-1");
+    renderGuarded();
+    await screen.findByText("Gateway key required");
+    expect(screen.queryByRole("button", { name: "Not now" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("Gateway key"), "wrong");
+    await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Invalid key. Try another.");
+    expect(screen.getByLabelText("Gateway key")).toHaveValue("wrong");
     expect(getGatewayKey()).toBeNull();
+    await userEvent.clear(screen.getByLabelText("Gateway key"));
+    await userEvent.type(screen.getByLabelText("Gateway key"), "sk-gw-1");
+    await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(await screen.findByText("version 9.9.9")).toBeInTheDocument();
   });
 
   it("says a valid key is not an admin key on a 403, rather than asking as if none was given", async () => {
@@ -94,10 +98,8 @@ describe("KeyDialog", () => {
     });
     renderGuarded();
 
-    expect(await screen.findByText("This key can't open the admin UI")).toBeInTheDocument();
-    expect(screen.queryByText("This gateway needs a key")).not.toBeInTheDocument();
-    expect(screen.queryByText("That key was refused")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Not now" }));
+    expect(await screen.findByText("This key has no admin access. Use an admin key.")).toBeInTheDocument();
+    expect(screen.queryByText("Invalid key. Try another.")).not.toBeInTheDocument();
     expect(getGatewayKey()).toBe("sk-client");
   });
 });

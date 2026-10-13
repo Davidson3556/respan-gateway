@@ -90,7 +90,6 @@ impl App {
             started: std::time::Instant::now(),
             reloaded_at: Mutex::new(None),
             reload: OnceLock::new(),
-            check: OnceLock::new(),
         });
         let built = Built::new(config, &process)?;
         let shared = Arc::new(Shared {
@@ -107,14 +106,6 @@ impl App {
             .set(Box::new(move || match weak.upgrade() {
                 Some(shared) => shared.reload(),
                 None => Err(ReloadError::Unavailable),
-            }));
-        let weak = Arc::downgrade(&shared);
-        let _ = shared
-            .process
-            .check
-            .set(Box::new(move |config| match weak.upgrade() {
-                Some(shared) => shared.check(config),
-                None => Err(Error::new("the gateway is stopping")),
             }));
         let router = switch(shared.clone());
         Ok(App { shared, router })

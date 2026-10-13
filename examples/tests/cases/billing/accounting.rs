@@ -1,7 +1,7 @@
 //! `Accounting` in a gateway: never overspend, settle exactly once, refuse
 //! what has no bound, and release what a cancelled hook held.
 
-use respan_gateway_core::{BadRequest, Provider, Upstream};
+use respan_gateway_core::Provider;
 use respan_gateway_examples::LIMIT;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -72,7 +72,7 @@ fn quote(px: &mut ProviderContext, tally: Tally) -> Result<Quote, Fault> {
     let max = chat
         .options
         .max_output_tokens
-        .ok_or_else(|| BadRequest::fault("no cost bound: set max_tokens"))?;
+        .ok_or_else(|| Fault::bad_request("no cost bound: set max_tokens"))?;
     px.filter(move |reply: &mut Output| {
         if let Output::Usage(usage) = reply {
             let output = usage.output_tokens;
@@ -279,7 +279,7 @@ async fn every_call_settles_exactly_once() {
             (gw, Some(fake))
         } else {
             let transport = respan_gateway_http::connect(
-                |_call| async { Err(Upstream::fault("lost head")) },
+                |_call| async { Err(Fault::upstream("lost head")) },
                 LIMIT,
             );
             (gateway(transport, Nothing, ledger.clone()), None)
@@ -342,7 +342,7 @@ impl Plugin for GivesUp {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         match tokio::time::timeout(Duration::from_millis(20), cx.call("p")).await {
             Ok(resp) => resp.map(Some),
-            Err(_) => Err(Upstream::fault("gave up")),
+            Err(_) => Err(Fault::upstream("gave up")),
         }
     }
 }
@@ -428,7 +428,7 @@ async fn a_call_sent_that_times_out_before_its_head_is_charged_the_reserve() {
     let no_head = respan_gateway_http::connect(
         |_call| async {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            Err(Upstream::fault("no head within 1s"))
+            Err(Fault::upstream("no head within 1s"))
         },
         LIMIT,
     );

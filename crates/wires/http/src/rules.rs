@@ -1,10 +1,13 @@
 //! HTTP's own rules at the edges: what a hop must not carry, what a body-less
 //! answer is, and how a fault is written as a response. A fault's status and
-//! error code are `respan-gateway-http-faults`'; how a path or a header is
-//! read is `respan-gateway-http-syntax`'s.
+//! error code are `respan-gateway-http-faults`'; how a path is matched is
+//! [`path`](crate::path)'s.
 
 use bytes::Bytes;
-use http::header::{CONNECTION, CONTENT_TYPE, HeaderName, RETRY_AFTER, UPGRADE};
+use http::header::{
+    self, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, PROXY_AUTHENTICATE,
+    PROXY_AUTHORIZATION, RETRY_AFTER, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
+};
 use http::{
     HeaderMap, HeaderValue, Method, StatusCode, request::Parts as RequestHead,
     response::Parts as ResponseHead,
@@ -14,8 +17,38 @@ use respan_gateway_core::{Fault, RetryAfter};
 use crate::Body;
 
 use respan_gateway_http_faults::status;
-pub(crate) use respan_gateway_http_syntax::HOP_BY_HOP;
-use respan_gateway_http_syntax::header_tokens;
+
+/// The headers of one connection, never carried past it: a hop's own (RFC
+/// 9110 7.6.1), the proxy's (11.7), and the body's framing
+/// (`Content-Length`, `Transfer-Encoding`, `Trailer`), as the gateway
+/// re-frames every body it passes on and delivers no trailers.
+pub(crate) const CONNECTION_HEADERS: [HeaderName; 10] = [
+    CONNECTION,
+    CONTENT_LENGTH,
+    HeaderName::from_static("keep-alive"),
+    HeaderName::from_static("proxy-connection"),
+    PROXY_AUTHENTICATE,
+    PROXY_AUTHORIZATION,
+    TE,
+    TRAILER,
+    TRANSFER_ENCODING,
+    UPGRADE,
+];
+
+/// Whether `name` is the connection's, never a transport's to send: one of
+/// its own headers, `Expect` or `Host`.
+pub fn is_connection_header(name: &HeaderName) -> bool {
+    CONNECTION_HEADERS.contains(name) || name == header::EXPECT || name == header::HOST
+}
+
+/// The comma-separated tokens of every `name` header (RFC 9110 5.6.1).
+pub fn header_tokens(headers: &HeaderMap, name: HeaderName) -> impl Iterator<Item = &str> {
+    let values = headers.get_all(name).into_iter();
+    values
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+}
 
 /// HTTP's success, an [`ProviderIo`](crate::ProviderIo)'s unless it says another: 2xx, or a 101
 /// to a call that asked to switch protocols (RFC 9110 15.2.2).
@@ -28,7 +61,11 @@ pub fn success(answer: &ResponseHead, call: &RequestHead) -> bool {
 
 /// A format's error writer ([`ClientIo::bind`](crate::ClientIo::bind)) for a protocol without an
 /// error envelope: the fault's message as text/plain.
-pub fn plain(fault: &Fault, _request: &http::Request<Bytes>, head: &mut ResponseHead) -> Bytes {
+pub(crate) fn plain(
+    fault: &Fault,
+    _request: &http::Request<Bytes>,
+    head: &mut ResponseHead,
+) -> Bytes {
     head.headers.insert(
         CONTENT_TYPE,
         HeaderValue::from_static("text/plain; charset=utf-8"),
@@ -40,7 +77,10 @@ pub fn plain(fault: &Fault, _request: &http::Request<Bytes>, head: &mut Response
 /// `keep_upgrade`.
 pub(crate) fn strip_hops(headers: &mut HeaderMap, keep_upgrade: bool) {
     strip_named(headers);
-    for name in HOP_BY_HOP.iter().filter(|&n| !keep_upgrade || n != UPGRADE) {
+    for name in CONNECTION_HEADERS
+        .iter()
+        .filter(|&n| !keep_upgrade || n != UPGRADE)
+    {
         headers.remove(name);
     }
 }
@@ -108,7 +148,6 @@ pub fn bodiless(method: &Method, status: StatusCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use respan_gateway_core::Upstream;
     use respan_gateway_http_faults::{Status, provider_fault};
     use std::time::Duration;
 
@@ -188,7 +227,7 @@ mod tests {
             (Duration::from_secs(u64::MAX), u64::MAX),
             (Duration::MAX, u64::MAX),
         ] {
-            let fault = Upstream::fault("retry later").with(RetryAfter(wait));
+            let fault = Fault::upstream("retry later").with(RetryAfter(wait));
             let mut head = http::Response::new(()).into_parts().0;
             error_head(&mut head, &fault);
             assert_eq!(head.headers[RETRY_AFTER], seconds.to_string(), "{wait:?}");

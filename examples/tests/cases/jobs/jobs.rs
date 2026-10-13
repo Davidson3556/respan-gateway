@@ -171,9 +171,7 @@ async fn a_run_cut_by_a_disconnect_stores_nothing_and_runs_again() -> Result<(),
     let frame = body.frame().await.transpose()?;
     assert!(frame.is_some(), "the client got the start");
     drop(body);
-    let end = outcome
-        .await
-        .map_err(|f| respan_gateway_http_faults::error_code(&f).to_owned());
+    let end = outcome.await.map_err(|f| f.code().to_owned());
     assert_eq!(end, Err("abandoned".into()), "core cut the call");
     gw.idle().await;
 

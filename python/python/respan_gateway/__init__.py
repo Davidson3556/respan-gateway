@@ -51,9 +51,9 @@ _BASE = "http://respan-gateway"
 class Gateway:
     """A configured gateway.
 
-    `config` is a mapping (see `GatewayConfig`), or a YAML string, in the
-    format of `gateway.example.yaml`. Without it, the gateway is configured as
-    the binary is with no arguments: from `./gateway.yaml` if that file
+    `config` is a mapping (see `GatewayConfig`), or a TOML string, in the
+    format of `gateway.example.toml`. Without it, the gateway is configured as
+    the binary is with no arguments: from `./gateway.toml` if that file
     exists, else from the environment: every vendor whose key is set
     (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, ...), with
     `RESPAN_<VENDOR>_BASE_URL` to point one elsewhere.
@@ -68,10 +68,10 @@ class Gateway:
         if config is None:
             native, self._source = _native.Native.discover(), "discovered"
         elif isinstance(config, str):
-            native, self._source = _native.Native.from_yaml(config), "yaml"
+            native, self._source = _native.Native.from_toml(config), "toml"
         else:
-            # JSON is YAML.
-            native, self._source = _native.Native.from_yaml(json.dumps(config)), "dict"
+            # Pass structured mappings directly through the native JSON bridge.
+            native, self._source = _native.Native.from_json(json.dumps(config)), "dict"
         self._setup(native)
 
     def _setup(self, native: _native.Native) -> None:
@@ -85,7 +85,7 @@ class Gateway:
 
     @classmethod
     def from_file(cls, path: Union[str, "os.PathLike[str]"]) -> "Gateway":
-        """A gateway from the YAML file at `path`."""
+        """A gateway from the TOML file at `path`."""
         gateway = cls.__new__(cls)
         gateway._source = os.fspath(path)
         gateway._setup(_native.Native.from_file(os.fspath(path)))
@@ -94,7 +94,7 @@ class Gateway:
     def __repr__(self) -> str:
         try:
             providers = ", ".join(p["name"] for p in self.providers())
-        except Exception:  # a repr must not raise (e.g. `ui: false`)
+        except Exception:  # a repr must not raise (e.g. `ui = false`)
             providers = "?"
         return f"Gateway(source={self._source!r}, providers=[{providers}])"
 
@@ -270,7 +270,7 @@ class Gateway:
     def providers(self) -> List[Dict[str, Any]]:
         """The configured providers with their formats and request counts.
 
-        Like `requests()`, this is the web UI's admin API, off with `ui: false`.
+        Like `requests()`, this is the web UI's admin API, off with `ui = false`.
         """
         return _items(self._admin("/ui/api/providers"), "providers")
 
@@ -283,7 +283,7 @@ class Gateway:
 
         `filters` are those of `export_requests`, such as `client="app"` (the name of a client key; each record's `client`).
 
-        The log is in memory, and `log: off` (the default here) only silences stderr; this admin API is off with `ui: false`.
+        The log is in memory, and `log = 'off'` (the default here) only silences stderr; this admin API is off with `ui = false`.
         """
         return _items(self._admin("/ui/api/requests", params={"limit": limit, **filters}), "requests")
 
@@ -371,7 +371,7 @@ def _check(response: httpx.Response) -> None:
             message = response.json()["error"]["message"]
         except Exception:
             message = response.text[:200]
-        hint = " (is `ui: false` set in the config?)" if response.url.path.startswith("/ui/") else ""
+        hint = " (is `ui = false` set in the config?)" if response.url.path.startswith("/ui/") else ""
         what = f"{response.request.method} {response.url.path} answered {response.status_code}"
         raise GatewayError(f"{what}: {message}{hint}")
 

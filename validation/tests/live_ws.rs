@@ -151,11 +151,7 @@ async fn real_openai_realtime_text_turn_through_tls_gateway() {
 /// environment, and the address its sessions connect to.
 async fn translating_gateway() -> (binary::Gateway, std::net::SocketAddr) {
     let gw = binary::Gateway::start(
-        "providers:
-  openai: { vendor: openai, key: env:OPENAI_API_KEY }
-  gemini: { vendor: gemini, key: env:GEMINI_API_KEY }
-formats: [openai-realtime, gemini-live]
-",
+        "providers = { openai = { vendor = \"openai\", key = \"env:OPENAI_API_KEY\" }, gemini = { vendor = \"gemini\", key = \"env:GEMINI_API_KEY\" } }\nformats = [\"openai-realtime\", \"gemini-live\"]\n",
     )
     .await;
     let addr = gw.base.trim_start_matches("http://").parse().unwrap();

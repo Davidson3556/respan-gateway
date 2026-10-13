@@ -7,7 +7,6 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::Fault;
-use respan_gateway_core::Upstream;
 use respan_gateway_core::futures::stream;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
@@ -123,7 +122,7 @@ impl ScriptedAt {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .pop_front()
-            .ok_or_else(|| Upstream::fault(format!("no mock response for {url}")))?;
+            .ok_or_else(|| Fault::upstream(format!("no mock response for {url}")))?;
         assert_eq!(
             expected, self.base,
             "provider calls reached the wrong endpoint"

@@ -14,12 +14,7 @@ use crate::support::Gateway;
 async fn a_chat_request_never_escapes_into_passthrough() {
     let (base, seen) = record_lines(CHAT_REPLY).await;
     let gw = Gateway::start(&format!(
-        "providers:
-  p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
-  any: {{ formats: passthrough, base_url: '{base}/pt' }}
-formats: [openai-chat, passthrough]
-plugins: {{ routing: {{ default: p }} }}
-"
+        "providers = {{ p = {{ formats = \"openai-chat\", base_url = \"{base}/chatv1\" }}, any = {{ formats = \"passthrough\", base_url = \"{base}/pt\" }} }}\nformats = [\"openai-chat\", \"passthrough\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
     ))
     .await;
     let addr = gw.base.trim_start_matches("http://").to_owned();

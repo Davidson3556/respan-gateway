@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use respan_gateway_core::futures::StreamExt;
 use respan_gateway_core::futures::stream::{self};
-use respan_gateway_core::{ErrorCode, Fault, Upstream};
+use respan_gateway_core::{ErrorCode, Fault};
 use serde_json::Value;
 use tokio::time::{Instant, timeout};
 
@@ -83,7 +83,7 @@ pub(super) fn cut(text: String, max: usize) -> String {
 }
 
 pub(super) fn limit(code: &'static str, message: String) -> Fault {
-    Upstream::fault(message).with(ErrorCode(code.into()))
+    Fault::upstream(message).with(ErrorCode(code.into()))
 }
 
 #[cfg(test)]

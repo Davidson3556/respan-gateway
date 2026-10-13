@@ -25,7 +25,6 @@
 #![allow(clippy::duplicate_mod)]
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_core::Upstream;
 use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Provider, Response, async_trait};
 #[cfg(test)]
@@ -79,7 +78,7 @@ impl Plugin for Split {
                     .try_collect::<Vec<_>>()
                     .await?;
                 if answers.len() != 1 || answers[0].vectors.len() != expected {
-                    return Err(Upstream::fault("the provider omitted embedding vectors"));
+                    return Err(Fault::upstream("the provider omitted embedding vectors"));
                 }
                 Ok(answers)
             })

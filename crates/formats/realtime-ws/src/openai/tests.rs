@@ -1,4 +1,5 @@
-use respan_gateway_core::{BadRequest, NativeFields};
+use respan_gateway_core::FaultKind;
+use respan_gateway_core::NativeFields;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_realtime::{AudioFormat, Input, Output, Session, Status, ToolResult};
 use serde_json::{Value, json};
@@ -229,7 +230,7 @@ fn another_formats_input_is_dropped_where_it_cannot_change_the_answer() {
         ),
     ] {
         let refused = sent(&[event]).expect_err("refused");
-        assert!(refused.is::<BadRequest>(), "{refused}");
+        assert!(refused.is(FaultKind::Client), "{refused}");
         assert_eq!(
             refused.message(),
             format!("{field} cannot be translated to openai-realtime")
@@ -254,7 +255,7 @@ fn audio_in_another_format_is_converted_to_the_sessions() {
     // A second at 24 kHz, but what the resampler still holds.
     assert!((47_000..=48_000).contains(&data.len()), "{}", data.len());
     let refused = sent(&[audio(AudioFormat::pcm16(500), vec![0; 4])]).expect_err("refused");
-    assert!(refused.is::<BadRequest>(), "{refused}");
+    assert!(refused.is(FaultKind::Client), "{refused}");
 }
 
 #[test]

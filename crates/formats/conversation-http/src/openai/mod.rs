@@ -64,7 +64,7 @@ use respan_gateway_conversation::{
     Assembled, AssembledBlock, AssembledItem, Block, Content, Finish, Input, Output, Reasoning,
     Role, Usage,
 };
-use respan_gateway_core::{BadRequest, Connection, Fault, Format, NativeValue};
+use respan_gateway_core::{Connection, Fault, Format, NativeValue};
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo};
 use serde_json::{Map, Value, json};
 
@@ -230,7 +230,7 @@ impl Schema for OpenAiChat {
         if chat.native.format() == Some(OPENAI)
             && chat.native.fields().get("n").is_some_and(several)
         {
-            return Err(BadRequest::fault(
+            return Err(Fault::bad_request(
                 "several choices (n > 1) cannot be represented",
             ));
         }
@@ -363,7 +363,7 @@ impl Schema for OpenAiChat {
     }
 
     fn error_body(fault: &Fault) -> Value {
-        let code = respan_gateway_http_faults::error_code(fault);
+        let code = fault.code();
         let error =
             json!({ "message": fault.message(), "type": code, "param": null, "code": code });
         json!({ "error": merge_details(error, fault) })

@@ -10,14 +10,12 @@ use super::{
     take_string, unb64, unix_now, unreadable, usage_extras, whole_json, write_field, write_usage,
 };
 use respan_gateway_conversation::{Media, MediaSource, Usage};
-use respan_gateway_core::{
-    BadRequest, Connection, Fault, Format, NativeFields, NativeValue, Truncated,
-};
+use respan_gateway_core::{Connection, Fault, Format, NativeFields, NativeValue};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::framing::sse;
+use respan_gateway_http::content;
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
-use respan_gateway_http::{ClientIo, Decoder, Encoder, ProviderIo, Sse, Whole};
-use respan_gateway_http_syntax::path_ends_with;
+use respan_gateway_http::path::path_ends_with;
+use respan_gateway_http::{All, ClientIo, Decoder, Encoder, ProviderIo, Sse, Whole};
 use respan_gateway_media::image::{Image, Input, Output, Partial, Start};
 use serde_json::{Map, Value, json};
 
@@ -161,7 +159,7 @@ fn post(
 ) -> Result<Box<dyn Encoder<Input>>, Fault> {
     if !input.is_edit() {
         if input.mask.is_some() {
-            return Err(BadRequest::fault("a mask needs an image to edit"));
+            return Err(Fault::bad_request("a mask needs an image to edit"));
         }
         post_to(head, GENERATIONS, "application/json")?;
         return Ok(sends(json_bytes(&fields(input, stream)?)?));
@@ -227,7 +225,7 @@ fn linked_edit(input: &Input, stream: bool) -> Result<Map<String, Value>, Fault>
 /// The decoder of a provider's answer of `head`: a stream of events, or one
 /// JSON body.
 fn read_response(head: &http::response::Parts) -> Option<Box<dyn Decoder<Output>>> {
-    Some(match sse::is_stream(head) {
+    Some(match content::is_stream(head) {
         true => Box::new(Sse::new(Streamed::default())),
         false => Box::new(Whole::new(decode_whole)),
     })
@@ -353,7 +351,7 @@ impl Streamed {
     fn end(&mut self) -> Result<(), Fault> {
         match self.done {
             true => Ok(()),
-            false => Err(Truncated::fault()),
+            false => Err(Fault::truncated()),
         }
     }
 }
@@ -367,7 +365,7 @@ fn response_encoder(
 ) -> Box<dyn Encoder<Output>> {
     if !is_true(asked.get("stream")) {
         super::content_type(head, "application/json");
-        return Box::new(Whole::new(encode_whole));
+        return Box::new(All::new(encode_whole));
     }
     super::content_type(head, "text/event-stream");
     let prefix = match path_ends_with(request.uri(), EDITS) {
@@ -526,6 +524,7 @@ impl Encoder<Output> for StreamEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use respan_gateway_core::FaultKind;
 
     fn edit(body: Value) -> Result<Input, Fault> {
         let head = http::Request::post(EDITS).body(()).unwrap_or_default();
@@ -616,6 +615,6 @@ mod tests {
     #[test]
     fn an_image_named_by_file_id_is_refused() {
         let refused = edit(json!({"prompt": "p", "images": [{"file_id": "file-1"}]}));
-        assert!(refused.is_err_and(|f| f.is::<BadRequest>()));
+        assert!(refused.is_err_and(|f| f.is(FaultKind::Client)));
     }
 }

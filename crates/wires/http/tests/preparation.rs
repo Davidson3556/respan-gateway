@@ -1,3 +1,4 @@
+use respan_gateway_core::Fault;
 use std::time::Duration;
 
 #[allow(dead_code)]
@@ -7,7 +8,6 @@ use h::bytes::Bytes;
 use h::http::{Request, StatusCode};
 use h::http_body_util::BodyExt;
 use http_support::LIMIT;
-use respan_gateway_core::BadRequest;
 use respan_gateway_core::futures::{SinkExt, future};
 use respan_gateway_core::{EventSink, EventStream};
 use respan_gateway_http as h;
@@ -30,7 +30,7 @@ fn request(opening: Opening) -> Request<h::Body> {
 }
 
 async fn preparation_failure(opening: Opening, panic: bool) {
-    let (io, answer) = h::ClientIo::accept(request(opening), h::Framing::Whole, LIMIT);
+    let (io, answer) = h::ClientIo::accept(request(opening), LIMIT);
     let (read, mut sink) = io
         .with_error(|fault, _, _| Bytes::from(fault.message().to_owned()))
         .bind(
@@ -56,7 +56,7 @@ async fn preparation_failure(opening: Opening, panic: bool) {
                 if panic {
                     panic!("preparation panic after constructing a sink");
                 }
-                Err::<EventSink<u8>, _>(BadRequest::fault("preparation failed"))
+                Err::<EventSink<u8>, _>(Fault::bad_request("preparation failed"))
             },
         );
     let _input = read.await.expect("incoming request opens");
@@ -80,12 +80,12 @@ async fn preparation_failure(opening: Opening, panic: bool) {
 
     let expected = if panic { "internal" } else { "bad_request" };
     assert_eq!(
-        respan_gateway_http_faults::error_code(&delivery.expect_err("delivery must fail")),
+        delivery.expect_err("delivery must fail").code(),
         expected,
         "{opening:?}"
     );
     assert_eq!(
-        respan_gateway_http_faults::error_code(&completion.expect_err("delivery must fail")),
+        completion.expect_err("delivery must fail").code(),
         expected,
         "{opening:?}"
     );
@@ -123,7 +123,7 @@ async fn preparation_panic_wins_after_constructing_each_response_sink() {
 #[tokio::test]
 async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
     for opening in [Opening::Delayed, Opening::Empty] {
-        let (io, answer) = h::ClientIo::accept(request(opening), h::Framing::Whole, LIMIT);
+        let (io, answer) = h::ClientIo::accept(request(opening), LIMIT);
         let (read, mut sink) = io
             .with_error(|fault, _, _| Bytes::from(fault.message().to_owned()))
             .bind(
@@ -151,10 +151,7 @@ async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
         let result = tokio::time::timeout(Duration::from_secs(1), sink.close())
             .await
             .expect("cancelled response handoff must not hang");
-        assert_eq!(
-            respan_gateway_http_faults::error_code(&result.expect_err("delivery must fail")),
-            "abandoned"
-        );
+        assert_eq!(result.expect_err("delivery must fail").code(), "abandoned");
     }
 }
 
@@ -162,8 +159,8 @@ async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
 /// does, fails `internal` and says so.
 #[tokio::test]
 async fn a_response_prepared_before_its_request_was_read_fails() {
-    let (io, _answer) = h::ClientIo::accept(request(Opening::Delayed), h::Framing::Whole, LIMIT);
-    let (_read, mut sink) = io.with_error(h::rules::plain).bind(
+    let (io, _answer) = h::ClientIo::accept(request(Opening::Delayed), LIMIT);
+    let (_read, mut sink) = io.bind(
         |_| {
             Box::new(|_: Bytes, out: &mut Vec<String>| {
                 out.push(String::new());
@@ -185,10 +182,7 @@ async fn a_response_prepared_before_its_request_was_read_fails() {
         .prepare(&mut EventStream::single(1_u8))
         .expect_err("unread request");
     assert_eq!(
-        (
-            respan_gateway_http_faults::error_code(&fault),
-            fault.message()
-        ),
+        (fault.code(), fault.message()),
         (
             "internal",
             "a response was prepared before its request was read"

@@ -31,7 +31,7 @@ async fn nested_accounts_reserve_all_or_nothing() {
     let fault = refused.err().map(|f| {
         (
             respan_gateway_http_faults::status(&f).as_u16(),
-            respan_gateway_http_faults::error_code(&f).to_owned(),
+            f.code().to_owned(),
         )
     });
     assert_eq!(fault, Some((402, INSUFFICIENT_FUNDS.to_owned())));

@@ -1,7 +1,7 @@
 """Types for the configuration mapping, for editor completion and checking.
 
 They describe what `Gateway(config=...)` takes (the format of
-`gateway.example.yaml`). At run time a config is a plain dict, and a mistake
+`gateway.example.toml`). At run time a config is a plain dict, and a mistake
 in one is a `ConfigError`.
 """
 
@@ -165,5 +165,4 @@ class GatewayConfig(TypedDict, total=False):
     shutdown_grace: Union[int, float, str]  # seconds, or "30s", "2m", "500ms"
     mcp: Dict[str, McpConfig]
     cors: CorsConfig
-    admin_writes: bool  # let the admin API and web UI rewrite the config file; needs a client key with admin: True
     ui: bool  # False also turns off the admin API behind models()/requests()/providers()

@@ -21,16 +21,15 @@
 //! into the call, and a session the server names ([`Output::session`]) is
 //! written into the head of the client's answer.
 
+use respan_gateway_core::FaultKind;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, ready};
 
 use respan_gateway_core::futures::{Sink, SinkExt};
-use respan_gateway_core::{
-    BadRequest, Connection, Details, EventSink, Fault, Format, RetryAfter, Truncated, Upstream,
-};
+use respan_gateway_core::{Connection, Details, EventSink, Fault, Format, RetryAfter};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::{self, sse};
+use respan_gateway_http::content;
 use respan_gateway_http::http::header::{ACCEPT, CONTENT_TYPE};
 use respan_gateway_http::http::request::Parts as RequestHead;
 use respan_gateway_http::http::response::Parts as ResponseHead;
@@ -38,7 +37,7 @@ use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http::{Request, Response};
 use respan_gateway_http::{self as h, ClientIo, ProviderIo, rules::bodiless};
 use respan_gateway_http::{Sse, Whole};
-use respan_gateway_http_faults::{ProviderError, Status, error_code};
+use respan_gateway_http_faults::{ProviderError, Status};
 use serde_json::{Value, json};
 
 use crate::{PARSE_ERROR, body, lock, messages, read};
@@ -98,7 +97,7 @@ impl StreamableHttp {
 
     /// Whether it is served at `path`, as cleaned.
     fn serves(&self, path: &str) -> bool {
-        let base = respan_gateway_http_syntax::clean_path(&self.path);
+        let base = respan_gateway_http::path::clean_path(&self.path);
         match &self.servers {
             None => path == base,
             Some(_) if self.root && path == base => true,
@@ -125,14 +124,14 @@ impl Format<ClientIo, Input, Output> for StreamableHttp {
     fn matches(&self, io: &ClientIo) -> bool {
         let head = io.request();
         [Method::POST, Method::GET, Method::DELETE].contains(head.method())
-            && self.serves(&respan_gateway_http_syntax::clean_path(head.uri().path()))
+            && self.serves(&respan_gateway_http::path::clean_path(head.uri().path()))
     }
 
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         let started = Started::default();
         let refused = started.clone();
         let io = io.with_error(move |fault, request, head| {
-            framing::default_content_type(head, JSON);
+            content::default_content_type(head, JSON);
             match refused.get() {
                 Some(answered) => lock(answered).refusal(fault),
                 None => Answered::of(request.body()).refusal(fault),
@@ -158,10 +157,10 @@ fn decode(head: &RequestHead, raw: Bytes) -> Result<Input, Fault> {
     if head.method == Method::POST {
         // JSON-RPC 2.0 (5.1): a body that is no JSON is a parse error.
         let json = serde_json::from_slice(&raw).map_err(|e| {
-            let fault = BadRequest::fault("the body is not JSON");
+            let fault = Fault::bad_request("the body is not JSON");
             fault.with(PARSE_ERROR).with_source(e)
         })?;
-        let bad = || BadRequest::fault("not a JSON-RPC message or batch");
+        let bad = || Fault::bad_request("not a JSON-RPC message or batch");
         (input.messages, input.batch) = messages(json).ok_or_else(bad)?;
     }
     input.session = header(&head.headers, SESSION)?;
@@ -179,15 +178,17 @@ fn header(headers: &HeaderMap, name: &str) -> Result<Option<String>, Fault> {
         return Ok(None);
     };
     if values.next().is_some() {
-        return Err(BadRequest::fault(format!("the {name} header is repeated")));
+        return Err(Fault::bad_request(format!("the {name} header is repeated")));
     }
     let value = match name {
         LAST_EVENT_ID => std::str::from_utf8(value.as_bytes()).ok(),
         _ => value.to_str().ok(),
     }
-    .ok_or_else(|| BadRequest::fault(format!("the {name} header is not text")))?;
+    .ok_or_else(|| Fault::bad_request(format!("the {name} header is not text")))?;
     if name == SESSION && !valid_session(value) {
-        return Err(BadRequest::fault("the MCP session ID is not visible ASCII"));
+        return Err(Fault::bad_request(
+            "the MCP session ID is not visible ASCII",
+        ));
     }
     Ok(Some(value.to_owned()))
 }
@@ -246,8 +247,8 @@ impl Format<ProviderIo, Output, Input> for StreamableHttp {
 fn call_head(head: &mut RequestHead, input: &Input, path: &str) -> Result<(), Fault> {
     head.method = input.method.clone();
     match &input.query {
-        Some(query) => respan_gateway_http_syntax::set_path(head, &format!("{path}?{query}"))?,
-        None => respan_gateway_http_syntax::set_path(head, path)?,
+        Some(query) => respan_gateway_http::path::set_path(head, &format!("{path}?{query}"))?,
+        None => respan_gateway_http::path::set_path(head, path)?,
     }
     // MCP: a client lists both in its `Accept`.
     let both = HeaderValue::from_static("application/json, text/event-stream");
@@ -282,23 +283,23 @@ fn response_events(
     if head.status.is_success()
         && (bodiless(sent.method(), head.status) || head.status == StatusCode::ACCEPTED)
     {
-        return (!pending.is_empty()).then(|| failing(Truncated::fault()));
+        return (!pending.is_empty()).then(|| failing(Fault::truncated()));
     }
     let Ok(session) = header(&head.headers, SESSION) else {
         let invalid = "the MCP server sent an invalid session header";
-        return Some(failing(Upstream::fault(invalid)));
+        return Some(failing(Fault::upstream(invalid)));
     };
     let output = move |read: Option<(Vec<Message>, bool)>| Output {
         messages: read.map(|(messages, _)| messages).unwrap_or_default(),
         session: session.clone(),
         ..Output::default()
     };
-    let inner: Box<dyn h::Decoder<Output>> = if sse::is_stream(head) {
+    let inner: Box<dyn h::Decoder<Output>> = if content::is_stream(head) {
         Box::new(Sse::new(move |raw: Bytes, out: &mut Vec<Output>| {
             let data = respan_gateway_sse::event_data(&raw);
             let messages = match data.filter(|d| !d.is_empty()) {
                 Some(data) => Some(read(data.as_bytes()).ok_or_else(|| {
-                    Upstream::fault("the MCP server sent an invalid JSON-RPC message")
+                    Fault::upstream("the MCP server sent an invalid JSON-RPC message")
                 })?),
                 None => None,
             };
@@ -312,7 +313,7 @@ fn response_events(
         Box::new(Whole::new(move |raw: Bytes, out: &mut Vec<Output>| {
             if !raw.is_empty() {
                 let messages = read(&raw).ok_or_else(|| {
-                    Upstream::fault("the MCP server sent an invalid JSON-RPC message")
+                    Fault::upstream("the MCP server sent an invalid JSON-RPC message")
                 })?;
                 out.push(output(Some(messages)));
             }
@@ -370,7 +371,7 @@ impl Correlated {
                 let Some(pending) = self.pending.iter().position(|p| *p == id) else {
                     // The reply and what follows it never go out.
                     out.truncate(at);
-                    return Err(Upstream::fault(
+                    return Err(Fault::upstream(
                         "the MCP server replied to an ID that is not pending",
                     ));
                 };
@@ -403,7 +404,7 @@ impl h::Decoder<Output> for Correlated {
         self.answered(out, from)?;
         match self.pending.is_empty() {
             true => Ok(()),
-            false => Err(Truncated::fault()),
+            false => Err(Fault::truncated()),
         }
     }
 
@@ -445,7 +446,7 @@ fn rpc_refusal(fault: Fault) -> Fault {
     let (Some(said), Some(Status(status))) = (said, fault.get::<Status>().copied()) else {
         return fault;
     };
-    let mut read = Upstream::fault(said.message)
+    let mut read = Fault::upstream(said.message)
         .with(Status(status))
         .with(RpcCode(said.code));
     if let Some(data) = said.data {
@@ -593,7 +594,7 @@ impl h::Encoder<Output> for Answer {
     fn encode(&mut self, output: &Output, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         let mut answered = lock(&self.answered);
         if !self.events && output.messages.iter().any(|m| m.request_id().is_some()) {
-            return Err(Upstream::fault(
+            return Err(Fault::upstream(
                 "a server request requires an MCP event stream",
             ));
         }
@@ -763,16 +764,16 @@ fn event(output: &Output) -> Result<Bytes, Fault> {
 }
 
 /// A fault as a JSON-RPC error to `id`: its [`RpcCode`], else -32600 for
-/// a `BadRequest` and -32603 for any other (JSON-RPC 2.0, 5.1), its
-/// [`error_code`] as `data.code`, with the fields of its [`Details`] beside it.
+/// a `Client` fault and -32603 for any other (JSON-RPC 2.0, 5.1), its
+/// [`Fault::code`] as `data.code`, with the fields of its [`Details`] beside it.
 fn failure(id: &Value, fault: &Fault) -> Value {
     let code = match fault.get::<RpcCode>() {
         Some(RpcCode(code)) => *code,
-        None if fault.is::<BadRequest>() => -32600,
+        None if fault.is(FaultKind::Client) => -32600,
         None => -32603,
     };
     let mut e = error(id.clone(), code, fault.message());
-    let mut data = json!({ "code": error_code(fault) });
+    let mut data = json!({ "code": fault.code() });
     if let Some(Details(details)) = fault.get() {
         data.as_object_mut()
             .into_iter()

@@ -179,7 +179,7 @@ impl ClientContext {
     }
 
     /// The request's one input as `T`, as filters left it. `Err` with
-    /// [`Internal`](crate::Internal) for another type or a
+    /// [`internal`](crate::Fault::internal) for another type or a
     /// streaming request; or the decoder's or a filter's `Err`. A plugin
     /// that vets input must refuse on `Err`.
     pub fn input<T: Any>(&self) -> Result<&T> {
@@ -190,9 +190,9 @@ impl ClientContext {
     /// of a whole request's one; a streaming request's as they arrive, read
     /// once, so no call gets them, taken when first awaited and given back
     /// if none was read. Ends with the client's inputs, `Err` if the body
-    /// broke, and [`Abandoned`](crate::Abandoned) if the
+    /// broke, and [`Abandoned`](crate::FaultKind::Abandoned) if the
     /// request ended first, never as if they were complete; one `Err` with
-    /// [`Internal`](crate::Internal) for another type or if
+    /// [`internal`](crate::Fault::internal) for another type or if
     /// another reader took or read them.
     pub fn take_inputs<T: Any + Clone + Send>(
         &mut self,
@@ -265,7 +265,7 @@ impl ClientContext {
     /// end at once. Output filters run after the provider edge's,
     /// the last added first.
     ///
-    /// `Err` with [`Internal`](crate::Internal) for another
+    /// `Err` with [`internal`](crate::Fault::internal) for another
     /// type or a whole input filtered to other than one; or the filter's
     /// `Err`, which reading or sending the input then gets too; or the
     /// failure the inputs ended with.
@@ -315,12 +315,12 @@ impl ClientContext {
     /// order: a wrap sees inputs after the filters and wraps added before it,
     /// outputs before them. Its stream is pulled as its reader reads; the
     /// request's end cuts what it wraps and what it gives with
-    /// [`Abandoned`](crate::Abandoned), never a clean end.
+    /// [`Abandoned`](crate::FaultKind::Abandoned), never a clean end.
     /// Inputs that fail end the call that reads them with that fault, so
     /// the client edge can say it. A call made before the wrap keeps the
     /// inputs as they were.
     ///
-    /// `Err` with [`Internal`](crate::Internal) for another
+    /// `Err` with [`internal`](crate::Fault::internal) for another
     /// type, or for the inputs of a whole request, whose one input came with
     /// its head: vet it here and edit it with a filter.
     pub fn wrap<T, S>(
@@ -355,11 +355,11 @@ impl ClientContext {
     /// first. A provider's
     /// error answer is `Ok` here and fails the response as read.
     ///
-    /// `Err` with [`Config`](crate::Config) if `provider` is
+    /// `Err` with [`config`](crate::Fault::config) if `provider` is
     /// unknown or cannot take the inputs; with
-    /// [`Internal`](crate::Internal) for a
+    /// [`internal`](crate::Fault::internal) for a
     /// [`Call::with_input`] of another kind or once the request ended; with
-    /// [`Abandoned`](crate::Abandoned) if the request ends
+    /// [`Abandoned`](crate::FaultKind::Abandoned) if the request ends
     /// while it is pending; or the `Err` of a hook, the codec or the
     /// transport.
     pub fn call(&mut self, provider: impl Into<String>) -> Call {

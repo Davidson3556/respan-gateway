@@ -88,8 +88,8 @@ at [localhost:8080/ui/](http://localhost:8080/ui/).
 ## The binary
 
 ```
-respan-gateway [serve]          serve ./gateway.yaml, or the providers in the environment
-respan-gateway init             write a commented gateway.yaml (-p groq enables a vendor;
+respan-gateway [serve]          serve ./gateway.toml, or the providers in the environment
+respan-gateway init             write a commented gateway.toml (-p groq enables a vendor;
                                 --client-key generates a client key and prints it once)
 respan-gateway check            what a config serves; exit 1 on a problem
 respan-gateway check --online   ... and call each provider and MCP server with its key
@@ -99,20 +99,20 @@ respan-gateway proxy --anthropic|--openai
                                 whole API with each client's own credentials
 ```
 
-Settings come from flags, the environment, or a `.env` file in the current
-directory (the environment wins). `respan-gateway --help` lists them:
+Settings come from flags, the environment, or the nearest `.env` file in the current
+directory or its parents (the environment wins). `respan-gateway --help` lists them:
 
 | Variable | Meaning |
 |---|---|
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), `GROQ_API_KEY`, ... | Provider keys; with no config file each is a provider |
 | `RESPAN_CONFIG` | The config file, as `--config` |
 | `RESPAN_LISTEN` | Where to listen, as `--listen` (`127.0.0.1:8080`, `localhost:8080`, `8080`) |
-| `PORT` | The port, on every address (`0.0.0.0`), if neither `--listen`, `RESPAN_LISTEN` nor `listen:` says; for hosts that hand it out |
-| `RESPAN_CLIENT_KEYS` | Client keys, comma separated, added to the config's `client_keys:` (named `key-N`) |
+| `PORT` | The port, on every address (`0.0.0.0`), if neither `--listen`, `RESPAN_LISTEN` nor `listen` says; for hosts that hand it out |
+| `RESPAN_CLIENT_KEYS` | Client keys, comma separated, added to the config's `client_keys` (named `key-N`) |
 | `RESPAN_LOG` | `text`, `json` or `off` (one stderr line per finished request), as `--log` |
 | `RESPAN_<VENDOR>_BASE_URL` | Moves a vendor's base URL when there is no config file |
 
-**Client keys.** With `client_keys: [env:GATEWAY_KEY]` (or
+**Client keys.** With `client_keys = ['env:GATEWAY_KEY']` (or
 `RESPAN_CLIENT_KEYS`) every request must carry one (`Authorization: Bearer`,
 `x-api-key` or `x-goog-api-key`); the gateway takes it off and no provider
 sees it. Without keys the gateway answers only to loopback and to
@@ -130,23 +130,37 @@ requests read the answers, including the `mcp-session-id` header; the preflight 
 still need a client key if keys are set. `origins: ["*"]` allows any page and
 needs `client_keys`. Without `cors`, nothing changes.
 
-**Configuration** is one YAML file, every setting shown in
-[`gateway.example.yaml`](gateway.example.yaml): providers (vendor presets or
+**Configuration** is one TOML file, every setting shown in
+[`gateway.example.toml`](gateway.example.toml): providers (vendor presets or
 spelled out), `formats` served, `client_keys`, `mcp` servers, `cors`,
-`listen`, `log`, `ui`, `admin_writes`, `body_limit`, `ws_message_limit`,
+`listen`, `log`, `ui`, `body_limit`, `ws_message_limit`,
 `prices` (adds a cost to each request), `shutdown_grace`, and `plugins`. Each
 compiled-in plugin is configured under its own name in `plugins`, and the
 gateway runs them in a fixed order whatever the file's:
 
-```yaml
-plugins:
-  routing: { models: [{ prefix: llama, provider: groq }], default: openai }
-  fallback: { after: { openai: [openai-eu] }, tries: 2 }   # off unless set
-  hedge: { after: { openai: [openai-eu] }, stagger: 200ms } # off unless set
-  request_log: { history: 1000, file: ./requests.jsonl }   # file: across restarts
-  mcp_aggregate: {}                                        # off unless set
-  tool_loop: { servers: [github] }                         # off unless set
+```toml
+[plugins.routing]
+default = "openai"
+models = [{ prefix = "llama", provider = "groq" }]
+
+[plugins.fallback]                      # Enable the backup provider first
+after = { openai = ["backup"] }
+tries = 2
+
+[plugins.request_log]
+history = 1000
+file = "./requests.jsonl"               # Keep history across restarts
 ```
+
+Configuration is TOML only. The gateway reads `gateway.toml` from the working
+directory, or uses provider keys from the environment when no file exists.
+`-c FILE` selects an explicit TOML file; `init -o FILE` generates one.
+Keep root settings above the first TOML table.
+
+Text logs use colored levels and dim timestamps on terminals; redirected
+output stays plain. Use `--color auto|always|never` (`RESPAN_COLOR`) to
+control this; automatic colors respect `NO_COLOR`. `--log json` emits
+unstyled structured logs and `--log off` disables request logs.
 
 Routing order: `name/model` goes to provider `name`; else `routing.models`
 (the first listed prefix a model matches); else the vendors' prefixes
@@ -162,8 +176,8 @@ keys are set) or `--watch` (on a change of the file) re-read the config and
 swap it in for new requests; open requests and sessions finish on the old
 one, the request log carries over, and an invalid config is refused while the
 old one keeps serving. A changed `listen` needs a restart. `SIGHUP` is unix-only; on Windows use
-`POST /ui/api/reload` or `--watch`. In Docker, a `listen:` in a mounted config
-beats `PORT`, so `listen: 127.0.0.1:8080` there is unreachable from outside.
+`POST /ui/api/reload` or `--watch`. In Docker, a `listen` in a mounted config
+beats `PORT`, so `listen = "127.0.0.1:8080"` there is unreachable from outside.
 
 **Client keys and admin.** A `client_keys` entry is a key, or `{ name, key,
 admin?, tools? }`. The admin API (`/ui/api/*`: every client's request records,
@@ -178,23 +192,8 @@ excludes a key). `tools` limits the tool-loop tools (`server__tool` globs, as
 `GET /ui/api/config` shows the config file as on disk with every secret
 (`client_keys`, provider and MCP `key`/`auth.key`, MCP `env` values and
 program arguments, and MCP URLs that carry credentials) as `"…"`, while an
-`env:NAME` reference stays as written; `POST /ui/api/config/validate` (YAML
-body) parses and composes it as a reload would, touching nothing, and answers
-`{ok}` or `{ok: false, error, line, column}`. With `admin_writes: true`, a
-config file, `PUT /ui/api/config` validates the body, writes it atomically
-(temp file, rename, the old file kept as `<file>.bak`; written in place where
-the file is a bind mount, through a symlink) and reloads; otherwise it is
-`403`. `admin_writes` needs a client key with `admin: true` (the config can
-start programs and read environment variables, so not every key may write it);
-the gateway refuses to start without one. A secret left as `"…"` in the body
-keeps the file's value at that place, so the redacted view can be edited and
-sent back (YAML comments are not kept when it does). A client key is shown as
-`{ name, key: "…" }` (a bare one as `key-<n>`, the name it is logged under) and
-kept by its name, so keys may be deleted, reordered or added; other lists
-(an MCP command's arguments) are kept by position, and a list that changed
-length next to a `"…"` is refused: give the values. A provider `base_url` with
-credentials (userinfo, query) is redacted likewise. The web UI's Config page does all of
-this.
+`env:NAME` reference stays as written. The Config page is read-only.
+Edit the TOML file on disk, then use Reload to apply changes.
 
 ### MCP servers
 
@@ -202,10 +201,13 @@ The gateway fronts [MCP](https://modelcontextprotocol.io) servers too, behind
 the same client keys and `Host`/`Origin` guard. Each one is served to MCP
 clients over streamable HTTP at `/mcp/{name}`:
 
-```yaml
-mcp:
-  github: { url: "https://api.githubcopilot.com/mcp/", key: "env:GITHUB_TOKEN" }  # HTTP upstream
-  files:  { command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"] }  # stdio
+```toml
+[mcp.github]                       # HTTP upstream
+url = "https://api.githubcopilot.com/mcp/"
+key = "env:GITHUB_TOKEN"
+
+[mcp.files]                        # stdio upstream
+command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"]
 ```
 
 A client points its MCP config at `http://localhost:8080/mcp/github` with a
@@ -225,24 +227,24 @@ in place of a model and the server as its provider; the Providers page and
 also asks each to `initialize`, ends the session, and says reachable,
 unauthorized or unreachable; a stdio server is started and stopped for it).
 With `client_keys`, a session belongs to the key that opened it: another key
-naming its `Mcp-Session-Id` gets 404. Name `mcp` in `formats:` if you list
+naming its `Mcp-Session-Id` gets 404. Name `mcp` in `formats` if you list
 formats.
 
 **OAuth for an HTTP server.** For a server that wants an OAuth access token
-rather than a fixed key, give it `oauth:` and the gateway gets its own token
+rather than a fixed key, give it `oauth` and the gateway gets its own token
 from the token endpoint (machine to machine) and sends it as the Bearer
 token:
 
-```yaml
-mcp:
-  crm:
-    url: "https://mcp.example.com/mcp"
-    oauth:
-      token_url: "https://auth.example.com/oauth/token"
-      client_id: "env:CRM_CLIENT_ID"
-      client_secret: "env:CRM_CLIENT_SECRET"
-      scopes: [read, write]          # optional
-      # refresh_token: "env:CRM_REFRESH_TOKEN"   # optional: see below
+```toml
+[mcp.crm]
+url = "https://mcp.example.com/mcp"
+
+[mcp.crm.oauth]
+token_url = "https://auth.example.com/oauth/token"
+client_id = "env:CRM_CLIENT_ID"
+client_secret = "env:CRM_CLIENT_SECRET"
+scopes = ["read", "write"]          # Optional
+# refresh_token = "env:CRM_REFRESH_TOKEN"
 ```
 
 Without `refresh_token` the gateway uses the **client credentials** grant;
@@ -258,17 +260,15 @@ The browser flow (authorization code with PKCE, with a person to approve it)
 is not supported: for such a server use a personal access token as `key`, or
 authorize elsewhere and set the `refresh_token` it gives you.
 
-**One endpoint for all of them.** `plugins: mcp_aggregate` turns on `/mcp`, which
-fronts the `mcp:` servers as a single MCP server, so a client configures one
+**One endpoint for all of them.** `[plugins.mcp_aggregate]` turns on `/mcp`, which
+fronts the `mcp` servers as a single MCP server, so a client configures one
 URL:
 
-```yaml
-plugins:
-  mcp_aggregate: {}                 # every mcp: server that has no forward_auth
-  # mcp_aggregate:
-  #   servers: [github, files]      # or name them; lists show them in this order
-  #   allow: ["github__search_*"]   # tool patterns, as tool_loop has them (default: all)
-  #   deny: ["files__write_*"]      # wins over allow
+```toml
+[plugins.mcp_aggregate]             # All servers without forward_auth by default
+# servers = ["github", "files"]     # Or choose servers, in list order
+# allow = ["github__search_*"]      # Default: all tools
+# deny = ["files__write_*"]         # Wins over allow
 ```
 
 A client has one session, owned by its key like any other; the gateway holds
@@ -301,23 +301,22 @@ gateway's own). Each server stays at `/mcp/{name}` too.
 
 ### Tool loop
 
-With `plugins: tool_loop` the gateway runs MCP tools for the model, so a client that knows
+With `[plugins.tool_loop]` the gateway runs MCP tools for the model, so a client that knows
 nothing of MCP gets answers that used them. It is off unless configured:
 
-```yaml
-plugins:
-  tool_loop:
-    servers: [github, files]  # mcp: servers whose tools the gateway offers and runs
-    # allow: ["github__search_*", "files__read_file"]  # only these tools (default: all)
-    # deny: ["files__write_*"]   # never these; wins over allow
-    models: [gpt, claude]     # optional model prefixes; default: every chat model
-    max_steps: 8              # most calls to the model per request
-    # timeout: 5m             # wall clock of one request's loop
-    # tool_timeout: 60s       # one tool call
-    # tool_list_ttl: 5m       # how long a server's tool list is kept
-    # parallel: 4             # most tool calls of one step that run at once
-    # max_result: 64KiB       # most bytes of one tool answer the model sees
-    # max_results: 256KiB     # most bytes of tool answers in one request
+```toml
+[plugins.tool_loop]
+servers = ["github", "files"]
+# allow = ["github__search_*", "files__read_file"]
+# deny = ["files__write_*"]         # Wins over allow
+models = ["gpt", "claude"]          # Optional model prefixes
+max_steps = 8                      # Model calls per request
+# timeout = "5m"                   # Whole request's loop
+# tool_timeout = "60s"             # One tool call
+# tool_list_ttl = "5m"             # Tool list cache lifetime
+# parallel = 4                     # Concurrent tool calls per step
+# max_result = "64KiB"             # One tool answer
+# max_results = "256KiB"           # All tool answers per request
 ```
 
 `allow` and `deny` name tools as the model has them, `<server>__<tool>` with
@@ -411,7 +410,7 @@ provider with a `base_url` and a format.
 
 `/ui/` shows providers, routes, each request live (and a playground for
 chat, images, transcription, speech and video) through the admin API under
-`/ui/api` (reads, reload, and the config editor behind `admin_writes`). `ui: false` turns both off. See
+`/ui/api` (read-only views and reload). `ui = false` turns both off. See
 [`apps/ui`](apps/ui/README.md).
 
 ## Python
@@ -434,7 +433,7 @@ runnable, tested [`examples/`](examples/README.md) of the
 |---|---|
 | `crates/core/` | The neutral kernel and plugin API: typed streams, plugins, lifecycle, faults |
 | `crates/kinds/` | Event types per kind: `conversation`, `media`, `realtime`, `mcp` |
-| `crates/wires/` | Bytes at both edges, no kind: `http` (bodies, credentials), `http-transport` (Reqwest), `http-faults`, `http-syntax`, `sse`, `ws` |
+| `crates/wires/` | Bytes at both edges, no kind: `http` (bodies, credentials, path matching), `http-transport` (Reqwest), `http-faults`, `sse`, `ws` |
 | `crates/formats/` | A kind over a wire, no vendor: `conversation-http`, `media-http`, `realtime-ws`, `mcp-http` |
 | `crates/providers/` | Every vendor, a file each: URL, key, models, formats, quirks |
 | `crates/plugins/routing`, `fallback`, `tool-loop` | First-party plugins: model routing; retry, fallback and race; the tool loop |
@@ -455,15 +454,15 @@ tests, and a 10-minute plugin really takes 10 minutes.
 
 | Milestone | Delivers | Status |
 |---|---|---|
-| M1 Relay kernel | Plugins, byte-for-byte relay, OpenAI and Anthropic, routing, YAML config, `check` | done |
+| M1 Relay kernel | Plugins, byte-for-byte relay, OpenAI and Anthropic, routing, TOML config, `check` | done |
 | M2 Plugin API | Calls of their own input, async stream filters, unread bodies | done |
 | M3 Formats | Gemini Live and `generateContent`, Responses over HTTP and WebSocket, OpenAI media endpoints, Veo | done |
 | M4 Plugins and examples | Fallback, hedge, limits, memo, billing | done, as [examples](examples/README.md) |
 | M5 Translation | Tools, images and reasoning between the chat formats | done |
 | M6 Hard cases | Realtime translation, video jobs, PII rewriting, admission | done |
 | M7 0.1 release | Release binaries, Docker image and PyPI wheels are built by tag workflows; first tag pending | open |
-| M8 MCP gateway | `mcp:` servers (streamable HTTP or stdio) served at `/mcp/{name}` with client keys, the request log and the web UI | done |
-| M9 Tool loop | `plugins: tool_loop` runs the tools of `mcp:` servers inside chat requests, for every chat format and provider | done |
+| M8 MCP gateway | `mcp` servers (streamable HTTP or stdio) served at `/mcp/{name}` with client keys, the request log and the web UI | done |
+| M9 Tool loop | `[plugins.tool_loop]` runs the tools of `mcp` servers inside chat requests, for every chat format and provider | done |
 
 ## License
 

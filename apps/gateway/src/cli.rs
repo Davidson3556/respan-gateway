@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ClientKey;
 use crate::init::Chosen;
-use crate::logging::{Level, LogFormat};
+use crate::logging::{Color, Level, LogFormat};
 use crate::{App, Config, ProxyVendor, Source, VERSION};
 use clap::{ArgGroup, Parser, Subcommand};
 use serde_json::{Map, json};
@@ -19,14 +19,14 @@ use serde_json::{Map, json};
 ///   export OPENAI_API_KEY=sk-...   # and/or ANTHROPIC_API_KEY, GEMINI_API_KEY, ...
 ///   respan-gateway
 ///
-/// It reads ./gateway.yaml if there is one; `respan-gateway init` writes a
-/// starter. A .env file in the current directory is read first, so keys and
+/// It reads ./gateway.toml if there is one; `respan-gateway init` writes a
+/// starter. The nearest .env file in the current directory or its parents is read first, so keys and
 /// the settings below may live there.
 #[derive(Debug, Parser)]
 #[command(name = "respan-gateway", version = VERSION, verbatim_doc_comment, after_help = EXAMPLES)]
 struct Cli {
-    /// The config file [default: ./gateway.yaml if present, else providers
-    /// from the environment]
+    /// The config file [default: gateway.toml,
+    /// then providers from the environment]
     #[arg(short, long, global = true, value_name = "FILE", env = "RESPAN_CONFIG")]
     config: Option<PathBuf>,
 
@@ -38,6 +38,16 @@ struct Cli {
     /// How requests are logged to stderr, in place of the config's
     #[arg(long, global = true, value_name = "FORMAT", env = "RESPAN_LOG")]
     log: Option<LogFormat>,
+
+    /// Color in terminal output; auto respects NO_COLOR and redirected output
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value = "auto",
+        env = "RESPAN_COLOR"
+    )]
+    color: Color,
 
     /// While serving, reload the config file when it changes (checked every
     /// 2 s). SIGHUP and `POST /ui/api/reload` reload it either way
@@ -75,7 +85,7 @@ enum Command {
         /// and `VENDOR=KEY` writes the key itself into the file
         #[arg(short, long, value_name = "VENDOR[=KEY]")]
         provider: Vec<String>,
-        /// Generate a client key (`sk-gw-...`), write it into `client_keys:`
+        /// Generate a client key (`sk-gw-...`), write it into `client_keys`
         /// and print it once: what a gateway beyond localhost needs
         #[arg(long)]
         client_key: bool,
@@ -103,25 +113,27 @@ enum Command {
 }
 
 const EXAMPLES: &str = "Examples:
-  respan-gateway                    Serve ./gateway.yaml, or the providers in the environment
-  respan-gateway init               Write a starter ./gateway.yaml
+  respan-gateway                    Serve ./gateway.toml, or the providers in the environment
+  respan-gateway init               Write a starter ./gateway.toml
   respan-gateway init --client-key  ... with a generated client key, printed once
   respan-gateway init -p groq       Write a starter that also enables groq, key env:GROQ_API_KEY
-  respan-gateway check -c my.yaml   Check a config and print what it serves
+  respan-gateway check -c my.toml   Check a config and print what it serves
   respan-gateway check --online     ... and call each provider with its key, and list the tool loop's tools
   respan-gateway models             List the models the providers offer
   respan-gateway proxy --anthropic  Sit in front of Claude Code
 
-Environment (also read from ./.env):
+Environment (also read from the nearest .env in this directory or its parents):
   OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, ...
                      Provider keys; with no config file each is a provider
   RESPAN_CONFIG      The config file, as --config
   RESPAN_LISTEN      Where to listen, as --listen
   PORT               The port to listen on, on every address (0.0.0.0), if
-                     neither --listen, RESPAN_LISTEN nor the config's `listen:` says
+                     neither --listen, RESPAN_LISTEN nor the config's `listen` says
   RESPAN_CLIENT_KEYS Client keys, comma separated, added to the config's
-                     `client_keys:`; a gateway on a non-loopback address needs one
+                     `client_keys`; a gateway on a non-loopback address needs one
   RESPAN_LOG         text, json or off, as --log
+  RESPAN_COLOR       auto, always or never, as --color
+  NO_COLOR           Disable automatic colors when nonempty
   RESPAN_<VENDOR>_BASE_URL
                      Moves a vendor's base URL when there is no config file
 
@@ -139,7 +151,7 @@ where
     run_with(args, None).await
 }
 
-/// Runs the command line as the binary does: reads `./.env` if there is
+/// Runs the command line as the binary does: reads the nearest `.env` if there is
 /// one, then runs on a runtime of its own.
 pub fn execute<I, T>(args: I) -> u8
 where
@@ -159,15 +171,17 @@ where
     }
 }
 
-/// Reads `./.env` into the environment, never over a variable already set;
-/// the file if there was one.
+/// Reads the nearest `.env` in the working directory or its parents,
+/// without replacing variables already set in the environment.
 fn load_dotenv() -> Result<Option<PathBuf>, String> {
-    let path = Path::new(".env");
-    if !path.is_file() {
-        return Ok(None);
+    match dotenvy::dotenv() {
+        Ok(path) => Ok(Some(path)),
+        Err(e) if e.not_found() => Ok(None),
+        Err(dotenvy::Error::LineParse(..)) => Err(
+            ".env: invalid syntax; use KEY=value, with matching quotes around quoted values".into(),
+        ),
+        Err(e) => Err(format!(".env: {e}")),
     }
-    dotenvy::from_path(path).map_err(|e| format!(".env: {e}"))?;
-    Ok(Some(path.to_owned()))
 }
 
 async fn run_with<I, T>(args: I, dotenv: Option<PathBuf>) -> u8
@@ -182,6 +196,7 @@ where
             return u8::try_from(e.exit_code()).unwrap_or(FAILURE);
         }
     };
+    cli.color.apply();
     let command = cli.command.unwrap_or(Command::Serve);
     let models = matches!(command, Command::Models);
     let online = matches!(command, Command::Check { online: true });
@@ -239,15 +254,15 @@ where
     if let Some(mut refusal) = app.open_refusal(app.listen()) {
         if config_beats_port {
             refusal.push_str(
-                "\n  The config's `listen:` wins over PORT, so PORT is ignored; to follow \
-                 PORT, remove `listen:` from the config.",
+                "\n  The config's `listen` wins over PORT, so PORT is ignored; to follow \
+                 PORT, remove `listen` from the config.",
             );
         }
         return fail(&refusal);
     }
     if check {
-        println!("{}", app.report());
-        println!("{source}: ok");
+        println!("{}", crate::logging::report(&app.report()));
+        println!("{source}: {}", crate::logging::paint("ok", "1;32", false));
         if online {
             let (report, all_reachable) = app.probe().await;
             println!("\n{report}");
@@ -280,7 +295,7 @@ where
             let fields = fields.as_object().cloned().unwrap_or_else(Map::new);
             eprintln!("{}", log.line(Level::Info, "listening", fields));
         }
-        _ => println!("{}", app.banner(bound)),
+        _ => println!("{}", crate::logging::report(&app.banner(bound))),
     }
     #[cfg(unix)]
     if let Some(hangup) = hangup {
@@ -428,14 +443,12 @@ fn init(output: &Path, force: bool, providers: &[String], client_key: bool) -> u
         },
         false => None,
     };
-    if let Err(e) = write_config(
-        output,
-        &crate::init::starter(&chosen, key.as_deref()),
-        private,
-    ) {
+    let starter = crate::init::starter(&chosen, key.as_deref());
+    if let Err(e) = write_config(output, &starter, private) {
         return fail(&format!("write {}: {e}", output.display()));
     }
     let path = output.display();
+    println!("wrote {path}");
     for c in &chosen {
         let id = c.vendor.id;
         match (c.is_literal(), c.variable()) {
@@ -446,7 +459,7 @@ fn init(output: &Path, force: bool, providers: &[String], client_key: bool) -> u
             ),
             (_, Some(var)) if std::env::var(var).is_ok_and(|v| !v.is_empty()) => {}
             (_, Some(var)) => {
-                println!("{id}: set {var} (export {var}=..., or put it in .env) before you serve.")
+                println!("set {var} in .env")
             }
             _ => {}
         }
@@ -458,29 +471,8 @@ fn init(output: &Path, force: bool, providers: &[String], client_key: bool) -> u
              gateway takes it off, no provider sees it.\n"
         );
     }
-    let mut found = crate::init::detected_vendors();
-    if !chosen.is_empty() {
-        for c in &chosen {
-            if !found.contains(&c.vendor.id) {
-                found.push(c.vendor.id);
-            }
-        }
-        println!(
-            "wrote {path} with {} enabled.\n\
-             Next: `respan-gateway check --online`, then `respan-gateway`.",
-            found.join(", ")
-        );
-    } else if found.is_empty() {
-        println!(
-            "wrote {path} with openai enabled; no provider key is in the environment.\n\
-             Next: set OPENAI_API_KEY (export it, or put it in .env), then `respan-gateway check`."
-        );
-    } else {
-        println!(
-            "wrote {path} with {} enabled, from your environment.\n\
-             Next: `respan-gateway check`, then `respan-gateway`.",
-            found.join(", ")
-        );
+    if chosen.is_empty() && crate::init::detected_vendors().is_empty() {
+        println!("set OPENAI_API_KEY in .env");
     }
     SUCCESS
 }
@@ -508,6 +500,9 @@ const SUCCESS: u8 = 0;
 const FAILURE: u8 = 1;
 
 fn fail(message: &str) -> u8 {
-    eprintln!("error: {message}");
+    eprintln!(
+        "{} {message}",
+        crate::logging::paint("error:", "1;31", true)
+    );
     FAILURE
 }

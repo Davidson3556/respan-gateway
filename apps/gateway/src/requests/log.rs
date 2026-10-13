@@ -214,11 +214,9 @@ impl RequestLog {
     pub(super) fn start(&self, req: &Request) -> Arc<Entry> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let query_model = req.uri().query().and_then(|q| {
-            let pairs = q.split('&').filter_map(|pair| pair.split_once('='));
-            pairs
-                .into_iter()
-                .find(|(name, _)| *name == "model")
-                .map(|(_, m)| clip(m))
+            form_urlencoded::parse(q.as_bytes())
+                .find(|(name, _)| name == "model")
+                .map(|(_, model)| clip(&model))
         });
         let record = RequestRecord {
             id: format!("r_{id:06}"),
@@ -328,30 +326,27 @@ impl RequestLog {
     }
 }
 
-/// One finished request, in a line: `r_000001 POST /v1/chat/completions
-/// 200 812ms gpt-4o-mini -> openai (client app, ttfb 230ms, 12 in / 40 out
-/// tokens)`.
+/// One finished request, with the outcome first and secondary details separated.
 fn line(r: &RequestRecord) -> String {
     let status = r.status.map_or("-".to_owned(), |s| s.to_string());
     let mut line = format!(
-        "{} {} {} {status} {}ms",
-        r.id,
+        "{status}  {:>7}  {:<4} {}",
+        r.duration_ms.map_or_else(|| "-".into(), duration),
         r.method,
-        r.path,
-        r.duration_ms.unwrap_or_default()
+        r.path
     );
     if let Some(model) = &r.model {
-        line.push_str(&format!(" {model}"));
+        line.push_str(&format!("  |  {model}"));
     }
     if let Some(provider) = &r.provider {
-        line.push_str(&format!(" -> {provider}"));
+        line.push_str(&format!(" via {provider}"));
     }
     let mut details = Vec::new();
     if let Some(client) = &r.client {
         details.push(format!("client {client}"));
     }
     if let Some(ttfb) = r.ttfb_ms.filter(|_| r.stream) {
-        details.push(format!("ttfb {ttfb}ms"));
+        details.push(format!("first token {}", duration(ttfb)));
     }
     if let Some(u) = r.usage {
         if u.input_tokens + u.output_tokens > 0 || u.seconds.is_none() {
@@ -369,12 +364,21 @@ fn line(r: &RequestRecord) -> String {
         details.push(format!("{} steps, {tools} tool calls", r.steps.len()));
     }
     if !details.is_empty() {
-        line.push_str(&format!(" ({})", details.join(", ")));
+        line.push_str(&format!("  |  {}", details.join(" · ")));
     }
+    line.push_str(&format!("  |  {}", r.id));
     if let Some(error) = &r.error {
-        line.push_str(&format!(": {error}"));
+        line.push_str(&format!("  |  {error}"));
     }
     line
+}
+
+fn duration(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.2}s", ms as f64 / 1000.0)
+    }
 }
 
 /// `line` with its control characters escaped, so one request is one line.
@@ -435,7 +439,7 @@ mod tests {
         };
         assert_eq!(
             line(&record),
-            "r_000001 POST /v1/chat/completions 200 812ms gpt-4o-mini -> openai (ttfb 230ms, 12 in / 40 out tokens)"
+            "200    812ms  POST /v1/chat/completions  |  gpt-4o-mini via openai  |  first token 230ms · 12 in / 40 out tokens  |  r_000001"
         );
     }
 }

@@ -1,7 +1,7 @@
 //! Bounded Poppler conversion shared by the example and external validation.
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use respan_gateway_core::{BadRequest, ErrorCode, Fault};
+use respan_gateway_core::{ErrorCode, Fault};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http_faults::Status;
 
@@ -16,9 +16,9 @@ pub(crate) async fn extract_pdf_with(
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let bytes = STANDARD
         .decode(encoded)
-        .map_err(|_| BadRequest::fault("invalid PDF base64"))?;
+        .map_err(|_| Fault::bad_request("invalid PDF base64"))?;
     if !bytes.starts_with(b"%PDF-") {
-        return Err(BadRequest::fault("not a PDF"));
+        return Err(Fault::bad_request("not a PDF"));
     }
     let mut child = tokio::process::Command::new(converter)
         .args(["-enc", "UTF-8", "-", "-"])
@@ -42,11 +42,11 @@ pub(crate) async fn extract_pdf_with(
         input
             .write_all(&bytes)
             .await
-            .map_err(|e| BadRequest::fault("the PDF could not be read").with_source(e))?;
+            .map_err(|e| Fault::bad_request("the PDF could not be read").with_source(e))?;
         input
             .shutdown()
             .await
-            .map_err(|e| BadRequest::fault("the PDF could not be read").with_source(e))
+            .map_err(|e| Fault::bad_request("the PDF could not be read").with_source(e))
     };
     let read = async move {
         let mut text = Vec::new();
@@ -58,7 +58,7 @@ pub(crate) async fn extract_pdf_with(
         if text.len() > limit {
             return Err(too_large());
         }
-        String::from_utf8(text).map_err(|_| BadRequest::fault("the PDF text is not UTF-8"))
+        String::from_utf8(text).map_err(|_| Fault::bad_request("the PDF text is not UTF-8"))
     };
     let wait = async {
         let status = child
@@ -68,7 +68,7 @@ pub(crate) async fn extract_pdf_with(
         if status.success() {
             Ok(())
         } else {
-            Err(BadRequest::fault("the PDF is malformed or encrypted"))
+            Err(Fault::bad_request("the PDF is malformed or encrypted"))
         }
     };
     let (_, text, _) = tokio::try_join!(write, read, wait)?;

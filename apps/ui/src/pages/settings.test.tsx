@@ -40,10 +40,10 @@ describe("SettingsPage", () => {
   it("shows a config file path and a gateway that is not listening yet", async () => {
     serve({
       "GET /ui/api/overview": () =>
-        json({ ...overview, listen: null, config_source: "file", config_path: "/etc/respan/gateway.yaml" }),
+        json({ ...overview, listen: null, config_source: "file", config_path: "/etc/respan/gateway.toml" }),
     });
     renderSettings();
-    expect(await screen.findByText("Config file (/etc/respan/gateway.yaml)")).toBeInTheDocument();
+    expect(await screen.findByText("Config file (/etc/respan/gateway.toml)")).toBeInTheDocument();
     expect(screen.getByText("not listening yet")).toBeInTheDocument();
   });
 

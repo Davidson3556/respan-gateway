@@ -1,4 +1,4 @@
-//! The tool loop of the binary: `plugins: tool_loop` in the config names `mcp:` servers
+//! The tool loop of the binary: `plugins.tool_loop` in the config names `mcp` servers
 //! whose tools the gateway offers to the model in chat requests and runs for
 //! it ([`respan_gateway_plugin_tool_loop`] is the loop; this is the tools).
 //!
@@ -27,7 +27,7 @@ use respan_gateway_core::{
     Call, ClientContext, Extensions, Fault, Gateway, Plugin, Response, async_trait,
 };
 use respan_gateway_http::http::{self, Method};
-use respan_gateway_http::{Body, Framing};
+use respan_gateway_http::{Body};
 use respan_gateway_mcp::{Input, Message, Output, PROTOCOL, RpcError, answer};
 use respan_gateway_mcp_http::Owner;
 use respan_gateway_plugin_tool_loop::{
@@ -49,8 +49,8 @@ const CLOSING: Duration = Duration::from_secs(10);
 /// How long a server's tool list is kept unless the config says.
 const DEFAULT_CACHE: Duration = Duration::from_secs(300);
 
-/// Checks `plugins: tool_loop` against the servers: every tool server is an
-/// `mcp:` server that is served, and takes no client's credentials.
+/// Checks `plugins.tool_loop` against the servers: every tool server is an
+/// `mcp` server that is served, and takes no client's credentials.
 pub fn check(
     tool_loop: &ToolLoopConfig,
     servers: &[McpServer],
@@ -211,7 +211,7 @@ impl Closer {
         let mut marks = Extensions::new();
         marks.insert(mark);
         request.extensions_mut().insert(marks);
-        let sent = respan_gateway_http::handle(gateway, request, Framing::Whole, 1 << 20);
+        let sent = respan_gateway_http::handle(gateway, request, 1 << 20);
         let work = async {
             let (response, done) = sent.await;
             let body = respan_gateway_http::http_body_util::BodyExt::collect(response.into_body());

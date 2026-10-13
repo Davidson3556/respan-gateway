@@ -1,7 +1,7 @@
 //! End-to-end tests of the shipped binary.
 //!
 //! Each test starts `respan-gateway` itself (`CARGO_BIN_EXE_respan-gateway`)
-//! on a free port, with a temp YAML config whose providers are `mockllm`
+//! on a free port, with a temp TOML config whose providers are `mockllm`
 //! fakes on localhost: `FakeOpenAi`, `FakeAnthropic` and `FakeGemini` check
 //! each request by the provider's own rules and answer in its exact
 //! framing, streams, sessions and breaks included. Clients speak real HTTP
@@ -36,27 +36,15 @@ const CLAUDE: &str = "claude-sonnet-4-5";
 /// own, serving both formats, as the default target.
 fn one_provider(format: &str, base_url: &str) -> String {
     format!(
-        "providers:
-  p: {{ formats: {format}, base_url: '{base_url}' }}
-formats: [openai-chat, anthropic-messages]
-plugins: {{ routing: {{ default: p }} }}
-"
+        "providers = {{ p = {{ formats = \"{format}\", base_url = \"{base_url}\" }} }}\nformats = [\"openai-chat\", \"anthropic-messages\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
     )
 }
 
 /// OpenAI and Anthropic providers with keys of their own, Claude models
-/// routed to Anthropic, the rest to OpenAI, as in `gateway.example.yaml`.
+/// routed to Anthropic, the rest to OpenAI, as in `gateway.example.toml`.
 fn both(openai: &str, anthropic: &str) -> String {
     format!(
-        "providers:
-  openai: {{ formats: openai-chat, base_url: '{openai}', auth: {{ type: bearer, key: sk-gw-openai }} }}
-  anthropic: {{ formats: anthropic-messages, base_url: '{anthropic}', auth: {{ type: header, name: x-api-key, key: sk-gw-anthropic }} }}
-formats: [openai-chat, anthropic-messages]
-plugins:
-  routing:
-    models: [{{ prefix: claude, provider: anthropic }}]
-    default: openai
-"
+        "providers = {{ openai = {{ formats = \"openai-chat\", base_url = \"{openai}\", auth = {{ type = \"bearer\", key = \"sk-gw-openai\" }} }}, anthropic = {{ formats = \"anthropic-messages\", base_url = \"{anthropic}\", auth = {{ type = \"header\", name = \"x-api-key\", key = \"sk-gw-anthropic\" }} }} }}\nformats = [\"openai-chat\", \"anthropic-messages\"]\nplugins = {{ routing = {{ models = [{{ prefix = \"claude\", provider = \"anthropic\" }}], default = \"openai\" }} }}\n"
     )
 }
 
@@ -317,11 +305,7 @@ fn body_of<P: Provider>(mock: &Mock<P>, i: usize) -> Value {
 async fn a_provider_with_its_own_key_replaces_the_clients() {
     let openai = FakeOpenAi::start().await;
     let config = format!(
-        "providers:
-  p: {{ formats: openai-chat, base_url: '{}', auth: {{ type: bearer, key: sk-own }} }}
-formats: [openai-chat]
-plugins: {{ routing: {{ default: p }} }}
-",
+        "providers = {{ p = {{ formats = \"openai-chat\", base_url = \"{}\", auth = {{ type = \"bearer\", key = \"sk-own\" }} }} }}\nformats = [\"openai-chat\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n",
         openai.base_url()
     );
     let gw = Gateway::start(&config).await;
@@ -478,7 +462,7 @@ async fn an_openai_client_gets_an_anthropic_stream_in_openai_shape() {
     let got = &anthropic.requests()[0];
     assert_eq!(got.path, MESSAGES);
     assert_eq!(got.body["stream"], true);
-    assert!(got.body["max_tokens"].is_u64(), "required: {}", got.body);
+    assert!(got.body["max_tokens"].is_u64(), "required = {  }", got.body);
 }
 
 #[tokio::test]
@@ -532,15 +516,7 @@ async fn an_anthropic_client_gets_an_openai_stream_in_anthropic_shape() {
 async fn an_openai_clients_key_does_not_reach_an_anthropic_provider_without_one() {
     let (openai, anthropic) = (FakeOpenAi::start().await, FakeAnthropic::start().await);
     let config = format!(
-        "providers:
-  openai: {{ formats: openai-chat, base_url: '{}' }}
-  anthropic: {{ formats: anthropic-messages, base_url: '{}' }}
-formats: [openai-chat]
-plugins:
-  routing:
-    models: [{{ prefix: claude, provider: anthropic }}]
-    default: openai
-",
+        "providers = {{ openai = {{ formats = \"openai-chat\", base_url = \"{}\" }}, anthropic = {{ formats = \"anthropic-messages\", base_url = \"{}\" }} }}\nformats = [\"openai-chat\"]\nplugins = {{ routing = {{ models = [{{ prefix = \"claude\", provider = \"anthropic\" }}], default = \"openai\" }} }}\n",
         openai.base_url(),
         anthropic.base_url()
     );
@@ -967,7 +943,7 @@ async fn an_unknown_path_is_a_404() {
     let openai = FakeOpenAi::start().await;
     // Without the web UI, which takes `/`.
     let config = one_provider("openai-chat", &openai.base_url());
-    let gw = Gateway::start(&format!("ui: false\n{config}")).await;
+    let gw = Gateway::start(&format!("ui = false\n{config}")).await;
 
     for (verb, path) in [
         (reqwest::Method::POST, "/v1/nope"),
@@ -1223,7 +1199,7 @@ fn check_says_ok_for_a_good_config_and_fails_a_bad_one() {
     assert!(out.status.success(), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stdout).ends_with(": ok\n"));
 
-    let bad = support::write_config("formats: [nope]\n");
+    let bad = support::write_config("formats = [\"nope\"]\n");
     let out = std::process::Command::new(bin)
         .args(["--config", bad.to_str().unwrap(), "check"])
         .output()
@@ -1305,11 +1281,7 @@ async fn the_chat_format_still_answers_its_own_path_before_the_catch_all() {
 async fn serving_passthrough_needs_a_provider_of_that_format() {
     let bin = env!("CARGO_BIN_EXE_respan-gateway");
     let config = support::write_config(
-        "providers:
-  p: { formats: openai-chat, base_url: 'http://127.0.0.1:1/v1' }
-formats: [openai-chat, passthrough]
-plugins: { routing: { default: p } }
-",
+        "providers = { p = { formats = \"openai-chat\", base_url = \"http://127.0.0.1:1/v1\" } }\nformats = [\"openai-chat\", \"passthrough\"]\nplugins = { routing = { default = \"p\" } }\n",
     );
     let out = std::process::Command::new(bin)
         .args(["--config", config.to_str().unwrap(), "check"])
@@ -1395,7 +1367,7 @@ async fn proxy_relays_codex_the_responses_api_stream_byte_exact() {
 
 #[test]
 fn proxy_rejects_explicit_config_in_either_argument_order() {
-    let config = support::write_config("formats: []\n");
+    let config = support::write_config("formats = []\n");
     let path = config.to_str().unwrap();
     for args in [
         vec!["--config", path, "proxy", "--openai", "--listen", "invalid"],
@@ -1458,7 +1430,7 @@ fn proxy_without_a_vendor_or_with_a_bad_address_is_a_usage_error() {
 }
 
 #[test]
-fn proxy_url_with_a_quote_is_not_parsed_as_yaml() {
+fn proxy_url_with_a_quote_is_not_parsed_as_toml() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
         .args([
             "proxy",
@@ -1531,18 +1503,14 @@ async fn until(ws: &mut Ws, last: impl Fn(&Value) -> bool) -> String {
 }
 
 #[tokio::test]
-async fn sessions_from_yaml_relay_with_the_gateways_keys_and_close_1001_on_sigterm() {
+async fn sessions_from_toml_relay_with_the_gateways_keys_and_close_1001_on_sigterm() {
     let openai = FakeOpenAi::start().await;
     let gemini = mockllm::FakeGemini::start().await;
     openai.answer(Answer::text("hi there"));
     gemini.answer(Answer::text("Paris"));
     let ws = |base: String| base.replace("http://", "ws://");
     let mut gw = Gateway::start(&format!(
-        "providers:
-  realtime: {{ formats: openai-realtime, base_url: '{}', auth: {{ type: bearer, key: sk-gw }} }}
-  live: {{ formats: gemini-live, base_url: '{}', auth: {{ type: header, name: x-goog-api-key, key: AIza-gw }} }}
-formats: [openai-realtime, gemini-live]
-",
+        "providers = {{ realtime = {{ formats = \"openai-realtime\", base_url = \"{}\", auth = {{ type = \"bearer\", key = \"sk-gw\" }} }}, live = {{ formats = \"gemini-live\", base_url = \"{}\", auth = {{ type = \"header\", name = \"x-goog-api-key\", key = \"AIza-gw\" }} }} }}\nformats = [\"openai-realtime\", \"gemini-live\"]\n",
         ws(openai.base_url()),
         ws(gemini.base_url())
     ))
@@ -1567,8 +1535,7 @@ formats: [openai-realtime, gemini-live]
     assert_eq!(upgrade.header("authorization"), Some("Bearer sk-gw"));
 
     // Without its ?model=, a Gemini client would go to the realtime default.
-    let live = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent\
-        ?model=live/gemini-live";
+    let live = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?model=live/gemini-live";
     let (mut live, chosen) = session(&gw, live, "").await;
     assert_eq!(chosen, None);
     let setup = json!({"setup": {"model": "models/gemini-live",
@@ -1632,17 +1599,13 @@ fn pcm(ms: usize) -> Vec<u8> {
 const LIVE: &str = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
 #[tokio::test]
-async fn realtime_sessions_from_yaml_cross_vendors_by_the_model_they_ask_for() {
+async fn realtime_sessions_from_toml_cross_vendors_by_the_model_they_ask_for() {
     use realtime::{ToolCall, Turn};
     let openai = realtime::openai::start().await;
     let gemini = realtime::gemini::start().await;
     let http = |ws: String| ws.replace("ws://", "http://");
     let mut gw = Gateway::start(&format!(
-        "providers:
-  openai: {{ vendor: openai, base_url: '{}', key: sk-gw }}
-  gemini: {{ vendor: gemini, base_url: '{}/v1beta/openai', key: AIza-gw }}
-formats: [openai-realtime, gemini-live]
-",
+        "providers = {{ openai = {{ vendor = \"openai\", base_url = \"{}\", key = \"sk-gw\" }}, gemini = {{ vendor = \"gemini\", base_url = \"{}/v1beta/openai\", key = \"AIza-gw\" }} }}\nformats = [\"openai-realtime\", \"gemini-live\"]\n",
         http(openai.base_url()),
         http(gemini.base_url())
     ))
@@ -1806,7 +1769,7 @@ async fn a_realtime_session_is_one_record_that_ends_with_the_session_and_sums_it
     use realtime::{Turn, Usage};
     let openai = realtime::openai::start().await;
     let gw = Gateway::start(&format!(
-        "providers:\n  openai: {{ vendor: openai, base_url: '{}', key: sk-gw }}\nformats: [openai-realtime]\n",
+        "providers = {{ openai = {{ vendor = \"openai\", base_url = \"{}\", key = \"sk-gw\" }} }}\nformats = [\"openai-realtime\"]\n",
         openai.base_url().replace("ws://", "http://")
     ))
     .await;

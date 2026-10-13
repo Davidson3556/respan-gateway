@@ -6,7 +6,7 @@ mod session;
 #[cfg(test)]
 mod tests;
 
-use respan_gateway_core::{BadRequest, Connection, Fault, Format};
+use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::{ClientIo, ProviderIo, raw::Original};
 use respan_gateway_realtime::{Input, Output};
@@ -96,7 +96,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiRealtime {
         let chosen = io.extensions().get::<SessionModel>().map(|m| m.0.clone());
         let asked = || requested_model(io.extensions().get::<Original>()?);
         let model = chosen.or_else(asked).ok_or_else(|| {
-            BadRequest::fault(
+            Fault::bad_request(
                 "OpenAI Realtime takes its model at connect: name it with ?model= on the session's URL",
             )
         })?;

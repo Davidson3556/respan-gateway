@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
 #![doc = include_str!("../README.md")]
 
+use respan_gateway_core::Fault;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -9,10 +10,9 @@ use axum::extract::Request;
 use axum::response::Response;
 use http_body_util::BodyExt;
 use hyper_util::rt::TokioIo;
+use respan_gateway_core::Gateway;
 use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::future::{BoxFuture, Shared};
-use respan_gateway_core::{BadRequest, Gateway};
-use respan_gateway_http::Framing;
 use respan_gateway_http::http::header;
 use respan_gateway_http::http::request::Parts as RequestHead;
 use respan_gateway_ws::Limits;
@@ -122,9 +122,9 @@ impl Host {
 async fn whole(gateway: Gateway, req: Request, limit: &BodyLimit) -> Response {
     let (head, body) = req.into_parts();
     let max = limit(&head);
-    let broke = |_| BadRequest::fault("the request body broke off");
+    let broke = |_| Fault::bad_request("the request body broke off");
     let req = Request::from_parts(head, body.map_err(broke).boxed_unsync());
-    let (resp, _ended) = respan_gateway_http::handle(&gateway, req, Framing::Whole, max).await;
+    let (resp, _ended) = respan_gateway_http::handle(&gateway, req, max).await;
     let (parts, body) = resp.into_parts();
     Response::from_parts(parts, axum::body::Body::new(body))
 }

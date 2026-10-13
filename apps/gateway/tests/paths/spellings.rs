@@ -8,12 +8,7 @@ use crate::support::Gateway;
 async fn no_spelling_of_the_chat_path_reaches_the_vendor_chat_endpoint_through_passthrough() {
     let (base, seen) = record_lines(CHAT_REPLY).await;
     let gw = Gateway::start(&format!(
-        "providers:
-  p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
-  any: {{ formats: passthrough, base_url: '{base}/pt' }}
-formats: [openai-chat, passthrough]
-plugins: {{ routing: {{ default: p }} }}
-"
+        "providers = {{ p = {{ formats = \"openai-chat\", base_url = \"{base}/chatv1\" }}, any = {{ formats = \"passthrough\", base_url = \"{base}/pt\" }} }}\nformats = [\"openai-chat\", \"passthrough\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
     ))
     .await;
     let addr = gw.base.trim_start_matches("http://").to_owned();
@@ -63,12 +58,7 @@ plugins: {{ routing: {{ default: p }} }}
 async fn passthrough_forwards_the_matched_segments() {
     let (base, seen) = record_lines(CHAT_REPLY).await;
     let gw = Gateway::start(&format!(
-        "providers:
-  p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
-  any: {{ formats: passthrough, base_url: '{base}/pt' }}
-formats: [openai-chat, passthrough]
-plugins: {{ routing: {{ default: p }} }}
-"
+        "providers = {{ p = {{ formats = \"openai-chat\", base_url = \"{base}/chatv1\" }}, any = {{ formats = \"passthrough\", base_url = \"{base}/pt\" }} }}\nformats = [\"openai-chat\", \"passthrough\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
     ))
     .await;
     let addr = gw.base.trim_start_matches("http://").to_owned();

@@ -20,7 +20,8 @@ name = "respan-gateway"
 path = "src/main.rs"
 
 [dependencies]
-respan-gateway-http-syntax.workspace = true
+base64.workspace = true
+form_urlencoded.workspace = true
 respan-gateway-http-faults.workspace = true
 respan-gateway-plugin-relay.workspace = true
 respan-gateway-plugin-credentials.workspace = true
@@ -50,12 +51,12 @@ getrandom = { workspace = true, features = ["std"] }
 indexmap = { version = "2", features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
-serde_norway.workspace = true
+toml.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "process", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
-base64.workspace = true
+percent-encoding.workspace = true
 futures.workspace = true
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
 reqwest.workspace = true

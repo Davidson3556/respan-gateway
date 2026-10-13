@@ -1,9 +1,10 @@
 //! What each spec says of its session: its name, its path and its frames.
 
+use respan_gateway_core::FaultKind;
 use std::time::Duration;
 
+use respan_gateway_core::Fault;
 use respan_gateway_core::futures::{SinkExt, StreamExt, stream};
-use respan_gateway_core::{Fault, Upstream};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http;
@@ -63,7 +64,7 @@ async fn gemini_live_takes_binary_frames_as_text() {
             assert_eq!(frame.expect("UTF-8 text"), bytes);
             assert!(body.next().await.is_none());
         } else {
-            assert!(frame.is_err_and(|f| f.is::<Upstream>()));
+            assert!(frame.is_err_and(|f| f.is(FaultKind::Provider)));
         }
         drop(body);
         tokio::time::timeout(Duration::from_secs(3), completion.expect("completion"))

@@ -20,11 +20,11 @@ body.
 | --- | --- | --- |
 | first | the request's `Decoder`, given its head | the request's head, and its body's `Encoder` |
 | then | the response's sink, from a `Reply` and an `Encoder` | the answer's `Decoder`, given its head, or `None` for no body |
-| on failure | `with_error`: write the error body (`plain` by default) | `with_refusal`: read the error answer (`provider_fault` by default) |
+| on failure | `with_error`: write the error body (plain text by default) | `with_refusal`: read the error answer (`provider_fault` by default) |
 
 An `Encoder<T>` writes values as frames and a `Decoder<T>` reads frames as
-values; a closure is either. `Sse` reads a body's server-sent events and
-`Whole` all of a body at once, either way.
+values; a closure is either. `Sse` reads a body's server-sent events, one at
+a time, and `Whole` all of a body at once; `All` writes all values at once.
 
 The bindings own everything else: response handoff, backpressure and
 completion, whole or streamed uploads, what a proxy strips from a call, a
@@ -46,7 +46,7 @@ use respan_gateway_http as h;
 use h::bytes::Bytes;
 use h::http::{Method, Uri};
 use h::{Encoder, Whole};
-use respan_gateway_core::{BadRequest, Connection, Fault, Format, Result};
+use respan_gateway_core::{Connection, Fault, Format, Result};
 
 #[derive(Clone, Copy)]
 struct Echo;
@@ -63,7 +63,7 @@ impl Format<h::ClientIo, String, Vec<u8>> for Echo {
         Ok(io.bind(
             |_| Box::new(|bytes: Bytes, out: &mut Vec<String>| {
                 let question = String::from_utf8(bytes.to_vec())
-                    .map_err(|_| BadRequest::fault("expected UTF-8"))?;
+                    .map_err(|_| Fault::bad_request("expected UTF-8"))?;
                 out.push(question);
                 Ok(())
             }),
@@ -113,8 +113,9 @@ assert_eq!(bytes, Bytes::from_static(b"hello"));
 
 For stateful output, implement `Encoder<T>`: `encode` writes one value as
 zero or more frames, the chunks of a body or the messages of a live
-session, and `end` writes final success or error framing; the next value is
-taken only once its frames are read. For stateful input, implement
+session, and `end` writes final success or error framing: if ending well fails,
+`end` is called once more with that failure, to write it as error framing.
+The next value is taken only once its frames are read. For stateful input, implement
 `Decoder<T>`: `decode` reads one frame (an event behind `Sse`, the whole body
 behind `Whole`), `end` flushes what it held, `start` gives what comes before
 any frame, and `done` says it read all it will, so the rest of the body goes
@@ -142,14 +143,14 @@ buffer producers can progress. A `Body` with `full_bytes()` can be cloned
 without polling.
 
 Keep `Body::full` for finite, inspectable bytes, and `Body::stream`
-for pull-driven frames. Unlike a generic full or stream adapter, `Body` also
-carries a private upload handoff for delivery and cancellation, and, for a
-provider's answer, its transport's `limit`: the most bytes a reader holds of
-it at once. Those gateway semantics are not replaced by standard body
-utilities; ordinary conversions and collection need no additional facade.
+for pull-driven frames. Unlike a generic full or stream adapter, a
+provider's answer's `Body` also carries its transport's `limit`: the most
+bytes a reader holds of it at once.
 
 A client's `Decoder` reads a whole request, as one frame, into its one
-input, lazily, or each live frame as it comes. The outgoing binding encodes
+input, lazily, or each live frame as it comes. A provider's answer decoder
+is given the call as sent: the bytes of its one input, or an empty body for
+live input, which streamed. The outgoing binding encodes
 the request:
 
 - One input is encoded, and finalized, synchronously. Failure occurs
@@ -173,7 +174,7 @@ writing their original body, which a `Relayed` call's faults get.
 The incoming response handle constructs real sinks:
 
 - `write` normally waits for bytes or completion before publishing the head.
-  Explicitly live (`Framing::Live`) ingress retains immediate response
+  A live session's (`ClientIo::accept_live`) retains immediate response
   opening, so a duplex peer can send without waiting for its own first reply.
 - `open` publishes a quiet stream immediately, optionally with a prefix.
 - Either writes no body where HTTP has none (`bodiless`: to a `HEAD`, or a
@@ -181,16 +182,16 @@ The incoming response handle constructs real sinks:
   source not yet read is stopped. Stopping retains source ownership until
   delivery settles.
 
-Finite offline encoding uses an encoder's `encode_all`; a body is read by a
-decoder outside a binding with `Body::decode`, and a decoder's own
+Finite offline encoding uses an encoder's `encode_all`, and a decoder's own
 `decode` and `end` read finite bytes synchronously. Providers expose
 finite response conversion helpers for applications such as durable jobs.
 
 ## Hosting
 
-Hosting is not a wire's job. `handle(gateway, request, framing, limit)` is the
-client edge's entry point, which any server calls: it publishes the request
-as an HTTP adapter does and answers with the response. `respan-gateway-serve`
+Hosting is not a wire's job. `handle(gateway, request, limit)` is the client
+edge's entry point, which any server calls: it publishes the request as an
+HTTP adapter does and answers with the response. `handle_live` is the same
+for a session, each body frame one message, as `respan-gateway-ws` uses it. `respan-gateway-serve`
 is the Axum server that calls it, for plain HTTP and WebSocket upgrades alike.
 
 ## Backends and completion
@@ -212,14 +213,17 @@ sender accepted the outgoing handoff; a retained byte reader may still pull live
 input. The binding coordinates that reader with response termination. Refusal
 cancels unfinished upload rather than waiting for completion.
 
-Flush advances quiet transfers; close finalizes framing and waits for actual
-delivery. Source faults may be encoded into terminal framing but cannot turn
+Flush advances quiet transfers; close finalizes framing and waits until the
+transport has taken every frame (its `Completion`, if it gave one, says when
+they were written). Source faults may be encoded into terminal framing but cannot turn
 an interrupted upload into successful EOF. Dropping a response cancels its work.
 
 An answer succeeds by HTTP's rule, 2xx or a requested 101, unless the format
 says otherwise (`ProviderIo::with_success`): strict WebSocket formats require
-the handshake. An answer is refused, with the fault its format's error reader
-makes of its whole body, read up to the limit, if and only if it is no success; a success opens at
-its head, and a fault its body says later fails it. Parsing helpers preserve
+the handshake. An answer is refused if and only if it is no success, with the fault its
+format's error reader makes of its whole body, read up to the limit. An
+error body over the limit, or broken off, is the gateway's 502, keeping the
+answer's `Retry-After`. A success opens at its head, and a fault its body
+says later fails it. Parsing helpers preserve
 semantic decoder failures separately from broken wire bodies and avoid
 unbounded prefetch across wire frames.

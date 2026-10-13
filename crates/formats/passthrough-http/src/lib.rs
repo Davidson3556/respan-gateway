@@ -92,15 +92,15 @@ pub fn read_request<F: 'static>(head: &RequestHead) -> Box<dyn Decoder<Input<F>>
 /// one input with its safe forwarded path ([`forwarded_path`]); live input
 /// keeps the given head, as [`request_writer`] gives it.
 ///
-/// [`forwarded_path`]: respan_gateway_http_syntax::forwarded_path
+/// [`forwarded_path`]: respan_gateway_http::path::forwarded_path
 pub fn write_request<F: 'static>(
     head: &mut RequestHead,
     input: Option<&Input<F>>,
 ) -> Result<Box<dyn Encoder<Input<F>>>, Fault> {
     if let Some(input) = input {
         *head = input.0.clone().into_parts().0;
-        let path = respan_gateway_http_syntax::forwarded_path(head.uri.path());
-        respan_gateway_http_syntax::set_path(head, &path)?;
+        let path = respan_gateway_http::path::forwarded_path(head.uri.path());
+        respan_gateway_http::path::set_path(head, &path)?;
     }
     Ok(Box::new(Writes))
 }
@@ -122,8 +122,8 @@ pub fn request_writer<F: 'static>(
     move |head, input| {
         if let (None, Some(client)) = (input, client) {
             *head = client;
-            let path = respan_gateway_http_syntax::forwarded_path(head.uri.path());
-            respan_gateway_http_syntax::set_path(head, &path)?;
+            let path = respan_gateway_http::path::forwarded_path(head.uri.path());
+            respan_gateway_http::path::set_path(head, &path)?;
         }
         write_request(head, input)
     }

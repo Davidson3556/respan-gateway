@@ -207,7 +207,7 @@ fn a_count_written_as_a_whole_float_counts_and_any_other_is_refused() {
     for bad in [json!(1.5), json!(-1), json!("7")] {
         let refused = usage_of(&json!({ "input_tokens": 1, "output_tokens": bad }));
         assert!(
-            refused.is_err_and(|f| f.is::<respan_gateway_core::Upstream>()),
+            refused.is_err_and(|f| f.is(respan_gateway_core::FaultKind::Provider)),
             "{bad}"
         );
     }
@@ -848,7 +848,7 @@ fn a_stream_error_after_the_finish_keeps_the_finish_and_ends_last() {
     for reply in &replies {
         assert!(enc.encode_into(reply, &mut out).is_ok());
     }
-    let _ = enc.end_into(&Err(respan_gateway_core::Upstream::fault("boom")), &mut out);
+    let _ = enc.end_into(&Err(respan_gateway_core::Fault::upstream("boom")), &mut out);
     let text = String::from_utf8_lossy(&out);
     let delta = text.find("message_delta").unwrap_or(usize::MAX);
     let error = text.find("event: error").unwrap_or(0);

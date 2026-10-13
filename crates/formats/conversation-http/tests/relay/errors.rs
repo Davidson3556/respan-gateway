@@ -1,6 +1,7 @@
 //! Relay errors behavior.
 
 use super::*;
+use respan_gateway_core::Fault;
 
 #[tokio::test]
 async fn an_error_page_is_relayed_as_it_is() {
@@ -59,7 +60,7 @@ async fn a_refusal_is_an_error_in_the_client_format() {
 async fn a_unary_body_cut_before_any_bytes_is_an_error_in_the_client_format() {
     let h = relay();
     let mut reset = fixture::json(StatusCode::OK, UNARY);
-    *reset.body_mut() = vec![Err(Upstream::fault("connection reset"))];
+    *reset.body_mut() = vec![Err(Fault::upstream("connection reset"))];
     h.sites.openai.reply(reset);
 
     let (status, _, body) = h.send(unary_chat()).await;

@@ -217,7 +217,7 @@ fn error(status: StatusCode, message: &str) -> Response {
 
 fn config(fake: &Fake, extra: &str) -> String {
     format!(
-        "providers:\n  openai: {{ vendor: openai, key: sk-media, base_url: '{}/v1' }}\n{extra}",
+        "providers = {{ openai = {{ vendor = \"openai\", key = \"sk-media\", base_url = \"{}/v1\" }} }}\n{extra}",
         fake.base
     )
 }
@@ -346,7 +346,7 @@ async fn a_multi_megabyte_upload_reaches_the_provider_byte_for_byte() {
 #[tokio::test]
 async fn an_upload_over_the_body_limit_is_refused_before_the_provider() {
     let fake = Fake::start().await;
-    let gw = Gateway::start(&config(&fake, "body_limit: 1MiB\n")).await;
+    let gw = Gateway::start(&config(&fake, "body_limit = \"1MiB\"\n")).await;
     let resp = transcribe(&gw, upload()).await;
     assert_eq!(resp.status(), 413);
     assert!(fake.seen().is_empty(), "nothing was sent on");

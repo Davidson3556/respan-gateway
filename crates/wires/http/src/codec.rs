@@ -1,7 +1,7 @@
 //! How a format's values become a body's frames and back: an [`Encoder`]
 //! writes values as frames, a [`Decoder`] reads frames as values, and the
 //! binding drives them. A closure is either; [`Sse`] and [`Whole`] frame
-//! what another reads or writes.
+//! what another reads, and [`All`] what another writes.
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -10,7 +10,7 @@ use std::task::{Context, Poll, ready};
 
 use bytes::{Bytes, BytesMut};
 use futures::{Stream, TryStreamExt};
-use respan_gateway_core::{EventStream, Fault, Upstream};
+use respan_gateway_core::{EventStream, Fault};
 
 use crate::Body;
 
@@ -30,7 +30,11 @@ pub trait Encoder<T>: Send + 'static {
     fn encode(&mut self, value: &T, out: &mut Vec<Bytes>) -> Result<(), Fault>;
 
     /// The values ended as `end` says: write what closes the body, if
-    /// anything. `Err` fails it in place of how it ended.
+    /// anything. `Ok` means what it wrote closes the body as `end` says,
+    /// an `Err` written as error framing; `Err` means it could not, and
+    /// what it pushed is not sent. If ending with `Ok(())` fails, `end` is
+    /// called once more with that failure, to write its error framing; if
+    /// that fails too, or `end` was a failure already, the body breaks off.
     fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         let _ = out;
         end
@@ -146,18 +150,16 @@ impl<T, D: Decoder<T>> Decoder<T> for Sse<D> {
     }
 }
 
-/// The whole body at once, either way. As a [`Decoder`], it holds every
-/// frame and gives its inner decoder the whole body when it ends; as an
-/// [`Encoder`] of a function `FnMut(&[T]) -> Result<B, Fault>`, it holds
-/// every value and writes them all when they end. A failure writes nothing.
-pub struct Whole<X, T = Bytes> {
-    inner: X,
-    held: Vec<T>,
+/// The whole body at once: a [`Decoder`] that holds every frame and gives
+/// its inner decoder the whole body when it ends. A failure reads nothing.
+pub struct Whole<D> {
+    inner: D,
+    held: Vec<Bytes>,
     limit: Option<usize>,
     size: usize,
 }
 
-impl<X, T> std::fmt::Debug for Whole<X, T> {
+impl<D> std::fmt::Debug for Whole<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Whole")
             .field("held", &self.held.len())
@@ -165,9 +167,9 @@ impl<X, T> std::fmt::Debug for Whole<X, T> {
     }
 }
 
-impl<X, T> Whole<X, T> {
-    /// Hold all of it for `inner`.
-    pub fn new(inner: X) -> Self {
+impl<D> Whole<D> {
+    /// Hold all of a body for `inner`.
+    pub fn new(inner: D) -> Self {
         Self {
             inner,
             held: Vec::new(),
@@ -185,7 +187,7 @@ impl<T, D: Decoder<T>> Decoder<T> for Whole<D> {
     fn decode(&mut self, raw: Bytes, _: &mut Vec<T>) -> Result<(), Fault> {
         self.size += raw.len();
         if let Some(limit) = self.limit.filter(|&limit| self.size > limit) {
-            return Err(over(limit));
+            return Err(respan_gateway_sse::over_limit(limit));
         }
         self.held.push(raw);
         Ok(())
@@ -206,7 +208,33 @@ impl<T, D: Decoder<T>> Decoder<T> for Whole<D> {
     }
 }
 
-impl<T, F, B> Encoder<T> for Whole<F, T>
+/// All values at once: an [`Encoder`] that holds every value and, when
+/// they end, writes them as one body with `render`, a function
+/// `FnMut(&[T]) -> Result<B, Fault>`. A failure writes nothing.
+pub struct All<F, T> {
+    render: F,
+    held: Vec<T>,
+}
+
+impl<F, T> std::fmt::Debug for All<F, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("All")
+            .field("held", &self.held.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<F, T> All<F, T> {
+    /// Hold all values for `render`.
+    pub fn new(render: F) -> Self {
+        Self {
+            render,
+            held: Vec::new(),
+        }
+    }
+}
+
+impl<T, F, B> Encoder<T> for All<F, T>
 where
     T: Clone + Send + 'static,
     F: FnMut(&[T]) -> Result<B, Fault> + Send + 'static,
@@ -219,7 +247,7 @@ where
 
     fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         end?;
-        out.push((self.inner)(&self.held)?.into());
+        out.push((self.render)(&self.held)?.into());
         Ok(())
     }
 }
@@ -248,7 +276,7 @@ where
 {
     let decoder = Mutex::new(Some(decoder));
     EventStream::lazy(move || {
-        let taken = decoder.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let taken = crate::edge::locked(&decoder).take();
         let mut decoder = taken.ok_or_else(|| Fault::internal("a whole input read twice"))?;
         let mut out = Vec::new();
         decoder.start(&mut out)?;
@@ -273,7 +301,7 @@ pub(crate) fn decode<T: Send + 'static>(
     body: Body,
     mut decoder: Box<dyn Decoder<T>>,
 ) -> EventStream<T> {
-    decoder.limit(body.limit());
+    decoder.limit(body.limit);
     let mut ready = Vec::new();
     let started = decoder.start(&mut ready);
     let mut ready: VecDeque<_> = ready.into_iter().map(Ok).collect();
@@ -345,35 +373,52 @@ impl<T: Send + 'static> Stream for Decoding<T> {
     }
 }
 
-/// `body` collected whole, up to its [`limit`](Body::limit).
-pub(crate) async fn bytes(body: Body) -> Result<Bytes, Fault> {
-    let limit = body.limit();
+/// `body` collected whole, `too_big` past `limit` bytes. Each frame is
+/// released before the next is polled: a producer may recycle its buffer.
+pub(crate) async fn collect(
+    body: Body,
+    limit: usize,
+    too_big: impl Fn() -> Fault,
+) -> Result<Bytes, Fault> {
+    if let Some(bytes) = body.full_bytes() {
+        return (bytes.len() <= limit)
+            .then(|| bytes.clone())
+            .ok_or_else(too_big);
+    }
     let all = body.try_fold(BytesMut::new(), |mut all, frame| {
-        let over = limit.filter(|&limit| all.len() + frame.len() > limit);
-        if over.is_none() {
+        let kept = all.len() + frame.len() <= limit;
+        if kept {
             all.extend_from_slice(&frame);
         }
-        futures::future::ready(over.map_or(Ok(all), |limit| Err(self::over(limit))))
+        futures::future::ready(kept.then_some(all).ok_or_else(&too_big))
     });
     all.await.map(BytesMut::freeze)
-}
-
-/// The fault of a provider's answer that holds more than `limit` bytes at
-/// once.
-pub(crate) fn over(limit: usize) -> Fault {
-    Upstream::fault(format!(
-        "the provider's answer is over the limit of {limit} bytes"
-    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
+    use futures::{FutureExt, StreamExt};
+    use respan_gateway_core::FaultKind;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn frames_that_read_as_nothing_cannot_spin_in_one_poll() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = count.clone();
+        let body = Body::stream(futures::stream::repeat_with(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+            Ok(Bytes::new())
+        }));
+        let mut read = decode(body, Box::new(|_: Bytes, _: &mut Vec<u8>| Ok(())));
+        assert!(read.next().now_or_never().is_none());
+        assert_eq!(count.load(Ordering::SeqCst), FRAMES_PER_POLL);
+    }
 
     #[test]
     fn a_whole_body_is_written_once_in_order() {
-        let mut whole = Whole::new(|values: &[u32]| Ok(format!("{values:?}")));
+        let mut whole = All::new(|values: &[u32]| Ok(format!("{values:?}")));
         let mut out = Vec::new();
         for value in [1, 2] {
             assert!(whole.encode(&value, &mut out).is_ok());
@@ -385,10 +430,10 @@ mod tests {
 
     #[test]
     fn a_failure_writes_nothing() {
-        let mut whole = Whole::new(|values: &[u32]| Ok(format!("{values:?}")));
+        let mut whole = All::new(|values: &[u32]| Ok(format!("{values:?}")));
         let mut out = Vec::new();
         assert!(whole.encode(&1, &mut out).is_ok());
-        let ended = Encoder::end(&mut whole, Err(Upstream::fault("x")), &mut out);
+        let ended = Encoder::end(&mut whole, Err(Fault::upstream("x")), &mut out);
         assert!(ended.is_err());
         assert!(out.is_empty());
     }
@@ -400,14 +445,14 @@ mod tests {
         let whole = Whole::new(|_: Bytes, _: &mut Vec<()>| Ok(()));
         let got: Vec<_> = decode(body, Box::new(whole)).collect().await;
         let fault = got.into_iter().next().and_then(Result::err);
-        assert!(fault.is_some_and(|f| f.is::<Upstream>()));
+        assert!(fault.is_some_and(|f| f.is(FaultKind::Provider)));
     }
 
     #[tokio::test]
     async fn a_stream_stops_at_its_first_failure() {
         let events = Sse::new(|raw: Bytes, out: &mut Vec<Bytes>| {
             if respan_gateway_sse::event_data(&raw).is_some() {
-                return Err(Upstream::fault("unreadable"));
+                return Err(Fault::upstream("unreadable"));
             }
             out.push(raw);
             Ok(())

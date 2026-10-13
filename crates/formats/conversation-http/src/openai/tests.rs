@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_core::Fault;
 
 use respan_gateway_http::{Decoder, Sse};
 
@@ -366,11 +367,24 @@ fn the_terminator_completes_the_response_and_nothing_after_it_is_read() {
     assert!(out.is_empty() && end.is_ok());
     let (_, end) = decode_all(&["data: {\"choices\":[]}\n\n"]);
     assert_eq!(
-        end.err()
-            .map(|f| respan_gateway_http_faults::error_code(&f).to_owned())
-            .as_deref(),
+        end.err().map(|f| f.code().to_owned()).as_deref(),
         Some("truncated")
     );
+}
+
+// Some OpenAI-compatible servers end a finished stream without `[DONE]`:
+// it is whole once its finish and usage came, but not before its usage,
+// which the call asked for.
+#[test]
+fn a_stream_that_ends_well_after_its_finish_and_usage_is_whole_without_done() {
+    let text = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n";
+    let finish = "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+    let usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n";
+    let truncated = |end: Result<(), Fault>| end.err().is_some_and(|f| f.code() == "truncated");
+    let (_, end) = decode_all(&[text, finish, usage]);
+    assert!(end.is_ok(), "{end:?}");
+    assert!(truncated(decode_all(&[text, finish]).1));
+    assert!(truncated(decode_all(&[text, usage]).1));
 }
 
 #[test]
@@ -380,7 +394,7 @@ fn a_provider_error_event_ends_the_stream_with_its_code() {
     ]);
     assert!(matches!(
         end,
-        Err(f) if respan_gateway_http_faults::error_code(&f) == "server_error" && f.message() == "overloaded"
+        Err(f) if f.code() == "server_error" && f.message() == "overloaded"
     ));
 }
 
@@ -933,7 +947,7 @@ fn several_choices_are_refused_as_a_bad_request() {
     let chat = OpenAiChat.decode_json(&body);
     assert_eq!(chat.native.fields().get("n"), Some(&json!(2)));
     let refused = OpenAiChat.encode_request(&chat).err();
-    assert!(refused.is_some_and(|f| f.is::<respan_gateway_core::BadRequest>()));
+    assert!(refused.is_some_and(|f| f.is(respan_gateway_core::FaultKind::Client)));
     // One choice is the default, and says nothing.
     let one = OpenAiChat.decode_json(&json!({ "model": "m", "messages": [], "n": 1 }));
     assert!(one.native.is_empty());
@@ -1444,7 +1458,7 @@ fn blocks_of_any_numbers_are_written_in_the_order_they_open() {
 fn the_fault_says_message_and_type_the_provider_the_rest() {
     let details = json!({"message": "", "type": "https://x/p", "code": null, "native": 1});
     let fault =
-        BadRequest::fault("m").with(Details(details.as_object().expect("error fields").clone()));
+        Fault::bad_request("m").with(Details(details.as_object().expect("error fields").clone()));
     let body = OpenAiChat::error_body(&fault);
     // The fault's words are the format's; the provider's `code` stays.
     let kept =
@@ -1465,7 +1479,7 @@ fn a_plugins_fault_takes_one_shape_on_every_path() {
     assert_eq!(body["error"], kept);
     // A string, as OpenAI's own errors give, is kept.
     let details = json!({"param": "messages", "code": "context_length_exceeded"});
-    let fault = BadRequest::fault("too long")
+    let fault = Fault::bad_request("too long")
         .with(Details(details.as_object().expect("error fields").clone()));
     let error = &OpenAiChat::error_body(&fault)["error"];
     assert_eq!(

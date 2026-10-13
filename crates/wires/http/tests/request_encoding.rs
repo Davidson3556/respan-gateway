@@ -1,3 +1,4 @@
+use respan_gateway_core::FaultKind;
 use std::pin::Pin;
 #[allow(dead_code)]
 #[path = "../../../../tests/support/http.rs"]
@@ -15,7 +16,6 @@ use h::{
     bytes::{Bytes, BytesMut},
     http::{Request, Response},
 };
-use respan_gateway_core::Upstream;
 use respan_gateway_core::futures::{self, FutureExt, Sink, SinkExt, StreamExt, future, stream};
 use respan_gateway_core::{EventSink, EventStream, Extensions, Fault};
 use respan_gateway_http as h;
@@ -93,7 +93,7 @@ impl h::Decoder<u8> for LateFailure {
 
     fn end(&mut self, end: Result<(), Fault>, _: &mut Vec<u8>) -> Result<(), Fault> {
         end?;
-        Err(Upstream::fault("late failure"))
+        Err(Fault::upstream("late failure"))
     }
 }
 
@@ -130,8 +130,8 @@ fn sent<T: 'static>(sent: &Sent, sink: &mut EventSink<T>) -> Request<Body> {
 #[tokio::test]
 async fn default_request_decodes_encodes_and_finalizes_one_initial_body() {
     let request = Request::new(Body::full("raw"));
-    let (incoming, _answer) = h::ClientIo::accept(request, h::Framing::Whole, LIMIT);
-    let (read, _sink) = incoming.with_error(h::rules::plain).bind(
+    let (incoming, _answer) = h::ClientIo::accept(request, LIMIT);
+    let (read, _sink) = incoming.bind(
         |_| {
             Box::new(|_: Bytes, out: &mut Vec<u8>| {
                 out.push(b'r');
@@ -230,11 +230,11 @@ async fn a_bodiless_response_does_not_encode_and_open_keeps_prefix_through_decor
         let empty = (method, status) != ("GET", 200);
         let mut request = Request::new(Body::default());
         *request.method_mut() = h::http::Method::from_bytes(method.as_bytes()).expect("method");
-        let (incoming, answer) = h::ClientIo::accept(request, h::Framing::Whole, LIMIT);
+        let (incoming, answer) = h::ClientIo::accept(request, LIMIT);
         let encode = writer(false, false);
         let calls = encode.calls.clone();
         let ends = encode.ends.clone();
-        let (read, mut sink) = incoming.with_error(h::rules::plain).bind(
+        let (read, mut sink) = incoming.bind(
             |_| {
                 Box::new(move |_: Bytes, out: &mut Vec<_>| {
                     out.push(0_u8);
@@ -309,13 +309,13 @@ async fn an_encoders_failure_is_not_hidden_by_transport_completion() {
         .await
         .expect("expected value")
         .expect_err("expected failure");
-    assert_eq!(respan_gateway_http_faults::error_code(&error), "config");
+    assert_eq!(error.code(), "config");
 }
 
 #[tokio::test]
 async fn transport_failure_ends_the_call() {
     let send = h::connect(
-        |_| async { Err(Upstream::fault("transport failed")) },
+        |_| async { Err(Fault::upstream("transport failed")) },
         LIMIT,
     );
     let (_read, mut sink) = send(Extensions::new())
@@ -513,22 +513,9 @@ async fn empty_error_frames_yield_even_though_the_byte_cap_is_not_reached() {
     assert!((1..=256).contains(&observed.load(Ordering::SeqCst)));
 }
 
-#[tokio::test]
-async fn ignored_incoming_frames_cannot_spin_in_one_poll() {
-    let count = Arc::new(AtomicUsize::new(0));
-    let seen = count.clone();
-    let body = Body::stream(stream::repeat_with(move || {
-        seen.fetch_add(1, Ordering::SeqCst);
-        Ok(Bytes::new())
-    }));
-    let mut read = body.decode(Box::new(|_: Bytes, _: &mut Vec<u8>| Ok(())));
-    assert!(read.next().now_or_never().is_none());
-    assert_eq!(count.load(Ordering::SeqCst), 128);
-}
-
 /// An answer the format takes for no success is read whole by the binding,
 /// never by its decoder, into its error reader's fault, which keeps HTTP's
-/// facts of it, even for a 2xx a stricter format refuses: its status, its
+/// extensions of it, even for a 2xx a stricter format refuses: its status, its
 /// `Retry-After` and the answer as it came.
 #[tokio::test]
 async fn a_refused_answer_is_read_whole_into_the_error_readers_fault() {
@@ -562,7 +549,7 @@ async fn a_refused_answer_is_read_whole_into_the_error_readers_fault() {
     let (_, output) = future::join(sink.close(), read).await;
     let output = output.expect("an answer");
     let fault = output.refusal().expect("refused");
-    assert!(fault.is::<Upstream>());
+    assert!(fault.is(FaultKind::Provider));
     assert_eq!(
         fault.get(),
         Some(&respan_gateway_http_faults::Status(
@@ -605,7 +592,7 @@ async fn a_passthrough_refuses_a_101_no_one_asked_for() {
     let (_, output) = future::join(sink.close(), read).await;
     let output = output.expect("an answer");
     let fault = output.refusal().expect("refused");
-    assert!(fault.is::<Upstream>());
+    assert!(fault.is(FaultKind::Provider));
     assert!(
         fault
             .get::<respan_gateway_http_faults::ProviderError>()

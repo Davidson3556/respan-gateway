@@ -4,59 +4,42 @@
 //! provider's error answer read into a fault. A plugin that sets or reads a
 //! status depends on this crate alone, not on the HTTP wire.
 
-use std::time::Duration;
+use respan_gateway_core::FaultKind;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use http::StatusCode;
 use http::header::RETRY_AFTER;
-use respan_gateway_core::{
-    Abandoned, BadRequest, Config, ErrorCode, Fault, Internal, NotFound, RetryAfter, Truncated,
-    Upstream,
-};
+use respan_gateway_core::{Fault, RetryAfter};
 
-/// The HTTP status a fault asks for, as a fact ([`Fault::with`]): a plugin's
+/// The HTTP status a fault asks for, as an extension ([`Fault::with`]): a plugin's
 /// `Fault::new(msg).with(Status(StatusCode::TOO_MANY_REQUESTS))`, a
 /// provider's answer's. The kernel names no numbers; this is where they get
 /// them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status(pub StatusCode);
 
-/// The status of `fault` as HTTP's: its [`Status`] fact, else its kind's
-/// default (a 400 for [`BadRequest`], a 404 for [`NotFound`], a 502 for
-/// [`Upstream`] and [`Truncated`], a 499 for [`Abandoned`], a 500 for
-/// [`Config`], [`Internal`] and a fault of none of these).
+/// The status of `fault` as HTTP's: its [`Status`] extension, else its
+/// kind's: a 400 for the client's (a 404 coded `not_found`), a 502 for a
+/// provider's, a 499 for an abandoned one, else a 500.
 pub fn status(fault: &Fault) -> StatusCode {
     if let Some(Status(status)) = fault.get() {
         return *status;
     }
-    let number = match () {
-        _ if fault.is::<NotFound>() => 404,
-        _ if fault.is::<BadRequest>() => 400,
-        _ if fault.is::<Upstream>() || fault.is::<Truncated>() => 502,
-        _ if fault.is::<Abandoned>() => 499,
-        _ => 500,
-    };
-    StatusCode::from_u16(number).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+    match fault.kind() {
+        FaultKind::Client if fault.code() == "not_found" => StatusCode::NOT_FOUND,
+        FaultKind::Client => StatusCode::BAD_REQUEST,
+        FaultKind::Provider => StatusCode::BAD_GATEWAY,
+        FaultKind::Abandoned => CLIENT_CLOSED,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
-/// The code a format writes in a JSON error body for `fault`: its
-/// [`ErrorCode`] fact, else a name for its kind (`not_found`, `bad_request`,
-/// `upstream`, `truncated`, `abandoned`, `config`, `internal`), else `error`.
-pub fn error_code(fault: &Fault) -> &str {
-    if let Some(ErrorCode(code)) = fault.get() {
-        return code;
-    }
-    match () {
-        _ if fault.is::<NotFound>() => "not_found",
-        _ if fault.is::<BadRequest>() => "bad_request",
-        _ if fault.is::<Upstream>() => "upstream",
-        _ if fault.is::<Truncated>() => "truncated",
-        _ if fault.is::<Abandoned>() => "abandoned",
-        _ if fault.is::<Config>() => "config",
-        _ if fault.is::<Internal>() => "internal",
-        _ => "error",
-    }
-}
+/// 499, nginx's "client closed request".
+const CLIENT_CLOSED: StatusCode = match StatusCode::from_u16(499) {
+    Ok(status) => status,
+    Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+};
 
 /// The statuses RFC 9110 names as transient: a later attempt may succeed
 /// (408, 425, 429, 500, 502, 503, 504).
@@ -71,25 +54,18 @@ const TRANSIENT: [StatusCode; 7] = [
 ];
 
 /// HTTP retry eligibility for a failed `first_success` attempt. Before a
-/// response opened, only an [`Upstream`] fault is retryable: the provider
-/// could not be reached. After opening, a fault whose status is transient
-/// is: its [`Status`] fact, or the 502 of an [`Upstream`] or [`Truncated`]
-/// fault, which say the provider failed. A fault with neither, such as a
-/// plugin's own, is not, nor is an [`Internal`], [`Config`] or
-/// [`Abandoned`] one, whatever its status: a bug, a setting and a client
-/// that left are the same on a second attempt.
+/// response opened, only a provider's fault is retryable: the provider
+/// could not be reached. After opening, a fault whose [`Status`] is
+/// transient is, or a provider's without one. An abandoned fault never is:
+/// a client that left is gone on a second attempt.
 /// `response_opened` means the call returned `Ok(Response)` before the
 /// caller's response-selection criterion ran, not that bytes arrived.
 pub fn retryable(fault: &Fault, response_opened: bool) -> bool {
-    if !response_opened {
-        return fault.is::<Upstream>();
-    }
-    if fault.is::<Internal>() || fault.is::<Config>() || fault.is::<Abandoned>() {
-        return false;
-    }
-    match fault.get::<Status>() {
-        Some(Status(status)) => TRANSIENT.contains(status),
-        None => fault.is::<Upstream>() || fault.is::<Truncated>(),
+    match (fault.kind(), fault.get::<Status>()) {
+        (kind, _) if !response_opened => kind == FaultKind::Provider,
+        (FaultKind::Abandoned, _) => false,
+        (_, Some(Status(status))) => TRANSIENT.contains(status),
+        (kind, None) => kind == FaultKind::Provider,
     }
 }
 
@@ -105,10 +81,10 @@ pub struct ProviderError(pub http::Response<Bytes>);
 
 /// The fault of a provider's `answer` that is no success, read as by a
 /// format whose error bodies it does not read
-/// (`respan_gateway_http::ProviderIo::with_refusal`). It is [`Upstream`], says the
+/// (`respan_gateway_http::ProviderIo::with_refusal`). It is upstream, says the
 /// answer's status, with that [`Status`] if an error's, else a 502, and its
-/// `Retry-After` in whole seconds ([`RetryAfter`]; an HTTP date counts as
-/// none). Unless informational (an unasked 101), it carries the answer as
+/// `Retry-After` ([`RetryAfter`]): whole seconds, or an HTTP date, the wait
+/// until it (none if it is past). Unless informational (an unasked 101), it carries the answer as
 /// it came ([`ProviderError`]), for a plugin to inspect or a relay to write.
 pub fn provider_fault(answer: http::Response<Bytes>) -> Fault {
     let status = answer.status();
@@ -116,7 +92,7 @@ pub fn provider_fault(answer: http::Response<Bytes>) -> Fault {
         true => status,
         false => StatusCode::BAD_GATEWAY,
     };
-    let fault = Upstream::fault(format!("the provider returned {}", status.as_u16()));
+    let fault = Fault::upstream(format!("the provider returned {}", status.as_u16()));
     let fault = fault.with(Status(to));
     if status.is_informational() {
         return fault;
@@ -124,17 +100,32 @@ pub fn provider_fault(answer: http::Response<Bytes>) -> Fault {
     let wait = answer
         .headers()
         .get(RETRY_AFTER)
-        .and_then(|v| v.to_str().ok());
-    let fault = match wait.and_then(|v| v.trim().parse().ok()) {
-        Some(secs) => fault.with(RetryAfter(Duration::from_secs(secs))),
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| retry_after(v, SystemTime::now()));
+    let fault = match wait {
+        Some(wait) => fault.with(RetryAfter(wait)),
         None => fault,
     };
     fault.with(ProviderError(answer))
 }
 
+/// The wait a `Retry-After` value asks for at `now` (RFC 9110 10.2.3):
+/// whole seconds, or the time until an HTTP date, `None` once it is past.
+fn retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    match value.parse() {
+        Ok(secs) => Some(Duration::from_secs(secs)),
+        Err(_) => httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(now)
+            .ok(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use respan_gateway_core::ErrorCode;
 
     // An answer that is no error says a 502; an unasked 101 carries no
     // answer, as it was never relayed.
@@ -150,19 +141,34 @@ mod tests {
     }
 
     #[test]
+    fn retry_after_is_seconds_or_a_date() {
+        let now = httpdate::parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT");
+        let now = now.unwrap_or(SystemTime::UNIX_EPOCH);
+        for (value, wait) in [
+            (" 120 ", Some(120)),
+            ("Sun, 06 Nov 1994 08:50:37 GMT", Some(60)),
+            ("Sun, 06 Nov 1994 08:48:37 GMT", None),
+            ("soon", None),
+        ] {
+            let got = retry_after(value, now);
+            assert_eq!(got, wait.map(Duration::from_secs), "{value}");
+        }
+    }
+
+    #[test]
     fn a_kind_has_a_default_status_and_a_status_fact_overrides_it() {
         let of = |f: Fault| status(&f).as_u16();
         for (fault, want) in [
-            (BadRequest::fault("x"), 400),
+            (Fault::bad_request("x"), 400),
             (Fault::not_found("x"), 404),
-            (Upstream::fault("x"), 502),
-            (Truncated::fault(), 502),
+            (Fault::upstream("x"), 502),
+            (Fault::truncated(), 502),
             (Fault::abandoned(), 499),
             (Fault::config("x"), 500),
             (Fault::internal("x"), 500),
             (Fault::new("x"), 500),
         ] {
-            let code = error_code(&fault).to_owned();
+            let code = fault.code().to_owned();
             assert_eq!(of(fault.clone()), want, "{code}");
             assert_eq!(
                 of(fault.with(Status(StatusCode::TOO_MANY_REQUESTS))),
@@ -173,22 +179,22 @@ mod tests {
     }
 
     #[test]
-    fn an_error_code_is_the_fact_else_a_name_for_the_kind() {
+    fn a_code_is_the_extension_else_a_name_for_the_kind() {
         for (fault, want) in [
-            (BadRequest::fault("x"), "bad_request"),
+            (Fault::bad_request("x"), "bad_request"),
             (Fault::not_found("x"), "not_found"),
-            (Upstream::fault("x"), "upstream"),
-            (Truncated::fault(), "truncated"),
+            (Fault::upstream("x"), "upstream"),
+            (Fault::truncated(), "truncated"),
             (Fault::abandoned(), "abandoned"),
             (Fault::config("x"), "config"),
             (Fault::internal("x"), "internal"),
             (Fault::new("x"), "error"),
             (
-                Upstream::fault("x").with(ErrorCode("over_limit".into())),
+                Fault::upstream("x").with(ErrorCode("over_limit".into())),
                 "over_limit",
             ),
         ] {
-            assert_eq!(error_code(&fault), want);
+            assert_eq!(fault.code(), want);
         }
     }
 
@@ -199,13 +205,14 @@ mod tests {
         };
         let custom = || Fault::new("x").with(ErrorCode("custom".into()));
         for (fault, before, after) in [
-            (Upstream::fault("x"), true, true),
-            (Truncated::fault(), false, true),
-            (hinted(Upstream::fault("x"), 400), true, false),
-            (hinted(Fault::config("x"), 503), false, false),
-            (hinted(Fault::internal("x"), 429), false, false),
+            (Fault::upstream("x"), true, true),
+            (Fault::truncated(), true, true),
+            (hinted(Fault::upstream("x"), 400), true, false),
+            // A status says whether to try again, whoever's fault it is.
+            (hinted(Fault::config("x"), 503), false, true),
+            (hinted(Fault::internal("x"), 400), false, false),
             (hinted(Fault::abandoned(), 502), false, false),
-            (hinted(BadRequest::fault("x"), 503), false, true),
+            (hinted(Fault::bad_request("x"), 503), false, true),
             (hinted(custom(), 400), false, false),
             // A plugin's own fault, with no status, is not retried.
             (custom(), false, false),

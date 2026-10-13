@@ -13,11 +13,11 @@ use tower::ServiceExt;
 async fn a_host_hands_requests_to_the_app_in_process() {
     let openai = FakeOpenAi::start().await;
     openai.answer(Answer::text("hi there"));
-    let yaml = format!(
-        "log: off\nproviders: {{ openai: {{ vendor: openai, base_url: '{}', key: sk }} }}",
+    let text = format!(
+        "log = \"off\"\nproviders = {{ openai = {{ vendor = \"openai\", base_url = \"{}\", key = \"sk\" }} }}\n",
         openai.base_url()
     );
-    let app = App::new(Config::parse(&yaml).unwrap()).unwrap();
+    let app = App::new(Config::parse(&text).unwrap()).unwrap();
 
     let health = Request::get("/healthz").body(Body::empty()).unwrap();
     let health = app.router().oneshot(health).await.unwrap();
@@ -40,8 +40,7 @@ async fn a_host_hands_requests_to_the_app_in_process() {
 
 #[test]
 fn an_app_is_built_outside_a_runtime() {
-    let config =
-        "providers: { openai: { vendor: openai, key: sk }, gemini: { vendor: gemini, key: k } }";
+    let config = "providers = { openai = { vendor = \"openai\", key = \"sk\" }, gemini = { vendor = \"gemini\", key = \"k\" } }\n";
     let app = App::new(Config::parse(config).unwrap()).unwrap();
     assert_eq!(app.listen(), respan_gateway::DEFAULT_LISTEN);
     let banner = app.banner(app.listen());
@@ -50,7 +49,7 @@ fn an_app_is_built_outside_a_runtime() {
 
 #[test]
 fn a_bad_config_says_what_is_wrong() {
-    let config = Config::parse("providers: { p: { vendor: nope } }").unwrap();
+    let config = Config::parse("providers = { p = { vendor = \"nope\" } }\n").unwrap();
     let error = App::new(config).unwrap_err();
     assert!(
         error
@@ -58,5 +57,5 @@ fn a_bad_config_says_what_is_wrong() {
             .starts_with("provider 'p': unknown vendor 'nope'"),
         "{error}"
     );
-    assert!(Config::parse("listen: [").is_err());
+    assert!(Config::parse("listen = [").is_err());
 }

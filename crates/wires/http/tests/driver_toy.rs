@@ -17,12 +17,12 @@ use bytes::{Bytes, BytesMut};
 use respan_gateway_core::futures::channel::mpsc;
 use respan_gateway_core::futures::future::{self, BoxFuture};
 use respan_gateway_core::futures::{FutureExt, SinkExt, StreamExt, stream};
-use respan_gateway_core::{BadRequest, ErrorCode, Provider, Truncated, Upstream};
+use respan_gateway_core::{ErrorCode, Provider};
 use respan_gateway_core::{EventSink, EventStream, Extensions, Fault, Gateway, async_trait};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
-    Body, ClientIo, Completion, Encoder, Frames, Framing, ProviderIo, http,
+    Body, ClientIo, Completion, Encoder, Frames, ProviderIo, http,
     http::request::Parts as RequestHead,
 };
 #[allow(dead_code)]
@@ -67,10 +67,7 @@ impl respan_gateway_core::Format<ClientIo, In, Out> for Toy {
         Ok(io
             .with_error(move |fault, _, _| {
                 assert!(!unwritable, "unwritable");
-                Bytes::from(format!(
-                    "ERR {}",
-                    respan_gateway_http_faults::error_code(fault)
-                ))
+                Bytes::from(format!("ERR {}", fault.code()))
             })
             .bind(
                 |_| Box::new(ReqDec),
@@ -167,7 +164,7 @@ impl ReqDec {
         let s = String::from_utf8_lossy(&bytes).to_string();
         if s == "BAD" {
             out.push(In("before-bad".into()));
-            return Err(BadRequest::fault("bad"));
+            return Err(Fault::bad_request("bad"));
         }
         out.push(In(s));
         Ok(())
@@ -248,7 +245,7 @@ impl RespDec {
         let s = String::from_utf8_lossy(&bytes).to_string();
         match s.as_str() {
             "DONE" => self.done = true,
-            "ERR" => return Err(Upstream::fault("boom")),
+            "ERR" => return Err(Fault::upstream("boom")),
             _ => out.push(Out(s)),
         }
         Ok(())
@@ -257,7 +254,7 @@ impl RespDec {
     fn end(&mut self, _: &mut Vec<Out>) -> Result<(), Fault> {
         match self.done {
             true => Ok(()),
-            false => Err(Truncated::fault()),
+            false => Err(Fault::truncated()),
         }
     }
 }
@@ -288,9 +285,7 @@ impl RespEnc {
     fn end_into(&mut self, e: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         match e {
             Ok(()) => out.extend_from_slice(b"!"),
-            Err(f) => out.extend_from_slice(
-                format!("ERR {}", respan_gateway_http_faults::error_code(f)).as_bytes(),
-            ),
+            Err(f) => out.extend_from_slice(format!("ERR {}", f.code()).as_bytes()),
         }
         Ok(())
     }
@@ -394,9 +389,7 @@ impl Seen {
                 let mut body = c.into_body().into_data_stream();
                 let read = tokio::spawn(async move {
                     while let Some(f) = body.next().await {
-                        let f = f
-                            .map(|b| text(&b))
-                            .map_err(|e| respan_gateway_http_faults::error_code(&e).to_string());
+                        let f = f.map(|b| text(&b)).map_err(|e| e.code().to_string());
                         lock(&seen.frames).push(f);
                     }
                     seen.done.send_replace(true);
@@ -470,11 +463,10 @@ async fn open(
     BoxFuture<'static, Result<(), Fault>>,
 ) {
     let req = http::Request::from_parts(ask(), Body::stream(frames));
-    let framing = match streams {
-        true => Framing::Live,
-        false => Framing::Whole,
+    let (resp, end) = match streams {
+        true => respan_gateway_http::handle_live(gw, req, LIMIT).await,
+        false => respan_gateway_http::handle(gw, req, LIMIT).await,
     };
-    let (resp, end) = respan_gateway_http::handle(gw, req, framing, LIMIT).await;
     (Some(resp), end)
 }
 
@@ -489,10 +481,7 @@ async fn read(resp: Option<http::Response<Body>>) -> Result<(u16, String), Strin
         match frame {
             Ok(frame) => out.push_str(&text(&frame.into_data().unwrap_or_default())),
             Err(e) => {
-                return Err(format!(
-                    "{} after {out}",
-                    respan_gateway_http_faults::error_code(&e)
-                ));
+                return Err(format!("{} after {out}", e.code()));
             }
         }
     }
@@ -500,16 +489,14 @@ async fn read(resp: Option<http::Response<Body>>) -> Result<(u16, String), Strin
 }
 
 fn code(end: &Result<(), Fault>) -> String {
-    end.as_ref().map_or_else(
-        |f| respan_gateway_http_faults::error_code(f).to_string(),
-        |()| "ok".into(),
-    )
+    end.as_ref()
+        .map_or_else(|f| f.code().to_string(), |()| "ok".into())
 }
 
 /// What a client reads of a result: a fault's code and message.
 fn said<T>(result: Result<T, Fault>) -> Result<(), (String, String)> {
     result.map(|_| ()).map_err(|f| {
-        let code = respan_gateway_http_faults::error_code(&f).to_owned();
+        let code = f.code().to_owned();
         (code, f.message().to_owned())
     })
 }
@@ -593,7 +580,7 @@ async fn a_broken_upload_ends_the_providers_body_with_the_err() {
     let (gw, _, _) = gateway_of(Toy::default(), seen.transport(true, done));
     let (tx, body) = upload();
     send(&tx, "hello");
-    tx.unbounded_send(Err(BadRequest::fault("client broke")))
+    tx.unbounded_send(Err(Fault::bad_request("client broke")))
         .unwrap();
     let (resp, _) = open(&gw, body, true).await;
     let _ = read(resp).await;
@@ -611,11 +598,8 @@ async fn a_broken_upload_ends_the_providers_body_with_the_err() {
 async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
     let (tx, body) = upload();
     drop(tx);
-    let (wire, _answer) = ClientIo::accept(
-        http::Request::from_parts(ask(), Body::stream(body)),
-        Framing::Live,
-        LIMIT,
-    );
+    let (wire, _answer) =
+        ClientIo::accept_live(http::Request::from_parts(ask(), Body::stream(body)), LIMIT);
     let (incoming, _outgoing) = respan_gateway_core::Format::bind(&Toy::default(), wire).unwrap();
     let incoming = incoming.await.unwrap();
     assert!(!incoming.is_single());
@@ -623,7 +607,6 @@ async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
 
     let (wire, _answer) = ClientIo::accept(
         http::Request::from_parts(ask(), Body::stream(chunks(vec!["q"]))),
-        Framing::Whole,
         LIMIT,
     );
     let (incoming, _outgoing) = respan_gateway_core::Format::bind(&Toy::default(), wire).unwrap();
@@ -681,7 +664,7 @@ async fn a_providers_frames_are_read_apart() {
         polls.push(match outputs.poll_next_unpin(&mut cx) {
             Poll::Pending => "pending".to_string(),
             Poll::Ready(Some(Ok(Out(s)))) => s,
-            Poll::Ready(Some(Err(f))) => respan_gateway_http_faults::error_code(&f).to_string(),
+            Poll::Ready(Some(Err(f))) => f.code().to_string(),
             Poll::Ready(None) => "end".to_string(),
         });
     }
@@ -705,7 +688,7 @@ async fn a_slow_refusal_is_known_at_its_head() {
     let transport = fnt(|_| future::ready(Ok(answer(429, late("busy")))).boxed());
     let outputs = dial(&Toy::default(), transport).await.unwrap();
     let fault = outputs.refusal().unwrap();
-    assert_eq!(respan_gateway_http_faults::error_code(fault), "refused");
+    assert_eq!(fault.code(), "refused");
     assert_eq!(
         fault.get(),
         Some(&respan_gateway_http_faults::Status(
@@ -788,9 +771,7 @@ async fn an_error_answer_that_never_ends_is_refused() {
             "dial still pending after 2s; it pulled {frames} frames ({mib} MiB) of a 503's body into memory"
         )
     };
-    let refusal = outputs
-        .refusal()
-        .map(respan_gateway_http_faults::error_code);
+    let refusal = outputs.refusal().map(respan_gateway_core::Fault::code);
     assert_eq!(refusal, Some("upstream"));
 }
 
@@ -1190,7 +1171,7 @@ async fn response_opening_does_not_finish_an_outstanding_transport_write() {
             "response EOF settled an unfinished write"
         );
         let end = if failure {
-            Err(Upstream::fault("late write failure"))
+            Err(Fault::upstream("late write failure"))
         } else {
             Ok(())
         };
@@ -1233,7 +1214,6 @@ async fn refusal_does_not_wait_for_transport_write_completion() {
 async fn accepted_incoming_moves_into_one_connection() {
     let (incoming, reply) = ClientIo::accept(
         http::Request::from_parts(ask(), Body::stream(chunks(vec!["q"]))),
-        Framing::Whole,
         LIMIT,
     );
     assert_eq!(incoming.request().method(), http::Method::POST);
@@ -1329,14 +1309,13 @@ async fn response_encoding_failure_closes_without_reading_a_pending_tail() {
 async fn sink_send_fault_waits_for_its_refusal_bytes() {
     let (transport, answer) = ClientIo::accept(
         http::Request::from_parts(ask(), Body::stream(chunks(vec!["q"]))),
-        Framing::Whole,
         LIMIT,
     );
     let (incoming, mut outgoing) =
         respan_gateway_core::Format::bind(&Toy::default(), transport).unwrap();
     incoming.await.unwrap();
     outgoing.prepare(&mut EventStream::empty()).unwrap();
-    let fault = Upstream::fault("failed output");
+    let fault = Fault::upstream("failed output");
     let mut sending = outgoing.send(Err(fault.clone())).boxed();
     assert!(
         sending.as_mut().now_or_never().is_none(),
@@ -1358,7 +1337,7 @@ async fn upload_sink_flush_waits_for_its_terminal_body_error() {
         respan_gateway_core::Format::bind(&Toy::default(), factory(Extensions::new())).unwrap();
     let mut source = EventStream::stream(stream::pending());
     outgoing.prepare(&mut source).unwrap();
-    let fault = BadRequest::fault("broken upload");
+    let fault = Fault::bad_request("broken upload");
     let mut sending = outgoing.send(Err(fault.clone())).boxed();
     assert!(
         sending.as_mut().now_or_never().is_none(),

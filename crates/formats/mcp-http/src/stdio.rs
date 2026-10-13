@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use respan_gateway_core::futures::TryStreamExt;
-use respan_gateway_core::{BadRequest, ErrorCode, Extensions, Fault, Upstream};
+use respan_gateway_core::{ErrorCode, Extensions, Fault};
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{self, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
@@ -233,7 +233,7 @@ impl StdioTransport {
                 lock(&self.sessions).remove(&key);
                 empty(StatusCode::NO_CONTENT)
             }
-            _ => return Err(BadRequest::fault("not an MCP method")),
+            _ => return Err(Fault::bad_request("not an MCP method")),
         };
         Ok((answer, None))
     }
@@ -292,7 +292,7 @@ impl StdioTransport {
                     return Err(fault);
                 }
                 // It ended already.
-                (Ok(_), None) => return Err(Upstream::fault("the MCP server stopped")),
+                (Ok(_), None) => return Err(Fault::upstream("the MCP server stopped")),
             }
         };
         // Forgotten unless a message of its answer reaches the client,
@@ -330,7 +330,7 @@ fn session_id() -> Result<String, Fault> {
 /// The messages a `POST` carries; `Err` with a parse error if none.
 fn posted(body: &[u8]) -> Result<Vec<Message>, Fault> {
     let read = read(body).map(|(messages, _)| messages);
-    read.ok_or_else(|| BadRequest::fault("not JSON-RPC").with(PARSE_ERROR))
+    read.ok_or_else(|| Fault::bad_request("not JSON-RPC").with(PARSE_ERROR))
 }
 
 /// A success of `status` with no body, such as a 202.
@@ -349,7 +349,7 @@ fn own(fault: Fault, code: &'static str, rpc: i64, status: StatusCode) -> Fault 
 
 /// A request that names no session, but `initialize`: 400.
 fn no_session_named() -> Fault {
-    let fault = BadRequest::fault("the request names no session");
+    let fault = Fault::bad_request("the request names no session");
     own(fault, "no_session", -32003, StatusCode::BAD_REQUEST)
 }
 

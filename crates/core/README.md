@@ -23,10 +23,13 @@ protocols and adapters all depend on it directly.
   says which. `ClientContext::wrap` is for work that awaits.
 - `Call` / `Response`: a plugin's call to a provider (`cx.call`), and what
   a call or `Response::stream` gives back: streamed, read or held.
-- `Fault`: the one error, with typed facts (`fault.with(..)`,
-  `fault.get::<T>()`). Facts any protocol can render: `BadRequest`,
-  `Upstream`, `Truncated`, `RetryAfter`, `ErrorCode` and `Details`; the
-  kernel's own markers: `Abandoned`, `Internal`, `Config` and `NotFound`.
+- `Fault`: the one error: a message, a `FaultKind` saying who it is on
+  (`Client`, `Provider`, `Gateway`, or `Abandoned` when no one waits), a
+  code saying what went wrong (`fault.code()`: its `ErrorCode`, such as
+  `not_found`, `truncated`, `config` or `internal`, else its kind's), and
+  typed extensions (`fault.with(..)`, `fault.get::<T>()`) any protocol can
+  render: `RetryAfter`, `ErrorCode` and `Details`. `Fault::upstream(..)`
+  and the like make one.
 - `NativeFields { format, fields }` preserves unsupported fields on a typed
   value; `NativeValue { format, value }` an entire unsupported value. The
   format ID names the wire schema, not a provider deployment, so formats can

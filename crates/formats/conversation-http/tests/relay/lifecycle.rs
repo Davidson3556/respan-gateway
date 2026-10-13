@@ -1,6 +1,7 @@
 //! Relay lifecycle behavior.
 
 use super::*;
+use respan_gateway_core::Fault;
 
 #[tokio::test]
 async fn a_cut_stream_ends_with_an_error_event_relayed_or_filtered() {
@@ -40,7 +41,7 @@ async fn a_transport_error_mid_stream_ends_with_an_error_event() {
     broken.body_mut().truncate(2);
     broken
         .body_mut()
-        .push(Err(Upstream::fault("connection reset")));
+        .push(Err(Fault::upstream("connection reset")));
     h.sites.openai.reply(broken);
 
     let body = h.body(chat()).await;
@@ -95,7 +96,7 @@ async fn only_plugins_that_ran_get_end_hooks() {
     let after = Outcomes::default();
     let h = Harness::new(
         vec![
-            Arc::new(Refuse(BadRequest::fault("no"))),
+            Arc::new(Refuse(Fault::bad_request("no"))),
             Arc::new(after.clone()),
         ],
         Some("openai"),

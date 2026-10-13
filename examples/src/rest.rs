@@ -11,8 +11,8 @@
 use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Method, request::Parts as RequestHead};
+use respan_gateway_http::path::set_path;
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo};
-use respan_gateway_http_syntax::set_path;
 use respan_gateway_passthrough_http as passthrough;
 
 /// The API named `name` at paths starting with `prefix`.

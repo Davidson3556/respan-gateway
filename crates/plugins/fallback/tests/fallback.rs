@@ -1,6 +1,7 @@
 //! The attempt helpers' promises (retry, fallback, races), against a mock provider.
 
 use respan_gateway_conversation::{Block, Finish, Input, Output};
+use respan_gateway_core::FaultKind;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -11,8 +12,8 @@ use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::{FutureExt, StreamExt, sink, stream};
 use respan_gateway_core::{
-    BadRequest, ClientContext, Connection, ErrorCode, EventSink, EventStream, Fault, Format,
-    Gateway, Internal, Plugin, Provider, ProviderContext, Response, Upstream, async_trait,
+    ClientContext, Connection, ErrorCode, EventSink, EventStream, Fault, Format, Gateway, Plugin,
+    Provider, ProviderContext, Response, async_trait,
 };
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{
@@ -20,7 +21,7 @@ use respan_gateway_http::http::{
     header::{AUTHORIZATION, RETRY_AFTER},
 };
 use respan_gateway_http::{Body, Completion};
-use respan_gateway_http_faults::{error_code, retryable};
+use respan_gateway_http_faults::retryable;
 use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_plugin_fallback::{
     Attempt, Backoff, Fallback, Hedge, Role, Until, first_success, race,
@@ -148,11 +149,7 @@ impl Plugin for Record {
         let Some(a) = px.extensions().get::<Attempt>() else {
             return;
         };
-        let end = end
-            .as_ref()
-            .err()
-            .map_or("ok", |f| error_code(f))
-            .to_owned();
+        let end = end.as_ref().err().map_or("ok", |f| f.code()).to_owned();
         let entry = (px.provider().to_owned(), a.index(), a.role(), end);
         self.0
             .lock()
@@ -252,7 +249,7 @@ async fn silent(_: http::Request<Body>) -> Answered {
 
 /// Refuses the connection.
 async fn refused(_: http::Request<Body>) -> Answered {
-    Err(Upstream::fault("connection refused"))
+    Err(Fault::upstream("connection refused"))
 }
 
 struct Fakes {
@@ -695,7 +692,7 @@ async fn a_false_classifier_suppresses_preopening_upstream_retries_but_allows_fa
         Arc::new(move |fault, opened| {
             seen.lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push((error_code(fault).to_owned(), opened));
+                .push((fault.code().to_owned(), opened));
             false
         }),
     ))
@@ -730,7 +727,7 @@ async fn classifier_sees_opened_content_and_late_terminal_failures() {
             Arc::new(move |fault, opened| {
                 seen.lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .push((error_code(fault).to_owned(), opened));
+                    .push((fault.code().to_owned(), opened));
                 false
             }),
         ))
@@ -762,7 +759,7 @@ async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
                 let _ = input
                     .value()
                     .transpose()?
-                    .ok_or_else(|| BadRequest::fault("missing input"))?;
+                    .ok_or_else(|| Fault::bad_request("missing input"))?;
                 if invocations.fetch_add(1, Ordering::SeqCst) == 0 {
                     return Err(
                         Fault::new("local model warming up").with(ErrorCode("model_busy".into()))
@@ -800,7 +797,7 @@ async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
         Arc::new(move |fault, opened| {
             seen.lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push((error_code(fault).to_owned(), opened));
+                .push((fault.code().to_owned(), opened));
             fault
                 .get::<ErrorCode>()
                 .is_some_and(|c| c.0 == "model_busy")
@@ -1040,7 +1037,7 @@ async fn until_head_commits_on_a_success_status_however_its_body_goes() {
         // Committed on its head, so its failure before any bytes is refused.
         assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
         assert_eq!(h.sent_to(), ["a.test"]);
-        assert!(matches!(outcome, Err(f) if f.is::<Upstream>()));
+        assert!(matches!(outcome, Err(f) if f.is(FaultKind::Provider)));
         let a = ("a".to_owned(), 0, Role::Winner, "upstream".to_owned());
         assert_eq!(h.record.all(), [a]);
     }
@@ -1245,7 +1242,7 @@ async fn until_end_retries_a_stream_failing_after_content_and_returns_the_last()
     let heard = meaning(&body);
     assert_eq!(heard[..2], meaning(&[ROLE, HELLO].concat())[..], "{body}");
     assert!(body.contains("\"code\":\"upstream\""), "{body}");
-    assert!(matches!(outcome, Err(f) if f.is::<Upstream>()));
+    assert!(matches!(outcome, Err(f) if f.is(FaultKind::Provider)));
     assert_eq!(h.sent_to(), ["a.test", "a.test"]);
     let roles: Vec<_> = h.record.all().into_iter().map(|r| (r.1, r.2)).collect();
     assert_eq!(roles, [(0, Role::Loser), (1, Role::Winner)]);
@@ -1263,7 +1260,7 @@ async fn a_wrong_content_type_does_not_replay_a_healthy_final_response() {
     let (status, _, body, outcome) = h.send().await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert!(!body.contains("Hello"), "{body}");
-    assert!(matches!(outcome, Err(fault) if fault.is::<Internal>()));
+    assert!(matches!(outcome, Err(fault) if fault.code() == "internal"));
     assert_eq!(h.sent_to(), ["a.test"]);
     assert_eq!(h.record.all()[0].2, Role::Loser);
 }
@@ -1274,7 +1271,7 @@ async fn content_policy_accepts_custom_events_and_captured_configuration() {
     let Until::Content(read) = Until::content(move |event: &u32| *event >= threshold) else {
         panic!("expected the supplied policy");
     };
-    let make = || Response::stream(stream::iter([Ok(0u32), Err(Upstream::fault("cut"))]));
+    let make = || Response::stream(stream::iter([Ok(0u32), Err(Fault::upstream("cut"))]));
     assert!(read(make()).await.1.is_err());
     let Until::Content(read) = Until::content(|_: &u32| true) else {
         panic!("expected the supplied policy");
@@ -1291,7 +1288,7 @@ async fn until_end_falls_back_when_a_provider_filter_fails_at_end() {
             Ok(())
         }
         fn end(&mut self, _: &Result<(), Fault>, _: &mut Vec<Output>) -> Result<(), Fault> {
-            Err(Upstream::fault("failed-at-end"))
+            Err(Fault::upstream("failed-at-end"))
         }
     }
     struct FailFirst;

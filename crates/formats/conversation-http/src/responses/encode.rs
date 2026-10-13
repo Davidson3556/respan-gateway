@@ -664,7 +664,7 @@ impl Events {
             None => {
                 let v = json!({
                     "type": "error",
-                    "code": respan_gateway_http_faults::error_code(f),
+                    "code": f.code(),
                     "message": f.message(),
                     "param": null,
                 });

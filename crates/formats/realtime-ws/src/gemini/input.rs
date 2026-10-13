@@ -4,7 +4,7 @@
 use std::sync::atomic::Ordering;
 
 use respan_gateway_conversation::{Content, Message, Role};
-use respan_gateway_core::{BadRequest, Fault, NativeFields, NativeValue};
+use respan_gateway_core::{Fault, NativeFields, NativeValue};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_realtime::{
     Audio, AudioFormat, Encoding, Input, Output, Session, Status, ToolChoice, ToolResult, Turns,
@@ -90,7 +90,7 @@ impl Client {
 
 /// A message the Live API refuses, as it closes the session.
 fn invalid(message: &str) -> Fault {
-    BadRequest::fault(message).with(CloseCode(1007))
+    Fault::bad_request(message).with(CloseCode(1007))
 }
 
 /// The events of a message after the setup, its client `answering` or not;
@@ -457,7 +457,7 @@ impl Provider {
             let fixed = format!(
                 "Gemini Live fixes a session's configuration at its setup: this update changes `{field}`"
             );
-            return Err(BadRequest::fault(fixed).with(CloseCode(1008)));
+            return Err(Fault::bad_request(fixed).with(CloseCode(1008)));
         }
         // Audio formats are each chunk's own.
         applied.input_audio = s.input_audio.or(applied.input_audio);

@@ -180,7 +180,7 @@ fn scratch(name: &str) -> PathBuf {
 async fn a_python_child_serves_a_session_and_the_end_kills_its_whole_tree() {
     let script = serde_json::to_string(SERVER).unwrap();
     let gw = Gateway::start(&format!(
-        "mcp:\n  py:\n    command: [{}, -c, {script}]\n    env: {{ GREETING: 'hello:' }}\n",
+        "mcp = {{ py = {{ command = [\"{}\", \"-c\", {script}], env = {{ GREETING = \"hello:\" }} }} }}\n",
         python()
     ))
     .await;
@@ -235,8 +235,9 @@ fn shim(dir: &Path) {
 async fn a_bare_command_name_is_found_on_path_with_the_extensions_of_pathext() {
     let dir = scratch("shim");
     shim(&dir);
-    let config =
-        support::write_config("listen: 127.0.0.1:0\nmcp:\n  shimmed: { command: [pyshim] }\n");
+    let config = support::write_config(
+        "listen = \"127.0.0.1:0\"\nmcp = { shimmed = { command = [\"pyshim\"] } }\n",
+    );
 
     // The binary's whole environment: the shim's directory first on PATH.
     let mut paths = vec![dir.clone()];

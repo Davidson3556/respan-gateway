@@ -19,14 +19,13 @@
 //!
 //! `cargo run -p respan-gateway-examples --example models_merge`
 
-use respan_gateway_core::Upstream;
 use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::futures::{TryStreamExt, stream};
 use respan_gateway_core::{
     ClientContext, Connection, Fault, Format, Gateway, Plugin, Provider, Response, async_trait,
 };
-use respan_gateway_http::Whole;
-use respan_gateway_http::framing;
+use respan_gateway_http::All;
+use respan_gateway_http::content;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{ClientIo, ProviderIo};
 use respan_gateway_http_transport::HttpTransport;
@@ -58,7 +57,7 @@ impl Format<ClientIo, passthrough::Input<Models>, passthrough::Output<Models>> f
     ) -> Result<Connection<passthrough::Input<Models>, passthrough::Output<Models>>, Fault> {
         Ok(io
             .with_error(|fault, _, head| {
-                framing::default_content_type(head, "application/json");
+                content::default_content_type(head, "application/json");
                 json!({ "error": { "message": fault.message() } })
                     .to_string()
                     .into()
@@ -66,14 +65,14 @@ impl Format<ClientIo, passthrough::Input<Models>, passthrough::Output<Models>> f
             .bind(passthrough::read_request, |reply| {
                 // A merged list has no provider's head to borrow a content type from.
                 let mut head = reply.head();
-                framing::default_content_type(&mut head, "application/json");
+                content::default_content_type(&mut head, "application/json");
                 let write = |one: &[passthrough::Output<Models>]| {
                     Ok(one
                         .iter()
                         .flat_map(|g| g.0.body().to_vec())
                         .collect::<Vec<u8>>())
                 };
-                Ok(reply.write(head, Box::new(Whole::new(write))))
+                Ok(reply.write(head, Box::new(All::new(write))))
             }))
     }
 }
@@ -107,12 +106,12 @@ impl Plugin for MergeModels {
                     call.await?.outputs().try_collect().await?;
                 let bytes: Vec<u8> = frames.iter().flat_map(|f| f.0.body().to_vec()).collect();
                 let mut list: Value = serde_json::from_slice(&bytes)
-                    .map_err(|_| Upstream::fault("a provider's models are not JSON"))?;
+                    .map_err(|_| Fault::upstream("a provider's models are not JSON"))?;
                 match list["data"].take() {
                     Value::Array(models) if models.iter().all(|m| m["id"].is_string()) => {
                         Ok(models)
                     }
-                    _ => Err(Upstream::fault("a provider's models are not a list of ids")),
+                    _ => Err(Fault::upstream("a provider's models are not a list of ids")),
                 }
             }))
             .await;
@@ -121,7 +120,7 @@ impl Plugin for MergeModels {
             return Err(failures
                 .into_iter()
                 .find_map(Result::err)
-                .unwrap_or_else(|| Upstream::fault("no provider")));
+                .unwrap_or_else(|| Fault::upstream("no provider")));
         }
         let mut data: Vec<Value> = Vec::new();
         for model in lists.iter().flatten().flatten() {

@@ -14,7 +14,7 @@ impl Format<ClientIo, passthrough::Input<Responses>, passthrough::Output<Respons
     }
     fn matches(&self, io: &ClientIo) -> bool {
         io.request().method() == h::http::Method::POST
-            && respan_gateway_http_syntax::clean_path(io.request().uri().path())
+            && respan_gateway_http::path::clean_path(io.request().uri().path())
                 .ends_with("/responses")
     }
     fn bind(
@@ -22,9 +22,7 @@ impl Format<ClientIo, passthrough::Input<Responses>, passthrough::Output<Respons
         io: ClientIo,
     ) -> Result<Connection<passthrough::Input<Responses>, passthrough::Output<Responses>>, Fault>
     {
-        Ok(io
-            .with_error(h::rules::plain)
-            .bind(passthrough::read_request, passthrough::write_response))
+        Ok(io.bind(passthrough::read_request, passthrough::write_response))
     }
 }
 

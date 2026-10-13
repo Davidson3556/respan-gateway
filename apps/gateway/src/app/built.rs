@@ -142,7 +142,7 @@ impl Built {
             format!(
                 "refusing to listen on {addr} with no client keys: anyone who can reach it \
                  would spend your provider keys, and without keys it answers only to \
-                 localhost anyway.\n  Set `client_keys:` in the config (`respan-gateway init \
+                 localhost anyway.\n  Set `client_keys` in the config (`respan-gateway init \
                  --client-key` writes a strong one), or listen on 127.0.0.1."
             )
         })

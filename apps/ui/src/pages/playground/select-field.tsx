@@ -27,10 +27,10 @@ export function SelectField({
   className?: string;
 }) {
   return (
-    <div className="grid gap-2">
+    <div className="grid min-w-0 gap-2">
       <Label htmlFor={id}>{label}</Label>
       <Select value={value} onValueChange={onChange}>
-        <SelectTrigger id={id} className={cn("w-full", className)}>
+        <SelectTrigger id={id} className={cn("w-full min-w-0 [&_[data-slot=select-value]]:truncate", className)}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

@@ -12,7 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-respan-gateway-http-syntax.workspace = true
+percent-encoding.workspace = true
 respan-gateway-http-faults.workspace = true
 futures.workspace = true
 respan-gateway-core.workspace = true

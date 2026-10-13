@@ -4,6 +4,7 @@
 #[path = "../../../../tests/support/http.rs"]
 mod http_support;
 use http_support::{LIMIT, serve};
+use respan_gateway_core::FaultKind;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -13,16 +14,15 @@ use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{
     ClientContext, Extensions, Fault, Format, Gateway, Plugin, Provider, Response,
 };
-use respan_gateway_core::{RetryAfter, Truncated, Upstream, async_trait};
+use respan_gateway_core::{RetryAfter, async_trait};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
-    Body, ClientIo, Completion, Credential, Framing, ProviderIo, call::credentials,
+    Body, ClientIo, Completion, Credential, ProviderIo, call::credentials,
     call::strip_origin_headers,
 };
-use respan_gateway_http_faults::error_code;
 use respan_gateway_mcp::{Input, Output};
 #[cfg(unix)]
 use respan_gateway_mcp_http::StdioTransport;
@@ -121,7 +121,7 @@ async fn send(
 fn messages(body: &str) -> Vec<Value> {
     let each = body.split_inclusive("\n\n");
     let all = each
-        .filter_map(respan_gateway_http::framing::json)
+        .filter_map(respan_gateway_http::content::json)
         .flat_map(|v| match v {
             Value::Array(all) => all,
             one => vec![one],
@@ -208,7 +208,7 @@ impl ScriptedMcp {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .pop_front()
-            .ok_or_else(|| Upstream::fault("no MCP test reply"))?;
+            .ok_or_else(|| Fault::upstream("no MCP test reply"))?;
         let (mut head, chunks) = reply.into_parts();
         strip_origin_headers(&mut head.headers);
         Ok((
@@ -397,7 +397,7 @@ async fn an_invalid_provider_session_is_an_upstream_fault() {
         let (status, headers, _, outcome) = send(&gw, request(Method::POST, INIT, &[])).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY, "{session:?}");
         assert!(!headers.contains_key(SESSION));
-        assert!(outcome.is_err_and(|f| f.is::<Upstream>()));
+        assert!(outcome.is_err_and(|f| f.is(FaultKind::Provider)));
     }
 }
 
@@ -491,7 +491,7 @@ async fn an_event_id_that_would_break_its_line_is_refused_not_written() {
     let gw = gateway(mock.connect(), None).plugin(Inject);
     let (_, _, body, outcome) = send(&gw, request(Method::GET, "", &[])).await;
     assert!(!body.contains("injected"), "{body}");
-    assert!(outcome.is_err_and(|f| f.is::<respan_gateway_core::Internal>()));
+    assert!(outcome.is_err_and(|f| f.code() == "internal"));
 }
 
 /// A plugin-created response has no provider response head; the format must
@@ -589,7 +589,7 @@ async fn a_batch_answer_is_complete_only_once_every_id_is_answered() {
         (&json!(1), &json!("truncated"))
     );
     assert_eq!(
-        outcome.map_err(|f| (error_code(&f).to_owned(), f.is::<Truncated>())),
+        outcome.map_err(|f| (f.code().to_owned(), f.code() == "truncated")),
         Err(("truncated".to_owned(), true))
     );
 
@@ -751,7 +751,7 @@ impl Plugin for RefusalProbe {
             px.is_refused(),
             end.as_ref()
                 .err()
-                .map_or("ok".into(), |f| error_code(f).to_owned()),
+                .map_or("ok".into(), |f| f.code().to_owned()),
             end.as_ref()
                 .err()
                 .and_then(|f| f.get::<RetryAfter>())
@@ -794,7 +794,11 @@ async fn a_non_success_event_stream_is_refused_with_retry_after_and_can_fall_bac
         (&error["id"], &error["error"]["code"]),
         (&json!(1), &json!(-32603))
     );
-    assert!(outcome.expect_err("provider refusal").is::<Upstream>());
+    assert!(
+        outcome
+            .expect_err("provider refusal")
+            .is(FaultKind::Provider)
+    );
     assert_eq!(failed.sent().len(), 1);
     assert_eq!(
         *probe.0.lock().unwrap_or_else(PoisonError::into_inner),
@@ -1242,7 +1246,7 @@ async fn a_post_the_server_never_answers_times_out_and_frees_its_session() {
         (&json!(-32001), &json!("timed_out"))
     );
     assert_eq!(
-        outcome.err().map(|f| error_code(&f).to_owned()),
+        outcome.err().map(|f| f.code().to_owned()),
         Some("timed_out".into())
     );
     // With nothing waiting, the session idles out and a new one fits.
@@ -1368,7 +1372,7 @@ fn mcp_is_matched_however_its_path_is_spelled() {
             .method(method)
             .uri(uri)
             .body(Body::full(""));
-        ClientIo::accept(req.expect("valid request"), Framing::Whole, LIMIT).0
+        ClientIo::accept(req.expect("valid request"), LIMIT).0
     };
     let same = [
         "/mcp",
@@ -1455,7 +1459,7 @@ async fn rewritten_ids_correlate_with_sent_request_but_refuse_original_request()
         } else {
             assert_eq!(status, StatusCode::BAD_GATEWAY);
             assert_eq!(output[0]["id"], 1, "refusal addresses original caller");
-            assert!(ended.expect_err("unanswered request").is::<Truncated>());
+            assert!(ended.expect_err("unanswered request").code() == "truncated");
         }
     }
 }
@@ -1464,7 +1468,7 @@ async fn rewritten_ids_correlate_with_sent_request_but_refuse_original_request()
 async fn a_failed_get_stream_writes_no_json_rpc_answer() {
     let mock = ScriptedMcp::new();
     let mut broken = sse(&["data: {\"jsonrpc\":\"2.0\",\"method\":\"n\"}\n\n"]);
-    broken.body_mut().push(Err(Upstream::fault("cut")));
+    broken.body_mut().push(Err(Fault::upstream("cut")));
     mock.reply(broken);
     let gw = gateway(mock.connect(), None);
     let (status, _, body, outcome) = send(&gw, request(Method::GET, "", &[])).await;
@@ -1474,7 +1478,7 @@ async fn a_failed_get_stream_writes_no_json_rpc_answer() {
         [json!({"jsonrpc":"2.0","method":"n"})],
         "{body}"
     );
-    assert!(outcome.is_err_and(|f| f.is::<Upstream>()));
+    assert!(outcome.is_err_and(|f| f.is(FaultKind::Provider)));
 }
 
 #[tokio::test]
@@ -1500,7 +1504,7 @@ async fn a_json_answer_that_fails_midway_keeps_its_answers_and_errs_the_rest() {
         (&json!(1), &json!("truncated"), &Value::Null),
         "{body}"
     );
-    assert!(outcome.is_err_and(|f| f.is::<Truncated>()));
+    assert!(outcome.is_err_and(|f| f.code() == "truncated"));
 }
 
 #[tokio::test]
@@ -1552,7 +1556,7 @@ async fn a_zero_stdio_backlog_is_a_configuration_fault() {
     );
     let (status, _, _, outcome) = send(&gw, request(Method::POST, INIT, &[])).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(error_code(&outcome.expect_err("invalid backlog")), "config");
+    assert_eq!(outcome.expect_err("invalid backlog").code(), "config");
 }
 
 #[cfg(unix)]
@@ -1599,7 +1603,7 @@ async fn a_bodiless_success_cannot_settle_an_unanswered_request() {
         let answer = messages(&body).pop().expect("unanswered request error");
         assert_eq!(answer["id"], 2);
         assert_eq!(answer["error"]["data"]["code"], "truncated");
-        assert!(outcome.is_err_and(|f| f.is::<Truncated>()));
+        assert!(outcome.is_err_and(|f| f.code() == "truncated"));
     }
 }
 
@@ -1630,7 +1634,7 @@ async fn malformed_provider_messages_never_count_as_answers_in_json_or_sse() {
             let answer = messages(&body).pop().expect("protocol error");
             assert_eq!(answer["id"], 2, "{bad}: {body}");
             assert_eq!(answer["error"]["data"]["code"], "upstream", "{bad}: {body}");
-            assert!(outcome.is_err_and(|f| f.is::<Upstream>()));
+            assert!(outcome.is_err_and(|f| f.is(FaultKind::Provider)));
         }
     }
 }
@@ -1659,7 +1663,7 @@ async fn a_foreign_reply_cannot_turn_one_request_into_a_response_batch() {
         let reply: Value = serde_json::from_str(&body).expect("single refusal");
         assert_eq!(reply["id"], 2);
         assert_eq!(reply["error"]["data"]["code"], "upstream");
-        assert!(outcome.is_err_and(|f| f.is::<Upstream>()));
+        assert!(outcome.is_err_and(|f| f.is(FaultKind::Provider)));
     }
 }
 
@@ -1719,7 +1723,7 @@ async fn a_duplicate_reply_cannot_settle_a_different_pending_request() {
     assert_eq!(replies[0]["id"], 2);
     assert_eq!(replies[1]["id"], 1);
     assert_eq!(replies[1]["error"]["data"]["code"], "upstream");
-    assert!(outcome.is_err_and(|f| f.is::<Upstream>()));
+    assert!(outcome.is_err_and(|f| f.is(FaultKind::Provider)));
 }
 
 #[tokio::test]
@@ -1852,7 +1856,7 @@ async fn server_requests_are_refused_in_json_framing_and_preserved_in_sse() {
             assert_eq!(messages(&body)[0]["id"], "server");
         } else {
             assert_eq!(status, StatusCode::BAD_GATEWAY);
-            assert!(outcome.is_err_and(|f| f.is::<Upstream>()));
+            assert!(outcome.is_err_and(|f| f.is(FaultKind::Provider)));
             assert_eq!(messages(&body)[0]["id"], 2);
             assert_eq!(messages(&body)[0]["error"]["data"]["code"], "upstream");
         }

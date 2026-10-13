@@ -11,7 +11,7 @@
 //!
 //! `batch_split.rs` builds on this kind (it includes this file as a module).
 
-use respan_gateway_core::{BadRequest, Provider, Upstream};
+use respan_gateway_core::Provider;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mockllm::{Answer, FakeOpenAi};
@@ -21,10 +21,10 @@ use respan_gateway_core::{
     async_trait,
 };
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing;
+use respan_gateway_http::content;
 use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
-use respan_gateway_http::{self as h, ClientIo, ProviderIo, Whole};
+use respan_gateway_http::{self as h, All, ClientIo, ProviderIo, Whole};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -67,7 +67,7 @@ impl Format<ClientIo, EmbedRequest, Embeddings> for OpenAiEmbeddings {
 
     fn matches(&self, io: &ClientIo) -> bool {
         io.request().method() == Method::POST
-            && respan_gateway_http_syntax::clean_path(io.request().uri().path())
+            && respan_gateway_http::path::clean_path(io.request().uri().path())
                 .ends_with("/embeddings")
     }
 
@@ -83,8 +83,8 @@ impl Format<ClientIo, EmbedRequest, Embeddings> for OpenAiEmbeddings {
             // The response written whole, once it ended.
             |reply| {
                 let mut head = reply.head();
-                framing::default_content_type(&mut head, "application/json");
-                Ok(reply.write(head, Box::new(Whole::new(write_embeddings))))
+                content::default_content_type(&mut head, "application/json");
+                Ok(reply.write(head, Box::new(All::new(write_embeddings))))
             },
         ))
     }
@@ -105,7 +105,7 @@ impl Format<ProviderIo, Embeddings, EmbedRequest> for OpenAiEmbeddings {
                     )));
                 }
                 head.method = Method::POST;
-                respan_gateway_http_syntax::set_path(head, "/embeddings")?;
+                respan_gateway_http::path::set_path(head, "/embeddings")?;
                 head.headers
                     .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
                 Ok(Box::new(|r: &EmbedRequest, out: &mut Vec<Bytes>| {
@@ -128,9 +128,9 @@ impl Format<ProviderIo, Embeddings, EmbedRequest> for OpenAiEmbeddings {
 
 fn read_request(raw: Bytes) -> Result<EmbedRequest, Fault> {
     let mut v: Map<String, Value> =
-        serde_json::from_slice(&raw).map_err(|_| BadRequest::fault("not a JSON object"))?;
+        serde_json::from_slice(&raw).map_err(|_| Fault::bad_request("not a JSON object"))?;
     let model = v.remove("model").and_then(|m| m.as_str().map(Into::into));
-    let texts_only = || BadRequest::fault("input must be a string or an array of strings");
+    let texts_only = || Fault::bad_request("input must be a string or an array of strings");
     let input = match v.remove("input") {
         Some(Value::String(one)) => vec![one],
         // Texts; token arrays are not read here.
@@ -140,7 +140,9 @@ fn read_request(raw: Bytes) -> Result<EmbedRequest, Fault> {
     // Base64 vectors are not read here either: the provider would be paid
     // for answers this kind cannot hold.
     if v.get("encoding_format").is_some_and(|f| f == "base64") {
-        return Err(BadRequest::fault("encoding_format base64 is not supported"));
+        return Err(Fault::bad_request(
+            "encoding_format base64 is not supported",
+        ));
     }
     Ok(EmbedRequest {
         model,
@@ -151,9 +153,9 @@ fn read_request(raw: Bytes) -> Result<EmbedRequest, Fault> {
 
 fn read_embeddings(raw: Bytes) -> Result<Embeddings, Fault> {
     let mut v: Map<String, Value> =
-        serde_json::from_slice(&raw).map_err(|_| Upstream::fault("not a JSON object"))?;
+        serde_json::from_slice(&raw).map_err(|_| Fault::upstream("not a JSON object"))?;
     let mut said = Embeddings::default();
-    let malformed = || Upstream::fault("invalid embedding indices or vectors");
+    let malformed = || Fault::upstream("invalid embedding indices or vectors");
     let data = v.remove("data").ok_or_else(malformed)?;
     let data = data.as_array().ok_or_else(malformed)?;
     let mut ordered = vec![None; data.len()];
@@ -184,7 +186,7 @@ fn read_embeddings(raw: Bytes) -> Result<Embeddings, Fault> {
 
 /// The fault as this protocol's error body: the format's error writer.
 fn error(fault: &Fault, _: &h::http::Request<Bytes>, head: &mut ResponseHead) -> Bytes {
-    framing::default_content_type(head, "application/json");
+    content::default_content_type(head, "application/json");
     Bytes::from(json!({ "error": { "message": fault.message() } }).to_string())
 }
 

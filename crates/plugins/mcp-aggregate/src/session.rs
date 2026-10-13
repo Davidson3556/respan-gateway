@@ -11,8 +11,8 @@ use respan_gateway_core::futures::stream;
 use respan_gateway_core::{
     ClientContext, Extensions, Fault, Gateway, Plugin, Response, async_trait,
 };
+use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, Method};
-use respan_gateway_http::{Body, Framing};
 use respan_gateway_mcp::Output;
 use serde_json::Value;
 
@@ -108,7 +108,7 @@ impl Closer {
         let mut marks = Extensions::new();
         marks.insert(Close);
         request.extensions_mut().insert(marks);
-        let sent = respan_gateway_http::handle(gateway, request, Framing::Whole, 1 << 20);
+        let sent = respan_gateway_http::handle(gateway, request, 1 << 20);
         let work = async {
             let (response, done) = sent.await;
             let body = respan_gateway_http::http_body_util::BodyExt::collect(response.into_body());

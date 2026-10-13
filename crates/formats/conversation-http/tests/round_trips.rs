@@ -6,7 +6,7 @@ use respan_gateway_conversation::{Block, Content, Finish, Output, Role};
 use respan_gateway_conversation_http::Schema;
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
-use respan_gateway_core::Upstream;
+use respan_gateway_core::Fault;
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
@@ -659,7 +659,7 @@ async fn held_usage_survives_semantic_failure_but_not_a_wire_failure() {
     for (provider, (start, error)) in fixtures.into_iter().enumerate() {
         for wire in [false, true] {
             let ending = if wire {
-                Err(Upstream::fault("wire"))
+                Err(Fault::upstream("wire"))
             } else {
                 Ok(Bytes::from(error))
             };
@@ -767,10 +767,7 @@ async fn finite_and_streamed_response_reads_share_framing_and_errors() {
                 match (finite, live) {
                     (Ok(finite), Ok(live)) => assert_eq!(finite, live),
                     (Err(finite), Err(live)) => {
-                        assert_eq!(
-                            respan_gateway_http_faults::error_code(&finite),
-                            respan_gateway_http_faults::error_code(&live)
-                        );
+                        assert_eq!(finite.code(), live.code());
                         assert_eq!(finite.message(), live.message());
                     }
                     (finite, live) => panic!("finite/live mismatch: {finite:?} / {live:?}"),
@@ -1024,9 +1021,27 @@ fn read<S: Schema>(
     response: http::Response<Body>,
     request: &http::Request<Bytes>,
 ) -> respan_gateway_core::EventStream<Output> {
-    let (head, body) = response.into_parts();
-    match schema.read_response(&head, request) {
-        Some(decoder) => body.decode(decoder),
-        None => respan_gateway_core::EventStream::empty(),
-    }
+    let (head, mut body) = response.into_parts();
+    let Some(mut decoder) = schema.read_response(&head, request) else {
+        return respan_gateway_core::EventStream::empty();
+    };
+    use respan_gateway_core::futures::{StreamExt, stream};
+    // As a binding reads a body: each frame as it comes, until the decoder
+    // is done or fails, then the body's end.
+    let read = async move {
+        let mut values = Vec::new();
+        let mut end = decoder.start(&mut values);
+        while end.is_ok() && !decoder.done() {
+            match body.next().await {
+                Some(Ok(frame)) => end = decoder.decode(frame, &mut values),
+                tail => {
+                    let wire = tail.transpose().map(|_| ());
+                    end = wire.clone().and(decoder.end(wire, &mut values));
+                    break;
+                }
+            }
+        }
+        values.into_iter().map(Ok).chain(end.err().map(Err))
+    };
+    respan_gateway_core::EventStream::stream(stream::once(read).flat_map(stream::iter))
 }

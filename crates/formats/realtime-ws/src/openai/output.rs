@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use respan_gateway_core::{Fault, NativeFields, NativeValue, Upstream};
+use respan_gateway_core::{Fault, NativeFields, NativeValue};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_realtime::{Audio, AudioFormat, Output, Status, Usage};
 use serde_json::{Value, json};
@@ -62,7 +62,7 @@ impl Default for Provider {
 impl Provider {
     pub(super) fn read(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
         let v: Value = serde_json::from_slice(&raw)
-            .map_err(|_| Upstream::fault("a provider's frame is not a JSON event"))?;
+            .map_err(|_| Fault::upstream("a provider's frame is not a JSON event"))?;
         let mut rest = v.clone();
         match take(&mut rest, &["type"], string, text) {
             Some(kind) if self.decode(&kind, rest, out).is_some() => {}

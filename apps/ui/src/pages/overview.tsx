@@ -77,7 +77,7 @@ function ProvidersSummary() {
           Array.from({ length: 3 }, (_, i) => <Skeleton key={i} className="h-10 w-full" />)}
         {data?.length === 0 && (
           <p className="text-sm text-muted-foreground">
-            No providers yet. Add one to <code className="text-xs">gateway.yaml</code>.
+            No providers yet. Add one to <code className="text-xs">gateway.toml</code>.
           </p>
         )}
         {data?.slice(0, 6).map((p) => (

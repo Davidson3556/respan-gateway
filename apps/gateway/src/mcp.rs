@@ -1,4 +1,4 @@
-//! MCP servers behind the gateway: `mcp:` in the config names them, and
+//! MCP servers behind the gateway: `mcp` in the config names them, and
 //! clients reach each one over streamable HTTP at `/mcp/{name}`, behind the
 //! gateway's client keys. An upstream is a streamable-HTTP server (`url`) or
 //! a child process speaking MCP on stdio (`command`); either way its
@@ -49,7 +49,7 @@ const MOUNT: &str = "/mcp";
 /// (the transport's limits are per owner and in all; here they are one).
 const SESSIONS: usize = 32;
 
-/// One MCP server, as `gateway.yaml` writes it under `mcp:`: `url` or
+/// One MCP server, as `gateway.toml` writes it under `mcp`: `url` or
 /// `command`.
 #[derive(Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -525,11 +525,11 @@ pub fn known(servers: Vec<McpServer>, aggregate: bool, limit: usize) -> KnownFor
         endpoints.extend(["POST", "GET", "DELETE"].map(|m| format!("{m} {MOUNT} (all servers)")));
     }
     let endpoints: Vec<&str> = endpoints.iter().map(String::as_str).collect();
-    // Servers are not providers: nothing configures one under `providers:`.
+    // Servers are not providers: nothing configures one under `providers`.
     let not_a_provider =
         |_: &str, _: &str, _: HeaderMap| -> Result<fn(Extensions) -> ProviderIo, Fault> {
             Err(Fault::config(
-                "mcp servers are configured under `mcp:`, not `providers:`",
+                "mcp servers are configured under `mcp`, not `providers`",
             ))
         };
     let serve_client = client.clone();
@@ -746,7 +746,7 @@ impl Plugin for McpRoute {
             .extensions()
             .get::<Original>()
             .and_then(|wire| wire.get())
-            .map(|request| respan_gateway_http_syntax::clean_path(request.uri().path()));
+            .map(|request| respan_gateway_http::path::clean_path(request.uri().path()));
         let name = path.as_deref().and_then(|p| p.rsplit('/').next());
         let name = name.ok_or_else(|| Fault::not_found("no MCP server named"))?;
         cx.set_target(name);
@@ -758,16 +758,16 @@ impl Plugin for McpRoute {
 mod tests {
     use super::*;
 
-    fn parse(yaml: &str) -> Result<Vec<McpServer>, String> {
+    fn parse(text: &str) -> Result<Vec<McpServer>, String> {
         let config: IndexMap<String, McpConfig> =
-            serde_norway::from_str(yaml).map_err(|e| e.to_string())?;
+            toml::from_str(text).map_err(|e| e.to_string())?;
         servers(&config, &["openai"]).map_err(|e| e.message().to_owned())
     }
 
     #[test]
     fn a_server_is_a_url_or_a_command() {
         let ok =
-            parse("a: { url: 'https://h.test/mcp/', key: sk-1 }\nb: { command: [sh, -c, 'true'] }")
+            parse("a = { url = \"https://h.test/mcp/\", key = \"sk-1\" }\nb = { command = [\"sh\", \"-c\", \"true\"] }")
                 .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(ok[0].transport_label(), "http");
         assert!(ok[0].own_key && ok[0].key_from == "config");
@@ -784,17 +784,23 @@ mod tests {
 
     #[test]
     fn mistakes_are_named() {
-        let said = |yaml: &str| parse(yaml).err().unwrap_or_default();
-        assert!(said("a: {}").contains("needs a `url`"));
-        assert!(said("a: { url: 'http://h.test', command: [x] }").contains("not both"));
-        assert!(said("a: { url: 'http://h.test?x=1' }").contains("query"));
-        assert!(said("a: { command: [definitely-not-a-program] }").contains("not found on PATH"));
-        assert!(said("a: { command: [sh], key: k }").contains("for a `url`"));
-        assert!(said("a: { url: 'http://h.test', env: { A: b } }").contains("for a `command`"));
-        assert!(said("openai: { url: 'http://h.test' }").contains("provider"));
-        assert!(said("a/b: { url: 'http://h.test' }").contains("name"));
+        let said = |text: &str| parse(text).err().unwrap_or_default();
+        assert!(said("a = {  }").contains("needs a `url`"));
+        assert!(said("a = { url = \"http://h.test\", command = [\"x\"] }").contains("not both"));
+        assert!(said("a = { url = \"http://h.test?x=1\" }").contains("query"));
         assert!(
-            said("a: { url: 'http://h.test', key: 'env:NO_SUCH_VAR_X' }").contains("NO_SUCH_VAR_X")
+            said("a = { command = [\"definitely-not-a-program\"] }").contains("not found on PATH")
+        );
+        assert!(said("a = { command = [\"sh\"], key = \"k\" }").contains("for a `url`"));
+        assert!(
+            said("a = { url = \"http://h.test\", env = { A = \"b\" } }")
+                .contains("for a `command`")
+        );
+        assert!(said("openai = { url = \"http://h.test\" }").contains("provider"));
+        assert!(said("\"a/b\" = { url = \"http://h.test\" }").contains("name"));
+        assert!(
+            said("a = { url = \"http://h.test\", key = \"env:NO_SUCH_VAR_X\" }")
+                .contains("NO_SUCH_VAR_X")
         );
     }
 
@@ -820,7 +826,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_cwd_must_be_a_directory() {
-        let said = |cwd: &str| parse(&format!("a: {{ command: [sh], cwd: '{cwd}' }}")).err();
+        let said = |cwd: &str| parse(&format!("a = {{ command = ['sh'], cwd = '{cwd}' }}")).err();
         assert!(said("/definitely/not/here").is_some_and(|e| e.contains("does not exist")));
         assert!(said("/bin/sh").is_some_and(|e| e.contains("not a directory")));
         assert!(said("/").is_none());
@@ -828,13 +834,14 @@ mod tests {
 
     #[test]
     fn a_target_shows_no_path_argument_or_environment() {
-        let http = parse("a: { url: 'https://h.test:8443/mcp/tok3n/', key: sk-1 }")
+        let http = parse("a = { url = \"https://h.test:8443/mcp/tok3n/\", key = \"sk-1\" }")
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(http[0].target(), "https://h.test:8443");
         let plain =
-            parse("a: { url: 'http://h.test/secret/path' }").unwrap_or_else(|e| panic!("{e}"));
+            parse("a = { url = \"http://h.test/secret/path\" }").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(plain[0].target(), "http://h.test");
-        let stdio = parse("a: { command: [sh, '--token', tok3n], env: { K: sk-2 } }");
+        let stdio =
+            parse("a = { command = [\"sh\", \"--token\", \"tok3n\"], env = { K = \"sk-2\" } }");
         let stdio = stdio.unwrap_or_else(|e| panic!("{e}"));
         let target = stdio[0].target();
         assert_eq!(target, "sh");

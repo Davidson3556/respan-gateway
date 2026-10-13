@@ -1,6 +1,7 @@
 use super::*;
 use respan_gateway_conversation::Input;
-use respan_gateway_core::{BadRequest, Provider};
+use respan_gateway_core::Fault;
+use respan_gateway_core::Provider;
 
 #[tokio::test]
 async fn each_call_is_billed_at_its_models_price() -> Result<(), Fault> {
@@ -48,7 +49,7 @@ impl Plugin for Refuses {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         px.filter(
             |reply: &mut respan_gateway_conversation::Output| match reply {
-                respan_gateway_conversation::Output::Usage(_) => Err(BadRequest::fault("refused")),
+                respan_gateway_conversation::Output::Usage(_) => Err(Fault::bad_request("refused")),
                 _ => Ok(()),
             },
         )
