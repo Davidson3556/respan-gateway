@@ -11,7 +11,7 @@
 //! a [`Plugin`] that turns what the vendor sends beyond the spec into the
 //! kind's events and back. Each is described as a [`Quirk`].
 
-use respan_gateway_core::Plugin;
+use respan_gateway_core::{ClientContext, Plugin};
 
 pub mod models;
 mod provider;
@@ -60,7 +60,16 @@ pub struct Vendor {
     /// kind's events. Every provider of the vendor carries it, as each
     /// needs it.
     pub plugin: Option<&'static dyn Plugin>,
+    /// Which other of its formats a request goes in, given the one routing
+    /// picked (`from`), such as Responses for a chat its Chat Completions
+    /// refuses; `None` keeps it. Read before a call is made, so a request
+    /// edit belongs in [`Vendor::plugin`] instead.
+    pub reformat: Option<Reformat>,
 }
+
+/// A vendor's choice of another of its formats for a request
+/// ([`Vendor::reformat`]).
+pub type Reformat = fn(&ClientContext, from: &str) -> Option<&'static str>;
 
 impl std::fmt::Debug for Vendor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,6 +92,7 @@ impl Vendor {
         models: models::openai,
         quirks: &[],
         plugin: None,
+        reformat: None,
     };
 
     /// Its base URL, each `{NAME}` in it the environment variable `NAME`;

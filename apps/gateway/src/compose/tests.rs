@@ -754,3 +754,57 @@ fn bad_routes_and_retired_settings_are_errors() {
         assert!(said.contains(now), "{text}\n{said}");
     }
 }
+
+#[tokio::test]
+async fn a_vendor_sends_a_chat_its_chat_format_refuses_in_another() {
+    let text = "providers = { a = { vendor = \"openai\", base_url = \"https://a.test/v1\", key = \"k\" } }\nformats = [\"openai-chat\"]\n";
+    let (gateway, a, _) = local(text).await;
+    let chat = |extra: serde_json::Value| {
+        let mut body = serde_json::json!({ "model": "gpt-5-mini", "messages": [{ "role": "user", "content": "hi" }] });
+        body.as_object_mut()
+            .unwrap_or_else(|| unreachable!())
+            .extend(extra.as_object().cloned().unwrap_or_default());
+        body.to_string()
+    };
+    let tool = serde_json::json!([{ "type": "function", "function": { "name": "f", "parameters": { "type": "object" } } }]);
+    for (extra, path) in [
+        (serde_json::json!({ "tools": tool }), "/v1/chat/completions"),
+        (
+            serde_json::json!({ "reasoning_effort": "high" }),
+            "/v1/chat/completions",
+        ),
+        (
+            serde_json::json!({ "tools": tool, "reasoning_effort": "high" }),
+            "/v1/responses",
+        ),
+    ] {
+        a.answer(Answer::text("a"));
+        let (response, _) =
+            serve(&gateway, post("/v1/chat/completions", chat(extra.clone()))).await;
+        let (status, _, body) = read_whole(response).await;
+        gateway.idle().await;
+        assert_eq!(status, StatusCode::OK, "{extra}: {body:?}");
+        let v: serde_json::Value =
+            serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
+        assert_eq!(
+            v["object"], "chat.completion",
+            "{extra}: answered in the client's format"
+        );
+        assert_eq!(
+            a.requests().last().map(|r| r.path.clone()).as_deref(),
+            Some(path),
+            "{extra}"
+        );
+    }
+    // A model only Responses serves.
+    a.answer(Answer::text("a"));
+    let body =
+        serde_json::json!({ "model": "o3-pro", "messages": [{ "role": "user", "content": "hi" }] });
+    let (response, _) = serve(&gateway, post("/v1/chat/completions", body.to_string())).await;
+    assert_eq!(read_whole(response).await.0, StatusCode::OK);
+    gateway.idle().await;
+    assert_eq!(
+        a.requests().last().map(|r| r.path.clone()).as_deref(),
+        Some("/v1/responses")
+    );
+}

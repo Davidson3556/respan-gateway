@@ -3,10 +3,14 @@
 //! API and Sora models were removed on 2026-09-24, with no replacement; the
 //! format stays, as what clients send for any provider of video.
 
-use respan_gateway_core::{NativeFields, Plugin, ProviderContext, Result, async_trait};
+use respan_gateway_conversation::Effort;
+use respan_gateway_core::{
+    ClientContext, NativeFields, Plugin, ProviderContext, Result, async_trait,
+};
 use respan_gateway_realtime::Input;
 use serde_json::{Value, json};
 
+use respan_gateway_conversation_http::Schema;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_conversation_http::responses::OpenAiResponses;
 use respan_gateway_media_http::openai::{
@@ -35,15 +39,43 @@ pub const VENDOR: Vendor = Vendor {
         &Speaks::http(OpenAiSpeech),
         &Speaks::http(OpenAiEmbeddings),
     ],
-    quirks: &[Quirk {
-        name: "openai_transcription_model",
-        description: "Realtime transcribes the user's audio only with a named model: a session \
-                      that turns transcription on without one asks for \
-                      `gpt-4o-mini-transcribe`.",
-    }],
+    quirks: &[
+        Quirk {
+            name: "openai_transcription_model",
+            description: "Realtime transcribes the user's audio only with a named model: a \
+                          session that turns transcription on without one asks for \
+                          `gpt-4o-mini-transcribe`.",
+        },
+        Quirk {
+            name: "openai_responses_only",
+            description: "Chat Completions refuses function tools with a reasoning effort on \
+                          its newer models, and its pro, codex, deep research and computer \
+                          use models altogether: such a chat goes to Responses instead.",
+        },
+    ],
     plugin: Some(&OpenAiQuirks),
+    reformat: Some(reformat),
     ..Vendor::DEFAULT
 };
+
+/// The models only Responses serves, by a part of their names.
+const RESPONSES_ONLY: &[&str] = &["-pro", "codex", "deep-research", "computer-use"];
+
+/// Responses, for a chat Chat Completions would refuse: one with function
+/// tools and a reasoning effort, or for a model only Responses serves.
+fn reformat(cx: &ClientContext, from: &str) -> Option<&'static str> {
+    if from != OpenAiChat::NAME {
+        return None;
+    }
+    let input = cx.input::<respan_gateway_conversation::Input>().ok()?;
+    let reasoning = input.options.reasoning.as_ref().is_some_and(|r| {
+        r.effort.as_ref().is_some_and(|e| *e != Effort::Off) || r.budget_tokens.is_some()
+    });
+    let only = input
+        .model()
+        .is_some_and(|m| RESPONSES_ONLY.iter().any(|p| m.contains(p)));
+    ((reasoning && !input.tools.is_empty()) || only).then_some(OpenAiResponses::NAME)
+}
 
 /// OpenAI's quirks: a realtime session's input transcription names its
 /// model.

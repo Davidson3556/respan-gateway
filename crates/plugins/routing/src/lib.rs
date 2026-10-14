@@ -69,7 +69,13 @@ pub struct Routes {
     target: Option<String>,
     stats: Stats,
     catalog: OnceLock<Arc<dyn Catalog>>,
+    /// Each provider's choice of another of its formats for a request.
+    reformats: std::collections::HashMap<String, Arc<Reformat>>,
 }
+
+/// A provider's choice of another of its formats for a request, given the
+/// one the router picked; `None` keeps it.
+pub type Reformat = dyn Fn(&ClientContext, &str) -> Option<String> + Send + Sync;
 
 impl std::fmt::Debug for Routes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -174,6 +180,41 @@ impl Routes {
         self.claims
             .sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
         self
+    }
+
+    /// Lets `provider` send a request in another of its formats of the
+    /// same kind, as `reformat` chooses from the one picked: for a request
+    /// one of its formats refuses and another takes.
+    pub fn reformat(
+        mut self,
+        provider: impl Into<String>,
+        reformat: impl Fn(&ClientContext, &str) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.reformats.insert(provider.into(), Arc::new(reformat));
+        self
+    }
+
+    /// `chosen` in the format its provider chooses for `cx`, if another of
+    /// the same kind it speaks.
+    fn reformatted(&self, cx: &ClientContext, chosen: &mut Chosen) {
+        let Some(reformat) = self.reformats.get(&chosen.provider) else {
+            return;
+        };
+        let Some((_, speaks)) = self.providers.iter().find(|(n, _)| *n == chosen.provider) else {
+            return;
+        };
+        let Some(from) = speaks.iter().find(|s| s.internal == chosen.internal) else {
+            return;
+        };
+        let to = reformat(cx, &from.format);
+        let to = to.and_then(|to| {
+            speaks
+                .iter()
+                .find(|s| s.format == to && s.kind == from.kind)
+        });
+        if let Some(to) = to {
+            chosen.internal = to.internal.clone();
+        }
     }
 
     /// Makes `provider` the default of each kind it serves.
@@ -585,6 +626,9 @@ impl Plugin for Routing {
         // goes to its first candidate alone.
         if model.call.is_none() {
             planned.to.truncate(1);
+        }
+        for chosen in &mut planned.to {
+            self.routes.reformatted(cx, chosen);
         }
         let first = planned.to[0].clone();
         if cx.target().is_none() || cx.target() == self.default.as_deref() {
