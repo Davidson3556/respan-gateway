@@ -1,6 +1,9 @@
-// A realtime voice session against the gateway's OpenAI Realtime endpoint:
-// the WebSocket, and the reducer that turns its events into what the page
-// shows. The audio itself is handled beside this, in realtime-audio.
+// A realtime voice session against the gateway: the WebSocket, in any API
+// the playground speaks (realtime-apis), and the reducer that turns its
+// events, as OpenAI Realtime's, into what the page shows. The audio itself
+// is handled beside this, in realtime-audio.
+
+import type { ClientMessage, RealtimeApi } from "@/lib/realtime-apis";
 
 export interface ServerEvent {
   type: string;
@@ -9,32 +12,28 @@ export interface ServerEvent {
 
 // --- the socket -------------------------------------------------------------
 
-/** `/v1/realtime?model=…` on the page's own host, over ws or wss. */
-export function realtimeUrl(model: string, location: Pick<Location, "protocol" | "host">): string {
-  const scheme = location.protocol === "https:" ? "wss" : "ws";
-  return `${scheme}://${location.host}/v1/realtime?model=${encodeURIComponent(model)}`;
-}
-
-/**
- * A browser's WebSocket can set no header, so the gateway key rides in a
- * subprotocol, as OpenAI's own browser clients send theirs.
- */
-export function realtimeProtocols(key: string | null): string[] {
-  return key ? ["realtime", `openai-insecure-api-key.${key}`] : ["realtime"];
-}
+/** How long a session may take to open before it is given up. */
+export const OPEN_TIMEOUT_MS = 15_000;
 
 export interface RealtimeSocket {
-  send: (event: ServerEvent) => void;
+  send: (message: ClientMessage) => void;
   close: () => void;
 }
 
+/**
+ * A session in `api` on the page's own host. `onEvent` gets what the server
+ * sends as OpenAI Realtime's events, whatever the API; a server may send its
+ * JSON in text or binary frames.
+ */
 export function openRealtime({
+  api,
   model,
   key,
   onOpen,
   onEvent,
   onClose,
 }: {
+  api: RealtimeApi;
   model: string;
   key: string | null;
   onOpen: () => void;
@@ -42,24 +41,47 @@ export function openRealtime({
   /** `opened` is false when the gateway refused the upgrade. */
   onClose: (info: { opened: boolean; code: number; reason: string }) => void;
 }): RealtimeSocket {
-  const socket = new WebSocket(realtimeUrl(model, window.location), realtimeProtocols(key));
+  const socket = new WebSocket(api.url(model, key, window.location), api.protocols(key));
+  socket.binaryType = "arraybuffer";
+  const read = api.reader();
+  const text = new TextDecoder();
   let opened = false;
+  let ended = false;
+  const end = (info: { opened: boolean; code: number; reason: string }) => {
+    if (ended) return;
+    ended = true;
+    clearTimeout(giveUp);
+    onClose(info);
+  };
+  // Nothing answering the upgrade, as a proxy that does not forward it, would
+  // leave the session connecting for good.
+  const giveUp = setTimeout(() => {
+    end({
+      opened: false,
+      code: 0,
+      reason: `Nothing answered within ${OPEN_TIMEOUT_MS / 1000} s. Check that the gateway (or the dev server's proxy) serves ${api.label} at ${api.path}.`,
+    });
+    socket.close();
+  }, OPEN_TIMEOUT_MS);
   socket.onopen = () => {
     opened = true;
+    clearTimeout(giveUp);
     onOpen();
   };
   socket.onmessage = (message) => {
-    if (typeof message.data !== "string") return;
+    let parsed: unknown;
     try {
-      onEvent(JSON.parse(message.data) as ServerEvent);
+      const data: unknown = message.data;
+      parsed = JSON.parse(typeof data === "string" ? data : text.decode(data as ArrayBuffer));
     } catch {
-      // Not JSON; the protocol sends nothing else.
+      return; // Not JSON text; neither protocol sends anything else.
     }
+    read(parsed).forEach(onEvent);
   };
-  socket.onclose = (e) => onClose({ opened, code: e.code, reason: e.reason });
+  socket.onclose = (e) => end({ opened, code: e.code, reason: e.reason });
   return {
-    send: (event) => {
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event));
+    send: (message) => {
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
     },
     close: () => socket.close(1000),
   };
@@ -165,6 +187,11 @@ function onEvent(state: RealtimeState, event: ServerEvent): RealtimeState {
       };
     case "input_audio_buffer.speech_stopped":
       return state.speaker === "user" ? { ...state, speaker: null } : state;
+    case "conversation.item.input_audio_transcription.delta":
+      return {
+        ...state,
+        lines: upsert(state.lines, itemId, "user", (l) => ({ ...l, text: l.text + str(event.delta) })),
+      };
     case "conversation.item.input_audio_transcription.completed":
       return {
         ...state,

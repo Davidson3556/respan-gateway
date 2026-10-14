@@ -53,7 +53,7 @@ vendor, the first in `ALL` that speaks it, does.
 <!-- table -->
 | Vendor | Formats | Quirks |
 |---|---|---|
-| `openai` | `openai-chat`, `openai-responses`, `openai-realtime`, `responses-ws`, `openai-images`, `openai-transcriptions`, `openai-speech`, `openai-videos`, `openai-embeddings` | `openai_transcription_model`: Realtime transcribes the user's audio only with a named model: a session that turns transcription on without one asks for `gpt-4o-mini-transcribe`. |
+| `openai` | `openai-chat`, `openai-responses`, `openai-realtime`, `responses-ws`, `openai-images`, `openai-transcriptions`, `openai-speech`, `openai-embeddings` | `openai_transcription_model`: Realtime transcribes the user's audio only with a named model: a session that turns transcription on without one asks for `gpt-4o-mini-transcribe`. |
 | `anthropic` | `anthropic-messages` |  |
 | `gemini` | `openai-chat`, `gemini-generate`, `gemini-live`, `openai-images`, `gemini-veo`, `openai-embeddings` | `model_id_prefix`: Its OpenAI-compatible model list names each model `models/<id>`.<br>`thought_signature`: A Gemini 3 model refuses a function call in a request's history that has no `thoughtSignature`, as one from another format has none; it takes its documented placeholder in place of one. |
 | `groq` | `openai-chat`, `openai-transcriptions`, `openai-speech` | `x_groq_usage`: A response reports usage under `x_groq`, beside it, rather than in `usage`; the object's other fields stay native. |

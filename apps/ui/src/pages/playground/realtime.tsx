@@ -14,24 +14,17 @@ import {
   type ServerEvent,
   type RealtimeState,
 } from "@/lib/realtime";
+import { realtimeApi, servedRealtimeApis, type RealtimeApi, type RealtimeApiId } from "@/lib/realtime-apis";
 import { Player, startMic, type Mic as MicHandle } from "@/lib/realtime-io";
 import { cn } from "@/lib/utils";
 import { ModelPicker } from "./model-picker";
+import { SelectField } from "./select-field";
 
 const REFUSED =
   "The gateway refused the session. Check that a provider serves realtime for this model and that the gateway key is right.";
 
-/** Turns session.update asking for transcripts of what the user says. */
-const transcribeInput = {
-  type: "session.update",
-  session: {
-    type: "realtime",
-    audio: { input: { transcription: { model: "gpt-4o-mini-transcribe" } } },
-  },
-};
-
-/** A realtime session: the socket, the mic, the speaker, and the transcript they make. */
-function useRealtimeSession(model: string) {
+/** A realtime session in `api`: the socket, the mic, the speaker, and the transcript they make. */
+function useRealtimeSession(api: RealtimeApi, model: string) {
   const key = useGatewayKey();
   const [state, dispatch] = useReducer(realtimeReducer, initialRealtime);
   const [level, setLevel] = useState(0);
@@ -42,17 +35,12 @@ function useRealtimeSession(model: string) {
   const playing = useRef<{ id: string; index: number } | null>(null);
 
   const cutOff = useCallback(() => {
-    const heard = player.current?.stop() ?? 0;
-    if (playing.current) {
-      socket.current?.send({
-        type: "conversation.item.truncate",
-        item_id: playing.current.id,
-        content_index: playing.current.index,
-        audio_end_ms: heard,
-      });
-      playing.current = null;
+    const heardMs = player.current?.stop() ?? 0;
+    if (playing.current && api.truncate) {
+      socket.current?.send(api.truncate({ ...playing.current, heardMs }));
     }
-  }, []);
+    playing.current = null;
+  }, [api]);
 
   const teardown = useCallback(() => {
     mic.current?.stop();
@@ -77,14 +65,15 @@ function useRealtimeSession(model: string) {
     const speaker = new Player();
     player.current = speaker;
     const ws = openRealtime({
+      api,
       model,
       key,
       onOpen: () => {
         dispatch({ type: "open" });
-        ws.send(transcribeInput);
+        api.opening(model).forEach(ws.send);
         startMic(
           speaker,
-          (audio) => ws.send({ type: "input_audio_buffer.append", audio }),
+          (audio) => ws.send(api.audio(audio)),
           setLevel,
         ).then(
           (m) => {
@@ -124,12 +113,12 @@ function useRealtimeSession(model: string) {
       },
     });
     socket.current = ws;
-  }, [cutOff, key, model, stop, teardown]);
+  }, [api, cutOff, key, model, stop, teardown]);
 
   const interrupt = useCallback(() => {
     cutOff();
-    socket.current?.send({ type: "response.cancel" });
-  }, [cutOff]);
+    if (api.cancel) socket.current?.send(api.cancel);
+  }, [api, cutOff]);
 
   return { state, level, start, stop, interrupt };
 }
@@ -219,7 +208,10 @@ function Transcript({ lines }: { lines: Line[] }) {
 export function RealtimeTab() {
   const choice = useModelChoice("realtime", "gpt-realtime");
   const { data: routes } = useRoutes();
-  const { state, level, start, stop, interrupt } = useRealtimeSession(choice.model);
+  const apis = servedRealtimeApis(routes?.serve);
+  const [apiChoice, setApiChoice] = useState<RealtimeApiId>("openai-realtime");
+  const api = apis.find((a) => a.id === apiChoice) ?? apis[0];
+  const { state, level, start, stop, interrupt } = useRealtimeSession(api, choice.model);
   const active = state.phase === "connecting" || state.phase === "live";
   const unserved =
     !choice.isPending &&
@@ -243,12 +235,25 @@ export function RealtimeTab() {
   return (
     <div className="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[18rem_minmax(0,1fr)]">
       <Card className="h-fit gap-5 p-4">
+        {apis.length > 1 && (
+          <SelectField
+            id="realtime-api"
+            label="API"
+            value={api.id}
+            onChange={(v) => setApiChoice(v as RealtimeApiId)}
+            options={apis.map((a) => a.id)}
+            optionLabel={(id) => realtimeApi(id as RealtimeApiId).label}
+            disabled={active}
+          />
+        )}
         <ModelPicker id="realtime-model" choice={choice} />
         {active ? (
           <div className="grid gap-2">
-            <Button variant="outline" onClick={interrupt} disabled={state.speaker !== "assistant"}>
-              <Hand /> Interrupt
-            </Button>
+            {api.cancel && (
+              <Button variant="outline" onClick={interrupt} disabled={state.speaker !== "assistant"}>
+                <Hand /> Interrupt
+              </Button>
+            )}
             <Button variant="destructive" onClick={stop}>
               <PhoneOff /> End session
             </Button>
@@ -259,8 +264,9 @@ export function RealtimeTab() {
           </Button>
         )}
         <p className="text-xs text-muted-foreground">
-          Talks to <code>/v1/realtime</code> over a WebSocket. The browser asks for your microphone
-          once the session opens; audio is sent as 24 kHz PCM16.
+          Talks to the gateway's {api.label} endpoint over a WebSocket; any realtime model works,
+          as the gateway translates. The browser asks for your microphone once the session opens;
+          audio is sent as 24 kHz PCM16.
         </p>
       </Card>
 

@@ -16,6 +16,10 @@ window.ResizeObserver = class {
   disconnect() {}
 };
 Element.prototype.scrollIntoView = () => {};
+// Radix Select asks for pointer capture, which jsdom lacks.
+Element.prototype.hasPointerCapture = () => false;
+Element.prototype.releasePointerCapture = () => {};
+Element.prototype.setPointerCapture = () => {};
 
 // jsdom lacks matchMedia, which the theme and sidebar use.
 Object.defineProperty(window, "matchMedia", {

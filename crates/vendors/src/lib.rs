@@ -9,6 +9,7 @@
 //! carries ([`Vendor::plugin`]), and tests it in `tests/<id>.rs` by a test
 //! named for it.
 
+use respan_gateway_media_http::openai::OpenAiVideos;
 use respan_gateway_passthrough_http::Passthrough;
 
 pub use respan_gateway_vendor_kit::{
@@ -61,14 +62,18 @@ pub fn find(id: &str) -> Option<&'static Vendor> {
 }
 
 /// Format `name` as `vendor` speaks it, else as a provider of no vendor
-/// does: as the format's own vendor, the first in [`ALL`] that speaks it;
-/// passthrough at the origin. `None` for a format no vendor speaks.
+/// does: as the format's own vendor, the first in [`ALL`] that speaks it,
+/// else as its spec has it ([`UNSPOKEN`]). `None` for a format of neither.
 pub fn speaks(vendor: Option<&Vendor>, name: &str) -> Option<&'static dyn Wire> {
     let own = vendor.into_iter().flat_map(|v| v.formats);
     let spoken = own.chain(ALL.iter().flat_map(|v| v.formats));
-    let found = spoken.copied().find(|f| f.name() == name);
-    found.or((name == "passthrough").then_some(PASSTHROUGH))
+    spoken.chain(UNSPOKEN).copied().find(|f| f.name() == name)
 }
 
-/// Passthrough, as a provider of no vendor speaks it: at the origin.
-const PASSTHROUGH: &dyn Wire = &Speaks::http(Passthrough).at(Base::Origin);
+/// The formats no vendor speaks, as a provider of no vendor speaks them:
+/// passthrough at the origin, and OpenAI's Videos, which OpenAI no longer
+/// serves, at the base URL as its spec has it, for a provider that does.
+pub const UNSPOKEN: &[&dyn Wire] = &[
+    &Speaks::http(Passthrough).at(Base::Origin),
+    &Speaks::http(OpenAiVideos),
+];

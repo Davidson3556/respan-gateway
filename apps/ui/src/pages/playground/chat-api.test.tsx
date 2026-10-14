@@ -1,15 +1,8 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { json, renderApp, serve } from "@/test/render";
 import { ChatTab } from "./chat";
-
-beforeAll(() => {
-  // Radix Select asks for pointer capture, which jsdom lacks.
-  Element.prototype.hasPointerCapture = () => false;
-  Element.prototype.releasePointerCapture = () => {};
-  Element.prototype.setPointerCapture = () => {};
-});
 
 const serveAll = [
   { format: "openai-chat", kind: "chat", endpoints: ["POST /v1/chat/completions"] },

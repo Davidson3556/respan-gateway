@@ -17,6 +17,7 @@ export function SelectField({
   options,
   optionLabel = (v) => v,
   className,
+  disabled,
 }: {
   id: string;
   label: string;
@@ -25,11 +26,12 @@ export function SelectField({
   options: string[];
   optionLabel?: (value: string) => string;
   className?: string;
+  disabled?: boolean;
 }) {
   return (
     <div className="grid min-w-0 gap-2">
       <Label htmlFor={id}>{label}</Label>
-      <Select value={value} onValueChange={onChange}>
+      <Select value={value} onValueChange={onChange} disabled={disabled}>
         <SelectTrigger id={id} className={cn("w-full min-w-0 [&_[data-slot=select-value]]:truncate", className)}>
           <SelectValue />
         </SelectTrigger>

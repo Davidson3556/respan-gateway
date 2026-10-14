@@ -8,6 +8,8 @@ const proxy = {
   "/ui/api": gateway,
   "/v1": { target: gateway, ws: true },
   "/v1beta": gateway,
+  // Gemini Live's sessions, at the path Google's own clients dial.
+  "/ws": { target: gateway, ws: true },
   "/healthz": gateway,
 };
 

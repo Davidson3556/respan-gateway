@@ -213,7 +213,7 @@ mod tests {
         let read = provider_fault(http::Response::from_parts(head, Bytes::new()));
         assert_eq!(read.get(), Some(&RetryAfter(Duration::from_secs(2))));
         assert_eq!(read.get(), Some(&Status(StatusCode::TOO_MANY_REQUESTS)));
-        assert_eq!(read.message(), "the provider returned 429");
+        assert_eq!(read.message(), "the provider returned 429, with no body");
     }
 
     #[test]

@@ -217,7 +217,7 @@ fn error(status: StatusCode, message: &str) -> Response {
 
 fn config(fake: &Fake, extra: &str) -> String {
     format!(
-        "providers = {{ openai = {{ vendor = \"openai\", key = \"sk-media\", base_url = \"{}/v1\" }} }}\n{extra}",
+        "providers = {{ openai = {{ vendor = \"openai\", formats = [\"openai-chat\", \"openai-images\", \"openai-transcriptions\", \"openai-speech\", \"openai-videos\", \"openai-embeddings\"], key = \"sk-media\", base_url = \"{}/v1\" }} }}\n{extra}",
         fake.base
     )
 }

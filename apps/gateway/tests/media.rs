@@ -267,7 +267,7 @@ async fn transcribe(app: &App, model: &str) -> (StatusCode, Value) {
 async fn each_media_kind_is_relayed_to_its_provider_and_logged() {
     let openai = Fake::start().await;
     let app = app(&format!(
-        "openai = {{ vendor = \"openai\", key = \"sk-o\", base_url = \"{}/v1\" }}\n",
+        "openai = {{ vendor = \"openai\", formats = [\"openai-chat\", \"openai-images\", \"openai-transcriptions\", \"openai-speech\", \"openai-videos\", \"openai-embeddings\"], key = \"sk-o\", base_url = \"{}/v1\" }}\n",
         openai.base
     ));
 
@@ -516,7 +516,6 @@ async fn models_are_listed_with_their_kinds() {
             ("gpt-image-1", "image"),
             ("whisper-1", "transcription"),
             ("gpt-4o-mini-tts", "speech"),
-            ("sora-2", "video"),
             ("text-embedding-3-small", "embedding"),
         ]
     );

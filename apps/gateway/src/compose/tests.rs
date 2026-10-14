@@ -218,11 +218,6 @@ fn a_vendor_is_every_format_it_speaks() {
                 "https://api.openai.com/v1"
             ),
             entry(
-                "openai-videos",
-                "openai:openai-videos",
-                "https://api.openai.com/v1"
-            ),
-            entry(
                 "openai-embeddings",
                 "openai:openai-embeddings",
                 "https://api.openai.com/v1"

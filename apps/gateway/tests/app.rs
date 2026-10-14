@@ -541,7 +541,6 @@ async fn the_admin_api_reports_requests_as_they_happen() {
             "image",
             "transcription",
             "speech",
-            "video",
             "embedding"
         ])
     );

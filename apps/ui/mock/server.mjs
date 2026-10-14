@@ -103,7 +103,6 @@ const providers = [
       "openai-images",
       "openai-transcriptions",
       "openai-speech",
-      "openai-videos",
       "openai-embeddings",
     ],
     [quirk.openai_transcription_model],
@@ -209,7 +208,7 @@ const routes = {
     { prefix: "gpt", provider: "openai" },
     { prefix: "whisper", provider: "openai" },
     { prefix: "text-embedding", provider: "openai" },
-    { prefix: "sora", provider: "openai" },
+    { prefix: "veo", provider: "gemini" },
   ],
   defaults: [
     { kind: "chat", provider: "openai" },
@@ -236,7 +235,7 @@ const allModels = [
   ["whisper-1", "openai", "transcription"],
   ["whisper-large-v3", "groq", "transcription"],
   ["gpt-4o-mini-tts", "openai", "speech"],
-  ["sora-2", "openai", "video"],
+  ["veo-3.0-generate-001", "gemini", "video"],
   ["text-embedding-3-small", "openai", "embedding"],
 ].map(([id, owned_by, kind]) => ({ id, object: "model", owned_by, kind }));
 const models = allModels.filter((m) => !(NO_REALTIME && m.kind === "realtime"));
@@ -967,9 +966,9 @@ async function videos(req, res, path) {
   if (req.method === "POST" && !id) {
     const body = JSON.parse((await readBody(req)).toString() || "{}");
     const job = {
-      id: `video_${Math.random().toString(36).slice(2, 10)}`,
+      id: `veo_${Math.random().toString(36).slice(2, 10)}`,
       created: Date.now(),
-      model: body.model ?? "sora-2",
+      model: body.model ?? "veo-3.0-generate-001",
       seconds: body.seconds ?? "4",
       fail: /fail/i.test(body.prompt ?? ""),
     };

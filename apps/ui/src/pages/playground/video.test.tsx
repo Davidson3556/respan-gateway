@@ -44,7 +44,7 @@ describe("VideoTab", () => {
     const bar = await screen.findByRole("progressbar", { name: "Video progress" });
     await waitFor(() => expect(bar).toHaveAttribute("aria-valuenow", "40"));
     expect(JSON.parse(String(calls.find((c) => c.key === "POST /v1/videos")?.init.body))).toEqual({
-      model: "sora-2",
+      model: "veo-3.0-generate-001",
       prompt: "a paper boat",
       seconds: "4",
     });
@@ -109,7 +109,7 @@ describe("VideoTab", () => {
   it("points at the providers page when no provider serves video", async () => {
     serve({
       "GET /v1/models": models,
-      "POST /v1/videos": () => json({ error: { message: "no provider for sora-2" } }, 404),
+      "POST /v1/videos": () => json({ error: { message: "no provider for veo-3.0-generate-001" } }, 404),
     });
     create();
     expect(await screen.findByText("No provider serves video yet")).toBeInTheDocument();

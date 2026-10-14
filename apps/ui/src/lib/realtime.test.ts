@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   initialRealtime,
+  OPEN_TIMEOUT_MS,
   openRealtime,
-  realtimeProtocols,
   realtimeReducer,
-  realtimeUrl,
   type RealtimeAction,
   type ServerEvent,
 } from "./realtime";
+import { realtimeApi, type RealtimeApiId } from "./realtime-apis";
 
 const run = (...events: (ServerEvent | RealtimeAction)[]) =>
   events.reduce(
@@ -157,10 +157,11 @@ describe("the socket", () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  const connect = (key: string | null) => {
+  const connect = (key: string | null, api: RealtimeApiId = "openai-realtime") => {
     vi.stubGlobal("WebSocket", FakeSocket);
     const seen = { open: 0, events: [] as ServerEvent[], closes: [] as unknown[] };
     const socket = openRealtime({
+      api: realtimeApi(api),
       model: "gpt realtime",
       key,
       onOpen: () => seen.open++,
@@ -170,18 +171,30 @@ describe("the socket", () => {
     return { socket, seen, fake: FakeSocket.last };
   };
 
-  it("builds the URL and sends the key as a subprotocol", () => {
-    expect(realtimeUrl("a/b", { protocol: "https:", host: "gw.test" })).toBe(
+  it("builds OpenAI Realtime's URL and sends the key as a subprotocol", () => {
+    const openai = realtimeApi("openai-realtime");
+    expect(openai.url("a/b", "k", { protocol: "https:", host: "gw.test" })).toBe(
       "wss://gw.test/v1/realtime?model=a%2Fb",
     );
-    expect(realtimeUrl("m", { protocol: "http:", host: "localhost:8080" })).toBe(
+    expect(openai.url("m", null, { protocol: "http:", host: "localhost:8080" })).toBe(
       "ws://localhost:8080/v1/realtime?model=m",
     );
-    expect(realtimeProtocols("sk-1")).toEqual(["realtime", "openai-insecure-api-key.sk-1"]);
-    expect(realtimeProtocols(null)).toEqual(["realtime"]);
+    expect(openai.protocols(null)).toEqual(["realtime"]);
     const { fake } = connect("sk-1");
     expect(fake.protocols).toEqual(["realtime", "openai-insecure-api-key.sk-1"]);
     expect(fake.url).toContain("/v1/realtime?model=gpt%20realtime");
+  });
+
+  it("puts Gemini Live's model and key in its query, and offers no subprotocol", () => {
+    const { fake } = connect("sk-1", "gemini-live");
+    const url = new URL(fake.url);
+    expect(url.pathname).toBe(
+      "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+    );
+    expect(url.searchParams.get("model")).toBe("gpt realtime");
+    expect(url.searchParams.get("key")).toBe("sk-1");
+    expect(fake.protocols).toEqual([]);
+    expect(new URL(connect(null, "gemini-live").fake.url).searchParams.has("key")).toBe(false);
   });
 
   it("delivers JSON events, drops anything else, and sends only once open", () => {
@@ -195,7 +208,35 @@ describe("the socket", () => {
     fake.onmessage?.({ data: '{"type":"session.created"}' });
     fake.onmessage?.({ data: "not json" });
     fake.onmessage?.({ data: new ArrayBuffer(2) });
-    expect(seen.events).toEqual([{ type: "session.created" }]);
+    fake.onmessage?.({ data: new TextEncoder().encode('{"type":"session.updated"}').buffer });
+    expect(seen.events).toEqual([{ type: "session.created" }, { type: "session.updated" }]);
+  });
+
+  it("gives up on a session nothing answers, once", () => {
+    vi.useFakeTimers();
+    try {
+      const { seen, fake } = connect(null, "gemini-live");
+      vi.advanceTimersByTime(OPEN_TIMEOUT_MS);
+      expect(seen.closes).toEqual([
+        { opened: false, code: 0, reason: expect.stringMatching(/Nothing answered within 15 s/) },
+      ]);
+      fake.onclose?.({ code: 1006, reason: "" });
+      expect(seen.closes).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not give up on a session that opened", () => {
+    vi.useFakeTimers();
+    try {
+      const { seen, fake } = connect(null);
+      fake.open();
+      vi.advanceTimersByTime(OPEN_TIMEOUT_MS * 2);
+      expect(seen.closes).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("tells a refused upgrade from a closed session", () => {

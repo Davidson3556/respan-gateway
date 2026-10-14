@@ -1,5 +1,7 @@
 //! OpenAI: Chat Completions, Responses, Realtime and Responses over WebSocket, and its
-//! media endpoints (images, transcriptions, speech, videos, embeddings).
+//! media endpoints (images, transcriptions, speech, embeddings). Its Videos
+//! API and Sora models were removed on 2026-09-24, with no replacement; the
+//! format stays, as what clients send for any provider of video.
 
 use respan_gateway_core::{NativeFields, Plugin, ProviderContext, Result, async_trait};
 use respan_gateway_realtime::Input;
@@ -8,7 +10,7 @@ use serde_json::{Value, json};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_conversation_http::responses::OpenAiResponses;
 use respan_gateway_media_http::openai::{
-    OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
+    OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions,
 };
 use respan_gateway_realtime_ws::{OpenAiRealtime, ResponsesWs};
 
@@ -31,7 +33,6 @@ pub const VENDOR: Vendor = Vendor {
         &Speaks::http(OpenAiImages),
         &Speaks::http(OpenAiTranscriptions),
         &Speaks::http(OpenAiSpeech),
-        &Speaks::http(OpenAiVideos),
         &Speaks::http(OpenAiEmbeddings),
     ],
     quirks: &[Quirk {

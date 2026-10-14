@@ -213,7 +213,7 @@ fn kind_of(id: &str) -> Option<Kind> {
         _ if has(&["whisper", "transcribe"]) => kind::TRANSCRIPTION,
         _ if has(&["tts"]) => kind::SPEECH,
         _ if has(&["sora", "veo"]) => kind::VIDEO,
-        _ if has(&["realtime"]) => kind::REALTIME,
+        _ if has(&["realtime", "-live", "live-", "native-audio"]) => kind::REALTIME,
         _ if has(&["jev", "clef", "systemone"]) => kind::DECISION,
         _ => kind::CHAT,
     };
@@ -330,6 +330,13 @@ mod tests {
         assert_eq!(kind("sora-2"), Some("video"));
         assert_eq!(kind("veo-3.0-generate-001"), Some("video"));
         assert_eq!(kind("gpt-realtime"), Some("realtime"));
+        assert_eq!(kind("gemini-live-2.5-flash-preview"), Some("realtime"));
+        assert_eq!(kind("gemini-2.0-flash-live-001"), Some("realtime"));
+        assert_eq!(
+            kind("gemini-2.5-flash-native-audio-preview-09-2025"),
+            Some("realtime")
+        );
+        assert_eq!(kind("gemini-2.5-flash"), Some("chat"));
         assert_eq!(kind("text-embedding-3-small"), Some("embedding"));
         assert_eq!(kind("gemini-embedding-001"), Some("embedding"));
         assert_eq!(kind("jev-latest"), Some("decision"));

@@ -1,6 +1,6 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { formatCost } from "@/lib/format";
 import type { RequestRecord } from "@/lib/api";
 import { json, renderApp, serve } from "@/test/render";
@@ -35,12 +35,6 @@ const overview = (cost?: number) => ({
   config_source: "file",
   config_path: null,
   totals: { requests: 2, errors: 0, in_flight: 0, input_tokens: 1, output_tokens: 1, cost_usd: cost },
-});
-
-beforeAll(() => {
-  Element.prototype.hasPointerCapture = () => false;
-  Element.prototype.releasePointerCapture = () => {};
-  Element.prototype.setPointerCapture = () => {};
 });
 
 describe("formatCost", () => {

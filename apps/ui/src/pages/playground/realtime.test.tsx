@@ -130,6 +130,58 @@ describe("RealtimeTab", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Session ended");
   });
 
+  it("speaks Gemini Live when chosen: its URL, setup and audio, and barge-in by voice alone", async () => {
+    setGatewayKey("sk-gw");
+    serve({
+      "GET /v1/models": modelsWithRealtime,
+      "GET /ui/api/routes": () =>
+        json({
+          serve: [
+            { format: "openai-realtime", kind: "realtime", endpoints: [] },
+            { format: "gemini-live", kind: "realtime", endpoints: [] },
+          ],
+          routes: [],
+          defaults: [{ kind: "realtime", provider: "openai" }],
+        }),
+    });
+    renderApp(<RealtimeTab />);
+    await userEvent.click(await screen.findByRole("combobox", { name: "API" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Gemini Live" }));
+    await userEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+    const ws = FakeSocket.last;
+    const url = new URL(ws.url);
+    expect(url.pathname).toMatch(/BidiGenerateContent$/);
+    expect(url.searchParams.get("model")).toBe("gpt-realtime");
+    expect(url.searchParams.get("key")).toBe("sk-gw");
+    expect(ws.protocols).toEqual([]);
+
+    await act(async () => ws.open());
+    expect(ws.sent[0]).toMatchObject({ setup: { model: "models/gpt-realtime" } });
+    act(() => mic.onChunk?.("AAAA"));
+    expect(ws.sent.at(-1)).toEqual({
+      realtimeInput: { audio: { mimeType: "audio/pcm;rate=24000", data: "AAAA" } },
+    });
+    expect(screen.getByRole("combobox", { name: "API" })).toBeDisabled();
+
+    act(() => {
+      ws.emit({ serverContent: { inputTranscription: { text: "Hi" } } });
+      ws.emit({ serverContent: { modelTurn: { parts: [{ inlineData: { mimeType: "audio/pcm;rate=24000", data: "BBBB" } }] } } });
+      ws.emit({ serverContent: { outputTranscription: { text: "Hello there" } } });
+    });
+    expect(player.play).toHaveBeenCalledWith("BBBB");
+    expect(screen.getByText("Hi")).toBeInTheDocument();
+    expect(screen.getByText("Hello there")).toBeInTheDocument();
+    // Its server hears a barge-in itself, and a client can't cancel a reply.
+    expect(screen.queryByRole("button", { name: /interrupt/i })).not.toBeInTheDocument();
+
+    const sent = ws.sent.length;
+    act(() => ws.emit({ serverContent: { interrupted: true } }));
+    expect(player.stop).toHaveBeenCalled();
+    expect(ws.sent.length).toBe(sent);
+    expect(screen.getByText("interrupted")).toBeInTheDocument();
+  });
+
   it("explains a session the gateway refused", async () => {
     serve({ "GET /v1/models": modelsWithRealtime, "GET /ui/api/routes": routes(true) });
     renderApp(<RealtimeTab />);

@@ -115,7 +115,7 @@ function Failure({ title, message, onRetry }: { title: string; message: string; 
 }
 
 export function VideoTab() {
-  const choice = useModelChoice("video", "sora-2");
+  const choice = useModelChoice("video", "veo-3.0-generate-001");
   const [prompt, setPrompt] = useState("");
   const [seconds, setSeconds] = useState("4");
   const create = useMutation({

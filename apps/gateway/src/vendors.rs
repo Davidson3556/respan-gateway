@@ -61,9 +61,7 @@ fn ollama_base_url(host: &str) -> String {
 /// providers that match, the longer start wins.
 pub fn claims(vendor: &str) -> impl Iterator<Item = &'static str> {
     let claims = match vendor {
-        "openai" => {
-            "gpt o1 o3 o4 chatgpt codex dall-e gpt-image whisper-1 tts- sora text-embedding"
-        }
+        "openai" => "gpt o1 o3 o4 chatgpt codex dall-e gpt-image whisper-1 tts- text-embedding",
         "anthropic" => "claude",
         "gemini" => "gemini imagen veo",
         "groq" => "whisper-large distil-whisper playai-tts canopylabs/orpheus",

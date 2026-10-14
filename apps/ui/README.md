@@ -11,7 +11,7 @@ only to the admin API under `/ui/api` and the standard `/v1` endpoints.
 ```bash
 pnpm install
 pnpm mock    # a fake gateway on 127.0.0.1:8080 (no Rust needed)
-pnpm dev     # http://localhost:5173/ui/, proxying /ui/api, /v1, /healthz to :8080
+pnpm dev     # http://localhost:5173/ui/, proxying /ui/api, /v1, /v1beta, /ws, /healthz to :8080
 ```
 
 Or run the real gateway (`cargo run -p respan-gateway`) on `127.0.0.1:8080`

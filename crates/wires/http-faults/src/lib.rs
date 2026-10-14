@@ -82,7 +82,8 @@ pub struct ProviderError(pub http::Response<Bytes>);
 /// The fault of a provider's `answer` that is no success, read as by a
 /// format whose error bodies it does not read
 /// (`respan_gateway_http::ProviderIo::with_refusal`). It is upstream, says the
-/// answer's status, with that [`Status`] if an error's, else a 502, and its
+/// answer's status (and that its body is empty, if it is), with that
+/// [`Status`] if an error's, else a 502, and its
 /// `Retry-After` ([`RetryAfter`]): whole seconds, or an HTTP date, the wait
 /// until it (none if it is past). Unless informational (an unasked 101), it carries the answer as
 /// it came ([`ProviderError`]), for a plugin to inspect or a relay to write.
@@ -92,7 +93,13 @@ pub fn provider_fault(answer: http::Response<Bytes>) -> Fault {
         true => status,
         false => StatusCode::BAD_GATEWAY,
     };
-    let fault = Fault::upstream(format!("the provider returned {}", status.as_u16()));
+    // An error with nothing to say says so: often a route the provider does
+    // not have, rather than a request it refused.
+    let empty = match answer.body().is_empty() && !status.is_informational() {
+        true => ", with no body",
+        false => "",
+    };
+    let fault = Fault::upstream(format!("the provider returned {}{empty}", status.as_u16()));
     let fault = fault.with(Status(to));
     if status.is_informational() {
         return fault;
