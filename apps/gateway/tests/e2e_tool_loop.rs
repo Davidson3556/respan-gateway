@@ -774,3 +774,46 @@ fn a_config_error_never_prints_a_secret() {
         assert!(!text.contains(secret), "{text}: {text}");
     }
 }
+
+#[tokio::test]
+async fn tools_the_loop_adds_with_a_reasoning_effort_go_to_openais_responses() {
+    // OpenAI's Chat Completions refuses function tools with a reasoning
+    // effort on its newer models; the tools here are the loop's own.
+    let up = FakeMcp::start().await;
+    let openai = FakeOpenAi::start().await;
+    let gw = Gateway::start(&format!(
+        "client_keys = [\"{KEY}\"]\n\
+         providers = {{ openai = {{ vendor = \"openai\", base_url = \"{}\", key = \"sk-gw-openai\" }} }}\n\
+         {}plugins = {{ tool_loop = {{ servers = [\"files\"] }} }}\n",
+        openai.base_url(),
+        http_server(&up)
+    ))
+    .await;
+    openai.answer(Answer::text("done"));
+    let mut asked = hello();
+    asked["model"] = json!("gpt-5-mini");
+    asked["reasoning_effort"] = json!("low");
+    let (status, answer) = ask(&gw, &[], asked).await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer["object"], "chat.completion",
+        "in the client's format"
+    );
+    let sent = &openai.requests()[0];
+    assert_eq!(sent.path, "/v1/responses");
+    assert_eq!(sent.body["reasoning"]["effort"], "low");
+    assert!(
+        sent.body["tools"].as_array().is_some_and(|t| !t.is_empty()),
+        "{}",
+        sent.body
+    );
+
+    // Without a reasoning effort, Chat Completions takes them.
+    openai.answer(Answer::text("done"));
+    let (status, _) = ask(&gw, &[], hello()).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        openai.requests().last().map(|r| r.path.clone()).as_deref(),
+        Some("/v1/chat/completions")
+    );
+}

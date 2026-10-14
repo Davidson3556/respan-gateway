@@ -158,9 +158,11 @@ const ROLES: Names<Role> = Names(
     OPENAI,
 );
 
-/// OpenAI Chat counts no cache writes.
+/// OpenAI Chat counts no cache writes of its own; another provider's, part
+/// of the prompt's tokens, are written beside its cached ones as
+/// `prompt_tokens_details.cache_write_tokens`, as Responses names them.
 const USAGE: UsageFields = UsageFields {
-    cache_writes: false,
+    cache_writes: true,
     reasoning: true,
 };
 
@@ -413,6 +415,7 @@ fn usage_of(u: &Value) -> Result<Usage, Fault> {
     let n = |ptr| Ok::<_, Fault>(count(u.pointer(ptr))?.unwrap_or(0));
     let mut usage = Usage::new(n("/prompt_tokens")?, n("/completion_tokens")?);
     usage.cached_input_tokens = n("/prompt_tokens_details/cached_tokens")?;
+    usage.cache_write_input_tokens = n("/prompt_tokens_details/cache_write_tokens")?;
     usage.reasoning_tokens = n("/completion_tokens_details/reasoning_tokens")?;
     Ok(usage)
 }
@@ -422,7 +425,10 @@ fn usage_of(u: &Value) -> Result<Usage, Fault> {
 fn extra_usage(u: &Value) -> Map<String, Value> {
     let known = ["prompt_tokens", "completion_tokens", "total_tokens"];
     let details: [(&str, &[&str]); 2] = [
-        ("prompt_tokens_details", &["cached_tokens"]),
+        (
+            "prompt_tokens_details",
+            &["cached_tokens", "cache_write_tokens"],
+        ),
         ("completion_tokens_details", &["reasoning_tokens"]),
     ];
     usage_extra(u, &known, &details)
@@ -437,7 +443,10 @@ fn usage_body(u: &Usage, native: &Map<String, Value>) -> Value {
         "total_tokens": input.saturating_add(output),
     });
     if u.cached_input_tokens > 0 {
-        body["prompt_tokens_details"] = json!({ "cached_tokens": u.cached_input_tokens });
+        body["prompt_tokens_details"]["cached_tokens"] = u.cached_input_tokens.into();
+    }
+    if u.cache_write_input_tokens > 0 {
+        body["prompt_tokens_details"]["cache_write_tokens"] = u.cache_write_input_tokens.into();
     }
     if u.reasoning_tokens > 0 {
         body["completion_tokens_details"] = json!({ "reasoning_tokens": u.reasoning_tokens });

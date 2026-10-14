@@ -66,7 +66,6 @@ pub const VENDOR: Vendor = Vendor {
         },
     ],
     plugin: Some(&GeminiQuirks),
-    reformat: None,
 };
 
 /// What Gemini 3 models accept as the signature of a function call made

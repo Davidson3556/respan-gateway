@@ -545,17 +545,31 @@ fn a_whole_response_decodes_into_events() {
 }
 
 #[test]
-fn unsupported_usage_edits_fail_instead_of_disappearing() {
-    // OpenAI Chat has no count of cache writes.
-    let mut synthetic = vec![Output::start("x", "m")];
-    synthetic.extend(text_events(0, "ok"));
-    synthetic.push(Output::usage(Usage {
-        input_tokens: 3,
+fn cache_writes_are_written_beside_cached_tokens_and_bad_usage_fails() {
+    // Another provider's cache writes, as Responses names them.
+    let mut written = vec![Output::start("x", "m")];
+    written.extend(text_events(0, "ok"));
+    written.push(Output::usage(Usage {
+        input_tokens: 10,
+        cached_input_tokens: 2,
         cache_write_input_tokens: 3,
         ..Usage::default()
     }));
-    assert!(stream_of(&synthetic, true).is_err());
-    assert!(body_of(&synthetic).is_err());
+    let body = body_of(&written).expect("written");
+    assert_eq!(
+        body["usage"]["prompt_tokens_details"],
+        json!({ "cached_tokens": 2, "cache_write_tokens": 3 })
+    );
+    assert!(stream_of(&written, true).is_ok());
+    // Read back as it was written.
+    let read = decode_body(&json!({ "id": "x", "model": "m", "choices": [],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 0,
+                   "prompt_tokens_details": { "cache_write_tokens": 3 } } }));
+    assert!(
+        read.iter()
+            .any(|o| matches!(o, Output::Usage(u) if u.cache_write_input_tokens == 3)),
+        "{read:?}"
+    );
     // Cached tokens are part of the input: more than it is no usage.
     let more = [Output::usage(Usage {
         cached_input_tokens: 3,

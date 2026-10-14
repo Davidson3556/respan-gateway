@@ -14,6 +14,11 @@ vendors themselves are [`respan-gateway-vendors`](../vendors/README.md)'.
   it sits beside the base URL (`.at`). A vendor lists each as a `Wire`,
   `&Speaks::http(OpenAiChat)`, its type erased there; the kit depends on no
   format.
+- `Either`: one format, or another of the same kind for the calls whose
+  input the first refuses, chosen per call from the input it sends, whoever
+  sent it: a client, a tool loop that added tools, a route's fallback. It
+  speaks as the first, by its name, so nothing else knows; OpenAI's chat is
+  `Either::new(OpenAiChat, OpenAiResponses, chat_refuses)`.
 - `VendorProvider`: a provider of a vendor (`Vendor::provider`), or of
   formats of no vendor (`VendorProvider::new`), at a base URL with a key.
   `register` adds a core provider of each of its formats, each at its base

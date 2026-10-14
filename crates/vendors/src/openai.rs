@@ -4,13 +4,10 @@
 //! format stays, as what clients send for any provider of video.
 
 use respan_gateway_conversation::Effort;
-use respan_gateway_core::{
-    ClientContext, NativeFields, Plugin, ProviderContext, Result, async_trait,
-};
+use respan_gateway_core::{NativeFields, Plugin, ProviderContext, Result, async_trait};
 use respan_gateway_realtime::Input;
 use serde_json::{Value, json};
 
-use respan_gateway_conversation_http::Schema;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_conversation_http::responses::OpenAiResponses;
 use respan_gateway_media_http::openai::{
@@ -18,7 +15,7 @@ use respan_gateway_media_http::openai::{
 };
 use respan_gateway_realtime_ws::{OpenAiRealtime, ResponsesWs};
 
-use crate::{Quirk, Speaks, Vendor};
+use crate::{Either, Quirk, Speaks, Vendor};
 
 /// The model it transcribes a session's input with, unless the session
 /// names one.
@@ -30,7 +27,7 @@ pub const VENDOR: Vendor = Vendor {
     base_url: Some("https://api.openai.com/v1"),
     key_env: &["OPENAI_API_KEY"],
     formats: &[
-        &Speaks::http(OpenAiChat),
+        &Speaks::http(Either::new(OpenAiChat, OpenAiResponses, chat_refuses)),
         &Speaks::http(OpenAiResponses),
         &Speaks::ws(OpenAiRealtime, |base| OpenAiRealtime.transport(base)),
         &Speaks::ws(ResponsesWs, |base| ResponsesWs.transport(base)),
@@ -50,25 +47,22 @@ pub const VENDOR: Vendor = Vendor {
             name: "openai_responses_only",
             description: "Chat Completions refuses function tools with a reasoning effort on \
                           its newer models, and its pro, codex, deep research and computer \
-                          use models altogether: such a chat goes to Responses instead.",
+                          use models altogether: such a call, whoever made it, goes to \
+                          Responses instead.",
         },
     ],
     plugin: Some(&OpenAiQuirks),
-    reformat: Some(reformat),
     ..Vendor::DEFAULT
 };
 
 /// The models only Responses serves, by a part of their names.
 const RESPONSES_ONLY: &[&str] = &["-pro", "codex", "deep-research", "computer-use"];
 
-/// Responses, for a chat Chat Completions would refuse: one with function
-/// tools and a reasoning effort, or for a model only Responses serves; but
-/// not one with a field only Chat Completions has.
-fn reformat(cx: &ClientContext, from: &str) -> Option<&'static str> {
-    if from != OpenAiChat::NAME {
-        return None;
-    }
-    let input = cx.input::<respan_gateway_conversation::Input>().ok()?;
+/// Whether Chat Completions would refuse a call of `input`, which then goes
+/// to Responses: one with function tools and a reasoning effort, or for a
+/// model only Responses serves; but not one with a field only Chat
+/// Completions has.
+pub fn chat_refuses(input: &respan_gateway_conversation::Input) -> bool {
     // A field only Chat Completions has (`n`, `logprobs`) would be refused
     // in Responses: such a chat stays, as it was.
     // A tool's `strict` is Responses' too.
@@ -80,7 +74,7 @@ fn reformat(cx: &ClientContext, from: &str) -> Option<&'static str> {
     };
     let tools = input.tools.iter().any(|t| foreign(&t.native, &["strict"]));
     if foreign(&input.native, &[]) || tools {
-        return None;
+        return false;
     }
     let reasoning = input.options.reasoning.as_ref().is_some_and(|r| {
         r.effort.as_ref().is_some_and(|e| *e != Effort::Off) || r.budget_tokens.is_some()
@@ -88,7 +82,7 @@ fn reformat(cx: &ClientContext, from: &str) -> Option<&'static str> {
     let only = input
         .model()
         .is_some_and(|m| RESPONSES_ONLY.iter().any(|p| m.contains(p)));
-    ((reasoning && !input.tools.is_empty()) || only).then_some(OpenAiResponses::NAME)
+    (reasoning && !input.tools.is_empty()) || only
 }
 
 /// OpenAI's quirks: a realtime session's input transcription names its

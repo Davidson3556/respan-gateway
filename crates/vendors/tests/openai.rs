@@ -81,43 +81,19 @@ async fn openai_transcription_model_is_asked_for_beside_gemini_only_fields() {
     assert!(update["setup"].is_null(), "{update}");
 }
 
-#[allow(dead_code)]
-#[path = "../../../tests/support/http.rs"]
-mod http_support;
-
-/// The format OpenAI's `reformat` picks for a chat of `body`, sent as Chat
-/// Completions.
-async fn reformatted(body: Value) -> Option<&'static str> {
+/// Whether OpenAI sends a chat of `body` to Responses: what Chat
+/// Completions would refuse.
+fn to_responses(body: Value) -> bool {
+    use respan_gateway_conversation_http::Schema;
     use respan_gateway_conversation_http::openai::OpenAiChat;
-    use respan_gateway_core::{ClientContext, Fault, Plugin, Response, async_trait};
-    use std::sync::{Arc, Mutex};
-
-    /// Records the choice, and answers nothing.
-    #[derive(Debug)]
-    struct Ask(Arc<Mutex<Option<&'static str>>>);
-    #[async_trait]
-    impl Plugin for Ask {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let reformat = respan_gateway_vendors::openai::VENDOR
-                .reformat
-                .expect("a reformat");
-            *self.0.lock().expect("unpoisoned") = reformat(cx, "openai-chat");
-            Err(Fault::not_found("asked"))
-        }
-    }
-    let chosen = Arc::default();
-    let gateway = Gateway::new()
-        .client::<respan_gateway_conversation::Input, _, _>(OpenAiChat)
-        .expect("a gateway")
-        .plugin(Ask(Arc::clone(&chosen)));
-    let request = http_support::post("/v1/chat/completions", body.to_string());
-    let (_, ended) = http_support::serve(&gateway, request).await;
-    let _ = ended.await;
-    *chosen.lock().expect("unpoisoned")
+    let input = OpenAiChat
+        .decode_request(body.to_string().into())
+        .expect("a chat");
+    respan_gateway_vendors::openai::chat_refuses(&input)
 }
 
-#[tokio::test]
-async fn openai_responses_only_takes_tools_with_reasoning_and_its_models() {
+#[test]
+fn openai_responses_only_takes_tools_with_reasoning_and_its_models() {
     let tools = json!([{ "type": "function", "function": { "name": "f", "parameters": {} } }]);
     let chat = |model: &str, extra: Value| {
         let mut body = json!({ "model": model, "messages": [{ "role": "user", "content": "hi" }] });
@@ -127,33 +103,16 @@ async fn openai_responses_only_takes_tools_with_reasoning_and_its_models() {
         body
     };
     let both = json!({ "tools": tools, "reasoning_effort": "high" });
-    assert_eq!(
-        reformatted(chat("gpt-6-luna", both)).await,
-        Some("openai-responses")
-    );
-    assert_eq!(
-        reformatted(chat("gpt-6-luna", json!({ "tools": tools }))).await,
-        None
-    );
+    assert!(to_responses(chat("gpt-6-luna", both)));
+    assert!(!to_responses(chat("gpt-6-luna", json!({ "tools": tools }))));
     let off = json!({ "tools": tools, "reasoning_effort": "none" });
-    assert_eq!(
-        reformatted(chat("gpt-6-luna", off)).await,
-        None,
-        "no reasoning"
-    );
-    assert_eq!(
-        reformatted(chat("o3-pro", json!({}))).await,
-        Some("openai-responses")
-    );
-    assert_eq!(
-        reformatted(chat("gpt-5-codex", json!({}))).await,
-        Some("openai-responses")
-    );
-    assert_eq!(reformatted(chat("gpt-4o", json!({}))).await, None);
+    assert!(!to_responses(chat("gpt-6-luna", off)), "no reasoning");
+    assert!(to_responses(chat("o3-pro", json!({}))));
+    assert!(to_responses(chat("gpt-5-codex", json!({}))));
+    assert!(!to_responses(chat("gpt-4o", json!({}))));
     let n = json!({ "tools": tools, "reasoning_effort": "high", "n": 2 });
-    assert_eq!(
-        reformatted(chat("gpt-5-mini", n)).await,
-        None,
+    assert!(
+        !to_responses(chat("gpt-5-mini", n)),
         "only Chat Completions has n"
     );
 }

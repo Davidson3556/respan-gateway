@@ -122,10 +122,6 @@ fn routes(upstreams: &[Upstream], rules: Vec<Rule>, default: Option<String>) -> 
             internal: e.internal.clone(),
         });
         routes = routes.provider(&u.name, speaks.collect());
-        if let Some(reformat) = u.provider.vendor().reformat {
-            let reformat = move |cx: &_, from: &str| reformat(cx, from).map(str::to_owned);
-            routes = routes.reformat(&u.name, reformat);
-        }
     }
     let claims = upstreams
         .iter()
