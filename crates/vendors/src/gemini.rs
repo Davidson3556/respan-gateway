@@ -5,7 +5,7 @@
 use respan_gateway_conversation::{Content, Input, Role};
 use respan_gateway_conversation_http::Schema;
 use respan_gateway_core::{NativeFields, Plugin, ProviderContext, Result, async_trait};
-use serde_json::Map;
+use serde_json::{Map, Value, json};
 
 use respan_gateway_conversation_http::gemini::GeminiGenerate;
 use respan_gateway_conversation_http::openai::OpenAiChat;
@@ -13,22 +13,28 @@ use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_media_http::openai::{OpenAiEmbeddings, OpenAiImages};
 use respan_gateway_realtime_ws::GeminiLive;
 
-use crate::{Base, BoxFuture, Models, Quirk, Speaks, Vendor, VendorProvider, http::Uri, models};
+use crate::{
+    Base, Body, BoxFuture, Model, Models, Quirk, Speaks, Vendor, VendorProvider, built_wrong, chat,
+    http, http::Uri, json as body_json,
+};
 
 /// The header its own API takes the key in.
 const KEY: &str = "x-goog-api-key";
 
 /// Google's Gemini API. Its own API is its OpenAI-compatible base without
-/// `/openai`; Live's endpoint is at its origin.
+/// `/openai`; Live's endpoint is at its origin. Its own `generateContent`
+/// comes first, so a client of another format is translated to it, which
+/// says what Chat Completions cannot, such as reasoning; a client of Chat
+/// Completions is sent to its OpenAI-compatible endpoint as it is.
 pub const VENDOR: Vendor = Vendor {
     id: "gemini",
     base_url: Some("https://generativelanguage.googleapis.com/v1beta/openai"),
     key_env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
     formats: &[
-        &Speaks::http(OpenAiChat),
         &Speaks::http(GeminiGenerate)
             .key_in(KEY)
             .at(Base::Without("/openai")),
+        &Speaks::http(OpenAiChat),
         &Speaks::ws(GeminiLive, |base| GeminiLive.transport(base))
             .key_in(KEY)
             .at(Base::Origin),
@@ -43,13 +49,20 @@ pub const VENDOR: Vendor = Vendor {
     quirks: &[
         Quirk {
             name: "model_id_prefix",
-            description: "Its OpenAI-compatible model list names each model `models/<id>`.",
+            description: "Its model list names each model `models/<id>`.",
         },
         Quirk {
             name: "thought_signature",
             description: "A Gemini 3 model refuses a function call in a request's history that \
-                          has no `thoughtSignature`, as one from another format has none; it \
-                          takes its documented placeholder in place of one.",
+                          has no signature (`thoughtSignature`, or over Chat Completions the \
+                          call's `extra_content`), as one from another format has none; it takes \
+                          its documented placeholder in place of one.",
+        },
+        Quirk {
+            name: "extra_content",
+            description: "Over Chat Completions, a Gemini 3 reply carries its thought signature \
+                          in the message's `extra_content`, which only Gemini reads back: a \
+                          client of another format goes without it.",
         },
     ],
     plugin: Some(&GeminiQuirks),
@@ -59,39 +72,54 @@ pub const VENDOR: Vendor = Vendor {
 /// elsewhere, as its documentation gives.
 pub const SIGNATURE_PLACEHOLDER: &str = "skip_thought_signature_validator";
 
-/// Gemini's quirks: a function call in the history needs a thought signature.
+/// Gemini's quirks: a function call in the history needs a thought
+/// signature, and a reply's signature over Chat Completions is Gemini's
+/// alone.
 #[derive(Debug)]
 pub struct GeminiQuirks;
 
 #[async_trait]
 impl Plugin for GeminiQuirks {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
-        if !px.is_kind::<Input>() || px.format() != GeminiGenerate::NAME {
+        // Where each format of Gemini's takes a call's signature.
+        let (format, key, signature) = match px.format() {
+            f if f == GeminiGenerate::NAME => (
+                GeminiGenerate::NAME,
+                "thoughtSignature",
+                json!(SIGNATURE_PLACEHOLDER),
+            ),
+            f if f == OpenAiChat::NAME => (
+                OpenAiChat::NAME,
+                "extra_content",
+                json!({ "google": { "thought_signature": SIGNATURE_PLACEHOLDER } }),
+            ),
+            _ => return Ok(()),
+        };
+        if format == OpenAiChat::NAME {
+            chat::inert_message(px, &["extra_content"])?;
+        }
+        if !px.is_kind::<Input>() {
             return Ok(());
         }
-        px.filter(|input: &mut Input| {
+        px.filter(move |input: &mut Input| {
             // Models before Gemini 3 take no signature in the request.
             let older = input.model.as_deref().is_some_and(|m| {
                 let m = m.strip_prefix("models/").unwrap_or(m);
                 m.starts_with("gemini-1") || m.starts_with("gemini-2")
             });
             if !older {
-                sign_calls(input);
+                sign_calls(input, format, key, &signature);
             }
             Ok(())
         })
     }
 }
 
-/// Signs, with the placeholder, the first call of each assistant message
-/// that has no signature of its own, as Gemini returns one only on the first
-/// of a turn's parallel calls.
-fn sign_calls(input: &mut Input) {
-    let own = |native: &Option<NativeFields>| {
-        native
-            .as_ref()
-            .is_none_or(|n| &*n.format == GeminiGenerate::NAME)
-    };
+/// Signs, with `signature` at `key` of `format`'s fields, the first call of
+/// each assistant message that has no signature of its own, as Gemini
+/// returns one only on the first of a turn's parallel calls.
+fn sign_calls(input: &mut Input, format: &'static str, key: &str, signature: &Value) {
+    let own = |native: &Option<NativeFields>| native.as_ref().is_none_or(|n| &*n.format == format);
     for message in input
         .messages
         .iter_mut()
@@ -105,24 +133,26 @@ fn sign_calls(input: &mut Input) {
             continue;
         };
         let fields = native
-            .get_or_insert_with(|| NativeFields::new(GeminiGenerate::NAME, Map::new()))
+            .get_or_insert_with(|| NativeFields::new(format, Map::new()))
             .fields
-            .entry("thoughtSignature");
-        fields.or_insert_with(|| SIGNATURE_PLACEHOLDER.into());
+            .entry(key);
+        fields.or_insert_with(|| signature.clone());
     }
 }
 
-/// Its models, as OpenAI lists them, each id without the `models/` it puts
-/// before it.
+/// Its models, as its own API lists them (`{"models": [{"name", ..}]}`),
+/// each id without the `models/` it puts before it.
 fn list_models(p: &VendorProvider) -> BoxFuture<'_, Models> {
     Box::pin(async move {
-        let mut models = models::openai(p).await?;
-        for model in &mut models {
-            if let Some(id) = model.id.strip_prefix("models/") {
-                model.id = id.to_owned();
-            }
-        }
-        Ok(models)
+        let call = http::Request::get("/models?pageSize=1000").body(Body::default());
+        let (answer, _) = p.client()?.send(call.map_err(built_wrong)?).await?;
+        let answer = body_json(answer).await?;
+        let models = answer["models"].as_array().into_iter().flatten();
+        let model = |m: &Value| {
+            let name = m["name"].as_str()?;
+            Some(Model::new(name.strip_prefix("models/").unwrap_or(name)))
+        };
+        Ok(models.filter_map(model).collect())
     })
 }
 

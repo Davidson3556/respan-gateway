@@ -35,7 +35,8 @@
 
 use respan_gateway_core::Fault;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
+use std::collections::HashMap;
 
 use respan_gateway_core::{FormatId, NativeFields, NativeValue};
 
@@ -667,8 +668,9 @@ pub enum AssembledItem {
 
 /// Response events collected for inspection or whole-body encoding.
 /// Text, tool calls, reasoning and opaque events stay in one ordered list.
-/// This is a fold, not a conversion to conversation history or a check that
-/// the source completed: stream termination and truncation belong to its reader.
+/// This is a fold, not a check that the source completed: stream termination
+/// and truncation belong to its reader. [`Assembled::replay`] reads it as the
+/// assistant message that holds what was said.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Assembled {
     /// The response's start, if one came.
@@ -701,6 +703,79 @@ impl Assembled {
             .filter(|part| part.kind == Block::Text)
             .map(|part| part.text.as_str())
             .collect()
+    }
+
+    /// What the model said, as the assistant message holds it: its text,
+    /// reasoning and tool calls in order, each with the fields its format kept
+    /// beside it.
+    pub fn replay(&self) -> Vec<Content> {
+        let mut kept: HashMap<u32, (NativeValue, Map<String, Value>)> = HashMap::new();
+        for item in self.items() {
+            let AssembledItem::Native(native) = item else {
+                continue;
+            };
+            let Some(block) = native_block(&native.value) else {
+                continue;
+            };
+            let raw = &native.value;
+            let entry = kept
+                .entry(block)
+                .or_insert_with(|| (native.clone(), Map::new()));
+            if let Some(fields) = raw["fields"].as_object() {
+                let fields = fields.iter().map(|(k, v)| (k.clone(), v.clone()));
+                entry.1.extend(fields);
+            }
+            if let Some(signature) = raw["delta"]["signature"].as_str() {
+                entry.1.insert("signature".into(), signature.into());
+            }
+        }
+        let native_of = |block: u32| {
+            let (from, fields) = kept.get(&block)?;
+            Some(NativeFields::new(from.format.clone(), fields.clone())).filter(|n| !n.is_empty())
+        };
+        let mut parts = Vec::new();
+        for item in self.items() {
+            match item {
+                AssembledItem::Block(b) => {
+                    let native = native_of(b.block);
+                    match &b.kind {
+                        Block::Text if !b.text.is_empty() => {
+                            let mut part = Content::from(b.text.clone());
+                            if let Content::Text { native: n, .. } = &mut part {
+                                *n = native;
+                            }
+                            parts.push(part);
+                        }
+                        Block::Reasoning if !b.text.is_empty() || native.is_some() => {
+                            parts.push(Content::Reasoning {
+                                text: b.text.clone(),
+                                native,
+                            });
+                        }
+                        Block::ToolCall { id, name } => {
+                            let arguments = Some(b.text.as_str()).filter(|t| !t.trim().is_empty());
+                            let mut part = Content::tool_call(id, name, arguments.unwrap_or("{}"));
+                            if let Content::ToolCall { native: n, .. } = &mut part {
+                                *n = native;
+                            }
+                            parts.push(part);
+                        }
+                        _ => {}
+                    }
+                }
+                // Thinking the provider redacted is only a native block; it must
+                // be sent back as it came.
+                AssembledItem::Native(native) => {
+                    let block = &native.value["content_block"];
+                    if native.value["type"] == "content_block_start"
+                        && block["type"] == "redacted_thinking"
+                    {
+                        parts.push(Content::native(native.format.clone(), block.clone()));
+                    }
+                }
+            }
+        }
+        parts
     }
 
     /// Fold the next event. Reject duplicate response starts, conflicting
@@ -767,6 +842,13 @@ impl Assembled {
 /// A sequence of events that is no response.
 fn malformed(what: &str) -> Fault {
     Fault::upstream(format!("the response is malformed: {what}"))
+}
+
+/// The block a native event names, by `index` (Anthropic's) or `block` (the
+/// others' natives).
+fn native_block(raw: &Value) -> Option<u32> {
+    let named = raw["index"].as_u64().or_else(|| raw["block"].as_u64());
+    u32::try_from(named?).ok()
 }
 
 #[cfg(test)]

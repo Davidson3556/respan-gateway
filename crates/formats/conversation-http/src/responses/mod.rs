@@ -15,7 +15,8 @@
 //!
 //! What the kind has no form for stays native to this format and is refused
 //! in translation: `previous_response_id` and `conversation` (another
-//! provider cannot resolve them), `store: false`, `include`, `truncation`,
+//! provider cannot resolve them; the gateway's `plugins.responses` resolves
+//! the first itself), `include`, `truncation`,
 //! the rest of `reasoning` (`generate_summary`, a summary but `auto`), `metadata`, built-in tools (web search,
 //! file search, computer use, code interpreter, MCP) and the items they
 //! make, and the rest of what the request says beyond the spec's defaults.
@@ -67,8 +68,8 @@ mod request;
 mod tests;
 
 use crate::schema::{
-    Asked, NativeFieldsExt, Schema, UsageFields, count, merge_details, merge_fields, native_fields,
-    unsupported_fields, unwritable_content, usage_extra,
+    Asked, INERT, NativeFieldsExt, Schema, UsageFields, count, merge_details, merge_fields,
+    native_fields, unsupported_fields, unwritable_content, usage_extra,
 };
 use respan_gateway_conversation::{Assembled, Content, Finish, Input, Output, Start, Usage};
 use respan_gateway_core::{Connection, Fault, Format};
@@ -162,6 +163,14 @@ impl Schema for OpenAiResponses {
         chat.native = native_fields(RESPONSES, unsupported_fields(v, KNOWN, DEFAULTS));
         if chat.user.is_some() {
             chat.native.fields_mut(RESPONSES).shift_remove("user");
+        }
+        // Not to store a response is OpenAI's to honour; another provider
+        // stores nothing anyway.
+        if let Some(store) = chat.native.fields_mut(RESPONSES).shift_remove("store") {
+            let inert = serde_json::json!({ "store": store });
+            chat.native
+                .fields_mut(RESPONSES)
+                .insert(INERT.into(), inert);
         }
         request::read_input(v, &mut chat);
         request::read_tools(v, &mut chat);

@@ -954,7 +954,6 @@ async fn what_another_provider_cannot_resolve_is_refused_before_a_call() {
     for (field, value) in [
         ("previous_response_id", json!("resp_prev")),
         ("conversation", json!("conv_1")),
-        ("store", json!(false)),
         ("include", json!(["reasoning.encrypted_content"])),
         ("reasoning", json!({ "summary": "detailed" })),
         ("truncation", json!("auto")),

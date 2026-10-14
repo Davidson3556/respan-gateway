@@ -150,7 +150,17 @@ tries = 2
 [plugins.request_log]
 history = 1000
 file = "./requests.jsonl"               # Keep history across restarts
+
+[plugins.responses]                     # previous_response_id with any provider
+keep = "1h"
 ```
+
+OpenAI keeps its own Responses, so a Responses client's `previous_response_id`
+works when OpenAI answers. Translated to another provider, which keeps
+nothing, it is refused unless `[plugins.responses]` is set: the gateway then
+keeps each translated response in memory, for the client key that made it and
+for `keep`, and sends a follow-up the conversation it names. A request that
+says `store: false` is not kept.
 
 Configuration is TOML only. The gateway reads `gateway.toml` from the working
 directory, or uses provider keys from the environment when no file exists.

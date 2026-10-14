@@ -182,7 +182,11 @@ pub trait Schema: Copy + Send + Sync + 'static {
             droppable: &[],
         };
         let in_the_request = |key: &str| format!("'{key}' in the request");
-        let native = kept_fields(Self::NAME, &chat.native, in_the_request, keep)?;
+        let mut native = kept_fields(Self::NAME, &chat.native, in_the_request, keep)?;
+        // What only this format needs is written as it came.
+        if let Some(Value::Object(inert)) = native.shift_remove(INERT) {
+            native.extend(inert);
+        }
         let mut v = Map::new();
         set(&mut v, "model", chat.model.clone().map(Into::into));
         v.extend(self.encode_json(chat)?);

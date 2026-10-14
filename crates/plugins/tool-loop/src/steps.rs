@@ -14,7 +14,7 @@ use respan_gateway_core::{Call, ErrorCode, Fault, NativeValue};
 use respan_gateway_http_faults::Status;
 use tokio::time::{Instant, timeout_at};
 
-use super::replay::{block_of, renumbered, replay};
+use super::replay::{block_of, renumbered};
 use super::tools::{limit, run_tools, spend};
 use super::{Limits, Sink, Step, StepReport, Toolbox};
 
@@ -275,7 +275,7 @@ impl Run {
         let ran = Instant::now();
         let mut results = run_tools(&self.toolbox, self.limits, self.deadline, calls).await;
         spend(&mut self.budget, &mut results);
-        let mut said = replay(&reading.said);
+        let mut said = reading.said.replay();
         let mut assistant = Message::new(Role::Assistant, said.remove(0));
         assistant.content.append(&mut said);
         let flagged = self.flagged;

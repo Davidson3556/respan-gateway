@@ -257,7 +257,6 @@ fn what_the_kind_has_no_form_for_is_native_and_refused_in_translation() {
     for (field, value) in [
         ("previous_response_id", json!("resp_1")),
         ("conversation", json!("conv_1")),
-        ("store", json!(false)),
         ("include", json!(["reasoning.encrypted_content"])),
         ("truncation", json!("auto")),
         ("reasoning", json!({ "effort": "xhigh" })),
@@ -277,6 +276,23 @@ fn what_the_kind_has_no_form_for_is_native_and_refused_in_translation() {
             let message = refused.expect_err(field).message().to_owned();
             assert!(message.contains(field), "{field}: {message}");
         }
+    }
+}
+
+#[test]
+fn not_storing_is_sent_to_openai_and_said_to_no_other_provider() {
+    let v = json!({ "model": "m", "input": [{ "role": "user", "content": "hi" }], "store": false });
+    assert_eq!(round_trip(&v), v);
+    let chat = decode_request(&v);
+    for other in [
+        AnthropicMessages.encode_request(&chat),
+        OpenAiChat.encode_request(&chat),
+    ] {
+        let other = other.expect("translated");
+        assert!(
+            !other.contains_key("store") && !other.contains_key("inert"),
+            "{other:?}"
+        );
     }
 }
 

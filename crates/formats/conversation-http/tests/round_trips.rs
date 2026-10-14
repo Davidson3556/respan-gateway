@@ -451,6 +451,35 @@ fn unknown_fields_of_an_anthropic_block_survive_its_format_and_are_dropped_by_an
 }
 
 #[test]
+fn a_tool_call_in_a_chat_request_keeps_its_own_fields_as_a_call() {
+    let call = json!({ "id": "t", "type": "function",
+        "function": { "name": "f", "arguments": "{}" },
+        "extra_content": { "google": { "thought_signature": "sig" } } });
+    let body = openai(json!([
+        { "role": "user", "content": "hi" },
+        { "role": "assistant", "content": null, "tool_calls": [call] },
+        { "role": "tool", "tool_call_id": "t", "content": "done" },
+    ]));
+    // Read as a call, its signature its own: written back as it came.
+    let chat = OPENAI
+        .decode_request(Bytes::from(body.to_string()))
+        .expect("read");
+    let read = chat.messages[1].content.iter().find_map(|c| match c {
+        Content::ToolCall { id, native, .. } => Some((id.clone(), native.clone())),
+        _ => None,
+    });
+    let (id, native) = read.expect("a call, not an opaque message");
+    assert_eq!(id, "t");
+    assert_eq!(
+        native.expect("its fields").fields["extra_content"]["google"]["thought_signature"],
+        "sig"
+    );
+    assert_eq!(same(OPENAI, &body)["messages"][1]["tool_calls"][0], call);
+    // Another format has no place for it.
+    assert!(refused(OPENAI, ANTHROPIC, &body));
+}
+
+#[test]
 fn unknown_fields_of_an_openai_tool_call_survive_its_format_and_are_dropped_by_another() {
     let entry = |arguments: &str| {
         json!({ "index": 0, "id": "t", "type": "function",

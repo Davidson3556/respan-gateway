@@ -33,6 +33,7 @@ mod models;
 mod redact;
 mod report;
 mod requests;
+mod responses;
 mod tool_loop;
 mod vendors;
 

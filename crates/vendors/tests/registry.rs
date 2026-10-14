@@ -94,13 +94,10 @@ fn each_format_sits_where_and_takes_the_key_as_its_vendor_says() {
         let part = parts.iter().find(|p| p.format.name() == format);
         part.map(|p| (p.name.as_str(), p.base_url.as_str()))
     };
+    assert_eq!(at("gemini-generate"), Some(("g", "https://a.test/v1beta")));
     assert_eq!(
         at("openai-chat"),
-        Some(("g", "https://a.test/v1beta/openai"))
-    );
-    assert_eq!(
-        at("gemini-generate"),
-        Some(("g:gemini-generate", "https://a.test/v1beta"))
+        Some(("g:openai-chat", "https://a.test/v1beta/openai"))
     );
     assert_eq!(at("gemini-live"), Some(("g:gemini-live", "wss://a.test")));
     let claude = anthropic::VENDOR.provider("c").key("k");

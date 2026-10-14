@@ -227,11 +227,11 @@ fn a_vendor_is_every_format_it_speaks() {
     assert_eq!(
         entries(1),
         [
-            entry("openai-chat", "gemini", "http://g.test/v1beta/openai"),
+            entry("gemini-generate", "gemini", "http://g.test/v1beta"),
             entry(
-                "gemini-generate",
-                "gemini:gemini-generate",
-                "http://g.test/v1beta"
+                "openai-chat",
+                "gemini:openai-chat",
+                "http://g.test/v1beta/openai"
             ),
             entry("gemini-live", "gemini:gemini-live", "ws://g.test"),
             entry(
@@ -254,11 +254,11 @@ fn a_vendor_is_every_format_it_speaks() {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned)
     };
+    assert_eq!(header(1, 0, "x-goog-api-key").as_deref(), Some("AIza"));
     assert_eq!(
-        header(1, 0, "authorization").as_deref(),
+        header(1, 1, "authorization").as_deref(),
         Some("Bearer AIza")
     );
-    assert_eq!(header(1, 1, "x-goog-api-key").as_deref(), Some("AIza"));
     assert_eq!(header(1, 4, "x-goog-api-key").as_deref(), Some("AIza"));
     assert!(plan.upstreams.iter().all(|u| u.own_key));
     // Served by default: the chat formats, each chat, media and realtime client

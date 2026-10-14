@@ -47,6 +47,20 @@ pub(crate) fn inert_choice(
     px.filter(Inert(fields))
 }
 
+/// Fields of a choice's message that only describe it, such as a
+/// signature its provider alone reads back, are dropped for a client of
+/// another format, which would refuse them; a client of Chat Completions
+/// gets them as they came.
+pub(crate) fn inert_message(
+    px: &mut ProviderContext,
+    fields: &'static [&'static str],
+) -> Result<()> {
+    if !px.is_kind::<Input>() || !translated(px) {
+        return Ok(());
+    }
+    px.filter(InertMessage(fields))
+}
+
 /// Drops these fields of the first choice.
 struct Inert(&'static [&'static str]);
 
@@ -54,6 +68,20 @@ impl Filter<Output> for Inert {
     fn edit(&mut self, output: Output, out: &mut Vec<Output>) -> Result<()> {
         out.extend(first_choice(output, |choice| {
             self.0.iter().for_each(|f| _ = choice.shift_remove(*f));
+        }));
+        Ok(())
+    }
+}
+
+/// Drops these fields of the first choice's message.
+struct InertMessage(&'static [&'static str]);
+
+impl Filter<Output> for InertMessage {
+    fn edit(&mut self, output: Output, out: &mut Vec<Output>) -> Result<()> {
+        out.extend(first_choice(output, |choice| {
+            if let Some(delta) = choice.get_mut("delta").and_then(Value::as_object_mut) {
+                self.0.iter().for_each(|f| _ = delta.shift_remove(*f));
+            }
         }));
         Ok(())
     }

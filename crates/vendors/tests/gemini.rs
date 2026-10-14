@@ -6,16 +6,21 @@ use respan_gateway_vendors::gemini;
 
 #[tokio::test]
 async fn model_id_prefix() {
-    let list = support::json!({"object": "list", "data": [
-        {"id": "models/gemini-2.5-flash", "object": "model", "owned_by": "google"},
+    let list = support::json!({"models": [
+        {"name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"]},
+        {"name": "models/gemini-live-2.5-flash-preview", "supportedGenerationMethods": ["bidiGenerateContent"]},
     ]});
-    let base = support::listing("/v1beta/openai/models", list).await;
+    // Its own API's list, beside the OpenAI-compatible base, with its key.
+    let base = support::listing("/v1beta/models?pageSize=1000", list).await;
     let gemini = gemini::VENDOR
         .provider("g")
         .base(format!("{base}/v1beta/openai"))
         .key("k");
     let models = gemini.models().await.expect("a list").expect("models");
-    assert_eq!(support::ids(models), ["gemini-2.5-flash"]);
+    assert_eq!(
+        support::ids(models),
+        ["gemini-2.5-flash", "gemini-live-2.5-flash-preview"]
+    );
 }
 
 mod thought_signature {
@@ -68,10 +73,70 @@ mod thought_signature {
     }
 
     #[tokio::test]
+    async fn thought_signature_is_a_placeholder_in_extra_content_over_chat_completions() {
+        let answer = json!({ "id": "c", "object": "chat.completion", "model": "m",
+            "choices": [{ "index": 0, "finish_reason": "stop",
+                "message": { "role": "assistant", "content": "ok" } }] });
+        let gemini = Vendor::whole(&GeminiQuirks, answer);
+        // A history from a client of another format, which has no signatures.
+        let call = |id: &str| json!({ "type": "tool_use", "id": id, "name": "f", "input": {} });
+        let result = |id: &str| json!({ "type": "tool_result", "tool_use_id": id, "content": "1" });
+        gemini
+            .anthropic(
+                json!({ "model": "gemini-3-flash-preview", "max_tokens": 10, "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": [call("a"), call("b")] },
+                { "role": "user", "content": [result("a"), result("b")] },
+            ] }),
+            )
+            .await;
+        let calls = &gemini.sent()[0]["messages"][1]["tool_calls"];
+        let signature = &calls[0]["extra_content"]["google"]["thought_signature"];
+        assert_eq!(signature, SIGNATURE_PLACEHOLDER, "{calls}");
+        assert!(calls[1].get("extra_content").is_none(), "{calls}");
+    }
+
+    #[tokio::test]
     async fn an_older_model_is_sent_no_signature() {
         let gemini = vendor();
         gemini.openai(history("gemini-2.5-flash")).await;
         let parts = &gemini.sent()[0]["contents"][1]["parts"];
         assert!(parts[0].get("thoughtSignature").is_none(), "{parts}");
+    }
+}
+
+mod extra_content {
+    use super::support::{Vendor, chat, json, messages};
+    use respan_gateway_vendors::gemini::GeminiQuirks;
+
+    /// A Gemini 3 reply over Chat Completions, signed in `extra_content`.
+    fn signed() -> Vendor {
+        Vendor::whole(
+            &GeminiQuirks,
+            json!({ "id": "c", "object": "chat.completion", "model": "gemini-3-flash-preview",
+                "choices": [{ "index": 0, "finish_reason": "stop", "message": {
+                    "role": "assistant", "content": "Hello there.",
+                    "extra_content": { "google": { "thought_signature": "EsED" } } } }],
+                "usage": { "prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10 } }),
+        )
+    }
+
+    #[tokio::test]
+    async fn extra_content_is_dropped_for_anthropic_and_kept_for_openai_chat() {
+        let answer: serde_json::Value =
+            serde_json::from_str(&signed().anthropic(messages(false)).await).expect("JSON");
+        assert_eq!(answer["content"][0]["text"], "Hello there.", "{answer}");
+        assert!(
+            !answer.to_string().contains("thought_signature"),
+            "{answer}"
+        );
+
+        let answer: serde_json::Value =
+            serde_json::from_str(&signed().openai(chat(false)).await).expect("JSON");
+        let message = &answer["choices"][0]["message"];
+        assert_eq!(
+            message["extra_content"]["google"]["thought_signature"], "EsED",
+            "{answer}"
+        );
     }
 }

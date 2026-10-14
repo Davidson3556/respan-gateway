@@ -282,12 +282,29 @@ pub struct PluginsConfig {
     pub hedge: Option<HedgeConfig>,
     /// Run tools of `mcp` servers inside chat requests; off if unset.
     pub tool_loop: Option<ToolLoopConfig>,
+    /// Keep Responses translated to another provider's format, so a
+    /// client's `previous_response_id` works with it; off if unset.
+    pub responses: Option<ResponsesConfig>,
     /// One MCP endpoint, `/mcp`, that fronts the `mcp` servers as a single
     /// server (tools and prompts as `{server}__{name}`); off if unset.
     pub mcp_aggregate: Option<AggregateConfig>,
     /// The request history the web UI and admin API read; always on.
     #[serde(default)]
     pub request_log: RequestLogConfig,
+}
+
+/// Responses the gateway keeps, for `previous_response_id` with a provider
+/// of another format.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResponsesConfig {
+    /// How long a response is kept; an hour if unset.
+    #[serde(default, deserialize_with = "responses_keep")]
+    pub keep: Option<Duration>,
+}
+
+fn responses_keep<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "plugins: responses: keep")
 }
 
 /// Routing: which provider each request goes to.

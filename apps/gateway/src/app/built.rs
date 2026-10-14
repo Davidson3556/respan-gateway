@@ -236,6 +236,15 @@ fn with_plugins(
     let forwarded = plan.mcp.iter().filter(|s| s.forward_auth);
     let forwarded = forwarded.map(|s| s.name.clone());
     let gateway = gateway.plugin(ClientCredentials::new(keyless.chain(forwarded)));
+    let gateway = match &config.plugins.responses {
+        Some(responses) => {
+            let keep = responses
+                .keep
+                .unwrap_or(std::time::Duration::from_secs(60 * 60));
+            gateway.plugin(crate::responses::Responses::new(keep))
+        }
+        None => gateway,
+    };
     // A relay gives its vendor's response heads and error bodies back.
     let mut gateway = match config.relay {
         true => gateway.plugin(Relay),

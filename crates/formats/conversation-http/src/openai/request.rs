@@ -143,19 +143,20 @@ pub(crate) fn read_openai_message(m: &Value, message: &mut Message) {
     }
 }
 
+/// A function call of `tool_calls`, its own fields beyond the spec's, such
+/// as a provider's signature of it, kept as its `native`.
 fn openai_call(call: &Value) -> Option<Content> {
     let function = &call["function"];
     let function_call = call["type"].is_null() || call["type"] == "function";
-    let known = only(call, &["id", "type", "function"]) && only(function, &["name", "arguments"]);
-    if !function_call || !known {
+    if !function_call || !only(function, &["name", "arguments"]) {
         return None;
     }
     let (id, name) = (call["id"].as_str()?, function["name"].as_str()?);
-    Some(Content::tool_call(
-        id,
-        name,
-        function["arguments"].as_str()?,
-    ))
+    let mut part = Content::tool_call(id, name, function["arguments"].as_str()?);
+    if let Content::ToolCall { native, .. } = &mut part {
+        *native = native_fields(OPENAI, rest_of(call, &["id", "type", "function"]));
+    }
+    Some(part)
 }
 
 /// The kind's calls as OpenAI's `tool_calls`.
@@ -170,15 +171,18 @@ fn openai_calls(calls: &[&Content]) -> Result<Vec<Value>, Fault> {
             ..
         } = c
         {
-            refuse_part_fields(native)?;
+            let what = |key: &str| format!("a tool call's '{key}'");
+            let own = kept_fields(OPENAI, native, what, Keep::CACHE_MARKER)?;
             let function = json!({ "name": name, "arguments": arguments });
-            out.push(json!({ "id": id, "type": "function", "function": function }));
+            let mut call = json!({ "id": id, "type": "function", "function": function });
+            merge_missing(&mut call, own);
+            out.push(call);
         }
     }
     Ok(out)
 }
 
-/// OpenAI has no place for the fields of a tool part, but drops a cache
+/// OpenAI has no place for the fields of a tool result, but drops a cache
 /// marker.
 fn refuse_part_fields(native: &Option<NativeFields>) -> Result<(), Fault> {
     let what = |key: &str| format!("a tool part's '{key}'");

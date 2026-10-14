@@ -71,6 +71,13 @@ key = "env:OPENAI_API_KEY"
 # stagger = "200ms"
 # until = "head"
 
+# ── Responses' previous_response_id with any provider ─────────────────
+# OpenAI keeps its own Responses; for a Responses client translated to
+# another provider, the gateway keeps each response (in memory, per client
+# key) so `previous_response_id` sends the conversation it names.
+# [plugins.responses]
+# keep = "1h"                      # How long a response is kept
+
 # ── Request history and pricing ───────────────────────────────────────
 # [plugins.request_log]
 # history = 1000                   # Requests retained in memory
