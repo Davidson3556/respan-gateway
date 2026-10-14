@@ -1,7 +1,8 @@
-import { screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { Overview, Provider, RequestRecord } from "@/lib/api";
 import { json, renderApp, serve } from "@/test/render";
+import { RespanStatus } from "@/components/respan-status";
 import { OverviewPage } from "./overview";
 
 const overview: Overview = {
@@ -80,5 +81,27 @@ describe("OverviewPage", () => {
     renderApp(<OverviewPage />);
     expect(await screen.findByText("Couldn't load the overview")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+});
+
+describe("RespanStatus", () => {
+  const ok = { sent: 1234, rejected: 0, failed: 0, dropped: 0, ok_at: new Date().toISOString(), error: null, failing: false };
+
+  it("says how many spans were sent", () => {
+    render(<RespanStatus health={ok} />);
+    expect(screen.getByText(/1,234 spans sent · last just now/)).toBeInTheDocument();
+  });
+
+  it("says why traces are not reaching Respan", () => {
+    const failing = { ...ok, failed: 40, failing: true, error: { at: ok.ok_at, message: "Respan answered 401 Unauthorized: Invalid API key" } };
+    render(<RespanStatus health={failing} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Traces aren't reaching Respan");
+    expect(screen.getByText(/Invalid API key/)).toBeInTheDocument();
+    expect(screen.getByText(/40 spans lost/)).toBeInTheDocument();
+  });
+
+  it("counts what Respan did not take", () => {
+    render(<RespanStatus health={{ ...ok, rejected: 3, dropped: 2 }} />);
+    expect(screen.getByText("3 spans not taken · 2 traces dropped")).toBeInTheDocument();
   });
 });

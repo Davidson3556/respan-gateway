@@ -14,6 +14,12 @@ pub use log::{RequestLog, attribute};
 pub use record::{RequestRecord, Usage, rfc3339};
 pub use recorder::{Recorder, steps};
 
+/// Whether `cx` is a client's request, which the HTTP edge tracked ([`track`]),
+/// not one the gateway handed itself.
+pub fn is_clients(cx: &respan_gateway_core::ClientContext) -> bool {
+    cx.extensions().get::<log::Tracked>().is_some()
+}
+
 /// How many finished requests are kept unless the config's
 /// `request_log.history` says.
 pub const KEPT: usize = 1000;

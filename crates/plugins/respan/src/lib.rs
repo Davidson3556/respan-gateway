@@ -9,10 +9,13 @@
 //! [`BATCH`] spans or every [`EVERY`]) as OTLP/HTTP JSON by a task of their
 //! own. While Respan is slow or down, the queue holds at most [`QUEUE`]
 //! traces and drops what is beyond, counted, rather than slow a request.
-//! What is queued is sent when the plugin is dropped.
+//! What is queued is sent when the plugin is dropped. How sending goes is
+//! its [`Health`], for its host to show and to say when it starts failing.
 //!
 //! A host names a request's customer by putting a [`Customer`] in its
-//! extensions, as the gateway does with the client key's name.
+//! extensions, as the gateway does with the client key's name. It registers
+//! [`Respan`] before its other plugins, which opens a request's trace and
+//! sends it, and [`Respan::calls`] after them, which records each call.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -40,16 +43,118 @@ pub const QUEUE: usize = 4096;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Customer(pub String);
 
-/// Put in a request's extensions by its host to keep it out of Respan, as
-/// the host's own requests, such as a dashboard's look at a tool server.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Untraced;
-
 /// The plugin: one per gateway, its task posting what it queues.
 pub struct Respan {
     queue: mpsc::Sender<Vec<Value>>,
     content: bool,
-    dropped: Arc<AtomicU64>,
+    health: Arc<Health>,
+    traced: Option<Arc<Traced>>,
+}
+
+type Traced = dyn Fn(&ClientContext) -> bool + Send + Sync;
+
+type Change = Box<dyn Fn(Option<&str>) + Send + Sync>;
+
+/// How sending to Respan goes: what was sent, rejected, lost, and the last
+/// success and error.
+#[derive(Default)]
+pub struct Health {
+    sent: AtomicU64,
+    rejected: AtomicU64,
+    failed: AtomicU64,
+    dropped: AtomicU64,
+    last: Mutex<Last>,
+    on_change: std::sync::OnceLock<Change>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct Last {
+    ok_at: Option<SystemTime>,
+    error: Option<(SystemTime, String)>,
+    failing: bool,
+}
+
+/// [`Health`] as it is now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    /// Spans Respan accepted.
+    pub sent: u64,
+    /// Spans Respan answered it rejected.
+    pub rejected: u64,
+    /// Spans whose post failed: Respan unreachable, or refusing it.
+    pub failed: u64,
+    /// Traces dropped unsent, the queue full while Respan was slow or down.
+    pub dropped: u64,
+    /// When a post last succeeded.
+    pub ok_at: Option<SystemTime>,
+    /// The last error, and when: a failed post, or spans rejected.
+    pub error: Option<(SystemTime, String)>,
+    /// Whether the last post failed.
+    pub failing: bool,
+}
+
+impl std::fmt::Debug for Health {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Health").field(&self.report()).finish()
+    }
+}
+
+impl Health {
+    /// How it is now.
+    pub fn report(&self) -> Report {
+        let last = lock(&self.last).clone();
+        Report {
+            sent: self.sent.load(Ordering::Relaxed),
+            rejected: self.rejected.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+            dropped: self.dropped.load(Ordering::Relaxed),
+            ok_at: last.ok_at,
+            error: last.error,
+            failing: last.failing,
+        }
+    }
+
+    /// Calls `change` when sending starts failing, with why, and when it
+    /// works again, with `None`; and when Respan rejects spans for a reason
+    /// not said before. A second is ignored.
+    pub fn on_change(&self, change: impl Fn(Option<&str>) + Send + Sync + 'static) {
+        let _ = self.on_change.set(Box::new(change));
+    }
+
+    /// A post of `count` spans that Respan took, rejecting `rejected` of
+    /// them for `why`.
+    fn sent(&self, count: u64, rejected: u64, why: Option<String>) {
+        self.sent
+            .fetch_add(count - rejected.min(count), Ordering::Relaxed);
+        self.rejected.fetch_add(rejected, Ordering::Relaxed);
+        let mut last = lock(&self.last);
+        let recovered = std::mem::replace(&mut last.failing, false);
+        last.ok_at = Some(SystemTime::now());
+        let new = why.filter(|why| last.error.as_ref().is_none_or(|(_, e)| e != why));
+        if let Some(why) = &new {
+            last.error = Some((SystemTime::now(), why.clone()));
+        }
+        drop(last);
+        if let Some(change) = self.on_change.get() {
+            if let Some(why) = &new {
+                change(Some(why));
+            } else if recovered {
+                change(None);
+            }
+        }
+    }
+
+    /// A post of `count` spans that failed, for `why`.
+    fn failed(&self, count: u64, why: String) {
+        self.failed.fetch_add(count, Ordering::Relaxed);
+        let mut last = lock(&self.last);
+        let started = !std::mem::replace(&mut last.failing, true);
+        last.error = Some((SystemTime::now(), why.clone()));
+        drop(last);
+        if let (true, Some(change)) = (started, self.on_change.get()) {
+            change(Some(&why));
+        }
+    }
 }
 
 impl std::fmt::Debug for Respan {
@@ -74,26 +179,40 @@ impl Respan {
             .build()
             .map_err(|e| Fault::internal("respan: no HTTP client").with_source(e))?;
         let (queue, traces) = mpsc::channel(QUEUE);
-        let dropped = Arc::new(AtomicU64::new(0));
+        let health = Arc::new(Health::default());
         let poster = Poster {
             http,
             url,
             key: format!("Bearer {key}"),
             service: service.to_owned(),
-            failed: dropped.clone(),
+            health: health.clone(),
         };
         runtime.spawn(poster.run(traces));
         Ok(Self {
             queue,
             content,
-            dropped,
+            health,
+            traced: None,
         })
     }
 
-    /// How many traces were not sent: dropped while the queue was full, or
-    /// refused by Respan.
-    pub fn dropped(&self) -> u64 {
-        self.dropped.load(Ordering::Relaxed)
+    /// Traces only the requests `traced` accepts, such as its host's
+    /// clients' and not its own; every request if unset.
+    pub fn only(mut self, traced: impl Fn(&ClientContext) -> bool + Send + Sync + 'static) -> Self {
+        self.traced = Some(Arc::new(traced));
+        self
+    }
+
+    /// How sending goes, which its host keeps to show.
+    pub fn health(&self) -> Arc<Health> {
+        self.health.clone()
+    }
+
+    /// The plugin that records each call of a trace, registered last.
+    pub fn calls(&self) -> Calls {
+        Calls {
+            content: self.content,
+        }
     }
 }
 
@@ -133,7 +252,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 #[async_trait]
 impl Plugin for Respan {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-        if cx.extensions().get::<Untraced>().is_some() {
+        if self.traced.as_ref().is_some_and(|traced| !traced(cx)) {
             return Ok(None);
         }
         let trace = TraceState {
@@ -147,6 +266,32 @@ impl Plugin for Respan {
         Ok(None)
     }
 
+    async fn on_client_end(&self, cx: &ClientContext, end: &Result<()>) {
+        let Some(Trace(trace)) = cx.extensions().get::<Trace>() else {
+            return;
+        };
+        let customer = cx
+            .extensions()
+            .get::<Customer>()
+            .map(|Customer(c)| c.as_str());
+        let spans = spans(&lock(trace), cx.format(), customer, end, self.content);
+        if self.queue.try_send(spans).is_err() {
+            self.health.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The calls of a [`Respan`] trace: a span for each call to a model or a
+/// tool server, as sent. Register it last, so it sees each call as the
+/// plugins before it left it, and [`Respan`] first, so it sees each request
+/// before any plugin answers it, as a tool loop does.
+#[derive(Debug, Clone, Copy)]
+pub struct Calls {
+    content: bool,
+}
+
+#[async_trait]
+impl Plugin for Calls {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
         let Some(Trace(trace)) = px.extensions().get::<Trace>().cloned() else {
             return Ok(());
@@ -190,20 +335,6 @@ impl Plugin for Respan {
             let mut state = lock(call);
             state.end = Some(SystemTime::now());
             state.error = end.as_ref().err().map(|f| f.message().to_owned());
-        }
-    }
-
-    async fn on_client_end(&self, cx: &ClientContext, end: &Result<()>) {
-        let Some(Trace(trace)) = cx.extensions().get::<Trace>() else {
-            return;
-        };
-        let customer = cx
-            .extensions()
-            .get::<Customer>()
-            .map(|Customer(c)| c.as_str());
-        let spans = spans(&lock(trace), cx.format(), customer, end, self.content);
-        if self.queue.try_send(spans).is_err() {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -396,7 +527,7 @@ struct Poster {
     url: reqwest::Url,
     key: String,
     service: String,
-    failed: Arc<AtomicU64>,
+    health: Arc<Health>,
 }
 
 impl Poster {
@@ -444,9 +575,38 @@ impl Poster {
             .body(body.to_string())
             .send()
             .await;
-        if !sent.is_ok_and(|r| r.status().is_success()) {
-            self.failed.fetch_add(count, Ordering::Relaxed);
+        let answer = match sent {
+            Ok(answer) => answer,
+            Err(e) => {
+                // A reqwest error says the URL and why, never the headers.
+                let why = format!("could not reach Respan: {e}");
+                return self.health.failed(count, why);
+            }
+        };
+        let status = answer.status();
+        let text = answer.text().await.unwrap_or_default();
+        if !status.is_success() {
+            let said: Value = serde_json::from_str(&text).unwrap_or_default();
+            let said = (said["message"].as_str().or(said["error"].as_str()))
+                .or(said["detail"].as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| text.chars().take(200).collect());
+            return self
+                .health
+                .failed(count, format!("Respan answered {status}: {said}"));
         }
+        // OTLP's partial success: some spans taken, the rest rejected.
+        let said: Value = serde_json::from_str(&text).unwrap_or_default();
+        let partial = &said["partialSuccess"];
+        let rejected = match &partial["rejectedSpans"] {
+            Value::String(n) => n.parse().unwrap_or(0),
+            n => n.as_u64().unwrap_or(0),
+        };
+        let why = (rejected > 0).then(|| {
+            let message = partial["errorMessage"].as_str().unwrap_or_default();
+            format!("Respan rejected {rejected} of {count} spans: {message}")
+        });
+        self.health.sent(count, rejected, why);
     }
 }
 

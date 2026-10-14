@@ -12,6 +12,7 @@ import { Link } from "react-router";
 import { NoRequests } from "@/components/no-requests";
 import { PageHeader } from "@/components/page-header";
 import { RequestsTable } from "@/components/requests-table";
+import { RespanStatus } from "@/components/respan-status";
 import { StatCard } from "@/components/stat-card";
 import { TrafficChart } from "@/components/traffic-chart";
 import { Badge } from "@/components/ui/badge";
@@ -149,6 +150,7 @@ export function OverviewPage() {
         }
       />
       <Stats />
+      {data?.respan && <RespanStatus health={data.respan} />}
       <div className="grid gap-4 lg:grid-cols-3">
         <TrafficChart className="lg:col-span-2" />
         <ProvidersSummary />

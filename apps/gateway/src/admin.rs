@@ -66,6 +66,8 @@ pub struct Admin {
     gateway: Gateway,
     /// Each server's tools as last asked, for a minute.
     tools: Mutex<HashMap<String, (Instant, Value)>>,
+    /// How sending traces to Respan goes, if its plugin is on.
+    respan: Option<Arc<respan_gateway_plugin_respan::Health>>,
 }
 
 impl Admin {
@@ -156,7 +158,17 @@ impl Admin {
             }),
             gateway,
             tools: Mutex::default(),
+            respan: None,
         }
+    }
+
+    /// With `health`, the Respan plugin's, to show.
+    pub(crate) fn respan(
+        mut self,
+        health: Option<Arc<respan_gateway_plugin_respan::Health>>,
+    ) -> Self {
+        self.respan = health;
+        self
     }
 }
 
@@ -267,7 +279,24 @@ async fn overview(State(admin): State<Arc<Admin>>) -> Json<Value> {
         "config_source": source,
         "config_path": path,
         "totals": process.log.totals(),
+        "respan": admin.respan.as_ref().map(|h| respan_json(&h.report())),
     }))
+}
+
+/// How sending traces to Respan goes: spans `sent`, `rejected` and
+/// `failed`, traces `dropped`, the last success (`ok_at`) and `error`, and
+/// whether it is `failing` now.
+fn respan_json(report: &respan_gateway_plugin_respan::Report) -> Value {
+    let error = report.error.as_ref();
+    json!({
+        "sent": report.sent,
+        "rejected": report.rejected,
+        "failed": report.failed,
+        "dropped": report.dropped,
+        "ok_at": report.ok_at.map(rfc3339),
+        "error": error.map(|(at, why)| json!({ "at": rfc3339(*at), "message": why })),
+        "failing": report.failing,
+    })
 }
 
 async fn providers(State(admin): State<Arc<Admin>>) -> Json<Value> {

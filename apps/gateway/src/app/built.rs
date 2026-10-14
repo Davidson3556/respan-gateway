@@ -77,9 +77,10 @@ impl Built {
             let serving = plan.serves(mcp::FORMAT);
             tool_loop::check(tool_loop, &plan.mcp, serving)?;
         }
-        let (gateway, closer, aggregate) =
-            with_plugins(gateway, &config, aggregate, &plan, &formats, &process.log);
-        // Last, so its calls' filters see each call as it is sent.
+        // Respan opens a request's trace first, before any plugin answers
+        // it (as the tool loop does), and records its calls last, as sent.
+        let mut respan_health = None;
+        let mut respan_calls = None;
         let gateway = match &config.plugins.respan {
             Some(respan) => {
                 let key = crate::compose::secret("plugins: respan: key", &respan.key)?;
@@ -89,10 +90,27 @@ impl Built {
                     .unwrap_or(respan_gateway_plugin_respan::URL);
                 let service = respan.service.as_deref().unwrap_or("respan-gateway");
                 let content = respan.content.unwrap_or(true);
-                gateway.plugin(respan_gateway_plugin_respan::Respan::new(
-                    &key, url, service, content,
-                )?)
+                // A client's request alone: the gateway's own, such as the
+                // tool loop's and the dashboard's to tool servers, are not.
+                let respan =
+                    respan_gateway_plugin_respan::Respan::new(&key, url, service, content)?
+                        .only(requests::is_clients);
+                let health = respan.health();
+                let log = config.log;
+                health.on_change(move |why| match why {
+                    Some(why) => log.say(crate::logging::Level::Warn, &format!("respan: {why}")),
+                    None => log.say(crate::logging::Level::Info, "respan: sending traces again"),
+                });
+                respan_health = Some(health);
+                respan_calls = Some(respan.calls());
+                gateway.plugin(respan)
             }
+            None => gateway,
+        };
+        let (gateway, closer, aggregate) =
+            with_plugins(gateway, &config, aggregate, &plan, &formats, &process.log);
+        let gateway = match respan_calls {
+            Some(calls) => gateway.plugin(calls),
             None => gateway,
         };
         let keys = ClientKeys::new(plan.keys.clone());
@@ -106,13 +124,10 @@ impl Built {
         )
         .layer(from_fn_with_state(keys.clone(), auth::consume))
         .layer(from_fn_with_state(process.log.clone(), requests::track));
-        let admin = Arc::new(Admin::new(
-            process.clone(),
-            &config,
-            &plan,
-            &formats,
-            gateway.clone(),
-        ));
+        let admin = Arc::new(
+            Admin::new(process.clone(), &config, &plan, &formats, gateway.clone())
+                .respan(respan_health),
+        );
         let cors = match &config.cors {
             Some(c) => Some(Cors::new(&c.origins, keys.required()).map_err(Error::new)?),
             None => None,

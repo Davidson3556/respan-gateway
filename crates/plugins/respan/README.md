@@ -17,11 +17,26 @@
 
 Spans are sent off the request path, posted in batches (100 spans, or every
 2 s) by a task of its own; while Respan is slow or down, at most 4096 traces
-wait and the rest are dropped, counted (`Respan::dropped`), rather than slow
-a request. What waits is sent when the plugin is dropped.
+wait and the rest are dropped rather than slow a request. What waits is sent
+when the plugin is dropped.
+
+`Respan::health` says how sending goes: spans sent, rejected (OTLP's
+`partialSuccess`) and failed, traces dropped, the last success and error;
+`Health::on_change` is called when sending starts failing, and when it works
+again. The gateway logs those and shows them on its Overview page
+(`respan` in `GET /ui/api/overview`).
+
+Register `Respan` before the host's other plugins, so it opens a request's
+trace before any plugin answers it (as a tool loop or a route's dispatch
+does), and `Respan::calls` after them, so it records each call as sent.
+`Respan::only` limits it to some requests: the gateway traces its clients'
+alone, not those it hands itself (the tool loop's sessions, the
+dashboard's look at a tool server).
 
 ```rust
-let gateway = gateway.plugin(Respan::new(&key, respan_gateway_plugin_respan::URL, "my-gateway", true)?);
+let respan = Respan::new(&key, respan_gateway_plugin_respan::URL, "my-gateway", true)?;
+let calls = respan.calls();
+let gateway = gateway.plugin(respan) /* .plugin(the others) */ .plugin(calls);
 ```
 
 In the gateway's config:

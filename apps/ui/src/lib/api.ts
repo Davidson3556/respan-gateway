@@ -38,6 +38,24 @@ export interface Overview {
   /** The config file's path when `config_source` is `file`. */
   config_path: string | null;
   totals: Totals;
+  /** How sending traces to Respan goes; null without its plugin. */
+  respan?: RespanHealth | null;
+}
+
+/** The Respan plugin's record of sending traces. */
+export interface RespanHealth {
+  /** Spans Respan accepted. */
+  sent: number;
+  /** Spans Respan answered it rejected. */
+  rejected: number;
+  /** Spans whose post failed. */
+  failed: number;
+  /** Traces dropped unsent while Respan was slow or down. */
+  dropped: number;
+  ok_at: string | null;
+  error: { at: string; message: string } | null;
+  /** Whether the last post failed. */
+  failing: boolean;
 }
 
 /** What `POST /ui/api/reload` answers. */

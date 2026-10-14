@@ -1,7 +1,7 @@
 //! What an MCP server offers, asked through the gateway as a client asks:
 //! `initialize`, `tools/list` (every page), then the session ended. Asked
 //! in process, so it takes the server's transport and credentials as any
-//! call does, and is not a request of the log.
+//! call does, and, not a client's, is neither logged nor traced.
 
 use std::time::Duration;
 
@@ -97,10 +97,6 @@ async fn rpc(
     if let Some(session) = session.and_then(|s| HeaderValue::from_str(s).ok()) {
         headers.insert("mcp-session-id", session);
     }
-    // The gateway's own look, not a client's request: kept out of traces.
-    let mut marks = respan_gateway_core::Extensions::new();
-    marks.insert(respan_gateway_plugin_respan::Untraced);
-    request.extensions_mut().insert(marks);
     let (response, done) = respan_gateway_http::handle(gateway, request, 8 << 20).await;
     let status = response.status();
     let session = response.headers().get("mcp-session-id");
