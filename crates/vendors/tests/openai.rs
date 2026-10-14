@@ -150,4 +150,10 @@ async fn openai_responses_only_takes_tools_with_reasoning_and_its_models() {
         Some("openai-responses")
     );
     assert_eq!(reformatted(chat("gpt-4o", json!({}))).await, None);
+    let n = json!({ "tools": tools, "reasoning_effort": "high", "n": 2 });
+    assert_eq!(
+        reformatted(chat("gpt-5-mini", n)).await,
+        None,
+        "only Chat Completions has n"
+    );
 }

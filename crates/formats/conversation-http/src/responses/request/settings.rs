@@ -76,7 +76,16 @@ pub(in crate::responses) fn write_tools(
             tool.insert("description".into(), text.as_str().into());
         }
         tool.insert("parameters".into(), t.parameters.clone());
-        let mut fields = kept_fields(RESPONSES, &t.native, tool_field, Keep::CACHE_MARKER)?;
+        // Chat Completions' `strict` is Responses' own: OpenAI's, and the same.
+        let mut native = t.native.clone();
+        if let Some(n) = native
+            .as_mut()
+            .filter(|n| &*n.format == crate::openai::OPENAI)
+            && let Some(strict) = n.fields.shift_remove("strict")
+        {
+            tool.insert("strict".into(), strict);
+        }
+        let mut fields = kept_fields(RESPONSES, &native, tool_field, Keep::CACHE_MARKER)?;
         let unsaid = fields
             .shift_remove(INERT)
             .is_some_and(|inert| inert["strict"] == "unsaid");

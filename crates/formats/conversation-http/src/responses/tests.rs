@@ -889,3 +889,24 @@ fn a_response_is_recognized_by_its_object() {
     ));
     assert!(!OpenAiResponses::is_response(&json!({ "choices": [] })));
 }
+
+#[test]
+fn a_chat_tools_strict_is_written_as_responses_own() {
+    let body = json!({
+        "model": "m",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "tools": [
+            { "type": "function", "function": { "name": "a", "strict": true, "parameters": { "type": "object" } } },
+            { "type": "function", "function": { "name": "b", "parameters": { "type": "object" } } },
+        ],
+    });
+    let chat = OpenAiChat
+        .decode_request(Bytes::from(body.to_string()))
+        .expect("decoded");
+    let v = OpenAiResponses.encode_request(&chat).expect("translated");
+    assert_eq!(v["tools"][0]["strict"], true);
+    assert_eq!(
+        v["tools"][1]["strict"], false,
+        "Chat Completions' tools are not strict by default"
+    );
+}

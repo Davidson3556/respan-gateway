@@ -62,12 +62,26 @@ pub const VENDOR: Vendor = Vendor {
 const RESPONSES_ONLY: &[&str] = &["-pro", "codex", "deep-research", "computer-use"];
 
 /// Responses, for a chat Chat Completions would refuse: one with function
-/// tools and a reasoning effort, or for a model only Responses serves.
+/// tools and a reasoning effort, or for a model only Responses serves; but
+/// not one with a field only Chat Completions has.
 fn reformat(cx: &ClientContext, from: &str) -> Option<&'static str> {
     if from != OpenAiChat::NAME {
         return None;
     }
     let input = cx.input::<respan_gateway_conversation::Input>().ok()?;
+    // A field only Chat Completions has (`n`, `logprobs`) would be refused
+    // in Responses: such a chat stays, as it was.
+    // A tool's `strict` is Responses' too.
+    let foreign = |native: &Option<respan_gateway_core::NativeFields>, carried: &[&str]| {
+        let carried = |k: &String| k == "inert" || carried.contains(&k.as_str());
+        native
+            .as_ref()
+            .is_some_and(|n| !n.fields.keys().all(carried))
+    };
+    let tools = input.tools.iter().any(|t| foreign(&t.native, &["strict"]));
+    if foreign(&input.native, &[]) || tools {
+        return None;
+    }
     let reasoning = input.options.reasoning.as_ref().is_some_and(|r| {
         r.effort.as_ref().is_some_and(|e| *e != Effort::Off) || r.budget_tokens.is_some()
     });

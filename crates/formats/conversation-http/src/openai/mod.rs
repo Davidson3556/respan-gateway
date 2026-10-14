@@ -76,7 +76,7 @@ use request::{
 };
 
 /// The wire format's name ([`Schema::NAME`]).
-const OPENAI: &str = "openai-chat";
+pub(crate) const OPENAI: &str = "openai-chat";
 
 /// OpenAI Chat Completions, `openai-chat`: a `POST` to any path ending in
 /// `/chat/completions`. The provider's base URL includes the version, such
