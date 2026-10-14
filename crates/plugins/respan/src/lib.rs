@@ -40,6 +40,11 @@ pub const QUEUE: usize = 4096;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Customer(pub String);
 
+/// Put in a request's extensions by its host to keep it out of Respan, as
+/// the host's own requests, such as a dashboard's look at a tool server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Untraced;
+
 /// The plugin: one per gateway, its task posting what it queues.
 pub struct Respan {
     queue: mpsc::Sender<Vec<Value>>,
@@ -128,6 +133,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 #[async_trait]
 impl Plugin for Respan {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
+        if cx.extensions().get::<Untraced>().is_some() {
+            return Ok(None);
+        }
         let trace = TraceState {
             trace_id: id(16)?,
             root_id: id(8)?,

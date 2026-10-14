@@ -1,5 +1,6 @@
-import { KeyRound, Plug, Server, Terminal, TriangleAlert, UserRound } from "lucide-react";
+import { KeyRound, Server, TriangleAlert, UserRound } from "lucide-react";
 import type { ReactNode } from "react";
+import { Link } from "react-router";
 import { CodeBlock } from "@/components/code-block";
 import { CopyButton } from "@/components/copy-button";
 import { EmptyState } from "@/components/empty-state";
@@ -8,8 +9,8 @@ import { ProviderIcon } from "@/components/provider-icon";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useMcpServers, useProviders } from "@/hooks/queries";
-import type { McpServer, Provider, Quirk } from "@/lib/api";
+import { useProviders } from "@/hooks/queries";
+import type { Provider, Quirk } from "@/lib/api";
 import { formatCount, formatMs, formatPercent } from "@/lib/format";
 
 const exampleConfig = `[providers.openai]
@@ -131,78 +132,13 @@ function ProviderCard({ provider: p }: { provider: Provider }) {
   );
 }
 
-const statusStyle: Record<McpServer["status"], string> = {
-  idle: "text-muted-foreground",
-  ok: "text-success",
-  failing: "text-destructive",
-};
-
-const credentialsLabel: Record<McpServer["credentials"], string> = {
-  gateway: "Gateway key",
-  client: "Client key",
-  none: "No key",
-};
-
-function McpCard({ server: s }: { server: McpServer }) {
-  const Transport = s.transport === "stdio" ? Terminal : Plug;
-  return (
-    <Card className="min-w-0 gap-5">
-      <CardHeader className="gap-1">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2.5">
-            <span
-              aria-hidden="true"
-              className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand"
-            >
-              <Transport className="size-4" />
-            </span>
-            <div className="min-w-0">
-              <CardTitle className="truncate text-base">{s.name}</CardTitle>
-              <div className={`text-xs ${statusStyle[s.status]}`}>{s.status}</div>
-            </div>
-          </div>
-          <Badge variant="outline" className="shrink-0 font-normal text-muted-foreground">
-            {s.credentials === "client" ? <UserRound /> : <KeyRound />}
-            {credentialsLabel[s.credentials]}
-          </Badge>
-        </div>
-        <p className="truncate pt-1 font-mono text-xs text-muted-foreground" title={s.target}>
-          {s.target}
-        </p>
-      </CardHeader>
-      <CardContent className="flex flex-1 flex-col gap-4">
-        <Chips label="Transport">
-          <Badge className="bg-brand-soft font-normal text-brand">{s.transport}</Badge>
-        </Chips>
-        <div className="grid gap-1.5">
-          <span className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-            Clients connect to
-          </span>
-          <div className="flex min-w-0 items-center gap-1">
-            <code className="truncate font-mono text-xs">{s.endpoint}</code>
-            <CopyButton value={s.endpoint} label="Copy endpoint" className="size-6 shrink-0" />
-          </div>
-        </div>
-        <div className="mt-auto grid grid-cols-3 gap-3 border-t pt-4">
-          <Metric label="Requests" value={formatCount(s.requests)} />
-          <Metric label="Errors" value={s.requests ? formatPercent(s.errors / s.requests) : "—"} />
-          <Metric label="Avg latency" value={formatMs(s.avg_latency_ms)} />
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 export function ProvidersPage() {
-  const providers = useProviders();
-  const { data } = providers;
-  const { data: mcp, isPending: mcpPending } = useMcpServers();
-  const isPending = providers.isPending || mcpPending;
+  const { data, isPending } = useProviders();
   return (
     <div className="grid gap-6">
       <PageHeader
         title="Providers"
-        description="Upstreams the gateway can call, what they speak and how they're doing."
+        description={<>Upstreams the gateway can call, what they speak and how they're doing. Tool servers are under <Link to="/mcp" className="underline">MCP</Link>.</>}
       />
       {isPending ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -216,28 +152,11 @@ export function ProvidersPage() {
             <ProviderCard key={p.name} provider={p} />
           ))}
         </div>
-      ) : mcp?.length ? null : (
+      ) : (
         <EmptyState icon={Server} title="No providers configured">
           <p>Add a provider to gateway.toml and restart the gateway:</p>
           <CodeBlock className="w-full text-left" code={exampleConfig} />
         </EmptyState>
-      )}
-      {mcp && mcp.length > 0 && (
-        <section className="grid gap-4" aria-labelledby="mcp-servers">
-          <div>
-            <h2 id="mcp-servers" className="text-base font-semibold">
-              MCP servers
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              Tool servers the gateway fronts, behind its client keys.
-            </p>
-          </div>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {mcp.map((s) => (
-              <McpCard key={s.name} server={s} />
-            ))}
-          </div>
-        </section>
       )}
     </div>
   );

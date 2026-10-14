@@ -11,6 +11,7 @@ const titles: [prefix: string, title: string][] = [
   ["/requests", "Requests"],
   ["/playground", "Playground"],
   ["/providers", "Providers"],
+  ["/mcp", "MCP"],
   ["/routes", "Routes"],
   ["/settings", "Settings"],
 ];

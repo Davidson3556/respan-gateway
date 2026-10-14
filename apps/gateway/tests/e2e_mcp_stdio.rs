@@ -273,3 +273,39 @@ async fn a_bare_command_name_is_found_on_path_with_the_extensions_of_pathext() {
     gone(child).await;
     gone(grandchild).await;
 }
+
+#[tokio::test]
+async fn the_admin_api_lists_a_servers_tools_and_who_offers_them() {
+    let script = serde_json::to_string(SERVER).unwrap();
+    let gw = Gateway::start(&format!(
+        "providers = {{ p = {{ formats = \"openai-chat\", base_url = \"http://127.0.0.1:1/v1\" }} }}\n\
+         mcp = {{ py = {{ command = \"{}\", args = [\"-c\", {script}] }} }}\n\
+         plugins = {{ tool_loop = {{ servers = [\"py\"], deny = [\"py__spawn\"] }} }}\n",
+        python()
+    ))
+    .await;
+    let get = |path: &str| client().get(gw.url(path)).send();
+    let listed: Value = json(&get("/ui/api/mcp").await.unwrap().text().await.unwrap());
+    assert_eq!(listed["servers"][0]["auth"], "none (a child process)");
+    assert_eq!(listed["tool_loop"], json!({ "servers": ["py"] }));
+    assert_eq!(listed["aggregate"], Value::Null);
+
+    let resp = get("/ui/api/mcp/py/tools").await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let tools: Value = json(&resp.text().await.unwrap());
+    let tools = tools["tools"].as_array().unwrap();
+    let names: Vec<_> = tools
+        .iter()
+        .map(|t| (t["name"].clone(), t["tool_loop"].clone()))
+        .collect();
+    assert_eq!(
+        names,
+        [(json!("echo"), json!(true)), (json!("spawn"), json!(false))]
+    );
+    // Asked in process: not a request of the log.
+    let requests: Value = json(&get("/ui/api/requests").await.unwrap().text().await.unwrap());
+    assert_eq!(requests["requests"], json!([]));
+
+    let unknown = get("/ui/api/mcp/nope/tools").await.unwrap();
+    assert_eq!(unknown.status(), 404);
+}

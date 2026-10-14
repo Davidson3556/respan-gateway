@@ -269,8 +269,11 @@ ends: the client's `DELETE`, ten idle
 minutes, a crash (that session's calls fail and the client starts a new
 session, so a fresh child), or the gateway stopping. Each MCP request is in
 the request log as kind `mcp`, with its method and tool (`tools/call echo`)
-in place of a model and the server as its provider; the Providers page and
-`GET /ui/api/mcp` list the servers, and `check` prints them (`check --online`
+in place of a model and the server as its provider; the MCP page and
+`GET /ui/api/mcp` list the servers (how each signs in, and whether the tool
+loop and `/mcp` use it), `GET /ui/api/mcp/{name}/tools` asks one for its
+tools as a client would (kept out of the log and traces), and `check` prints
+them (`check --online`
 also asks each to `initialize`, ends the session, and says reachable,
 unauthorized or unreachable; a stdio server is started and stopped for it).
 With `client_keys`, a session belongs to the key that opened it: another key

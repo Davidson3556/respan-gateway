@@ -46,6 +46,29 @@ export function useMcpServers() {
 }
 
 /** The routes; `live` refetches them for each candidate's latest record. */
+/** The MCP servers with who uses them; refreshed for their counts. */
+export function useMcpOverview() {
+  return useQuery({
+    queryKey: ["mcp-overview"] as const,
+    queryFn: ({ signal }) => api.mcpOverview(signal),
+    refetchInterval: 10_000,
+  });
+}
+
+/**
+ * The tools server `name` lists, asked only when `enabled`: asking may start
+ * a stdio server. The gateway keeps a list a minute; `refresh` asks anew.
+ */
+export function useMcpTools(name: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["mcp-tools", name] as const,
+    queryFn: ({ signal }) => api.mcpTools(name, false, signal),
+    enabled,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
 export function useRoutes(live = false) {
   return useQuery({
     queryKey: queryKeys.routes,

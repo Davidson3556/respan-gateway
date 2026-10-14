@@ -76,11 +76,39 @@ export interface McpServer {
   endpoint: string;
   /** Whose credentials reach it: the gateway's, the client's, or none. */
   credentials: "gateway" | "client" | "none";
+  /** How it authenticates, for a person to read, such as `bearer (env GITHUB_TOKEN)` or `oauth login (…)`; never a secret. */
+  auth?: string;
   /** `idle` before a request, `failing` if every one failed, else `ok`. */
   status: "idle" | "ok" | "failing";
   requests: number;
   errors: number;
   avg_latency_ms: number | null;
+}
+
+/** The MCP servers, and which the tool loop and the `/mcp` aggregate use. */
+export interface McpOverview {
+  servers: McpServer[];
+  tool_loop: { servers: string[] } | null;
+  aggregate: { servers: string[]; endpoint: string } | null;
+}
+
+export interface McpTool {
+  name: string;
+  title: string | null;
+  description: string | null;
+  /** The server's hints, where it gives them. */
+  read_only: boolean | null;
+  destructive: boolean | null;
+  /** Whether the tool loop offers it to models, as `<server>__<tool>`. */
+  tool_loop: boolean;
+  /** Whether `/mcp` offers it. */
+  aggregate: boolean;
+}
+
+export interface McpTools {
+  tools: McpTool[];
+  took_ms: number;
+  asked_at: string;
 }
 
 export interface ServedFormat {
@@ -385,6 +413,9 @@ export const api = {
     getJson<{ providers: Provider[] }>("/ui/api/providers", signal).then((r) => r.providers),
   mcp: (signal?: AbortSignal) =>
     getJson<{ servers: McpServer[] }>("/ui/api/mcp", signal).then((r) => r.servers),
+  mcpOverview: (signal?: AbortSignal) => getJson<McpOverview>("/ui/api/mcp", signal),
+  mcpTools: (name: string, refresh: boolean, signal?: AbortSignal) =>
+    getJson<McpTools>(`/ui/api/mcp/${encodeURIComponent(name)}/tools${refresh ? "?refresh=true" : ""}`, signal),
   routes: (signal?: AbortSignal) => getJson<Routes>("/ui/api/routes", signal),
   explain: (ask: { model: string; kind: string; client?: string }, signal?: AbortSignal) => {
     const query = new URLSearchParams({ model: ask.model, kind: ask.kind });

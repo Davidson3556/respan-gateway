@@ -1,8 +1,9 @@
 //! The web UI under `/ui/`, and the admin API it reads under `/ui/api/`.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::Router;
@@ -27,7 +28,9 @@ use crate::formats::{KnownFormat, first_of_each_kind};
 use crate::history::{CSV_HEADER, Filter, csv_row};
 use crate::mcp::Transport;
 use crate::requests::{RequestRecord, rfc3339};
+use respan_gateway_core::Gateway;
 use respan_gateway_plugin_routing::{Ask, By, Kind, Routes};
+use respan_gateway_plugin_tool_loop::ToolFilter;
 
 mod config;
 
@@ -55,6 +58,14 @@ pub struct Admin {
     kinds: Vec<(Kind, String)>,
     /// Each MCP server, as `/ui/api/mcp` lists it but its counts and status.
     mcp: Vec<Value>,
+    /// The tool loop's and the aggregate's servers, and which of their
+    /// tools each offers.
+    tool_loop: Option<(Vec<String>, ToolFilter)>,
+    aggregate: Option<(Vec<String>, ToolFilter)>,
+    /// The gateway, which the tools of a server are asked through.
+    gateway: Gateway,
+    /// Each server's tools as last asked, for a minute.
+    tools: Mutex<HashMap<String, (Instant, Value)>>,
 }
 
 impl Admin {
@@ -74,6 +85,7 @@ impl Admin {
         config: &Config,
         plan: &Plan,
         formats: &[KnownFormat],
+        gateway: Gateway,
     ) -> Self {
         let providers = plan
             .upstreams
@@ -117,6 +129,7 @@ impl Admin {
                     "target": s.target(),
                     "endpoint": s.endpoint(),
                     "credentials": credentials,
+                    "auth": s.key_from,
                 })
             })
             .collect();
@@ -133,6 +146,16 @@ impl Admin {
             routes: plan.routes.clone(),
             kinds,
             mcp,
+            tool_loop: (config.plugins.tool_loop.as_ref()).map(|t| {
+                let filter = ToolFilter::new(t.allow.clone(), t.deny.clone());
+                (t.servers.clone(), filter)
+            }),
+            aggregate: (config.plugins.mcp_aggregate.as_ref()).and_then(|a| {
+                let servers = crate::mcp_aggregate::check(a, &plan.mcp).ok()?;
+                Some((servers, ToolFilter::new(a.allow.clone(), a.deny.clone())))
+            }),
+            gateway,
+            tools: Mutex::default(),
         }
     }
 }
@@ -143,6 +166,7 @@ pub fn router(admin: Arc<Admin>, keys: Arc<ClientKeys>) -> Router {
         .route("/ui/api/overview", get(overview))
         .route("/ui/api/providers", get(providers))
         .route("/ui/api/mcp", get(mcp))
+        .route("/ui/api/mcp/{name}/tools", get(mcp_tools))
         .route("/ui/api/routes", get(routes))
         .route("/ui/api/routes/explain", get(explain))
         .route("/ui/api/requests", get(requests))
@@ -292,7 +316,94 @@ async fn mcp(State(admin): State<Arc<Admin>>) -> Json<Value> {
             s
         })
         .collect();
-    Json(json!({ "servers": servers }))
+    let uses = |used: &Option<(Vec<String>, ToolFilter)>| {
+        used.as_ref()
+            .map(|(servers, _)| json!({ "servers": servers }))
+    };
+    Json(json!({
+        "servers": servers,
+        "tool_loop": uses(&admin.tool_loop),
+        "aggregate": uses(&admin.aggregate).map(|mut a| {
+            a["endpoint"] = "/mcp".into();
+            a
+        }),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct Fresh {
+    /// Ask the server again rather than answer from the last minute's list.
+    refresh: Option<bool>,
+}
+
+/// `GET /ui/api/mcp/{name}/tools[?refresh=true]`: the tools server `name`
+/// lists now, asked through the gateway as a client asks (a stdio server
+/// is started for it), each with whether the tool loop and the `/mcp`
+/// aggregate offer it; kept a minute.
+///
+/// ```json
+/// { "tools": [{ "name": "read_file", "title": null, "description": "..",
+///     "read_only": true, "destructive": null,
+///     "tool_loop": true, "aggregate": false }],
+///   "took_ms": 812, "asked_at": "2026-10-13T09:30:00Z" }
+/// ```
+///
+/// A server that would not list is `502`, its message saying why; an
+/// unknown one `404`.
+async fn mcp_tools(
+    State(admin): State<Arc<Admin>>,
+    Path(name): Path<String>,
+    Query(q): Query<Fresh>,
+) -> Response {
+    if !admin.mcp.iter().any(|s| s["name"] == name.as_str()) {
+        let message = format!("no MCP server named '{name}'");
+        return auth::error(StatusCode::NOT_FOUND, "not_found_error", &message);
+    }
+    let fresh = |(at, _): &&(Instant, Value)| at.elapsed() < Duration::from_secs(60);
+    if q.refresh != Some(true) {
+        let tools = admin.tools.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, listed)) = tools.get(&name).filter(fresh) {
+            return Json(listed.clone()).into_response();
+        }
+    }
+    let started = Instant::now();
+    let asked = tokio::time::timeout(
+        crate::mcp_tools::TIMEOUT,
+        crate::mcp_tools::list(&admin.gateway, &name),
+    );
+    let tools = match asked.await {
+        Ok(Ok(tools)) => tools,
+        Ok(Err(why)) => return auth::error(StatusCode::BAD_GATEWAY, "upstream_error", &why),
+        Err(_) => {
+            let why = format!(
+                "it did not list its tools within {}s",
+                crate::mcp_tools::TIMEOUT.as_secs()
+            );
+            return auth::error(StatusCode::GATEWAY_TIMEOUT, "upstream_error", &why);
+        }
+    };
+    let offers = |used: &Option<(Vec<String>, ToolFilter)>, tool: &str| {
+        used.as_ref().is_some_and(|(servers, filter)| {
+            servers.contains(&name) && filter.offers(&format!("{name}__{tool}"))
+        })
+    };
+    let tools: Vec<Value> = (tools.iter())
+        .map(|t| {
+            let mut tool = crate::mcp_tools::tool_json(t);
+            let named = t["name"].as_str().unwrap_or_default();
+            tool["tool_loop"] = offers(&admin.tool_loop, named).into();
+            tool["aggregate"] = offers(&admin.aggregate, named).into();
+            tool
+        })
+        .collect();
+    let listed = json!({
+        "tools": tools,
+        "took_ms": started.elapsed().as_millis() as u64,
+        "asked_at": rfc3339(std::time::SystemTime::now()),
+    });
+    let mut cache = admin.tools.lock().unwrap_or_else(|e| e.into_inner());
+    cache.insert(name, (Instant::now(), listed.clone()));
+    Json(listed).into_response()
 }
 
 /// `GET /ui/api/routes`: the formats served, each kind's default, the

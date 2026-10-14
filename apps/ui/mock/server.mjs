@@ -149,7 +149,14 @@ const mcpServers = [
     target: "https://api.githubcopilot.com",
     endpoint: "/mcp/github",
     credentials: "gateway",
+    auth: "bearer (env GITHUB_TOKEN)",
     labels: ["initialize", "tools/list", "tools/call search_repositories", "tools/call get_issue"],
+    tools: [
+      { name: "search_repositories", description: "Search GitHub repositories by name, topic or language.", read_only: true },
+      { name: "get_issue", description: "Get an issue of a repository, with its comments.", read_only: true },
+      { name: "create_issue", description: "Open an issue in a repository." },
+      { name: "delete_branch", description: "Delete a branch of a repository.", destructive: true },
+    ],
   },
   {
     name: "files",
@@ -157,7 +164,13 @@ const mcpServers = [
     target: "npx",
     endpoint: "/mcp/files",
     credentials: "none",
+    auth: "none (a child process)",
     labels: ["initialize", "tools/list", "tools/call read_file", "tools/call list_directory"],
+    tools: [
+      { name: "read_file", description: "Read a file under the allowed directories.", read_only: true },
+      { name: "list_directory", description: "List a directory's entries.", read_only: true },
+      { name: "write_file", description: "Create or overwrite a file.", destructive: true },
+    ],
   },
 ];
 
@@ -1125,12 +1138,29 @@ const routesTable = {
   "GET /ui/api/mcp": (_req, res) =>
     json(res, 200, {
       servers: mcpServers.map((server) => {
-        const { name, transport, target, endpoint, credentials } = server;
+        const { name, transport, target, endpoint, credentials, auth } = server;
         const stats = providerStats(name);
         const status = !stats.requests ? "idle" : stats.errors === stats.requests ? "failing" : "ok";
-        return { name, transport, target, endpoint, credentials, ...stats, status };
+        return { name, transport, target, endpoint, credentials, auth, ...stats, status };
       }),
+      // As `plugins.tool_loop` and `plugins.mcp_aggregate` configure them.
+      tool_loop: { servers: ["github"] },
+      aggregate: { servers: ["github", "files"], endpoint: "/mcp" },
     }),
+  // Each server's tools, as asking it through the gateway lists them.
+  ...Object.fromEntries(mcpServers.map((server) => [
+    `GET /ui/api/mcp/${server.name}/tools`,
+    (_req, res) =>
+      setTimeout(() => json(res, 200, {
+        tools: server.tools.map((t) => ({
+          title: null, read_only: null, destructive: null, ...t,
+          tool_loop: server.name === "github" && !t.destructive,
+          aggregate: true,
+        })),
+        took_ms: between(200, 900),
+        asked_at: new Date().toISOString(),
+      }), 300),
+  ])),
   "GET /ui/api/routes": (_req, res) => json(res, 200, routes),
   "GET /ui/api/routes/explain": (req, res) => {
     const q = new URL(req.url, "http://mock").searchParams;

@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import type { McpServer, Provider, RequestRecord } from "@/lib/api";
+import type { Provider, RequestRecord } from "@/lib/api";
 import { ProvidersPage } from "./providers";
 import { RequestsPage } from "./requests";
 import { RoutesPage } from "./routes";
@@ -45,18 +45,6 @@ const provider: Provider = {
   avg_latency_ms: 1250,
 };
 
-const mcpServer: McpServer = {
-  name: "github",
-  transport: "http",
-  target: "https://api.githubcopilot.com/mcp/",
-  endpoint: "/mcp/github",
-  credentials: "gateway",
-  status: "ok",
-  requests: 10,
-  errors: 1,
-  avg_latency_ms: 80,
-};
-
 const record: RequestRecord = {
   id: "r_000001",
   started_at: "2026-10-10T12:00:00.000Z",
@@ -83,27 +71,6 @@ describe("ProvidersPage", () => {
     expect(screen.getByText("x_groq_usage")).toBeInTheDocument();
     expect(screen.getByText("5.0%")).toBeInTheDocument();
     expect(screen.getByText("1.25 s")).toBeInTheDocument();
-  });
-
-  it("lists MCP servers with their transport, endpoint and status", async () => {
-    serve({
-      "/ui/api/providers": { providers: [provider] },
-      "/ui/api/mcp": { servers: [mcpServer, { ...mcpServer, name: "files", transport: "stdio", target: "npx -y srv", endpoint: "/mcp/files", credentials: "none", status: "idle", requests: 0, errors: 0, avg_latency_ms: null }] },
-    });
-    renderPage(<ProvidersPage />);
-    expect(await screen.findByText("MCP servers")).toBeInTheDocument();
-    expect(screen.getByText("/mcp/github")).toBeInTheDocument();
-    expect(screen.getByText("npx -y srv")).toBeInTheDocument();
-    expect(screen.getByText("stdio")).toBeInTheDocument();
-    expect(screen.getByText("ok")).toBeInTheDocument();
-    expect(screen.getByText("idle")).toBeInTheDocument();
-  });
-
-  it("shows MCP servers alone, and not the empty state, for a gateway with only those", async () => {
-    serve({ "/ui/api/providers": { providers: [] }, "/ui/api/mcp": { servers: [mcpServer] } });
-    renderPage(<ProvidersPage />);
-    expect(await screen.findByText("/mcp/github")).toBeInTheDocument();
-    expect(screen.queryByText("No providers configured")).not.toBeInTheDocument();
   });
 
   it("teaches how to add a provider when none are configured", async () => {

@@ -29,6 +29,7 @@ mod mcp;
 mod mcp_aggregate;
 mod mcp_login;
 mod mcp_oauth;
+mod mcp_tools;
 mod models;
 mod redact;
 mod report;
