@@ -199,15 +199,52 @@ const routes = {
       endpoints: ["POST /mcp/{name}", "GET /mcp/{name}", "DELETE /mcp/{name}"],
     },
   ],
-  // As the router lists them: the `models` tables, then providers' claims.
-  routes: [
-    { prefix: "claude", provider: "anthropic" },
-    { prefix: "llama", provider: "groq" },
-    { prefix: "gemini", provider: "gemini" },
-    { prefix: "deepseek", provider: "deepseek" },
-    { prefix: "gpt", provider: "openai" },
-    { prefix: "whisper", provider: "openai" },
+  // `[routes.*]` of the config, each candidate with its price and the
+  // router's own record of it.
+  rules: [
+    {
+      name: "smart", glob: false, pick: "cheapest", needs: ["tools"], clients: [], kinds: [],
+      fallback: true, hedge_ms: null, tries: 1,
+      to: [
+        { target: "anthropic/claude-sonnet-4-5", provider: "anthropic", model: "claude-sonnet-4-5", weight: 1,
+          price: { input: 3, output: 15 },
+          seen: { latency_ms: 812, error_rate: 0.02, calls: 140, failures: 3, cooling: false } },
+        { target: "openai/gpt-4.1", provider: "openai", model: "gpt-4.1", weight: 1,
+          price: { input: 2, output: 8 },
+          seen: { latency_ms: 655, error_rate: 0, calls: 310, failures: 0, cooling: false } },
+        { target: "groq/llama-3.3-70b-versatile", provider: "groq", model: "llama-3.3-70b-versatile", weight: 1,
+          price: { input: 0.59, output: 0.79 },
+          seen: { latency_ms: 190, error_rate: 0.6, calls: 25, failures: 15, cooling: true } },
+      ],
+    },
+    {
+      name: "fast", glob: false, pick: "fastest", needs: [], clients: ["ops"], kinds: ["chat"],
+      fallback: true, hedge_ms: 250, tries: 1,
+      to: [
+        { target: "groq/llama-3.1-8b-instant", provider: "groq", model: "llama-3.1-8b-instant", weight: 1,
+          price: null, seen: { latency_ms: 120, error_rate: 0, calls: 88, failures: 0, cooling: false } },
+        { target: "gemini/gemini-2.5-flash", provider: "gemini", model: "gemini-2.5-flash", weight: 1,
+          price: { input: 0.3, output: 2.5 }, seen: null },
+      ],
+    },
+    {
+      name: "llama-*", glob: true, pick: "weighted", needs: [], clients: [], kinds: [],
+      fallback: true, hedge_ms: null, tries: 2,
+      to: [
+        { target: "groq", provider: "groq", model: null, weight: 3, price: null, seen: null },
+        { target: "deepseek/{model}", provider: "deepseek", model: null, weight: 1, price: null, seen: null },
+      ],
+    },
+  ],
+  // Each vendor's own model names, longest first.
+  claims: [
     { prefix: "text-embedding", provider: "openai" },
+    { prefix: "deepseek", provider: "deepseek" },
+    { prefix: "whisper", provider: "openai" },
+    { prefix: "claude", provider: "anthropic" },
+    { prefix: "gemini", provider: "gemini" },
+    { prefix: "llama", provider: "groq" },
+    { prefix: "gpt", provider: "openai" },
     { prefix: "veo", provider: "gemini" },
   ],
   defaults: [
@@ -238,7 +275,12 @@ const allModels = [
   ["veo-3.0-generate-001", "gemini", "video"],
   ["text-embedding-3-small", "openai", "embedding"],
 ].map(([id, owned_by, kind]) => ({ id, object: "model", owned_by, kind }));
-const models = allModels.filter((m) => !(NO_REALTIME && m.kind === "realtime"));
+// A route named for one model is a model clients may ask for, as `/v1/models` lists it.
+const routeModels = routes.rules.filter((r) => !r.glob).map((r) => ({
+  id: r.name, object: "model", owned_by: "routes", kind: "chat",
+  route: { pick: r.pick, to: r.to.map((c) => c.target) },
+}));
+const models = [...routeModels, ...allModels].filter((m) => !(NO_REALTIME && m.kind === "realtime"));
 
 // --- request records ------------------------------------------------------
 
@@ -249,7 +291,40 @@ let seq = 0;
 const pick = (items) => items[Math.floor(Math.random() * items.length)];
 const between = (lo, hi) => Math.round(lo + Math.random() * (hi - lo));
 const providerFor = (model) =>
-  routes.routes.find((r) => model.startsWith(r.prefix))?.provider ?? "openai";
+  routes.rules.find((r) => r.name === model)?.to[0].provider ??
+  routes.claims.find((c) => model.startsWith(c.prefix))?.provider ??
+  "openai";
+
+/** Where a request would go, as `/ui/api/routes/explain` says. */
+function explain(model, kind) {
+  const glob = (name) => new RegExp(`^${name.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+  const rule = routes.rules.find((r) => !r.glob && r.name === model) ??
+    (model.includes("/") ? null : routes.rules.find((r) => r.glob && glob(r.name).test(model)));
+  if (rule) {
+    const to = rule.to.map((c) => ({
+      provider: c.provider,
+      model: c.model ?? model,
+      price: c.price,
+      seen: c.seen,
+    }));
+    if (rule.pick === "cheapest") {
+      const cost = (c) => (c.price ? c.price.input + 3 * c.price.output : Infinity);
+      to.sort((a, b) => cost(a) - cost(b));
+    }
+    const cooling = (c) => (c.seen?.cooling ? 1 : 0);
+    to.sort((a, b) => cooling(a) - cooling(b));
+    return { by: { type: "rule", name: rule.name }, pick: rule.pick,
+      mode: rule.hedge_ms != null ? "hedge" : to.length > 1 ? "fallback" : "single", to, passed: [] };
+  }
+  const one = (by, provider, sent) =>
+    ({ by, pick: null, mode: "single", to: [{ provider, model: sent, price: null, seen: null }], passed: [] });
+  const slash = model.indexOf("/");
+  if (slash > 0) return one({ type: "named" }, model.slice(0, slash), model.slice(slash + 1));
+  const claim = routes.claims.find((c) => model.startsWith(c.prefix));
+  if (claim) return one({ type: "claim", prefix: claim.prefix }, claim.provider, model);
+  const fallback = routes.defaults.find((d) => d.kind === kind);
+  return fallback ? one({ type: "default" }, fallback.provider, model) : { by: null };
+}
 
 function broadcast(record) {
   const frame = `event: request\ndata: ${JSON.stringify(record)}\n\n`;
@@ -1010,7 +1085,11 @@ base_url = "http://127.0.0.1:11434/v1"
 
 [mcp.github]
 url = "https://api.githubcopilot.com/mcp/"
-key = "…"
+auth = { bearer = "…" }
+
+[mcp.files]
+command = "npx"
+args = ["…", "…", "…"]
 `;
 
 
@@ -1053,6 +1132,10 @@ const routesTable = {
       }),
     }),
   "GET /ui/api/routes": (_req, res) => json(res, 200, routes),
+  "GET /ui/api/routes/explain": (req, res) => {
+    const q = new URL(req.url, "http://mock").searchParams;
+    json(res, 200, explain(q.get("model") ?? "", q.get("kind") ?? "chat"));
+  },
   "GET /ui/api/requests": (req, res) => {
     const limit = Number(new URL(req.url, "http://x").searchParams.get("limit") ?? 100);
     json(res, 200, { requests: records.slice(0, limit) });

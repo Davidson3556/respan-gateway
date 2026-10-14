@@ -12,7 +12,9 @@ use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode, header
 use respan_gateway_http::{Body, Completion};
 use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_passthrough_http::Passthrough;
-use respan_gateway_plugin_routing::{Kind, Model, Routes, Routing, Speaks};
+use respan_gateway_plugin_routing::{
+    Candidate, Dispatch, Kind, Model, Pick, Routes, Routing, Rule, Speaks,
+};
 
 /// An end by its message, for comparing: `Fault` has no equality.
 fn ended(end: Result<(), Fault>) -> Result<(), String> {
@@ -97,6 +99,11 @@ const CHAT: Kind = Kind {
 
 /// Providers `a` and `b` of OpenAI Chat, `b` the target, and `routes`.
 fn model_gateway(mock: &Fakes, routes: Routes) -> Gateway {
+    routed_gateway(mock, routes).0
+}
+
+/// [`model_gateway`], dispatching what a rule routes, and its routes.
+fn routed_gateway(mock: &Fakes, routes: Routes) -> (Gateway, Arc<Routes>) {
     let speaks = |internal: &str| {
         vec![Speaks {
             format: "openai-chat".into(),
@@ -105,12 +112,13 @@ fn model_gateway(mock: &Fakes, routes: Routes) -> Gateway {
         }]
     };
     let routes = routes.provider("a", speaks("a")).provider("b", speaks("b"));
-    let routing = Routing::new(Arc::new(routes.target("b"))).format(
+    let routes = Arc::new(routes.target("b"));
+    let routing = Routing::new(routes.clone()).format(
         "openai-chat",
         CHAT,
         Model::of(Input::model, Input::set_model),
     );
-    Gateway::new()
+    let gateway = Gateway::new()
         .client::<Input, _, _>(OpenAiChat)
         .expect("chat client")
         .provider(Provider::new(
@@ -126,6 +134,8 @@ fn model_gateway(mock: &Fakes, routes: Routes) -> Gateway {
         ))
         .expect("b provider")
         .plugin(routing)
+        .plugin(Dispatch::new(|_, _| true));
+    (gateway, routes)
 }
 
 async fn routed_post(gw: &Gateway, body: &'static str) -> (StatusCode, String) {
@@ -416,4 +426,59 @@ async fn routing_overrides_the_gateways_default_target_it_was_told_of() {
     assert_eq!(status, StatusCode::OK);
     assert!(answer.contains("routed"), "{answer}");
     assert_eq!(mock.sent(), ["a.test"]);
+}
+
+fn smart(pick: Pick) -> Rule {
+    let mut rule = Rule::new(
+        "smart",
+        vec![Candidate::parse("a/model-a"), Candidate::parse("b/model-b")],
+    );
+    rule.pick = pick;
+    rule
+}
+
+#[tokio::test]
+async fn a_rule_falls_back_to_its_next_candidate_with_that_ones_model() {
+    const ASK: &str = r#"{"model":"smart","messages":[{"role":"user","content":"hi"}]}"#;
+    let mock = Fakes::start().await;
+    mock.reply(A, Answer::error(503))
+        .reply(B, Answer::text("from b"));
+    let (gw, routes) = routed_gateway(&mock, Routes::new().rule(smart(Pick::First)));
+    let (status, answer) = routed_post(&gw, ASK).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(answer.contains("from b"), "{answer}");
+    assert_eq!(mock.sent(), ["a.test", "b.test"]);
+    assert_eq!(mock.a.requests()[0].body["model"], "model-a");
+    assert_eq!(mock.b.requests()[0].body["model"], "model-b");
+    // The router's own record of each, once their end hooks ran.
+    gw.idle().await;
+    let a = routes.stats().seen("a", "model-a").expect("a seen");
+    assert_eq!((a.calls, a.failures), (1, 1));
+    let b = routes.stats().seen("b", "model-b").expect("b seen");
+    assert_eq!((b.calls, b.failures), (1, 0));
+    assert!(b.latency_ms.is_some());
+}
+
+#[tokio::test]
+async fn fastest_goes_to_the_quicker_candidate_once_it_knows() {
+    const ASK: &str = r#"{"model":"smart","messages":[{"role":"user","content":"hi"}]}"#;
+    let mock = Fakes::start().await;
+    let (gw, routes) = routed_gateway(&mock, Routes::new().rule(smart(Pick::Fastest)));
+    routes.stats().record(
+        "a",
+        "model-a",
+        Some(std::time::Duration::from_millis(900)),
+        false,
+    );
+    routes.stats().record(
+        "b",
+        "model-b",
+        Some(std::time::Duration::from_millis(50)),
+        false,
+    );
+    mock.reply(B, Answer::text("quick"));
+    let (status, answer) = routed_post(&gw, ASK).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(answer.contains("quick"), "{answer}");
+    assert_eq!(mock.sent(), ["b.test"]);
 }

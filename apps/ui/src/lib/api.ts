@@ -89,10 +89,73 @@ export interface ServedFormat {
   endpoints: string[];
 }
 
+/** What the router saw of a candidate's calls, from its own record. */
+export interface RouteSeen {
+  /** Time to a response's head, a moving average. */
+  latency_ms: number | null;
+  /** Share of failed calls, a moving average from 0 to 1. */
+  error_rate: number;
+  calls: number;
+  failures: number;
+  /** Failed its last few calls just now, so it goes last for a while. */
+  cooling: boolean;
+}
+
+/** US dollars per million tokens. */
+export interface RoutePrice {
+  input: number;
+  output: number;
+}
+
+export type RoutePick = "first" | "cheapest" | "fastest" | "weighted" | "random";
+
+export interface RouteCandidate {
+  /** As configured: `provider`, `provider/model` or `provider/{model}`. */
+  target: string;
+  provider: string;
+  /** The model it is sent; null when each request sends its own, as a glob's do. */
+  model: string | null;
+  weight: number;
+  price: RoutePrice | null;
+  seen: RouteSeen | null;
+}
+
+/** A `[routes.<name>]` of the config. */
+export interface RouteRule {
+  /** The model clients ask for, or a glob of them such as `llama-*`. */
+  name: string;
+  glob: boolean;
+  pick: RoutePick;
+  needs: string[];
+  clients: string[];
+  kinds: string[];
+  fallback: boolean;
+  hedge_ms: number | null;
+  tries: number;
+  to: RouteCandidate[];
+}
+
 export interface Routes {
   serve: ServedFormat[];
-  routes: { prefix: string; provider: string }[];
   defaults: { kind: Kind; provider: string }[];
+  rules: RouteRule[];
+  /** Vendors' own model names, by prefix, longest first. */
+  claims: { prefix: string; provider: string }[];
+}
+
+/** Where a request would go now, as the router decides it. */
+export interface Explained {
+  by:
+    | null
+    | { type: "rule"; name: string }
+    | { type: "named" }
+    | { type: "listed" }
+    | { type: "claim"; prefix: string }
+    | { type: "default" };
+  pick?: RoutePick | null;
+  mode?: "single" | "fallback" | "hedge";
+  to?: { provider: string; model: string | null; price: RoutePrice | null; seen: RouteSeen | null }[];
+  passed?: { candidate: string; why: string }[];
 }
 
 export interface Usage {
@@ -165,6 +228,18 @@ export interface Model {
   owned_by: string;
   /** Gateway extension; may be absent. */
   kind?: Kind;
+  /** What its provider's list says of it, where it says; may be absent. */
+  display_name?: string;
+  description?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  input_modalities?: string[];
+  capabilities?: string[];
+  /** US dollars per million tokens, from the provider's list or the config's `prices`. */
+  pricing?: { input: number; output: number; cached_input?: number; from: "provider" | "config" };
+  retires_at?: string;
+  /** A route of the config named for this model (`owned_by: "routes"`): how it picks, and its candidates. */
+  route?: { pick: RoutePick; to: string[] };
 }
 
 export const KEY_STORAGE = "respan.gatewayKey";
@@ -311,6 +386,11 @@ export const api = {
   mcp: (signal?: AbortSignal) =>
     getJson<{ servers: McpServer[] }>("/ui/api/mcp", signal).then((r) => r.servers),
   routes: (signal?: AbortSignal) => getJson<Routes>("/ui/api/routes", signal),
+  explain: (ask: { model: string; kind: string; client?: string }, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ model: ask.model, kind: ask.kind });
+    if (ask.client) query.set("client", ask.client);
+    return getJson<Explained>(`/ui/api/routes/explain?${query}`, signal);
+  },
   requests: (limit: number, signal?: AbortSignal) =>
     getJson<{ requests: RequestRecord[] }>(`/ui/api/requests?limit=${limit}`, signal).then(
       (r) => r.requests,

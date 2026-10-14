@@ -45,7 +45,7 @@ type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-ex
  * header, so the gateway key rides in a subprotocol, as OpenAI's own
  * browser clients send theirs.
  */
-const openaiRealtime: RealtimeApi = {
+export const openaiRealtime: RealtimeApi = {
   id: "openai-realtime",
   label: "OpenAI Realtime",
   path: "/v1/realtime",
@@ -82,7 +82,7 @@ const GEMINI_PATH = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.B
  * barge-in itself and says `interrupted`; a client can neither cancel a
  * reply nor say how much of it was heard.
  */
-const geminiLive: RealtimeApi = {
+export const geminiLive: RealtimeApi = {
   id: "gemini-live",
   label: "Gemini Live",
   path: GEMINI_PATH,
@@ -116,6 +116,30 @@ const geminiLive: RealtimeApi = {
       const user = `user-${turn}`;
       const model = `model-${turn}`;
       const out: ServerEvent[] = [];
+      const done = (status: string) => {
+        out.push({ type: "response.done", response: { status } });
+        turn += 1;
+        begun = false;
+        answering = false;
+      };
+      const parts: Json[] = content.modelTurn?.parts ?? [];
+      const carries =
+        Boolean(content.inputTranscription?.text) ||
+        Boolean(content.outputTranscription?.text) ||
+        content.interrupted === true ||
+        parts.some((p) => p.inlineData || p.text);
+      if (!carries) {
+        // A turn's end alone, such as the one after an interruption, which
+        // already ended it, opens no turn.
+        if (content.turnComplete === true && begun) done("completed");
+        return out;
+      }
+      const lateSaid = content.outputTranscription?.text;
+      if (!begun && turn > 0 && lateSaid && !content.inputTranscription?.text && parts.length === 0) {
+        // The rest of the last reply's transcript, after its turn ended: its
+        // own, which the reducer ignores if it was cut off.
+        return [{ type: "response.output_audio_transcript.delta", item_id: `model-${turn - 1}`, delta: lateSaid }];
+      }
       if (!begun) {
         // The user's line first, even if its transcript comes after the reply.
         out.push({ type: "conversation.item.created", item: { id: user, role: "user" } });
@@ -128,7 +152,6 @@ const geminiLive: RealtimeApi = {
       if (content.interrupted === true) {
         out.push({ type: "input_audio_buffer.speech_started" });
       }
-      const parts: Json[] = content.modelTurn?.parts ?? [];
       for (const part of parts) {
         if (!answering && (part.inlineData || part.text)) {
           out.push({ type: "input_audio_buffer.speech_stopped" });
@@ -147,23 +170,14 @@ const geminiLive: RealtimeApi = {
       if (typeof said === "string" && said) {
         out.push({ type: "response.output_audio_transcript.delta", item_id: model, delta: said });
       }
-      if (content.turnComplete === true || content.interrupted === true) {
-        const status = content.interrupted === true ? "cancelled" : "completed";
-        out.push({ type: "response.done", response: { status } });
-        turn += 1;
-        begun = false;
-        answering = false;
-      }
+      if (content.interrupted === true) done("cancelled");
+      else if (content.turnComplete === true) done("completed");
       return out;
     };
   },
 };
 
-export const realtimeApis: RealtimeApi[] = [openaiRealtime, geminiLive];
-
-export function realtimeApi(id: RealtimeApiId): RealtimeApi {
-  return realtimeApis.find((a) => a.id === id) ?? openaiRealtime;
-}
+const realtimeApis: RealtimeApi[] = [openaiRealtime, geminiLive];
 
 /** The APIs the gateway serves sessions in; OpenAI Realtime if it lists none. */
 export function servedRealtimeApis(

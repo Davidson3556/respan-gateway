@@ -4,7 +4,8 @@
 //! same list in Gemini's shape, for Gemini SDKs; a request to `/v1/models`
 //! with `anthropic-version` gets Anthropic's shape.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use axum::Json;
@@ -18,9 +19,11 @@ use serde_json::{Value, json};
 
 use crate::auth;
 use crate::compose::Upstream;
+use crate::config::Price;
 use crate::formats::{first_of_each_kind, kind};
 use crate::requests::rfc3339;
-use respan_gateway_plugin_routing::{Kind, Routes};
+use indexmap::IndexMap;
+use respan_gateway_plugin_routing::{Catalog, Facts, Kind, Routes};
 use respan_gateway_vendors::{Model, VendorProvider};
 
 /// How long a provider may take to list its models.
@@ -66,7 +69,12 @@ pub struct Probe {
 pub struct Models {
     listings: Vec<Listing>,
     routes: Arc<Routes>,
+    /// The config's `prices`, for a model its list gives none.
+    prices: Vec<(String, Price)>,
     cached: Mutex<Option<(Instant, Value)>>,
+    /// What the last listings said of each model, by provider and id, for
+    /// routes that pick by price or need a capability.
+    facts: Mutex<HashMap<(String, String), Facts>>,
 }
 
 impl Models {
@@ -79,8 +87,56 @@ impl Models {
         Self {
             listings: listings.collect(),
             routes,
+            prices: Vec::new(),
             cached: Mutex::default(),
+            facts: Mutex::default(),
         }
+    }
+
+    /// With `prices`, the config's, for a model whose list gives none.
+    pub fn priced(mut self, prices: &IndexMap<String, Price>) -> Self {
+        self.prices = prices
+            .iter()
+            .map(|(p, price)| (p.clone(), *price))
+            .collect();
+        self
+    }
+
+    /// The price of `model`: its list's, else the longest `prices` prefix's.
+    fn price_of(&self, model: &Model) -> Option<Value> {
+        if let Some(p) = model.pricing {
+            return Some(price_json(p.input, p.output, p.cached_input, "provider"));
+        }
+        let p = self.configured(&model.id)?;
+        Some(price_json(p.input, p.output, p.cached_input, "config"))
+    }
+
+    /// The config's price of `id`: its longest matching `prices` prefix's.
+    fn configured(&self, id: &str) -> Option<&Price> {
+        let (_, p) = self
+            .prices
+            .iter()
+            .filter(|(prefix, _)| id.starts_with(prefix.as_str()))
+            .max_by_key(|(prefix, _)| prefix.len())?;
+        Some(p)
+    }
+
+    /// Lists every provider's models now and every `every` after, while
+    /// anything but this task holds `models`, so routes that pick by price
+    /// or capability know them before a client lists.
+    pub fn refresh(models: &Arc<Self>, every: Duration) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let models: Weak<Self> = Arc::downgrade(models);
+        runtime.spawn(async move {
+            loop {
+                let Some(held) = models.upgrade() else { return };
+                let _ = held.collect().await;
+                drop(held);
+                tokio::time::sleep(every).await;
+            }
+        });
     }
 
     /// The merged list, fetched again once a minute old; not kept while a
@@ -110,7 +166,26 @@ impl Models {
         let fetched = join_all(self.listings.iter().map(|l| self.fetch(l))).await;
         let (listed, failed): (Vec<_>, Vec<_>) = fetched.into_iter().partition(Result::is_ok);
         let failed = failed.into_iter().filter_map(Result::err).collect();
-        (listed.into_iter().flatten().flatten().collect(), failed)
+        let listed = listed.into_iter().flatten().flatten();
+        (self.routes().chain(listed).collect(), failed)
+    }
+
+    /// The routes named for one model, as models a client may ask for:
+    /// owned by `routes`, of the kind their first candidate's model is.
+    fn routes(&self) -> impl Iterator<Item = Value> + '_ {
+        let rules = self.routes.rules().iter().filter(|r| !r.is_glob());
+        rules.map(|rule| {
+            let first = rule.to.first().and_then(|c| c.model_for(Some(&rule.name)));
+            let kind = kind_of(first.as_deref().unwrap_or(&rule.name)).unwrap_or(kind::CHAT);
+            let to: Vec<String> = rule.to.iter().map(ToString::to_string).collect();
+            json!({
+                "id": rule.name,
+                "object": "model",
+                "owned_by": "routes",
+                "kind": kind.label,
+                "route": { "pick": rule.pick.name(), "to": to },
+            })
+        })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<(Instant, Value)>> {
@@ -170,6 +245,17 @@ impl Models {
             return Ok(Vec::new());
         };
         let models = listed.map_err(|r| format!("{}: {}", listing.provider, r.why))?;
+        {
+            let mut facts = self.facts.lock().unwrap_or_else(|e| e.into_inner());
+            for m in &models {
+                let known = Facts {
+                    price: m.pricing.map(|p| (p.input, p.output)),
+                    capabilities: m.capabilities.clone(),
+                    input_modalities: m.input_modalities.clone(),
+                };
+                facts.insert((listing.provider.clone(), m.id.clone()), known);
+            }
+        }
         let models = models
             .iter()
             .filter_map(|m| {
@@ -182,8 +268,27 @@ impl Models {
                     "owned_by": listing.provider,
                     "kind": kind.label,
                 });
-                if let Some(created) = m.created {
-                    model["created"] = created.into();
+                let fields = [
+                    ("created", m.created.map(Value::from)),
+                    ("display_name", m.display_name.clone().map(Value::from)),
+                    ("description", m.description.clone().map(Value::from)),
+                    ("context_window", m.context_window.map(Value::from)),
+                    ("max_output_tokens", m.max_output_tokens.map(Value::from)),
+                    (
+                        "input_modalities",
+                        (!m.input_modalities.is_empty()).then(|| json!(m.input_modalities)),
+                    ),
+                    (
+                        "capabilities",
+                        (!m.capabilities.is_empty()).then(|| json!(m.capabilities)),
+                    ),
+                    ("pricing", self.price_of(m)),
+                    ("retires_at", m.retires_at.clone().map(Value::from)),
+                ];
+                for (key, value) in fields {
+                    if let Some(value) = value {
+                        model[key] = value;
+                    }
                 }
                 Some(model)
             })
@@ -200,6 +305,51 @@ impl Models {
             _ => format!("{}/{id}", listing.provider),
         }
     }
+}
+
+/// The models a router reads, while the gateway serves them: held weakly,
+/// as the models hold the routes.
+pub struct Listed(pub Weak<Models>);
+
+impl Catalog for Listed {
+    fn facts(&self, provider: &str, model: &str) -> Option<Facts> {
+        self.0.upgrade()?.facts(provider, model)
+    }
+
+    fn lists(&self, provider: &str, model: &str) -> bool {
+        self.0.upgrade().is_some_and(|m| m.lists(provider, model))
+    }
+}
+
+impl Catalog for Models {
+    fn facts(&self, provider: &str, model: &str) -> Option<Facts> {
+        let facts = self.facts.lock().unwrap_or_else(|e| e.into_inner());
+        let listed = facts.get(&(provider.to_owned(), model.to_owned())).cloned();
+        let configured = self.configured(model).map(|p| (p.input, p.output));
+        let price = listed.as_ref().and_then(|f| f.price).or(configured);
+        if listed.is_none() && price.is_none() {
+            return None;
+        }
+        Some(Facts {
+            price,
+            ..listed.unwrap_or_default()
+        })
+    }
+
+    fn lists(&self, provider: &str, model: &str) -> bool {
+        let facts = self.facts.lock().unwrap_or_else(|e| e.into_inner());
+        facts.contains_key(&(provider.to_owned(), model.to_owned()))
+    }
+}
+
+/// A price, in US dollars per million tokens, and where it was read: its
+/// provider's list, or the config's `prices`.
+fn price_json(input: f64, output: f64, cached: Option<f64>, from: &str) -> Value {
+    let mut price = json!({ "input": input, "output": output, "from": from });
+    if let Some(cached) = cached {
+        price["cached_input"] = cached.into();
+    }
+    price
 }
 
 /// What a model does, by its name as vendors spell them; `None` for one the
@@ -245,12 +395,19 @@ fn anthropic_list(list: &Value) -> Value {
             let id = m["id"].as_str()?;
             let created = m["created"].as_u64().unwrap_or_default();
             let created = SystemTime::UNIX_EPOCH + Duration::from_secs(created);
-            Some(json!({
+            let mut model = json!({
                 "type": "model",
                 "id": id,
-                "display_name": id,
+                "display_name": m["display_name"].as_str().unwrap_or(id),
                 "created_at": rfc3339(created),
-            }))
+            });
+            if let Some(n) = m["context_window"].as_u64() {
+                model["max_input_tokens"] = n.into();
+            }
+            if let Some(n) = m["max_output_tokens"].as_u64() {
+                model["max_tokens"] = n.into();
+            }
+            Some(model)
         })
         .collect();
     json!({
@@ -275,12 +432,23 @@ fn gemini_models(list: &Value) -> Vec<Value> {
         .filter(|m| m["kind"] == "chat")
         .filter_map(|m| {
             let id = m["id"].as_str()?;
-            Some(json!({
+            let mut model = json!({
                 "name": format!("models/{id}"),
                 "baseModelId": id,
-                "displayName": id,
+                "displayName": m["display_name"].as_str().unwrap_or(id),
                 "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
-            }))
+            });
+            let fields = [
+                ("description", "description"),
+                ("context_window", "inputTokenLimit"),
+                ("max_output_tokens", "outputTokenLimit"),
+            ];
+            for (from, to) in fields {
+                if !m[from].is_null() {
+                    model[to] = m[from].clone();
+                }
+            }
+            Some(model)
         })
         .collect()
 }

@@ -52,24 +52,42 @@ key = "env:OPENAI_API_KEY"
 # key = "env:BACKUP_API_KEY"
 
 # ── Routing and resilience ────────────────────────────────────────────
-# Enable the referenced providers before enabling these plugins.
+# A request's model goes to: a route of that exact name; else `provider/model`
+# (sent `model`); else the first glob route it matches; else the provider
+# whose model list has it; else the vendor that claims its name (`claude-*`
+# to Anthropic); else the kind's default. A route
+# whose candidates don't serve the request's kind, or whose `when` doesn't
+# match, is skipped. Name only configured providers.
 # [plugins.routing]
-# default = "openai"
-# models = [{ prefix = "llama", provider = "groq" }]
+# default = "openai"               # The default provider of each kind it serves
+# listings = true                  # Read each provider's model list at start and every 10 min
 
-# Retry failures, then try another provider.
-# [plugins.fallback]
-# after = { openai = ["backup"] }
-# tries = 2                        # Attempts per provider, including retries
-# backoff = "250ms"
+# Routes by the model name clients ask for; exact names are listed in
+# GET /v1/models. A candidate is "provider", "provider/model", or
+# "provider/{model}" ({model} is the name asked for); one or a list.
+# [routes.smart]
+# to = ["anthropic/claude-opus-4-1", { target = "openai/gpt-5", weight = 3 }]
+# pick = "first"                   # first | cheapest | fastest | weighted | random
+# needs = ["tools"]                # From the provider's model listing; unknown is kept
+# when = { clients = ["ops"], kinds = ["chat"] }   # Client key names, kinds; all if unset
+# fallback = true                  # Try the next candidate when one fails
+# hedge = "200ms"                  # Race them instead, each this long after the last
+# tries = 2                        # Per candidate, including retries; 1 to 10
+# backoff = "250ms"                # Doubled after each retry
 # max_backoff = "10s"
 # until = "head"                   # head | end (buffers the whole response)
 
-# Race a second provider after a delay; the first success wins.
-# [plugins.hedge]
-# after = { openai = ["backup"] }
-# stagger = "200ms"
-# until = "head"
+# A glob, sent to groq as asked:
+# [routes."llama-*"]
+# to = "groq"
+
+# ── Respan observability ───────────────────────────────────────────────
+# Each request a trace in Respan: a span per call to a model (model, tokens,
+# and its messages and reply unless content = false) or to a tool server.
+# [plugins.respan]
+# key = "env:RESPAN_API_KEY"
+# content = true                   # Send messages and replies
+# service = "respan-gateway"       # The traces' service.name
 
 # ── Responses' previous_response_id with any provider ─────────────────
 # OpenAI keeps its own Responses; for a Responses client translated to
@@ -94,10 +112,12 @@ key = "env:OPENAI_API_KEY"
 # ── MCP servers and tools ─────────────────────────────────────────────
 # [mcp.github]
 # url = "https://api.githubcopilot.com/mcp/"
-# key = "env:GITHUB_TOKEN"
+# auth = { bearer = "env:GITHUB_TOKEN" }  # Or "login" (`respan-gateway mcp login github`),
+#                                         # "forward", { oauth = { .. } }, or headers = { .. }
 
 # [mcp.files]
-# command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
 # Combine servers at /mcp; tool names become server__tool.
 # [plugins.mcp_aggregate]

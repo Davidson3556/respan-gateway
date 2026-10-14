@@ -2,14 +2,6 @@
 
 use respan_gateway_conversation::Output;
 use respan_gateway_core::NativeValue;
-use serde_json::Value;
-
-/// The block an event names, by `index` (Anthropic's) or `block` (the
-/// others' natives).
-pub(super) fn block_of(raw: &Value) -> Option<u32> {
-    let named = raw["index"].as_u64().or_else(|| raw["block"].as_u64());
-    u32::try_from(named?).ok()
-}
 
 /// `native`, which names `block`, naming `number`.
 pub(super) fn renumbered(native: &NativeValue, block: u32, number: u32) -> Output {

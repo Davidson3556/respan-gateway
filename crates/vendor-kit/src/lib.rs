@@ -17,7 +17,7 @@ pub mod models;
 mod provider;
 mod wire;
 
-pub use models::{BoxFuture, ListModels, Model, Models};
+pub use models::{BoxFuture, ListModels, Model, Models, Pricing};
 pub use provider::{Part, VendorProvider};
 pub use respan_gateway_http::{Body, http};
 pub use respan_gateway_http_faults::built_wrong;
@@ -57,7 +57,8 @@ pub struct Vendor {
     /// The plugin of its quirks, a plugin of each of its providers
     /// ([`Provider::plugin`](respan_gateway_core::Provider::plugin)): run on
     /// their calls alone, after the gateway's plugins, so those see the
-    /// kind's events. Not optional: a provider of this vendor needs it.
+    /// kind's events. Every provider of the vendor carries it, as each
+    /// needs it.
     pub plugin: Option<&'static dyn Plugin>,
 }
 

@@ -828,7 +828,7 @@ async fn client_credentials_get_a_token_and_a_refusal_gets_a_new_one() {
     let tokens = Tokens::start().await;
     let up = Fake::start("beta", false, Some("tok-1")).await;
     let config = format!(
-        "client_keys = [\"{KEY}\"]\nmcp = {{ beta = {{ url = \"{}\", oauth = {{ token_url = \"{}\", client_id = \"the-id\", client_secret = \"s3cret & more\", scopes = [\"read\", \"write\"] }} }} }}\n",
+        "client_keys = [\"{KEY}\"]\nmcp = {{ beta = {{ url = \"{}\", auth = {{ oauth = {{ token_url = \"{}\", client_id = \"the-id\", client_secret = \"s3cret & more\", scopes = [\"read\", \"write\"] }} }} }} }}\n",
         up.url(),
         tokens.url
     );
@@ -901,7 +901,7 @@ async fn a_refresh_token_is_used_and_its_rotation_kept() {
     let tokens = Tokens::start().await;
     let up = Fake::start("beta", false, Some("tok-1")).await;
     let config = format!(
-        "client_keys = [\"{KEY}\"]\nmcp = {{ beta = {{ url = \"{}\", oauth = {{ token_url = \"{}\", client_id = \"the-id\", client_secret = \"env:OAUTH_TEST_SECRET\", refresh_token = \"env:OAUTH_TEST_REFRESH\" }} }} }}\n",
+        "client_keys = [\"{KEY}\"]\nmcp = {{ beta = {{ url = \"{}\", auth = {{ oauth = {{ token_url = \"{}\", client_id = \"the-id\", client_secret = \"env:OAUTH_TEST_SECRET\", refresh_token = \"env:OAUTH_TEST_REFRESH\" }} }} }} }}\n",
         up.url(),
         tokens.url
     );
@@ -956,12 +956,20 @@ async fn oauth_mistakes_are_named_at_load() {
             + &String::from_utf8_lossy(&out.stderr);
         (out.status.success(), text)
     };
-    let oauth = "oauth = { token_url = \"http://127.0.0.1:1/t\", client_id = \"i\", client_secret = \"s\" }\n";
-    let (ok, text) = check(&format!("key = \"k\"\n{oauth}"));
-    assert!(!ok && text.contains("only one"), "{text}");
-    let (ok, text) = check(&format!("forward_auth = true\n{oauth}"));
-    assert!(!ok && text.contains("forward_auth"), "{text}");
-    let missing = "oauth = { token_url = \"http://127.0.0.1:1/t\", client_id = \"i\", client_secret = \"env:NO_SUCH_OAUTH_VAR\" }\n";
+    let client =
+        "{ token_url = \"http://127.0.0.1:1/t\", client_id = \"i\", client_secret = \"s\" }";
+    let (ok, text) = check(&format!(
+        "headers = {{ Authorization = \"k\" }}\nauth = {{ oauth = {client} }}\n"
+    ));
+    assert!(!ok && text.contains("set one"), "{text}");
+    let (ok, text) = check(&format!("auth = {{ bearer = \"k\", oauth = {client} }}\n"));
+    assert!(!ok && text.contains("not also"), "{text}");
+    let (ok, text) = check(&format!("oauth = {client}\n"));
+    assert!(
+        !ok && text.contains("is now `auth = { oauth = { .. } }`"),
+        "{text}"
+    );
+    let missing = "auth = { oauth = { token_url = \"http://127.0.0.1:1/t\", client_id = \"i\", client_secret = \"env:NO_SUCH_OAUTH_VAR\" } }\n";
     let (ok, text) = check(missing);
     assert!(!ok && text.contains("NO_SUCH_OAUTH_VAR"), "{text}");
 }

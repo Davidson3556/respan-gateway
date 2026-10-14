@@ -45,17 +45,20 @@ pub trait Wire: Send + Sync {
     fn websocket(&self) -> bool {
         matches!(self.reach(), Reach::Ws(_))
     }
-    /// Its base URL, for a provider at `base_url`: a WebSocket format's
-    /// with `ws`/`wss`.
+    /// Its base URL, for a provider at `base_url`, where it sits.
     fn base_url(&self, base_url: &str) -> String {
-        let base = self.base().of(base_url);
+        self.scheme(self.base().of(base_url))
+    }
+    /// `url` in its scheme: a WebSocket format's `ws`/`wss`, another's
+    /// `http`/`https`.
+    fn scheme(&self, url: &str) -> String {
         let swap = match self.websocket() {
             true => [("https://", "wss://"), ("http://", "ws://")],
             false => [("wss://", "https://"), ("ws://", "http://")],
         };
         swap.iter()
-            .find_map(|(from, to)| base.strip_prefix(from).map(|rest| format!("{to}{rest}")))
-            .unwrap_or_else(|| base.to_owned())
+            .find_map(|(from, to)| url.strip_prefix(from).map(|rest| format!("{to}{rest}")))
+            .unwrap_or_else(|| url.to_owned())
     }
     /// The core provider `name` of it, its calls made by `connect`.
     fn provider(&self, name: String, connect: Connect) -> Provider;

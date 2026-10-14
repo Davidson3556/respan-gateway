@@ -97,10 +97,18 @@ async fn a_follow_up_is_sent_with_the_conversation_it_names() {
     let (status, first) = respond(
         &gw,
         "ka",
-        json!({ "model": "m", "instructions": "Be brief.", "input": "one" }),
+        json!({ "model": "m", "instructions": "Be brief.", "input": [
+            { "role": "system", "content": "Speak French." },
+            { "role": "user", "content": "one" },
+        ] }),
     )
     .await;
     assert_eq!(status, 200, "{first}");
+    // The gateway's own id, not the provider's.
+    assert!(
+        first["id"].as_str().unwrap().starts_with("resp_"),
+        "{first}"
+    );
     let (status, second) = respond(
         &gw,
         "ka",
@@ -117,11 +125,13 @@ async fn a_follow_up_is_sent_with_the_conversation_it_names() {
     assert_eq!(status, 200);
 
     let sent = sent.lock().unwrap().clone();
-    // A response's instructions are its own; the turns before are carried on.
+    // A response's instructions are its own; the turns before, a system item
+    // among them, are carried on.
     assert_eq!(
         said(&sent[1]),
         pairs(&[
             ("system", "Be kind."),
+            ("system", "Speak French."),
             ("user", "one"),
             ("assistant", "reply-1"),
             ("user", "two"),
@@ -130,6 +140,7 @@ async fn a_follow_up_is_sent_with_the_conversation_it_names() {
     assert_eq!(
         said(&sent[2]),
         pairs(&[
+            ("system", "Speak French."),
             ("user", "one"),
             ("assistant", "reply-1"),
             ("user", "two"),

@@ -846,7 +846,7 @@ fn malformed(what: &str) -> Fault {
 
 /// The block a native event names, by `index` (Anthropic's) or `block` (the
 /// others' natives).
-fn native_block(raw: &Value) -> Option<u32> {
+pub fn native_block(raw: &Value) -> Option<u32> {
     let named = raw["index"].as_u64().or_else(|| raw["block"].as_u64());
     u32::try_from(named?).ok()
 }

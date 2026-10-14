@@ -17,7 +17,7 @@ async fn a_host_hands_requests_to_the_app_in_process() {
         "log = \"off\"\nproviders = {{ openai = {{ vendor = \"openai\", base_url = \"{}\", key = \"sk\" }} }}\n",
         openai.base_url()
     );
-    let app = App::new(Config::parse(&text).unwrap()).unwrap();
+    let app = App::new(quiet(Config::parse(&text).unwrap())).unwrap();
 
     let health = Request::get("/healthz").body(Body::empty()).unwrap();
     let health = app.router().oneshot(health).await.unwrap();
@@ -58,4 +58,11 @@ fn a_bad_config_says_what_is_wrong() {
         "{error}"
     );
     assert!(Config::parse("listen = [").is_err());
+}
+
+/// `config`, reading no provider's model list: a provider sees only the
+/// calls a test makes.
+fn quiet(mut config: Config) -> Config {
+    config.plugins.routing.listings = Some(false);
+    config
 }

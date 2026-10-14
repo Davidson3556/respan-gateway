@@ -16,10 +16,10 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
-import { queryKeys, useOverview } from "@/hooks/queries";
+import { queryKeys } from "@/hooks/queries";
 import { ApiError, api, type RequestRecord } from "@/lib/api";
 import { formatCost, formatCount, formatDateTime, formatMs, formatPercent } from "@/lib/format";
-import { reproduceCurl, timingOf, tokensPerSecond } from "@/lib/requests";
+import { timingOf, tokensPerSecond } from "@/lib/requests";
 
 function useRequestRecord(id: string) {
   const queryClient = useQueryClient();
@@ -131,21 +131,6 @@ function Usage({ record }: { record: RequestRecord }) {
   );
 }
 
-function Reproduce({ record }: { record: RequestRecord }) {
-  const { data } = useOverview();
-  const curl = reproduceCurl(record, window.location.origin, data?.auth_required ?? false);
-  if (!curl) return null;
-  return (
-    <Section title="Reproduce">
-      <CodeBlock code={curl} />
-      <p className="text-xs text-muted-foreground">
-        The gateway keeps no request bodies, so the prompt is a stand-in; the model, endpoint and
-        streaming match.
-      </p>
-    </Section>
-  );
-}
-
 function Detail({ record }: { record: RequestRecord }) {
   return (
     <div className="grid grid-cols-[minmax(0,1fr)] gap-6 px-4 pb-6">
@@ -192,7 +177,6 @@ function Detail({ record }: { record: RequestRecord }) {
           <Field label="Streaming">{record.stream ? "Yes" : "No"}</Field>
         </dl>
       </Section>
-      <Reproduce record={record} />
       <details className="group grid grid-cols-[minmax(0,1fr)] gap-2">
         <summary className="w-fit cursor-pointer rounded text-xs font-medium tracking-wide text-muted-foreground uppercase outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50">
           Raw record

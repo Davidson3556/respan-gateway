@@ -9,14 +9,15 @@ use support::{Gateway, client, json, write_config};
 
 const KEY: &str = "gw-key-1";
 
-const BODY: &str = "client_keys = [{ name = \"ops\", key = \"gw-key-1\", admin = true }, \"env:SOME_OTHER_KEY_VAR\"]\nproviders = { alpha = { formats = \"openai-chat\", base_url = \"http://127.0.0.1:9\", key = \"sk-prov-secret-1\" }, beta = { formats = \"openai-chat\", base_url = \"http://127.0.0.1:9\", auth = { type = \"header\", name = \"x-api\", key = \"sk-prov-secret-2\" } }, gamma = { formats = \"openai-chat\", base_url = \"http://127.0.0.1:9\", key = \"env:GAMMA_KEY_REF\" } }\nmcp = { tools = { command = [\"sh\", \"--token\", \"mcp-arg-secret-3\"], env = { TOKEN = \"mcp-env-secret-4\" } }, remote = { url = \"https://example.invalid/mcp/\", key = \"mcp-key-secret-5\" } }\n";
+const BODY: &str = "client_keys = [{ name = \"ops\", key = \"gw-key-1\", admin = true }, \"env:SOME_OTHER_KEY_VAR\"]\nproviders = { alpha = { formats = \"openai-chat\", base_url = \"http://127.0.0.1:9\", key = \"sk-prov-secret-1\" }, beta = { formats = \"openai-chat\", base_url = \"http://127.0.0.1:9\", auth = { type = \"header\", name = \"x-api\", key = \"sk-prov-secret-2\" } }, gamma = { formats = \"openai-chat\", base_url = \"http://127.0.0.1:9\", key = \"env:GAMMA_KEY_REF\" } }\nmcp = { tools = { command = \"sh\", args = [\"--token\", \"mcp-arg-secret-3\"], env = { TOKEN = \"mcp-env-secret-4\" } }, remote = { url = \"https://example.invalid/mcp/\", auth = { bearer = \"mcp-key-secret-5\" } }, keyed = { url = \"https://example.invalid/mcp/\", headers = { x-api-key = \"mcp-header-secret-6\" } } }\n";
 
-const SECRETS: [&str; 5] = [
+const SECRETS: [&str; 6] = [
     "sk-prov-secret-1",
     "sk-prov-secret-2",
     "mcp-arg-secret-3",
     "mcp-env-secret-4",
     "mcp-key-secret-5",
+    "mcp-header-secret-6",
 ];
 
 /// The binary on `config` with the variables it names set, and `PATH` to
@@ -64,6 +65,11 @@ async fn the_view_redacts_every_secret() {
     assert_eq!(said["config"]["providers"]["alpha"]["key"], "…");
     assert_eq!(said["config"]["client_keys"][0]["key"], "…");
     assert_eq!(said["config"]["client_keys"][0]["admin"], true);
+    let mcp = &said["config"]["mcp"];
+    assert_eq!(mcp["tools"]["command"], "sh");
+    assert_eq!(mcp["tools"]["args"], serde_json::json!(["…", "…"]));
+    assert_eq!(mcp["remote"]["auth"]["bearer"], "…");
+    assert_eq!(mcp["keyed"]["headers"]["x-api-key"], "…");
     assert_eq!(said["source"], "file");
     assert!(said["path"].as_str().unwrap().ends_with(".toml"));
 }

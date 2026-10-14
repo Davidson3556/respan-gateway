@@ -80,7 +80,7 @@ pub mod kind {
     };
     /// The kinds of one request and its answer, whose client formats are
     /// served by default once a provider speaks the kind.
-    pub const MEDIA: [Kind; 6] = [IMAGE, TRANSCRIPTION, SPEECH, VIDEO, EMBEDDING, DECISION];
+    pub const ONE_SHOT: [Kind; 6] = [IMAGE, TRANSCRIPTION, SPEECH, VIDEO, EMBEDDING, DECISION];
 }
 
 /// The first of `items` of each kind, in order.

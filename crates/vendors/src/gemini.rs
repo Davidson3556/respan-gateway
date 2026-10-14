@@ -15,7 +15,7 @@ use respan_gateway_realtime_ws::GeminiLive;
 
 use crate::{
     Base, Body, BoxFuture, Model, Models, Quirk, Speaks, Vendor, VendorProvider, built_wrong, chat,
-    http, http::Uri, json as body_json,
+    http, http::Uri, json as body_json, models,
 };
 
 /// The header its own API takes the key in.
@@ -119,7 +119,19 @@ impl Plugin for GeminiQuirks {
 /// each assistant message that has no signature of its own, as Gemini
 /// returns one only on the first of a turn's parallel calls.
 fn sign_calls(input: &mut Input, format: &'static str, key: &str, signature: &Value) {
-    let own = |native: &Option<NativeFields>| native.as_ref().is_none_or(|n| &*n.format == format);
+    // Another format's fields a translation drops anyway, as a client's
+    // item id or cache marker, give way to the signature.
+    const DROPPED: &[&str] = &["inert", "cache_control", "thoughtSignature"];
+    let own = |native: &mut Option<NativeFields>| match native {
+        Some(n) if &*n.format != format => {
+            let dropped = n.fields.keys().all(|k| DROPPED.contains(&k.as_str()));
+            if dropped {
+                *native = None;
+            }
+            dropped
+        }
+        _ => true,
+    };
     for message in input
         .messages
         .iter_mut()
@@ -129,9 +141,12 @@ fn sign_calls(input: &mut Input, format: &'static str, key: &str, signature: &Va
             Content::ToolCall { native, .. } => Some(native),
             _ => None,
         });
-        let Some(native) = first.filter(|native| own(native)) else {
+        let Some(native) = first else {
             continue;
         };
+        if !own(native) {
+            continue;
+        }
         let fields = native
             .get_or_insert_with(|| NativeFields::new(format, Map::new()))
             .fields
@@ -141,16 +156,33 @@ fn sign_calls(input: &mut Input, format: &'static str, key: &str, signature: &Va
 }
 
 /// Its models, as its own API lists them (`{"models": [{"name", ..}]}`),
-/// each id without the `models/` it puts before it.
+/// each id without the `models/` it puts before it; as OpenAI lists them for
+/// a provider of its OpenAI-compatible formats alone.
 fn list_models(p: &VendorProvider) -> BoxFuture<'_, Models> {
     Box::pin(async move {
+        // Its own API's base and key, as either format of it takes them.
+        let own = match p.client_of(GeminiGenerate::NAME)? {
+            Some(own) => Some(own),
+            None => p.client_of(GeminiVeo::NAME)?,
+        };
+        let Some(own) = own else {
+            return models::openai(p).await;
+        };
         let call = http::Request::get("/models?pageSize=1000").body(Body::default());
-        let (answer, _) = p.client()?.send(call.map_err(built_wrong)?).await?;
+        let (answer, _) = own.send(call.map_err(built_wrong)?).await?;
         let answer = body_json(answer).await?;
         let models = answer["models"].as_array().into_iter().flatten();
         let model = |m: &Value| {
             let name = m["name"].as_str()?;
-            Some(Model::new(name.strip_prefix("models/").unwrap_or(name)))
+            let mut model = Model::new(name.strip_prefix("models/").unwrap_or(name));
+            model.display_name = m["displayName"].as_str().map(str::to_owned);
+            model.description = m["description"].as_str().map(str::to_owned);
+            model.context_window = m["inputTokenLimit"].as_u64();
+            model.max_output_tokens = m["outputTokenLimit"].as_u64();
+            if m["thinking"] == true {
+                model.capabilities.push("reasoning".to_owned());
+            }
+            Some(model)
         };
         Ok(models.filter_map(model).collect())
     })

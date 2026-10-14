@@ -101,7 +101,33 @@ impl Gateway {
 }
 
 /// Writes `text` to a fresh file under Cargo's temp dir for tests.
+/// `config` with `plugins.routing.listings = false`, unless it says.
+pub fn quiet(config: &str) -> String {
+    let Ok(mut table) = config.parse::<toml::Table>() else {
+        return config.to_owned(); // A test of a bad config.
+    };
+    let plugins = table
+        .entry("plugins")
+        .or_insert_with(|| toml::Table::new().into());
+    let Some(routing) = plugins
+        .as_table_mut()
+        .map(|p| {
+            p.entry("routing")
+                .or_insert_with(|| toml::Table::new().into())
+        })
+        .and_then(|r| r.as_table_mut())
+    else {
+        return config.to_owned();
+    };
+    routing.entry("listings").or_insert(false.into());
+    table.to_string()
+}
+
+/// Writes `text` as a config file. It reads no provider's model list
+/// unless it sets `plugins.routing.listings`, so a provider sees only the
+/// calls a test makes.
 pub fn write_config(text: &str) -> std::path::PathBuf {
+    let text = &quiet(text);
     static N: AtomicUsize = AtomicUsize::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));

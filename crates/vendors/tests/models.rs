@@ -12,10 +12,23 @@ use support::{ids, json, listing};
 
 #[tokio::test]
 async fn anthropic_lists_its_models_at_its_versioned_path() {
-    let list = json!({"data": [{"id": "claude-sonnet-4-5", "type": "model"}], "has_more": false});
+    let list = json!({"data": [{"id": "claude-sonnet-4-5", "type": "model",
+        "display_name": "Claude Sonnet 4.5", "max_input_tokens": 1000000, "max_tokens": 64000,
+        "retires_at": null,
+        "capabilities": {"image_input": {"supported": true}, "pdf_input": {"supported": true},
+            "thinking": {"supported": true}, "structured_outputs": {"supported": false}}}],
+        "has_more": false});
     let base = listing("/v1/models?limit=1000", list).await;
     let provider = anthropic::VENDOR.provider("a").base(base).key("k");
     let models = provider.models().await.expect("a list").expect("models");
+    let claude = &models[0];
+    assert_eq!(claude.display_name.as_deref(), Some("Claude Sonnet 4.5"));
+    assert_eq!(
+        (claude.context_window, claude.max_output_tokens),
+        (Some(1000000), Some(64000))
+    );
+    assert_eq!(claude.input_modalities, ["image", "pdf"]);
+    assert_eq!(claude.capabilities, ["tools", "reasoning"]);
     assert_eq!(ids(models), ["claude-sonnet-4-5"]);
 }
 

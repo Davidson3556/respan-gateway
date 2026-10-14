@@ -207,7 +207,7 @@ fn error(status: StatusCode, message: &str) -> Response {
 
 fn app(providers: &str) -> App {
     let text = format!("log = \"off\"\n[providers]\n{providers}");
-    App::new(Config::parse(&text).unwrap()).unwrap()
+    App::new(quiet(Config::parse(&text).unwrap())).unwrap()
 }
 
 /// `(status, content type, body)` of `request`, whole.
@@ -531,4 +531,11 @@ async fn models_are_listed_with_their_kinds() {
         list["data"],
         json!([{"id": "gpt-image-1", "object": "model", "owned_by": "images", "kind": "image"}])
     );
+}
+
+/// `config`, reading no provider's model list: a provider sees only the
+/// calls a test makes.
+fn quiet(mut config: Config) -> Config {
+    config.plugins.routing.listings = Some(false);
+    config
 }

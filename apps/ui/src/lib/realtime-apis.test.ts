@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { initialRealtime, realtimeReducer, type RealtimeState } from "./realtime";
-import { realtimeApi, servedRealtimeApis } from "./realtime-apis";
+import { geminiLive, servedRealtimeApis } from "./realtime-apis";
 
 /** The state a session reaches from Gemini Live's `messages`, as the page reads them. */
 function geminiSession(...messages: unknown[]): RealtimeState {
-  const read = realtimeApi("gemini-live").reader();
+  const read = geminiLive.reader();
   const live: RealtimeState = { ...initialRealtime, phase: "live" };
   return messages
     .flatMap((m) => read(m))
@@ -16,7 +16,7 @@ const lines = (state: RealtimeState) =>
 
 describe("Gemini Live", () => {
   it("opens with a setup that asks for audio and both transcripts", () => {
-    const gemini = realtimeApi("gemini-live");
+    const gemini = geminiLive;
     expect(gemini.opening("gemini-live-2.5-flash")).toEqual([
       {
         setup: {
@@ -50,7 +50,7 @@ describe("Gemini Live", () => {
   });
 
   it("plays the model's audio as OpenAI's deltas, under its turn's id", () => {
-    const read = realtimeApi("gemini-live").reader();
+    const read = geminiLive.reader();
     const audio = { inlineData: { mimeType: "audio/pcm;rate=24000", data: "AAAA" } };
     const events = read({ serverContent: { modelTurn: { parts: [audio] } } });
     expect(events.find((e) => e.type === "response.output_audio.delta")).toEqual({
@@ -66,6 +66,8 @@ describe("Gemini Live", () => {
       { serverContent: { inputTranscription: { text: "Tell me a story" } } },
       { serverContent: { outputTranscription: { text: "Once upon" } } },
       { serverContent: { interrupted: true } },
+      // As Gemini sends it: the interrupted turn's end, after it.
+      { serverContent: { turnComplete: true } },
       { serverContent: { inputTranscription: { text: "Stop" } } },
     );
     expect(lines(state)).toEqual([
@@ -76,8 +78,21 @@ describe("Gemini Live", () => {
     expect(state.speaker).toBe("user");
   });
 
+  it("gives a reply's late transcript to that reply, not a new turn", () => {
+    const state = geminiSession(
+      { serverContent: { inputTranscription: { text: "Hi" } } },
+      { serverContent: { outputTranscription: { text: "Hello" } } },
+      { serverContent: { turnComplete: true } },
+      { serverContent: { outputTranscription: { text: " there" } } },
+    );
+    expect(lines(state)).toEqual([
+      { role: "user", text: "Hi", done: false, interrupted: false },
+      { role: "assistant", text: "Hello there", done: true, interrupted: false },
+    ]);
+  });
+
   it("ignores what is no server content, and a model's thoughts", () => {
-    const read = realtimeApi("gemini-live").reader();
+    const read = geminiLive.reader();
     expect(read({ setupComplete: {} })).toEqual([]);
     expect(read({ usageMetadata: { totalTokenCount: 3 } })).toEqual([]);
     const thought = read({ serverContent: { modelTurn: { parts: [{ text: "planning", thought: true }] } } });

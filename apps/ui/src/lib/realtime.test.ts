@@ -7,7 +7,7 @@ import {
   type RealtimeAction,
   type ServerEvent,
 } from "./realtime";
-import { realtimeApi, type RealtimeApiId } from "./realtime-apis";
+import { geminiLive, openaiRealtime } from "./realtime-apis";
 
 const run = (...events: (ServerEvent | RealtimeAction)[]) =>
   events.reduce(
@@ -157,11 +157,11 @@ describe("the socket", () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  const connect = (key: string | null, api: RealtimeApiId = "openai-realtime") => {
+  const connect = (key: string | null, api = openaiRealtime) => {
     vi.stubGlobal("WebSocket", FakeSocket);
     const seen = { open: 0, events: [] as ServerEvent[], closes: [] as unknown[] };
     const socket = openRealtime({
-      api: realtimeApi(api),
+      api,
       model: "gpt realtime",
       key,
       onOpen: () => seen.open++,
@@ -172,7 +172,7 @@ describe("the socket", () => {
   };
 
   it("builds OpenAI Realtime's URL and sends the key as a subprotocol", () => {
-    const openai = realtimeApi("openai-realtime");
+    const openai = openaiRealtime;
     expect(openai.url("a/b", "k", { protocol: "https:", host: "gw.test" })).toBe(
       "wss://gw.test/v1/realtime?model=a%2Fb",
     );
@@ -186,7 +186,7 @@ describe("the socket", () => {
   });
 
   it("puts Gemini Live's model and key in its query, and offers no subprotocol", () => {
-    const { fake } = connect("sk-1", "gemini-live");
+    const { fake } = connect("sk-1", geminiLive);
     const url = new URL(fake.url);
     expect(url.pathname).toBe(
       "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
@@ -194,7 +194,7 @@ describe("the socket", () => {
     expect(url.searchParams.get("model")).toBe("gpt realtime");
     expect(url.searchParams.get("key")).toBe("sk-1");
     expect(fake.protocols).toEqual([]);
-    expect(new URL(connect(null, "gemini-live").fake.url).searchParams.has("key")).toBe(false);
+    expect(new URL(connect(null, geminiLive).fake.url).searchParams.has("key")).toBe(false);
   });
 
   it("delivers JSON events, drops anything else, and sends only once open", () => {
@@ -215,7 +215,7 @@ describe("the socket", () => {
   it("gives up on a session nothing answers, once", () => {
     vi.useFakeTimers();
     try {
-      const { seen, fake } = connect(null, "gemini-live");
+      const { seen, fake } = connect(null, geminiLive);
       vi.advanceTimersByTime(OPEN_TIMEOUT_MS);
       expect(seen.closes).toEqual([
         { opened: false, code: 0, reason: expect.stringMatching(/Nothing answered within 15 s/) },

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it } from "vitest";
-import { byProvider } from "@/lib/models";
+import { byProvider, modelFacts } from "@/lib/models";
 import type { Model } from "@/lib/api";
 import { ModelPicker } from "./model-picker";
 
@@ -55,4 +55,23 @@ it("offers no typed ID that is already listed", async () => {
   await userEvent.type(screen.getByPlaceholderText(/Search/), "gpt-5-mini");
   const list = screen.getByRole("listbox");
   expect(within(list).queryByText("Use")).not.toBeInTheDocument();
+});
+
+it("says what a model's list said of it: name, context and price", () => {
+  expect(
+    modelFacts({
+      id: "claude-haiku-5-5",
+      display_name: "Claude Haiku 5.5",
+      context_window: 1_000_000,
+      pricing: { input: 1, output: 5 },
+    }),
+  ).toBe("Claude Haiku 5.5 · 1M ctx · $1 / $5 per M");
+  expect(modelFacts({ id: "gpt-x", display_name: "gpt-x", context_window: 128_000 })).toBe("128K ctx");
+  expect(modelFacts({ id: "plain" })).toBe("");
+});
+
+it("says where a route goes", () => {
+  const route = { pick: "cheapest", to: ["openai/gpt-4.1", "groq/llama"] };
+  expect(modelFacts({ id: "smart", owned_by: "routes", route })).toBe("cheapest: openai/gpt-4.1 +1");
+  expect(modelFacts({ id: "pin", route: { pick: "first", to: ["openai/gpt-4o"] } })).toBe("→ openai/gpt-4o");
 });

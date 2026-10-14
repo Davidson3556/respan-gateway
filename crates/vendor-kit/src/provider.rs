@@ -140,8 +140,8 @@ impl VendorProvider {
     }
 
     /// Each format's core provider. One format of no vendor sits at the
-    /// base URL exactly. `Err` with `config` if it has no base URL, or a
-    /// key no header can carry.
+    /// base URL exactly, in its scheme. `Err` with `config` if it has no
+    /// base URL, or a key no header can carry.
     pub fn parts(&self) -> Result<Vec<Part>, Fault> {
         let base = self.base.as_deref();
         let base = base.ok_or_else(|| Fault::config("needs a `base_url`"))?;
@@ -154,7 +154,7 @@ impl VendorProvider {
                 },
                 format: *format,
                 base_url: match exact {
-                    true => base.to_owned(),
+                    true => format.scheme(base),
                     false => format.base_url(base),
                 },
                 headers: self.auth(format.auth())?,
@@ -187,18 +187,27 @@ impl VendorProvider {
     /// A client of it at `base`, relative to its base URL, such as an API
     /// beside the one its formats are at.
     pub fn client_at(&self, base: Base) -> Result<HttpTransport, Fault> {
-        let parts = self.parts()?;
-        let part = parts.into_iter().find(|p| !p.format.websocket());
-        let part = part.ok_or_else(|| Fault::config("speaks no format over HTTP"))?;
+        let part = self.parts()?.into_iter().find(|p| of_api(p.format));
+        let part = part.ok_or_else(|| Fault::config("speaks no format of an API over HTTP"))?;
         HttpTransport::new(base.of(&part.base_url))?.with_headers(part.headers)
+    }
+
+    /// A client of it at the base URL of its format `format`, if it speaks
+    /// it.
+    pub fn client_of(&self, format: &str) -> Result<Option<HttpTransport>, Fault> {
+        let part = self
+            .parts()?
+            .into_iter()
+            .find(|p| p.format.name() == format);
+        let client = |p: Part| HttpTransport::new(&p.base_url)?.with_headers(p.headers);
+        part.map(client).transpose()
     }
 
     /// The models it lists, as its vendor lists them ([`Vendor::models`]);
     /// `None` if it speaks no format whose models are listed, such as only
     /// passthrough or sessions.
     pub async fn models(&self) -> Option<Models> {
-        let lists = |f: &&dyn Wire| !f.websocket() && f.name() != "passthrough";
-        if !self.formats.iter().any(lists) {
+        if !self.formats.iter().any(|f| of_api(*f)) {
             return None;
         }
         let listed = (self.vendor.models)(self).await;
@@ -260,6 +269,12 @@ impl VendorProvider {
 /// The vendor of a provider of no vendor.
 static NONE: Vendor = Vendor::DEFAULT;
 
+/// Whether `format` is of the provider's API over HTTP: not a session's,
+/// nor passthrough's, which sits at the origin beside it.
+fn of_api(format: &dyn Wire) -> bool {
+    !format.websocket() && format.name() != "passthrough"
+}
+
 /// Why `fault` says its provider could not be reached, if it does.
 pub(crate) fn unreached(fault: &Fault) -> Option<String> {
     let e = fault.cause::<reqwest::Error>();
@@ -270,15 +285,18 @@ pub(crate) fn unreached(fault: &Fault) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// A format of no kind, over HTTP.
-    struct Fake;
+    /// A format of no kind, over HTTP, or as a session if `.0`.
+    struct Fake(bool);
 
     impl Wire for Fake {
         fn name(&self) -> &str {
             "fake"
         }
         fn reach(&self) -> Reach {
-            Reach::Http { follow: None }
+            match self.0 {
+                true => Reach::Ws(|_| Err(Fault::config("not dialled"))),
+                false => Reach::Http { follow: None },
+            }
         }
         fn auth(&self) -> Auth {
             Auth::Bearer
@@ -293,12 +311,19 @@ mod tests {
 
     #[test]
     fn one_format_of_no_vendor_sits_at_its_base_exactly() {
-        let passthrough: &'static dyn Wire = &Fake;
+        let http: &'static dyn Wire = &Fake(false);
         let one = VendorProvider::new("p")
-            .formats([passthrough])
+            .formats([http])
             .base("https://x.test/v1");
         let parts = one.parts().unwrap_or_default();
         assert_eq!(parts[0].base_url, "https://x.test/v1");
+        // A session's, in its scheme.
+        let session: &'static dyn Wire = &Fake(true);
+        let one = VendorProvider::new("p")
+            .formats([session])
+            .base("https://x.test/v1");
+        let parts = one.parts().unwrap_or_default();
+        assert_eq!(parts[0].base_url, "wss://x.test/v1");
         assert!(VendorProvider::new("p").parts().is_err(), "no base URL");
     }
 

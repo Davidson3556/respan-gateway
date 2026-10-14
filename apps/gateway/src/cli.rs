@@ -90,6 +90,11 @@ enum Command {
         #[arg(long)]
         client_key: bool,
     },
+    /// MCP servers: log in to one a person must authorize
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
     /// Relay one vendor's whole API, with each client's own credentials
     ///
     /// No config file and no keys of its own: chat and every other endpoint
@@ -112,6 +117,17 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    /// Log in to an HTTP MCP server, as a person approving it once (a device
+    /// code, or in a browser), and save the login beside the config, in
+    /// `.respan/mcp/<name>.json`, for `auth = "login"`
+    Login {
+        /// The server, as `[mcp.<name>]` names it
+        name: String,
+    },
+}
+
 const EXAMPLES: &str = "Examples:
   respan-gateway                    Serve ./gateway.toml, or the providers in the environment
   respan-gateway init               Write a starter ./gateway.toml
@@ -121,6 +137,7 @@ const EXAMPLES: &str = "Examples:
   respan-gateway check --online     ... and call each provider with its key, and list the tool loop's tools
   respan-gateway models             List the models the providers offer
   respan-gateway proxy --anthropic  Sit in front of Claude Code
+  respan-gateway mcp login linear   Log in to the MCP server [mcp.linear], once
 
 Environment (also read from the nearest .env in this directory or its parents):
   OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, ...
@@ -223,6 +240,21 @@ where
                 false => ProxyVendor::OpenAi,
             };
             (Ok(Config::proxy(vendor, url.as_deref())), check)
+        }
+        Command::Mcp {
+            command: McpCommand::Login { name },
+        } => {
+            let config = match Config::discover(cli.config.as_deref()) {
+                Ok(config) => config,
+                Err(e) => return fail(&e.to_string()),
+            };
+            return match crate::mcp_login::login(&config, &name).await {
+                Ok(path) => {
+                    println!("Logged in to '{name}'; saved to {}.", path.display());
+                    0
+                }
+                Err(e) => fail(&format!("mcp login {name}: {e}")),
+            };
         }
         Command::Serve => (Config::discover(cli.config.as_deref()), false),
         Command::Check { .. } | Command::Models => (Config::discover(cli.config.as_deref()), true),

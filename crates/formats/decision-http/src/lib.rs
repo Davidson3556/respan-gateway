@@ -128,10 +128,17 @@ fn decode_question(id: String, v: Value) -> Result<Question, Fault> {
                 yes: None,
                 no: None,
             },
-            Value::Object(mut sides) => Ask::Noul {
-                yes: sides.remove("true").filter(|v| !v.is_null()),
-                no: sides.remove("false").filter(|v| !v.is_null()),
-            },
+            Value::Object(mut sides) => {
+                let yes = sides.remove("true").filter(|v| !v.is_null());
+                let no = sides.remove("false").filter(|v| !v.is_null());
+                if !sides.is_empty() {
+                    return Err(invalid(
+                        &param,
+                        "has criteria other than {\"true\", \"false\"}",
+                    ));
+                }
+                Ask::Noul { yes, no }
+            }
             _ => {
                 return Err(invalid(
                     &param,
@@ -442,6 +449,9 @@ mod tests {
         assert!(refused(json!({"state": 1, "questions": {}})));
         assert!(refused(
             json!({"state": "s", "questions": {"q": {"type": "vibes"}}})
+        ));
+        assert!(refused(
+            json!({"state": "s", "questions": {"q": {"type": "noul", "criteria": {"true": "x", "maybe": "y"}}}})
         ));
         assert!(refused(
             json!({"state": "s", "questions": {"q": {"type": "score", "criteria": {}}}})

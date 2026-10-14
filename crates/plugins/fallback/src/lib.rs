@@ -24,9 +24,9 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::stream::FuturesUnordered;
@@ -52,6 +52,11 @@ impl Backoff {
     /// One try per call: no retries.
     pub fn once() -> Self {
         Self::new(1, Duration::ZERO, Duration::ZERO)
+    }
+
+    /// The most tries per call.
+    pub fn tries(&self) -> u32 {
+        self.tries
     }
 
     /// The wait before another try, after `tries` tries; `None` if the
@@ -90,6 +95,7 @@ impl Backoff {
 pub struct Attempt {
     index: u32,
     won: Arc<AtomicBool>,
+    head: Arc<OnceLock<Duration>>,
 }
 
 /// What became of an attempt.
@@ -105,7 +111,14 @@ pub enum Role {
 impl Attempt {
     fn new(index: u32) -> Self {
         let won = Arc::new(AtomicBool::new(false));
-        Self { index, won }
+        let head = Arc::default();
+        Self { index, won, head }
+    }
+
+    /// How long its response took to open, once it did: a provider's time
+    /// to its head, for a router that ranks providers by speed.
+    pub fn head(&self) -> Option<Duration> {
+        self.head.get().copied()
     }
 
     /// Its place among the helper's attempts, in the order sent, from 0:
@@ -199,8 +212,10 @@ impl Answer {
 
 /// Send `call` as `attempt` and read it `until` a point.
 async fn send(call: Call, attempt: Attempt, until: Until) -> Answer {
+    let sent = Instant::now();
     let outcome = match call.with_extension(attempt.clone()).await {
         Ok(mut response) => {
+            let _ = attempt.head.set(sent.elapsed());
             let inspected = match until {
                 // A provider's refusal is an opened response, but not a success.
                 Until::Head if response.is_refused() => response.until_end().await,

@@ -17,7 +17,6 @@
 
 mod admin;
 mod app;
-mod attempts;
 mod auth;
 mod cli;
 mod compose;
@@ -28,12 +27,14 @@ mod init;
 mod logging;
 mod mcp;
 mod mcp_aggregate;
+mod mcp_login;
 mod mcp_oauth;
 mod models;
 mod redact;
 mod report;
 mod requests;
 mod responses;
+mod rules;
 mod tool_loop;
 mod vendors;
 
@@ -41,8 +42,9 @@ pub use app::{App, DEFAULT_LISTEN, ReloadError, Reloaded, shutdown_signal};
 pub use auth::Trusted;
 pub use cli::{execute, run};
 pub use config::{
-    Auth, Commit, Config, DEFAULT_FILE, FallbackConfig, HedgeConfig, ModelRoute, PluginsConfig,
-    Price, ProviderConfig, ProxyVendor, RequestLogConfig, RoutingConfig, Source, no_keys_message,
+    Auth, Commit, Config, DEFAULT_FILE, PickName, PluginsConfig, Price, ProviderConfig,
+    ProxyVendor, RequestLogConfig, RouteConfig, RouteTarget, RouteWhen, RoutingConfig, Source,
+    no_keys_message,
 };
 pub use init::starter_config;
 pub use logging::LogFormat;

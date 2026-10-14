@@ -1,8 +1,11 @@
 # respan-gateway-plugin-fallback
 
 `Fallback` sends a request to its target, then to each provider of the
-target's chain in turn, and the client gets the first success. A request
-whose target has no chain is left alone.
+target's chain in turn, and the client gets the first success; `Hedge` races
+them instead, each started a stagger after the last. A request whose target
+has no chain is left alone. They are library plugins: the gateway binary
+configures attempts per route (`[routes.<model>]`'s `fallback`, `tries`,
+`hedge`), sent by the routing crate's `Dispatch` with the helpers below.
 
 ```rust,ignore
 use respan_gateway_plugin_fallback::{Backoff, Fallback, Until};
@@ -42,12 +45,14 @@ after commitment.
   cannot read the response and commit as `Head` does.
 - `race(calls, stagger, Until)`: start each call `stagger` after the last;
   the first success wins.
-- `Attempt` (extension on each call): its `index()` and `Role`.
+- `Attempt` (extension on each call): its `index()`, `Role`, and `head()`,
+  how long its response took to open.
 
 For HTTP, explicitly pass `respan_gateway_http::rules::retryable` as the classifier.
 HTTP's `watchdog(transport, head, idle)` lives in the HTTP protocol module; it bounds a
 transport's head wait and polled per-frame body gaps. Other transports can
 choose a different classifier without importing HTTP.
 
-Used by: [fallback](../../../examples/routing/fallback.rs),
+Used by: [routing](../routing/README.md)'s `Dispatch`,
+[fallback](../../../examples/routing/fallback.rs),
 [attachments](../../../examples/integrations/attachments.rs).

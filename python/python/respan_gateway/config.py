@@ -41,20 +41,32 @@ class OAuthConfig(TypedDict, total=False):
 class McpAggregateConfig(TypedDict, total=False):
     """One MCP endpoint, /mcp, that fronts the `mcp` servers as a single server."""
 
-    servers: List[str]  # the `mcp` servers fronted; all without forward_auth if unset
+    servers: List[str]  # the `mcp` servers fronted; all but auth "forward" ones if unset
     allow: List[str]  # tool names "server__tool", "*" for any characters; all if unset
     deny: List[str]  # never offered; wins over `allow`
 
 
+class McpAuth(TypedDict, total=False):
+    """How the gateway authenticates to an HTTP MCP server: one of the keys.
+
+    `auth` may also be "login" (the login `respan-gateway mcp login <name>`
+    saved) or "forward" (each client's own credentials, passed on).
+    """
+
+    bearer: str  # literal or "env:NAME", sent as a bearer token
+    oauth: OAuthConfig  # a token from a token endpoint
+
+
 class McpConfig(TypedDict, total=False):
-    """One MCP server, served at /mcp/{name}: an HTTP `url` or a stdio `command`."""
+    """One MCP server, served at /mcp/{name}, in the fields of an `mcp.json`:
+    an HTTP `url` (with `headers`, `auth`) or a stdio `command` (with `args`,
+    `env`, `cwd`)."""
 
     url: str  # a streamable-HTTP endpoint
-    key: str  # literal or "env:NAME", sent as a bearer token
-    auth: Auth  # one header, in place of `key`
-    oauth: OAuthConfig  # a token from a token endpoint, in place of `key`
-    forward_auth: bool  # send the client's credentials when there is no key
-    command: List[str]  # a stdio server's program and arguments
+    headers: Dict[str, str]  # values literal or "env:NAME"; all treated as secrets
+    auth: Union[McpAuth, str]  # {"bearer": ..}, {"oauth": {..}}, "login" or "forward"
+    command: str  # a stdio server's program alone
+    args: List[str]  # its arguments
     env: Dict[str, str]  # values literal or "env:NAME"
     cwd: str
 
@@ -82,28 +94,39 @@ class CorsConfig(TypedDict):
 
 
 class RoutingConfig(TypedDict, total=False):
-    """Which provider each request goes to."""
+    """Which provider each request goes to; its rules are the top-level `routes`."""
 
-    models: List[Dict[str, str]]  # [{"prefix": "claude-", "provider": "anthropic"}]; first match wins
-    default: str  # the provider for requests nothing else routes
+    default: str  # the provider of each kind it serves, for requests nothing else routes
+    listings: bool  # read each provider's model list to route by it; true if unset
 
 
-class FallbackConfig(TypedDict, total=False):
-    """Retry a provider, then try each provider of its chain in turn."""
+class RouteTarget(TypedDict, total=False):
+    """A route's candidate with a weight, for `pick` "weighted"."""
 
-    after: Dict[str, List[str]]  # {"openai": ["openai-eu"]}
-    tries: int  # per provider, retries included; 1 to 10
-    backoff: Union[int, float, str]  # the first wait before a retry; "250ms"
+    target: str  # required; "provider", "provider/model" or "provider/{model}"
+    weight: int  # 1 if unset
+
+
+class RouteWhen(TypedDict, total=False):
+    """Which requests a route applies to; every request if unset."""
+
+    clients: List[str]  # client keys, by name
+    kinds: List[str]  # "chat", "embedding", ...
+
+
+class RouteConfig(TypedDict, total=False):
+    """Where a model name goes, and how its candidates are picked, retried and raced."""
+
+    to: Union[str, RouteTarget, List[Union[str, RouteTarget]]]  # required; "anthropic/claude-opus-4-1"
+    pick: str  # "first" (default), "cheapest", "fastest", "weighted" or "random"
+    needs: List[str]  # capabilities from the provider's model listing: "tools", "vision"
+    when: RouteWhen
+    fallback: bool  # try the next candidate when one fails; True if unset
+    hedge: Union[int, float, str]  # race the candidates instead, each started this long after the last; "200ms"
+    tries: int  # per candidate, retries included; 1 to 10
+    backoff: Union[int, float, str]  # the first wait before a retry, doubled after each; "250ms"
     max_backoff: Union[int, float, str]  # the longest wait; "10s"
     until: str  # "head" or "end": how far an answer is read before it counts
-
-
-class HedgeConfig(TypedDict, total=False):
-    """Race a provider against its chain, each started `stagger` after the last."""
-
-    after: Dict[str, List[str]]
-    stagger: Union[int, float, str]  # "200ms"
-    until: str  # "head" or "end"
 
 
 class RequestLogConfig(TypedDict, total=False):
@@ -118,8 +141,6 @@ class PluginsConfig(TypedDict, total=False):
     """The compiled-in plugins, each under its name; the gateway orders them."""
 
     routing: RoutingConfig
-    fallback: FallbackConfig
-    hedge: HedgeConfig
     tool_loop: ToolLoopConfig
     mcp_aggregate: McpAggregateConfig
     request_log: RequestLogConfig
@@ -155,6 +176,7 @@ class GatewayConfig(TypedDict, total=False):
 
     providers: Dict[str, ProviderConfig]
     formats: List[str]  # the formats served to clients
+    routes: Dict[str, RouteConfig]  # by the model name asked for, or a glob such as "llama-*"
     client_keys: List[Union[str, NamedClientKey]]  # when set, every request needs one; a bare key is named key-1, key-2...
     plugins: PluginsConfig
     listen: str

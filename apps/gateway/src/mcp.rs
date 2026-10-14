@@ -3,7 +3,7 @@
 //! gateway's client keys. An upstream is a streamable-HTTP server (`url`) or
 //! a child process speaking MCP on stdio (`command`); either way its
 //! credentials stay on the gateway, and a client's are not sent on unless the
-//! server says `forward_auth`.
+//! server says `auth = "forward"`.
 //!
 //! A stdio server is not a daemon: the transport starts one child per
 //! client session, when the session `initialize`s, and ends it with the
@@ -22,6 +22,7 @@ use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::{
     ClientContext, ErrorCode, Extensions, Fault, Gateway, Plugin, Provider, Response, async_trait,
 };
+use respan_gateway_http::http::header::{self, HeaderName, HeaderValue};
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
 use respan_gateway_http::{Body, Completion, raw::Original};
 use respan_gateway_http_faults::Status;
@@ -34,8 +35,7 @@ use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
 
-use crate::compose::{auth_headers, secret, valid_provider_name};
-use crate::config::Auth;
+use crate::compose::{secret, valid_provider_name};
 use crate::formats::{KnownFormat, kind};
 use crate::mcp_oauth::{OAuth, OAuthConfig};
 use crate::models::{Probe, Reach};
@@ -49,40 +49,146 @@ const MOUNT: &str = "/mcp";
 /// (the transport's limits are per owner and in all; here they are one).
 const SESSIONS: usize = 32;
 
-/// One MCP server, as `gateway.toml` writes it under `mcp`: `url` or
-/// `command`.
+/// One MCP server, as `gateway.toml` writes it under `mcp`, in the fields
+/// MCP clients' `mcp.json` use, so an entry copies across: a `url`
+/// (streamable HTTP) with its `headers` and `auth`, or a `command` (stdio)
+/// with its `args`, `env` and `cwd`.
 #[derive(Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpConfig {
     /// A streamable-HTTP server's endpoint, such as
     /// `https://api.githubcopilot.com/mcp/`.
     pub url: Option<String>,
-    /// Its key, literal or `env:NAME`, sent as `Authorization: Bearer`.
-    pub key: Option<String>,
-    /// Its credentials as one header, in place of `key`.
-    pub auth: Option<Auth>,
-    /// The gateway's own OAuth client for the server: it gets a token from
-    /// a token endpoint, in place of `key`.
-    pub oauth: Option<OAuthConfig>,
-    /// Send the client's own credentials to a server with no key of its own.
+    /// Headers sent to it, values literal or `env:NAME`, such as a key in a
+    /// header of its own: `{ "x-api-key" = "env:KEY" }`.
     #[serde(default)]
-    pub forward_auth: bool,
-    /// A stdio server's program and arguments, run once per client session.
-    pub command: Option<Vec<String>>,
+    pub headers: IndexMap<String, String>,
+    /// How the gateway authenticates to it, if not by `headers`.
+    pub auth: Option<McpAuth>,
+    /// A stdio server's program, run once per client session.
+    pub command: Option<Program>,
+    /// Its arguments.
+    #[serde(default)]
+    pub args: Vec<String>,
     /// Its environment, values literal or `env:NAME`. It gets nothing else
     /// of the gateway's but `PATH`.
     #[serde(default)]
     pub env: IndexMap<String, String>,
     /// The directory it runs in.
     pub cwd: Option<PathBuf>,
+    // The fields this block once had, refused with how to write them now.
+    #[serde(default)]
+    key: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    oauth: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    forward_auth: Option<serde::de::IgnoredAny>,
 }
 
-// Its key, auth, OAuth, arguments and environment are secrets: not printed.
+// Its headers, auth, arguments and environment are secrets: not printed.
 impl std::fmt::Debug for McpConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpConfig")
-            .field("forward_auth", &self.forward_auth)
+            // Its origin alone: a path can hold a token (`/mcp/<token>`).
+            .field("url", &self.url.as_deref().map(origin))
             .finish_non_exhaustive()
+    }
+}
+
+/// How the gateway authenticates to an HTTP MCP server.
+#[derive(Clone)]
+pub enum McpAuth {
+    /// `{ bearer = "env:KEY" }`: a key, as `Authorization: Bearer`.
+    Bearer(String),
+    /// `{ oauth = { token_url, client_id, client_secret, .. } }`: the
+    /// gateway's own OAuth client, which gets its tokens from the endpoint.
+    OAuth(OAuthConfig),
+    /// `"login"`: the login `respan-gateway mcp login <name>` saved.
+    Login,
+    /// `"forward"`: each client's own credentials, passed on.
+    Forward,
+}
+
+// Its key and OAuth client are secrets: only which it is is printed.
+impl std::fmt::Debug for McpAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            McpAuth::Bearer(_) => "Bearer",
+            McpAuth::OAuth(_) => "OAuth",
+            McpAuth::Login => "Login",
+            McpAuth::Forward => "Forward",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for McpAuth {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Auth;
+        impl<'de> serde::de::Visitor<'de> for Auth {
+            type Value = McpAuth;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("\"login\", \"forward\", { bearer = \"...\" } or { oauth = { ... } }")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<McpAuth, E> {
+                match v {
+                    "login" => Ok(McpAuth::Login),
+                    "forward" => Ok(McpAuth::Forward),
+                    _ => Err(E::invalid_value(serde::de::Unexpected::Str(v), &self)),
+                }
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut m: M,
+            ) -> Result<McpAuth, M::Error> {
+                use serde::de::Error;
+                let Some(kind) = m.next_key::<String>()? else {
+                    return Err(M::Error::invalid_length(0, &self));
+                };
+                let auth = match kind.as_str() {
+                    "bearer" => McpAuth::Bearer(m.next_value()?),
+                    "oauth" => McpAuth::OAuth(m.next_value()?),
+                    "type" | "name" | "key" => {
+                        return Err(M::Error::custom(
+                            "`auth = { type = .. }` is now `auth = { bearer = \"KEY\" }`, \
+                             or a key in a header of its own in `headers`",
+                        ));
+                    }
+                    other => return Err(M::Error::unknown_field(other, &["bearer", "oauth"])),
+                };
+                match m.next_key::<String>()? {
+                    Some(more) => Err(M::Error::custom(format!(
+                        "`auth` is one of bearer or oauth, not also `{more}`"
+                    ))),
+                    None => Ok(auth),
+                }
+            }
+        }
+        d.deserialize_any(Auth)
+    }
+}
+
+/// A stdio server's program alone, as `mcp.json` writes it.
+#[derive(Clone, Debug)]
+pub struct Program(String);
+
+impl<'de> Deserialize<'de> for Program {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Name;
+        impl<'de> serde::de::Visitor<'de> for Name {
+            type Value = Program;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a program, such as \"npx\"")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Program, E> {
+                Ok(Program(v.to_owned()))
+            }
+            fn visit_seq<S: serde::de::SeqAccess<'de>>(self, _: S) -> Result<Program, S::Error> {
+                Err(serde::de::Error::custom(
+                    "`command` is the program alone; its arguments go in `args`, as in mcp.json",
+                ))
+            }
+        }
+        d.deserialize_any(Name)
     }
 }
 
@@ -166,6 +272,7 @@ impl McpServer {
 pub fn servers(
     config: &IndexMap<String, McpConfig>,
     providers: &[&str],
+    logins: &std::path::Path,
 ) -> Result<Vec<McpServer>, Fault> {
     config
         .iter()
@@ -177,48 +284,77 @@ pub fn servers(
             if providers.contains(&name.as_str()) {
                 return Err(bad("is also the name of a provider; names are shared"));
             }
-            server(name, c)
+            server(name, c, logins)
         })
         .collect()
 }
 
-fn server(name: &str, c: &McpConfig) -> Result<McpServer, Fault> {
+fn server(name: &str, c: &McpConfig, logins: &std::path::Path) -> Result<McpServer, Fault> {
     let owner = format!("mcp '{name}'");
     let bad = |e: &str| Fault::config(format!("{owner}: {e}"));
-    match (&c.url, &c.command) {
+    let moved = [
+        (
+            c.key.is_some(),
+            "`key` is now `auth = { bearer = \"KEY\" }`",
+        ),
+        (
+            c.oauth.is_some(),
+            "`oauth = { .. }` is now `auth = { oauth = { .. } }`",
+        ),
+        (
+            c.forward_auth.is_some(),
+            "`forward_auth = true` is now `auth = \"forward\"`",
+        ),
+    ];
+    if let Some((_, how)) = moved.iter().find(|(set, _)| *set) {
+        return Err(bad(how));
+    }
+    let (transport, own_key, key_from, oauth) = match (&c.url, &c.command) {
         (Some(_), Some(_)) => return Err(bad("set `url` or `command`, not both")),
         (None, None) => return Err(bad("needs a `url` (HTTP) or a `command` (stdio)")),
-        _ => {}
-    }
-    let mut oauth = None;
-    let (transport, own_key, key_from) = match (&c.url, &c.command) {
-        (Some(url), _) => {
-            if !c.env.is_empty() || c.cwd.is_some() {
-                return Err(bad("`env` and `cwd` are for a `command`"));
+        (Some(url), None) => {
+            if !c.args.is_empty() || !c.env.is_empty() || c.cwd.is_some() {
+                return Err(bad("`args`, `env` and `cwd` are for a `command`"));
             }
-            if c.oauth.is_some() && (c.key.is_some() || c.auth.is_some()) {
-                return Err(bad("set `oauth`, or `key` or `auth`; only one"));
-            }
-            if c.oauth.is_some() && c.forward_auth {
+            let mut auth = headers(&owner, &c.headers)?;
+            let given = |kind: &str| match c.headers.is_empty() {
+                true => kind.to_owned(),
+                false => format!("{kind} and headers"),
+            };
+            let (oauth, key_from) = match &c.auth {
+                None if c.headers.is_empty() => (None, "none".to_owned()),
+                None => (None, "headers".to_owned()),
+                Some(McpAuth::Bearer(key)) => {
+                    let value = secret(&format!("{owner}: auth bearer"), key)?;
+                    let bearer = HeaderValue::from_str(&format!("Bearer {value}"));
+                    let mut bearer = bearer.map_err(|e| bad(&format!("auth bearer: {e}")))?;
+                    bearer.set_sensitive(true);
+                    auth.insert(header::AUTHORIZATION, bearer);
+                    (None, given(&format!("bearer ({})", key_source(key))))
+                }
+                Some(McpAuth::OAuth(o)) => {
+                    let o = OAuth::new(&owner, o)?;
+                    let from = given(&format!("oauth {} ({})", o.grant(), o.source));
+                    (Some(Arc::new(o)), from)
+                }
+                Some(McpAuth::Login) => {
+                    let path = logins.join(format!("{name}.json"));
+                    let o = OAuth::login(&owner, name, &path)?;
+                    let from = given(&format!("oauth login ({})", o.source));
+                    (Some(Arc::new(o)), from)
+                }
+                Some(McpAuth::Forward) => (None, given("the client's own")),
+            };
+            if c.auth.is_some()
+                && !matches!(c.auth, Some(McpAuth::Forward))
+                && c.headers
+                    .keys()
+                    .any(|k| k.eq_ignore_ascii_case("authorization"))
+            {
                 return Err(bad(
-                    "`oauth` and `forward_auth` are both credentials; set one",
+                    "an `Authorization` header and `auth` both authenticate; set one",
                 ));
             }
-            let (auth, key_from) = match (&c.key, &c.auth) {
-                (Some(_), Some(_)) => return Err(bad("set `key` or `auth`, not both")),
-                (Some(key), None) => {
-                    let auth = Auth::Bearer { key: key.clone() };
-                    (auth_headers(&owner, &auth)?, key_source(key))
-                }
-                (None, Some(a @ (Auth::Bearer { key } | Auth::Header { key, .. }))) => {
-                    (auth_headers(&owner, a)?, key_source(key))
-                }
-                (None, None) => (HeaderMap::new(), "client credentials".to_owned()),
-            };
-            oauth = match &c.oauth {
-                Some(o) => Some(Arc::new(OAuth::new(&owner, o)?)),
-                None => None,
-            };
             // Parsed as the transport will: a bad URL fails here, not on a call.
             let url = url.trim();
             HttpTransport::new(origin(url)).map_err(|e| bad(e.message()))?;
@@ -229,27 +365,21 @@ fn server(name: &str, c: &McpConfig) -> Result<McpServer, Fault> {
             let path = if path.is_empty() { "/" } else { path };
             let (origin, path) = (origin(url).to_owned(), path.to_owned());
             let own = !auth.is_empty() || oauth.is_some();
-            let key_from = match &oauth {
-                Some(o) => format!("oauth {} ({})", o.grant(), o.source),
-                None => key_from,
-            };
             let t = Transport::Http {
                 url: url.to_owned(),
                 origin,
                 path,
                 auth,
             };
-            (t, own, key_from)
+            (t, own, key_from, oauth)
         }
-        (_, Some(command)) => {
-            if c.key.is_some() || c.auth.is_some() || c.forward_auth || c.oauth.is_some() {
-                return Err(bad(
-                    "`key`, `auth`, `oauth` and `forward_auth` are for a `url`",
-                ));
+        (None, Some(Program(program))) => {
+            if !c.headers.is_empty() || c.auth.is_some() {
+                return Err(bad("`headers` and `auth` are for a `url`"));
             }
-            let Some(program) = command.first().filter(|p| !p.is_empty()) else {
+            if program.trim().is_empty() {
                 return Err(bad("`command` is empty"));
-            };
+            }
             let Some(found) = find_program(program) else {
                 return Err(bad(&format!("command '{program}' was not found on PATH")));
             };
@@ -267,24 +397,41 @@ fn server(name: &str, c: &McpConfig) -> Result<McpServer, Fault> {
                 .iter()
                 .map(|(k, v)| Ok((k.clone(), secret(&format!("{owner}: env {k}"), v)?)))
                 .collect::<Result<_, Fault>>()?;
+            let mut command = vec![program.clone()];
+            command.extend(c.args.iter().cloned());
             let t = Transport::Stdio {
-                command: command.clone(),
+                command,
                 program: found,
                 env,
                 cwd: c.cwd.clone(),
             };
-            (t, false, "none (a child process)".to_owned())
+            (t, false, "none (a child process)".to_owned(), None)
         }
-        _ => unreachable!("one of url and command is set"),
     };
     Ok(McpServer {
         name: name.to_owned(),
         transport,
         own_key,
         key_from,
-        forward_auth: c.forward_auth,
+        forward_auth: matches!(c.auth, Some(McpAuth::Forward)),
         oauth,
     })
+}
+
+/// `headers`, each value literal or `env:NAME`, marked sensitive: a header
+/// of a server is as likely a key as not.
+fn headers(owner: &str, headers: &IndexMap<String, String>) -> Result<HeaderMap, Fault> {
+    let mut map = HeaderMap::new();
+    for (name, value) in headers {
+        let bad = |e: String| Fault::config(format!("{owner}: header '{name}': {e}"));
+        let name =
+            HeaderName::from_bytes(name.trim().as_bytes()).map_err(|e| bad(e.to_string()))?;
+        let value = secret(&format!("{owner}: header {name}"), value)?;
+        let mut value = HeaderValue::from_str(&value).map_err(|e| bad(e.to_string()))?;
+        value.set_sensitive(true);
+        map.insert(name, value);
+    }
+    Ok(map)
 }
 
 fn key_source(value: &str) -> String {
@@ -785,16 +932,17 @@ mod tests {
     fn parse(text: &str) -> Result<Vec<McpServer>, String> {
         let config: IndexMap<String, McpConfig> =
             toml::from_str(text).map_err(|e| e.to_string())?;
-        servers(&config, &["openai"]).map_err(|e| e.message().to_owned())
+        servers(&config, &["openai"], std::path::Path::new(".respan/mcp"))
+            .map_err(|e| e.message().to_owned())
     }
 
     #[test]
     fn a_server_is_a_url_or_a_command() {
         let ok =
-            parse("a = { url = \"https://h.test/mcp/\", key = \"sk-1\" }\nb = { command = [\"sh\", \"-c\", \"true\"] }")
+            parse("a = { url = \"https://h.test/mcp/\", auth = { bearer = \"sk-1\" } }\nb = { command = \"sh\", args = [\"-c\", \"true\"] }")
                 .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(ok[0].transport_label(), "http");
-        assert!(ok[0].own_key && ok[0].key_from == "config");
+        assert!(ok[0].own_key && ok[0].key_from == "bearer (config)");
         assert_eq!(ok[0].endpoint(), "/mcp/a");
         assert_eq!(ok[1].transport_label(), "stdio");
         let Transport::Http { origin, path, .. } = &ok[0].transport else {
@@ -810,12 +958,14 @@ mod tests {
     fn mistakes_are_named() {
         let said = |text: &str| parse(text).err().unwrap_or_default();
         assert!(said("a = {  }").contains("needs a `url`"));
-        assert!(said("a = { url = \"http://h.test\", command = [\"x\"] }").contains("not both"));
+        assert!(said("a = { url = \"http://h.test\", command = \"x\" }").contains("not both"));
         assert!(said("a = { url = \"http://h.test?x=1\" }").contains("query"));
         assert!(
-            said("a = { command = [\"definitely-not-a-program\"] }").contains("not found on PATH")
+            said("a = { command = \"definitely-not-a-program\" }").contains("not found on PATH")
         );
-        assert!(said("a = { command = [\"sh\"], key = \"k\" }").contains("for a `url`"));
+        assert!(
+            said("a = { command = \"sh\", auth = { bearer = \"k\" } }").contains("for a `url`")
+        );
         assert!(
             said("a = { url = \"http://h.test\", env = { A = \"b\" } }")
                 .contains("for a `command`")
@@ -823,8 +973,69 @@ mod tests {
         assert!(said("openai = { url = \"http://h.test\" }").contains("provider"));
         assert!(said("\"a/b\" = { url = \"http://h.test\" }").contains("name"));
         assert!(
-            said("a = { url = \"http://h.test\", key = \"env:NO_SUCH_VAR_X\" }")
+            said("a = { url = \"http://h.test\", auth = { bearer = \"env:NO_SUCH_VAR_X\" } }")
                 .contains("NO_SUCH_VAR_X")
+        );
+    }
+
+    #[test]
+    fn credentials_are_said_where_they_come_from() {
+        let from = |text: &str| {
+            parse(text)
+                .map(|s| s[0].key_from.clone())
+                .unwrap_or_else(|e| e)
+        };
+        assert_eq!(from("a = { url = \"http://h.test\" }"), "none");
+        assert_eq!(
+            from("a = { url = \"http://h.test\", headers = { x-k = \"k\" } }"),
+            "headers"
+        );
+        assert_eq!(
+            from("a = { url = \"http://h.test\", auth = \"forward\" }"),
+            "the client's own"
+        );
+        let forward = parse("a = { url = \"http://h.test\", auth = \"forward\" }");
+        assert!(forward.is_ok_and(|s| s[0].forward_auth && !s[0].own_key));
+        assert!(
+            from("a = { url = \"http://h.test\", headers = { Authorization = \"x\" }, auth = { bearer = \"k\" } }")
+                .contains("set one")
+        );
+        assert!(from("a = { url = \"http://h.test\", auth = \"nope\" }").contains("login"));
+    }
+
+    #[test]
+    fn the_old_fields_say_how_to_write_them_now() {
+        let said = |text: &str| parse(text).err().unwrap_or_default();
+        let url = "url = \"http://h.test\"";
+        assert!(
+            said(&format!("a = {{ {url}, key = \"k\" }}"))
+                .contains("`key` is now `auth = { bearer = \"KEY\" }`")
+        );
+        assert!(
+            said(&format!("a = {{ {url}, oauth = {{ client_id = \"i\" }} }}"))
+                .contains("`oauth = { .. }` is now `auth = { oauth = { .. } }`")
+        );
+        assert!(
+            said(&format!("a = {{ {url}, forward_auth = true }}"))
+                .contains("`forward_auth = true` is now `auth = \"forward\"`")
+        );
+        assert!(
+            said(&format!(
+                "a = {{ {url}, auth = {{ type = \"bearer\", key = \"k\" }} }}"
+            ))
+            .contains("`auth = { bearer = \"KEY\" }`")
+        );
+        assert!(
+            said("a = { command = [\"sh\", \"-c\"] }")
+                .contains("`command` is the program alone; its arguments go in `args`")
+        );
+        assert!(
+            said("a = { command = \"sh\", headers = { x = \"y\" } }")
+                .contains("`headers` and `auth` are for a `url`")
+        );
+        assert!(
+            said(&format!("a = {{ {url}, args = [\"x\"] }}"))
+                .contains("`args`, `env` and `cwd` are for a `command`")
         );
     }
 
@@ -850,7 +1061,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_cwd_must_be_a_directory() {
-        let said = |cwd: &str| parse(&format!("a = {{ command = ['sh'], cwd = '{cwd}' }}")).err();
+        let said = |cwd: &str| parse(&format!("a = {{ command = 'sh', cwd = '{cwd}' }}")).err();
         assert!(said("/definitely/not/here").is_some_and(|e| e.contains("does not exist")));
         assert!(said("/bin/sh").is_some_and(|e| e.contains("not a directory")));
         assert!(said("/").is_none());
@@ -858,14 +1069,16 @@ mod tests {
 
     #[test]
     fn a_target_shows_no_path_argument_or_environment() {
-        let http = parse("a = { url = \"https://h.test:8443/mcp/tok3n/\", key = \"sk-1\" }")
-            .unwrap_or_else(|e| panic!("{e}"));
+        let http =
+            parse("a = { url = \"https://h.test:8443/mcp/tok3n/\", auth = { bearer = \"sk-1\" } }")
+                .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(http[0].target(), "https://h.test:8443");
         let plain =
             parse("a = { url = \"http://h.test/secret/path\" }").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(plain[0].target(), "http://h.test");
-        let stdio =
-            parse("a = { command = [\"sh\", \"--token\", \"tok3n\"], env = { K = \"sk-2\" } }");
+        let stdio = parse(
+            "a = { command = \"sh\", args = [\"--token\", \"tok3n\"], env = { K = \"sk-2\" } }",
+        );
         let stdio = stdio.unwrap_or_else(|e| panic!("{e}"));
         let target = stdio[0].target();
         assert_eq!(target, "sh");

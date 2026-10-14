@@ -91,9 +91,20 @@ async fn with_no_config_every_vendor_with_a_key_in_the_environment_is_a_provider
         200
     );
     assert_eq!(post_chat(&gw, "llama-3", &[]).await.status(), 200);
-    let sent = anthropic.requests()[1].object().unwrap()["model"].clone();
-    assert_eq!(sent, "claude-sonnet-4-5");
-    assert_eq!(openai.requests()[1].object().unwrap()["model"], "llama-3");
+    // Each provider's list is read too; only the chats count here.
+    let chats = |fake: &[mockllm::Request]| -> Vec<Value> {
+        let chats = fake
+            .iter()
+            .filter(|r| r.path.ends_with("/messages") || r.path.ends_with("/completions"));
+        chats
+            .map(|r| r.object().unwrap()["model"].clone())
+            .collect()
+    };
+    assert_eq!(
+        chats(&anthropic.requests()).last().unwrap(),
+        "claude-sonnet-4-5"
+    );
+    assert_eq!(chats(&openai.requests()).last().unwrap(), "llama-3");
 }
 
 #[test]
@@ -297,14 +308,14 @@ async fn models_are_merged_from_every_provider() {
         .iter()
         .map(|m| (m["id"].as_str().unwrap(), m["owned_by"].as_str().unwrap()))
         .collect();
-    // As routing reaches them: Claude's and GPT's by name, the rest by
-    // their provider's.
+    // As routing reaches them: each by its name, as the provider that
+    // lists it gets it.
     assert!(
         ids.contains(&("claude-sonnet-4-5-20250929", "anthropic")),
         "{ids:?}"
     );
     assert!(ids.contains(&("gpt-4o", "openai")), "{ids:?}");
-    assert!(ids.contains(&("openai/llama-x", "openai")), "{ids:?}");
+    assert!(ids.contains(&("llama-x", "openai")), "{ids:?}");
     assert!(ids.iter().all(|(_, owner)| *owner != "down"), "{ids:?}");
     assert_eq!(list["data"][0]["kind"], "chat");
     assert_eq!(*seen.lock().unwrap(), ["Bearer sk-openai"]);
@@ -553,7 +564,7 @@ async fn the_admin_api_reports_requests_as_they_happen() {
     assert_eq!(serve["format"], "openai-chat");
     assert_eq!(serve["endpoints"], json!(["POST /v1/chat/completions"]));
     assert!(
-        routes["routes"]
+        routes["claims"]
             .as_array()
             .unwrap()
             .contains(&json!({"prefix": "gpt", "provider": "openai"}))
@@ -703,4 +714,47 @@ async fn an_open_event_stream_does_not_hold_up_shutdown() {
     let exited = tokio::time::timeout(BOUND, gw.child.wait()).await;
     assert!(exited.is_ok(), "still running {BOUND:?} after SIGTERM");
     drop(events);
+}
+
+#[tokio::test]
+async fn a_listed_model_carries_what_its_list_says_and_the_configs_price() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let list = || async {
+        axum::Json(json!({"object": "list", "data": [
+            {"id": "gpt-4o", "object": "model", "created": 1, "owned_by": "x"},
+            {"id": "llama-x", "object": "model", "display_name": "Llama X", "context_length": 8192,
+             "pricing": {"input": 0.2, "output": 0.4}},
+        ]}))
+    };
+    let app = axum::Router::new().route("/v1/models", axum::routing::get(list));
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let gw = Gateway::start(&format!(
+        "providers = {{ openai = {{ vendor = \"openai\", base_url = \"http://{addr}/v1\", key = \"sk\" }} }}\n\
+         [prices]\n\"gpt-4o\" = {{ input = 2.5, output = 10.0, cached_input = 1.25 }}\n\
+         [routes.\"llama*\"]\nto = \"openai\"\n"
+    ))
+    .await;
+    let list = client().get(gw.url("/v1/models")).send().await.unwrap();
+    let list: Value = support::json(&list.text().await.unwrap());
+    let model = |id: &str| {
+        let data = list["data"].as_array().unwrap();
+        data.iter()
+            .find(|m| m["id"] == id)
+            .cloned()
+            .unwrap_or_default()
+    };
+    // OpenAI lists no price: the config's.
+    assert_eq!(
+        model("gpt-4o")["pricing"],
+        json!({"input": 2.5, "output": 10.0, "cached_input": 1.25, "from": "config"})
+    );
+    // A list that says more: its name, its context, its own price.
+    let llama = model("llama-x");
+    assert_eq!(llama["display_name"], "Llama X");
+    assert_eq!(llama["context_window"], 8192);
+    assert_eq!(
+        llama["pricing"],
+        json!({"input": 0.2, "output": 0.4, "from": "provider"})
+    );
 }

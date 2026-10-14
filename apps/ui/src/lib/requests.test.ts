@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RequestRecord } from "./api";
-import { ANY, distinct, filterRequests, reproduceCurl, timingOf, tokensPerSecond } from "./requests";
+import { ANY, distinct, filterRequests, timingOf, tokensPerSecond } from "./requests";
 
 const base: RequestRecord = {
   id: "r_1",
@@ -85,28 +85,3 @@ describe("tokensPerSecond", () => {
   });
 });
 
-describe("reproduceCurl", () => {
-  it("rebuilds a chat call, with the key when the gateway needs one", () => {
-    const curl = reproduceCurl({ ...base, stream: true }, "http://gw", true)!;
-    expect(curl).toContain("curl http://gw/v1/chat/completions");
-    expect(curl).toContain("Authorization: Bearer $GATEWAY_KEY");
-    expect(curl).toContain('"model":"gpt-4o-mini"');
-    expect(curl).toContain('"stream":true');
-  });
-
-  it("sends audio as a form", () => {
-    const curl = reproduceCurl(
-      { ...base, format: "openai-transcriptions", path: "/v1/audio/transcriptions", model: "whisper-1" },
-      "http://gw",
-      false,
-    )!;
-    expect(curl).toContain("-F file=@audio.mp3");
-    expect(curl).not.toContain("Authorization");
-  });
-
-  it("gives up on what isn't a replayable POST", () => {
-    const realtime = { ...base, method: "GET", format: "openai-realtime" };
-    expect(reproduceCurl(realtime, "http://gw", false)).toBeNull();
-    expect(reproduceCurl({ ...base, format: null }, "http://gw", false)).toBeNull();
-  });
-});

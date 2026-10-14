@@ -13,6 +13,8 @@ vi.mock("@/lib/realtime-io", () => ({
     return { stop: mic.stop };
   }),
   Player: class {
+    // Mid-reply, so a barge-in cuts it.
+    playing = true;
     play = player.play;
     stop = player.stop;
     close = player.close;
@@ -180,6 +182,18 @@ describe("RealtimeTab", () => {
     expect(player.stop).toHaveBeenCalled();
     expect(ws.sent.length).toBe(sent);
     expect(screen.getByText("interrupted")).toBeInTheDocument();
+  });
+
+  it("ends a session the user cancels while it connects, without calling it refused", async () => {
+    serve({ "GET /v1/models": modelsWithRealtime, "GET /ui/api/routes": routes(true) });
+    renderApp(<RealtimeTab />);
+    await userEvent.click(await screen.findByRole("button", { name: "Start session" }));
+    const ws = FakeSocket.last;
+    await userEvent.click(screen.getByRole("button", { name: /end session/i }));
+    // The socket, never opened, then reports its failed connection.
+    act(() => ws.onclose?.({ code: 1006, reason: "" }));
+    expect(screen.getByRole("status")).toHaveTextContent("Session ended");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("explains a session the gateway refused", async () => {

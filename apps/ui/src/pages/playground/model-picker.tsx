@@ -8,7 +8,15 @@ import type { ModelChoice } from "@/hooks/use-model-choice";
  * Choose a listed model, searching by its ID or provider, or use whatever
  * ID is typed. With no models listed, a plain ID field.
  */
-export function ModelPicker({ id, choice }: { id: string; choice: ModelChoice }) {
+export function ModelPicker({
+  id,
+  choice,
+  disabled,
+}: {
+  id: string;
+  choice: ModelChoice;
+  disabled?: boolean;
+}) {
   const { model, chosen, setModel, models, isPending, fallback } = choice;
   return (
     <div className="grid min-w-0 gap-2">
@@ -16,7 +24,7 @@ export function ModelPicker({ id, choice }: { id: string; choice: ModelChoice })
       {isPending ? (
         <Skeleton className="h-9 w-full" />
       ) : models?.length ? (
-        <ModelCombobox id={id} value={model} onChange={setModel} models={models} custom />
+        <ModelCombobox id={id} value={model} onChange={setModel} models={models} custom disabled={disabled} />
       ) : (
         <Input
           id={id}
@@ -26,6 +34,7 @@ export function ModelPicker({ id, choice }: { id: string; choice: ModelChoice })
           className="min-w-0 font-mono"
           autoComplete="off"
           spellCheck={false}
+          disabled={disabled}
         />
       )}
     </div>

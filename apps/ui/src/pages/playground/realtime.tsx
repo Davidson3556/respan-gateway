@@ -14,7 +14,7 @@ import {
   type ServerEvent,
   type RealtimeState,
 } from "@/lib/realtime";
-import { realtimeApi, servedRealtimeApis, type RealtimeApi, type RealtimeApiId } from "@/lib/realtime-apis";
+import { servedRealtimeApis, type RealtimeApi, type RealtimeApiId } from "@/lib/realtime-apis";
 import { Player, startMic, type Mic as MicHandle } from "@/lib/realtime-io";
 import { cn } from "@/lib/utils";
 import { ModelPicker } from "./model-picker";
@@ -35,8 +35,10 @@ function useRealtimeSession(api: RealtimeApi, model: string) {
   const playing = useRef<{ id: string; index: number } | null>(null);
 
   const cutOff = useCallback(() => {
+    // A reply that already played out is not cut.
+    const wasPlaying = player.current?.playing ?? false;
     const heardMs = player.current?.stop() ?? 0;
-    if (playing.current && api.truncate) {
+    if (wasPlaying && playing.current && api.truncate) {
       socket.current?.send(api.truncate({ ...playing.current, heardMs }));
     }
     playing.current = null;
@@ -51,11 +53,21 @@ function useRealtimeSession(api: RealtimeApi, model: string) {
     setLevel(0);
   }, []);
 
-  const stop = useCallback(() => {
-    socket.current?.close();
-    socket.current = null;
-    teardown();
-  }, [teardown]);
+  /** Ends the session, if one is open or opening: failed with `error`, else ended by the user. */
+  const end = useCallback(
+    (error?: string) => {
+      const ws = socket.current;
+      socket.current = null;
+      if (!ws) return;
+      // Its close, once it comes, is no longer this session's to report.
+      ws.close();
+      teardown();
+      dispatch({ type: "close", error });
+    },
+    [teardown],
+  );
+  // Not `end` itself, which a click handler would pass the click as its error.
+  const stop = useCallback(() => end(), [end]);
 
   useEffect(() => stop, [stop]);
 
@@ -81,14 +93,13 @@ function useRealtimeSession(api: RealtimeApi, model: string) {
             else m.stop();
           },
           (error: unknown) => {
-            dispatch({
-              type: "close",
-              error:
-                error instanceof DOMException && error.name === "NotAllowedError"
-                  ? "Microphone access was blocked. Allow it for this page and start again."
-                  : `The microphone could not be opened: ${error instanceof Error ? error.message : String(error)}`,
-            });
-            stop();
+            // A session already ended or replaced has nothing to report.
+            if (socket.current !== ws) return;
+            end(
+              error instanceof DOMException && error.name === "NotAllowedError"
+                ? "Microphone access was blocked. Allow it for this page and start again."
+                : `The microphone could not be opened: ${error instanceof Error ? error.message : String(error)}`,
+            );
           },
         );
       },
@@ -107,13 +118,14 @@ function useRealtimeSession(api: RealtimeApi, model: string) {
         }
       },
       onClose: ({ opened, reason }) => {
-        if (socket.current === ws) socket.current = null;
+        if (socket.current !== ws) return;
+        socket.current = null;
         teardown();
         dispatch({ type: "close", error: opened ? undefined : reason || REFUSED });
       },
     });
     socket.current = ws;
-  }, [api, cutOff, key, model, stop, teardown]);
+  }, [api, cutOff, end, key, model, stop, teardown]);
 
   const interrupt = useCallback(() => {
     cutOff();
@@ -242,11 +254,11 @@ export function RealtimeTab() {
             value={api.id}
             onChange={(v) => setApiChoice(v as RealtimeApiId)}
             options={apis.map((a) => a.id)}
-            optionLabel={(id) => realtimeApi(id as RealtimeApiId).label}
+            optionLabel={(id) => apis.find((a) => a.id === id)?.label ?? id}
             disabled={active}
           />
         )}
-        <ModelPicker id="realtime-model" choice={choice} />
+        <ModelPicker id="realtime-model" choice={choice} disabled={active} />
         {active ? (
           <div className="grid gap-2">
             {api.cancel && (

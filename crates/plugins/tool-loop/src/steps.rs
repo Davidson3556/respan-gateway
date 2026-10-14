@@ -14,9 +14,10 @@ use respan_gateway_core::{Call, ErrorCode, Fault, NativeValue};
 use respan_gateway_http_faults::Status;
 use tokio::time::{Instant, timeout_at};
 
-use super::replay::{block_of, renumbered};
+use super::replay::renumbered;
 use super::tools::{limit, run_tools, spend};
 use super::{Limits, Sink, Step, StepReport, Toolbox};
+use respan_gateway_conversation::native_block as block_of;
 
 pub(super) struct Run {
     /// Whether the provider takes a tool result flagged as a failure.

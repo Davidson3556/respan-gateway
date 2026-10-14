@@ -12,10 +12,10 @@ use std::sync::Arc;
 pub const PLACEHOLDER: &str = "…";
 
 /// Whether `value`, at `path` in the config, is a secret: a client key
-/// (the entry, or a named entry's `key`), a provider's or MCP server's key
-/// (also inside `auth`), an MCP server's OAuth client secret and refresh
-/// token, environment value or program argument (not the program), and an
-/// MCP URL that holds credentials. An `env:NAME` reference is no secret; it is
+/// (the entry, or a named entry's `key`), a provider's key (also inside
+/// `auth`), an MCP server's header, bearer key, OAuth client secret and
+/// refresh token, environment value or argument (not the program), and a
+/// URL that holds credentials. An `env:NAME` reference is no secret; it is
 /// shown as written.
 fn is_secret(path: &[String], value: &Value) -> bool {
     let path: Vec<&str> = path.iter().map(String::as_str).collect();
@@ -23,12 +23,13 @@ fn is_secret(path: &[String], value: &Value) -> bool {
         ["client_keys", _] => value.is_string(),
         ["client_keys", _, "key"]
         | ["providers", _, "key"]
+        | ["plugins", "respan", "key"]
         | ["providers", _, "auth", "key"]
-        | ["mcp", _, "key"]
-        | ["mcp", _, "auth", "key"]
-        | ["mcp", _, "oauth", "client_secret" | "refresh_token"]
-        | ["mcp", _, "env", _] => !value.is_null(),
-        ["mcp", _, "command", i] => *i != "0" && !value.is_null(),
+        | ["mcp", _, "headers", _]
+        | ["mcp", _, "auth", "bearer"]
+        | ["mcp", _, "auth", "oauth", "client_secret" | "refresh_token"]
+        | ["mcp", _, "env", _]
+        | ["mcp", _, "args", _] => !value.is_null(),
         ["mcp", _, "url"] | ["providers", _, "base_url"] => value
             .as_str()
             .is_some_and(|u| u == PLACEHOLDER || url_holds_secret(u)),
@@ -188,7 +189,7 @@ mod tests {
         }
     }
 
-    const FULL: &str = "client_keys = [\"gw-secret\", \"env:GATEWAY_KEY\", { name = \"app\", key = \"named-secret\" }]\nproviders = { a = { vendor = \"openai\", key = \"sk-live-1\" }, b = { formats = \"openai-chat\", base_url = \"http://b.test\", auth = { type = \"bearer\", key = \"sk-live-2\" } }, c = { vendor = \"groq\", key = \"env:GROQ_API_KEY\" } }\nmcp = { m = { command = [\"npx\", \"-y\", \"server\", \"--token\", \"tok-1\"], env = { TOKEN = \"tok-2\", FROM_ENV = \"env:X\" } }, h = { url = \"https://h.test/mcp/\", key = \"tok-3\" }, t = { url = \"https://t.test/mcp/abcdef0123456789abcdef0123\" }, q = { url = \"https://q.test/mcp?token=zzz\", auth = { type = \"header\", name = \"x-k\", key = \"tok-4\" } }, o = { url = \"https://o.test/mcp\", oauth = { token_url = \"https://o.test/token\", client_id = \"cid\", client_secret = \"oauth-secret\", refresh_token = \"oauth-refresh\" } } }\n";
+    const FULL: &str = "client_keys = [\"gw-secret\", \"env:GATEWAY_KEY\", { name = \"app\", key = \"named-secret\" }]\nproviders = { a = { vendor = \"openai\", key = \"sk-live-1\" }, b = { formats = \"openai-chat\", base_url = \"http://b.test\", auth = { type = \"bearer\", key = \"sk-live-2\" } }, c = { vendor = \"groq\", key = \"env:GROQ_API_KEY\" } }\nmcp = { m = { command = \"npx\", args = [\"-y\", \"server\", \"--token\", \"tok-1\"], env = { TOKEN = \"tok-2\", FROM_ENV = \"env:X\" } }, h = { url = \"https://h.test/mcp/\", auth = { bearer = \"tok-3\" } }, t = { url = \"https://t.test/mcp/abcdef0123456789abcdef0123\" }, q = { url = \"https://q.test/mcp?token=zzz\", headers = { x-k = \"tok-4\", x-from = \"env:Y\" } }, o = { url = \"https://o.test/mcp\", auth = { oauth = { token_url = \"https://o.test/token\", client_id = \"cid\", client_secret = \"oauth-secret\", refresh_token = \"oauth-refresh\" } } }, f = { url = \"https://f.test/mcp\", auth = \"forward\" } }\n";
 
     #[test]
     fn redacts_every_kind_of_secret_and_keeps_references_and_the_rest() {
@@ -213,6 +214,8 @@ mod tests {
             "env:GATEWAY_KEY",
             "env:GROQ_API_KEY",
             "env:X",
+            "env:Y",
+            "auth = \"forward\"",
             "https://h.test/mcp/",
             "npx",
             "http://b.test",

@@ -277,7 +277,7 @@ fn bearer(key: &str) -> String {
 async fn an_http_server_is_served_behind_client_keys_with_its_own_key() {
     let up = FakeMcp::start(true).await;
     let gw = Gateway::start(&format!(
-        "client_keys = [\"{KEY}\"]\nmcp = {{ github = {{ url = \"{}/mcp\", key = \"{UPSTREAM_KEY}\" }} }}\n",
+        "client_keys = [\"{KEY}\"]\nmcp = {{ github = {{ url = \"{}/mcp\", auth = {{ bearer = \"{UPSTREAM_KEY}\" }} }} }}\n",
         up.base
     ))
     .await;
@@ -397,7 +397,7 @@ async fn an_http_server_is_served_behind_client_keys_with_its_own_key() {
 async fn a_clients_credentials_go_on_only_when_the_config_says_so() {
     let up = FakeMcp::start(false).await;
     let gw = Gateway::start(&format!(
-        "mcp = {{ closed = {{ url = \"{0}/mcp\" }}, open = {{ url = \"{0}/mcp\", forward_auth = true }} }}\n",
+        "mcp = {{ closed = {{ url = \"{0}/mcp\" }}, open = {{ url = \"{0}/mcp\", auth = \"forward\" }} }}\n",
         up.base
     ))
     .await;
@@ -449,7 +449,7 @@ for line in sys.stdin:
 fn stdio_config() -> String {
     let script = serde_json::to_string(STDIO_SERVER).unwrap();
     format!(
-        "client_keys = [\"{KEY}\"]\nmcp = {{ files = {{ command = [\"python3\", \"-c\", {script}], env = {{ GREETING = \"hello:\" }} }} }}\n"
+        "client_keys = [\"{KEY}\"]\nmcp = {{ files = {{ command = \"python3\", args = [\"-c\", {script}], env = {{ GREETING = \"hello:\" }} }} }}\n"
     )
 }
 
@@ -586,8 +586,7 @@ async fn a_stdio_server_runs_a_child_per_session_and_a_dead_one_is_replaced() {
 
 #[tokio::test]
 async fn bad_mcp_config_is_refused_at_start() {
-    let path =
-        support::write_config("mcp = { x = { command = [\"no-such-program-anywhere\"] } }\n");
+    let path = support::write_config("mcp = { x = { command = \"no-such-program-anywhere\" } }\n");
     let said = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
         .args(["check", "--config", path.to_str().unwrap()])
         .output()
@@ -599,7 +598,7 @@ async fn bad_mcp_config_is_refused_at_start() {
         "{err}"
     );
 
-    let ok = support::write_config("mcp = { x = { command = [\"sh\"] } }\n");
+    let ok = support::write_config("mcp = { x = { command = \"sh\" } }\n");
     let said = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
         .args(["check", "--config", ok.to_str().unwrap()])
         .output()
@@ -662,7 +661,7 @@ async fn an_http_session_belongs_to_the_client_key_that_opened_it() {
 async fn a_stdio_session_belongs_to_the_client_key_that_opened_it() {
     let script = serde_json::to_string(STDIO_SERVER).unwrap();
     let gw = Gateway::start(&format!(
-        "client_keys = [\"{KEY}\", \"{KEY_2}\"]\nmcp = {{ files = {{ command = [\"python3\", \"-c\", {script}] }} }}\n"
+        "client_keys = [\"{KEY}\", \"{KEY_2}\"]\nmcp = {{ files = {{ command = \"python3\", args = [\"-c\", {script}] }} }}\n"
     ))
     .await;
     let path = "/mcp/files";
@@ -699,7 +698,7 @@ async fn check_online_probes_each_mcp_server_without_naming_keys() {
     let wrapper = serde_json::to_string(wrapper).unwrap();
     let pidfile_text = serde_json::to_string(pidfile.to_str().unwrap()).unwrap();
     let config = support::write_config(&format!(
-        "mcp = {{ good = {{ url = \"{base}/mcp\", key = \"{UPSTREAM_KEY}\" }}, stale = {{ url = \"{base}/mcp\", key = \"sk-wrong-key\" }}, gone = {{ url = \"{down}/mcp\", key = \"{UPSTREAM_KEY}\" }}, child = {{ command = [\"sh\", \"-c\", {wrapper}, {pidfile_text}, {script}] }}, quits = {{ command = [\"sh\", \"-c\", \"exit 0\"] }} }}\n",
+        "mcp = {{ good = {{ url = \"{base}/mcp\", auth = {{ bearer = \"{UPSTREAM_KEY}\" }} }}, stale = {{ url = \"{base}/mcp\", auth = {{ bearer = \"sk-wrong-key\" }} }}, gone = {{ url = \"{down}/mcp\", auth = {{ bearer = \"{UPSTREAM_KEY}\" }} }}, child = {{ command = \"sh\", args = [\"-c\", {wrapper}, {pidfile_text}, {script}] }}, quits = {{ command = \"sh\", args = [\"-c\", \"exit 0\"] }} }}\n",
         base = up.base
     ));
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))

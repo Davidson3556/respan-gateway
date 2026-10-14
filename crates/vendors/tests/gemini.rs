@@ -7,7 +7,8 @@ use respan_gateway_vendors::gemini;
 #[tokio::test]
 async fn model_id_prefix() {
     let list = support::json!({"models": [
-        {"name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"]},
+        {"name": "models/gemini-2.5-flash", "displayName": "Gemini 2.5 Flash", "inputTokenLimit": 1048576,
+         "outputTokenLimit": 65536, "thinking": true, "supportedGenerationMethods": ["generateContent"]},
         {"name": "models/gemini-live-2.5-flash-preview", "supportedGenerationMethods": ["bidiGenerateContent"]},
     ]});
     // Its own API's list, beside the OpenAI-compatible base, with its key.
@@ -17,6 +18,9 @@ async fn model_id_prefix() {
         .base(format!("{base}/v1beta/openai"))
         .key("k");
     let models = gemini.models().await.expect("a list").expect("models");
+    assert_eq!(models[0].display_name.as_deref(), Some("Gemini 2.5 Flash"));
+    assert_eq!(models[0].context_window, Some(1048576));
+    assert_eq!(models[0].capabilities, ["reasoning"]);
     assert_eq!(
         support::ids(models),
         ["gemini-2.5-flash", "gemini-live-2.5-flash-preview"]
@@ -94,6 +98,25 @@ mod thought_signature {
         let signature = &calls[0]["extra_content"]["google"]["thought_signature"];
         assert_eq!(signature, SIGNATURE_PLACEHOLDER, "{calls}");
         assert!(calls[1].get("extra_content").is_none(), "{calls}");
+    }
+
+    #[tokio::test]
+    async fn thought_signature_replaces_a_cache_marker_another_format_put_on_a_call() {
+        let gemini = vendor();
+        let call = json!({ "type": "tool_use", "id": "a", "name": "f", "input": {},
+            "cache_control": { "type": "ephemeral" } });
+        gemini
+            .anthropic(json!({ "model": "gemini-3-flash-preview", "max_tokens": 10, "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": [call] },
+                { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "a", "content": "1" }] },
+            ] }))
+            .await;
+        let parts = &gemini.sent()[0]["contents"][1]["parts"];
+        assert_eq!(
+            parts[0]["thoughtSignature"], SIGNATURE_PLACEHOLDER,
+            "{parts}"
+        );
     }
 
     #[tokio::test]

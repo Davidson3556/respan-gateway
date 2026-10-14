@@ -121,6 +121,20 @@ describe("RequestsPage", () => {
     expect(screen.getByText("812 ms")).toBeInTheDocument();
   });
 
+  it("says why a request failed in the list, and when a stream's first byte came", async () => {
+    serve({
+      "/ui/api/requests": {
+        requests: [
+          { ...record, id: "r_2", stream: false, status: 404, error: "the provider returned 404, with no body" },
+          { ...record, id: "r_3", stream: true, ttfb_ms: 230 },
+        ],
+      },
+    });
+    renderPage(<RequestsPage />);
+    expect(await screen.findByText("the provider returned 404, with no body")).toBeInTheDocument();
+    expect(screen.getByText(/first 230 ms/)).toBeInTheDocument();
+  });
+
   it("shows a copyable first request when the gateway has seen none", async () => {
     serve({ "/ui/api/requests": { requests: [] } });
     renderPage(<RequestsPage />);
@@ -142,13 +156,21 @@ describe("RoutesPage", () => {
       "/ui/api/providers": { providers: [provider] },
       "/ui/api/routes": {
         serve: [{ format: "anthropic-messages", kind: "chat", endpoints: ["POST /v1/messages"] }],
-        routes: [{ prefix: "claude", provider: "anthropic" }],
+        rules: [],
+        claims: [{ prefix: "claude", provider: "anthropic" }],
         defaults: [{ kind: "chat", provider: "anthropic" }],
+      },
+      "/ui/api/routes/explain": {
+        by: { type: "claim", prefix: "claude" },
+        pick: null,
+        mode: "single",
+        to: [{ provider: "anthropic", model: "claude-x", price: null, seen: null }],
+        passed: [],
       },
     });
     renderPage(<RoutesPage />);
     await userEvent.type(await screen.findByLabelText("Model", { exact: true }), "claude-x");
-    expect(await screen.findByText("prefix claude*")).toBeInTheDocument();
+    expect(await screen.findByText("vendor's model name claude*")).toBeInTheDocument();
     expect(screen.getByText("POST")).toBeInTheDocument();
   });
 });

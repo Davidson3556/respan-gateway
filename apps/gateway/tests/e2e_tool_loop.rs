@@ -141,7 +141,7 @@ fn config(openai: &FakeOpenAi, mcp: &str, tool_loop: &str) -> String {
 
 fn http_server(up: &FakeMcp) -> String {
     format!(
-        "mcp = {{ files = {{ url = \"{}/mcp\", key = \"{UPSTREAM_KEY}\" }} }}\n",
+        "mcp = {{ files = {{ url = \"{}/mcp\", auth = {{ bearer = \"{UPSTREAM_KEY}\" }} }} }}\n",
         up.base
     )
 }
@@ -355,7 +355,8 @@ async fn a_stdio_server_serves_the_loop_from_one_child() {
         openai.answer(Answer::text("done"));
     }
     let script = serde_json::to_string(STDIO_SERVER).unwrap();
-    let mcp = format!("mcp = {{ tools = {{ command = [\"python3\", \"-c\", {script}] }} }}\n");
+    let mcp =
+        format!("mcp = {{ tools = {{ command = \"python3\", args = [\"-c\", {script}] }} }}\n");
     let gw = Gateway::start(&config(
         &openai,
         &mcp,
@@ -475,7 +476,8 @@ async fn a_reload_stops_the_old_stdio_child() {
     openai.answer(Answer::tool_call("tools__who", json!({})));
     openai.answer(Answer::text("done"));
     let script = serde_json::to_string(STDIO_SERVER).unwrap();
-    let mcp = format!("mcp = {{ tools = {{ command = [\"python3\", \"-c\", {script}] }} }}\n");
+    let mcp =
+        format!("mcp = {{ tools = {{ command = \"python3\", args = [\"-c\", {script}] }} }}\n");
     let (gw, _) = served_from_file(&config(
         &openai,
         &mcp,
@@ -509,7 +511,7 @@ fn check(text: &str) -> (bool, String) {
 #[test]
 fn the_tool_loop_section_is_checked_against_the_mcp_servers() {
     let base = "providers = { p = { formats = \"openai-chat\", base_url = \"http://x.test/v1\", key = \"k\" } }\n";
-    let server = "mcp = { files = { url = \"http://m.test/mcp\", key = \"k\" }, open = { url = \"http://m.test/mcp\", forward_auth = true } }\n";
+    let server = "mcp = { files = { url = \"http://m.test/mcp\", auth = { bearer = \"k\" } }, open = { url = \"http://m.test/mcp\", auth = \"forward\" } }\n";
     let (ok, text) = check(&format!(
         "{base}{server}plugins = {{ tool_loop = {{ servers = [\"files\"], max_steps = 4, timeout = \"2m\" }} }}\n"
     ));
@@ -523,7 +525,10 @@ fn the_tool_loop_section_is_checked_against_the_mcp_servers() {
         said("plugins = { tool_loop = { servers = [\"nope\"] } }\n")
             .contains("unknown mcp server 'nope'")
     );
-    assert!(said("plugins = { tool_loop = { servers = [\"open\"] } }\n").contains("forward_auth"));
+    assert!(
+        said("plugins = { tool_loop = { servers = [\"open\"] } }\n")
+            .contains("`auth = \"forward\"`")
+    );
     assert!(said("plugins = { tool_loop = { servers = [] } }\n").contains("names no mcp server"));
     assert!(
         said("plugins = { tool_loop = { servers = [\"files\", \"files\"] } }\n")
@@ -662,7 +667,7 @@ async fn check_lists_the_offered_tools_only_online() {
 #[test]
 fn the_tool_loop_keys_are_validated_and_the_old_names_say_what_replaced_them() {
     let base = "providers = { p = { formats = \"openai-chat\", base_url = \"http://x.test/v1\", key = \"k\" } }\n";
-    let server = "mcp = { files = { url = \"http://m.test/mcp\", key = \"k\" } }\n";
+    let server = "mcp = { files = { url = \"http://m.test/mcp\", auth = { bearer = \"k\" } } }\n";
     let said = |tool_loop: &str| {
         let (ok, text) = check_args(&format!("{base}{server}{tool_loop}"), &[]);
         assert!(!ok, "{text}");
@@ -693,7 +698,7 @@ async fn an_mcp_server_shows_as_its_origin_or_program_name_alone() {
     let up = FakeMcp::start().await;
     let script = serde_json::to_string(STDIO_SERVER).unwrap();
     let mcp = format!(
-        "mcp = {{ files = {{ url = \"{}/mcp/path-token-9\", key = \"{UPSTREAM_KEY}\" }}, local = {{ command = [\"python3\", \"-c\", {script}], env = {{ API_TOKEN = \"env-secret-7\" }} }} }}\n",
+        "mcp = {{ files = {{ url = \"{}/mcp/path-token-9\", auth = {{ bearer = \"{UPSTREAM_KEY}\" }} }}, local = {{ command = \"python3\", args = [\"-c\", {script}], env = {{ API_TOKEN = \"env-secret-7\" }} }} }}\n",
         up.base
     );
     let text = format!(
@@ -734,7 +739,7 @@ fn a_stdio_servers_cwd_must_be_a_directory_at_start() {
     let tmp = env!("CARGO_TARGET_TMPDIR");
     let config = |cwd: &str| {
         format!(
-            "{base}mcp = {{ s = {{ command = [\"python3\", \"-c\", \"pass\"], cwd = \"{cwd}\" }} }}\n"
+            "{base}mcp = {{ s = {{ command = \"python3\", args = [\"-c\", \"pass\"], cwd = \"{cwd}\" }} }}\n"
         )
     };
     let (ok, text) = check_args(&config(&format!("{tmp}/no-such-dir")), &[]);
@@ -759,7 +764,7 @@ fn a_config_error_never_prints_a_secret() {
             "sk-secret-77",
         ),
         (
-            "mcp = { m = { command = [\"python3\"], env = \"sk-secret-77\" } }\n",
+            "mcp = { m = { command = \"python3\", env = \"sk-secret-77\" } }\n",
             "sk-secret-77",
         ),
     ] {

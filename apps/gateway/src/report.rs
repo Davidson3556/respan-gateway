@@ -91,18 +91,28 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
         .map(|(kind, provider)| format!("{kind} -> {provider}"));
     row(&mut lines, "defaults", defaults.collect());
 
-    let mut claims: Vec<(String, Vec<String>)> = Vec::new();
-    for (prefix, provider) in plan.routes.prefixes() {
-        match claims.iter_mut().find(|(p, _)| *p == provider) {
+    let mut claims: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (prefix, provider) in plan.routes.claims() {
+        match claims.iter_mut().find(|(p, _)| p == provider) {
             Some((_, prefixes)) => prefixes.push(prefix),
             None => claims.push((provider, vec![prefix])),
         }
     }
-    let mut routes: Vec<String> = claims
+    let rules = plan.routes.rules().iter().map(|rule| {
+        let to: Vec<String> = rule.to.iter().map(ToString::to_string).collect();
+        let how = match (rule.hedge, rule.to.len()) {
+            (Some(_), _) => format!(" ({}, hedged)", rule.pick.name()),
+            (None, 1) => String::new(),
+            (None, _) => format!(" ({})", rule.pick.name()),
+        };
+        format!("{} -> {}{how}", rule.name, to.join(", "))
+    });
+    let claims = claims
         .into_iter()
-        .map(|(provider, prefixes)| format!("{} -> {provider}", prefixes.join(", ")))
-        .collect();
+        .map(|(provider, prefixes)| format!("{}* -> {provider}", prefixes.join("*, ")));
+    let mut routes: Vec<String> = rules.chain(claims).collect();
     routes.push("<provider>/<model> -> that provider".to_owned());
+    routes.push("a model a provider lists -> that provider".to_owned());
     row(&mut lines, "routes", routes);
 
     let auth = match plan.keys.len() {

@@ -14,16 +14,14 @@ use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_media::video::{LocateContent, VideoJobs};
 use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_plugin_credentials::ClientCredentials;
-use respan_gateway_plugin_fallback::{Fallback, Hedge};
 use respan_gateway_plugin_mcp_aggregate::{Aggregate, Closer as AggregateCloser};
 use respan_gateway_plugin_relay::Relay;
-use respan_gateway_plugin_routing::Routing;
+use respan_gateway_plugin_routing::{Dispatch, Routing};
 use respan_gateway_ws::Limits;
 use tokio::sync::watch;
 
 use super::{BODY_LIMIT, DEFAULT_LISTEN, Process};
 use crate::admin::{self, Admin};
-use crate::attempts;
 use crate::auth::{self, ClientKeys, Cors, LocalOnly};
 use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{KnownFormat, formats, kind};
@@ -60,7 +58,8 @@ impl Built {
         };
         let mut formats = formats();
         let providers: Vec<&str> = config.providers.keys().map(String::as_str).collect();
-        let mcp = mcp::servers(&config.mcp, &providers)?;
+        let logins = crate::mcp_oauth::logins_dir(config.source());
+        let mcp = mcp::servers(&config.mcp, &providers, &logins)?;
         if !mcp.is_empty() {
             formats.push(mcp::known(
                 mcp.clone(),
@@ -78,23 +77,24 @@ impl Built {
             let serving = plan.serves(mcp::FORMAT);
             tool_loop::check(tool_loop, &plan.mcp, serving)?;
         }
-        let attempts = Attempts {
-            fallback: (config.plugins.fallback.as_ref())
-                .map(|c| attempts::fallback(c, &plan.upstreams))
-                .transpose()?,
-            hedge: (config.plugins.hedge.as_ref())
-                .map(|c| attempts::hedge(c, &plan.upstreams))
-                .transpose()?,
+        let (gateway, closer, aggregate) =
+            with_plugins(gateway, &config, aggregate, &plan, &formats, &process.log);
+        // Last, so its calls' filters see each call as it is sent.
+        let gateway = match &config.plugins.respan {
+            Some(respan) => {
+                let key = crate::compose::secret("plugins: respan: key", &respan.key)?;
+                let url = respan
+                    .url
+                    .as_deref()
+                    .unwrap_or(respan_gateway_plugin_respan::URL);
+                let service = respan.service.as_deref().unwrap_or("respan-gateway");
+                let content = respan.content.unwrap_or(true);
+                gateway.plugin(respan_gateway_plugin_respan::Respan::new(
+                    &key, url, service, content,
+                )?)
+            }
+            None => gateway,
         };
-        let (gateway, closer, aggregate) = with_plugins(
-            gateway,
-            &config,
-            aggregate,
-            attempts,
-            &plan,
-            &formats,
-            &process.log,
-        );
         let keys = ClientKeys::new(plan.keys.clone());
         let relay = relay(
             &gateway,
@@ -149,35 +149,33 @@ impl Built {
     }
 }
 
-/// Routing by the plan's routes, of each format.
+/// Routing by the plan's routes, of each format, knowing each request's
+/// client key by name.
 fn routing(plan: &Plan, formats: &[KnownFormat]) -> Routing {
-    formats
-        .iter()
-        .filter(|f| f.kind != kind::MCP)
-        .fold(Routing::new(plan.routes.clone()), |routing, f| {
-            routing.format(&f.name, f.kind, f.model.clone())
-        })
+    let client = |cx: &respan_gateway_core::ClientContext| {
+        let customer = cx
+            .extensions()
+            .get::<respan_gateway_plugin_respan::Customer>();
+        customer.map(|c| c.0.clone())
+    };
+    formats.iter().filter(|f| f.kind != kind::MCP).fold(
+        Routing::new(plan.routes.clone()).client(client),
+        |routing, f| routing.format(&f.name, f.kind, f.model.clone()),
+    )
 }
 
 /// The gateway with the binary's plugins, and what ends the sessions of the
 /// tool loop and of the aggregate.
 type Plugins = (Gateway, Option<tool_loop::Closer>, Option<AggregateCloser>);
 
-/// The fallback and hedge plugins the config asks for.
-struct Attempts {
-    fallback: Option<Fallback>,
-    hedge: Option<Hedge>,
-}
-
 /// The gateway with the binary's plugins, in a fixed order whatever the
 /// config's: the request log, routing, MCP, video jobs, whose credentials go
-/// where, the tool loop, then hedge and fallback. The vendors' quirks are
+/// where, the tool loop, then the dispatch of routes. The vendors' quirks are
 /// the gateway's plugins: they are their providers' own ([`compose`]).
 fn with_plugins(
     gateway: Gateway,
     config: &Config,
     aggregate: Option<Vec<String>>,
-    attempts: Attempts,
     plan: &Plan,
     formats: &[KnownFormat],
     log: &Arc<RequestLog>,
@@ -254,14 +252,9 @@ fn with_plugins(
     if let Some((tool_loop, _)) = tool_loop {
         gateway = gateway.plugin(tool_loop.observe(requests::steps(log.clone())));
     }
-    // Each answers the request itself: a request the tool loop runs is not
-    // hedged or retried, and a hedged one is not retried.
-    if let Some(hedge) = attempts.hedge {
-        gateway = gateway.plugin(hedge);
-    }
-    if let Some(fallback) = attempts.fallback {
-        gateway = gateway.plugin(fallback);
-    }
+    // It answers the request itself: a request the tool loop runs is not
+    // sent to a route's other candidates.
+    let gateway = gateway.plugin(Dispatch::new(respan_gateway_http_faults::retryable));
     (gateway, closer, aggregate_closer)
 }
 
@@ -324,7 +317,15 @@ fn routes(
     let mut router = Router::new().route("/healthz", get(|| async { "ok" }));
     // A relay lets its vendor answer, with the client's credentials.
     if !config.relay {
-        let models = Arc::new(Models::new(&plan.upstreams, plan.routes.clone()));
+        let models = Models::new(&plan.upstreams, plan.routes.clone()).priced(&config.prices);
+        let models = Arc::new(models);
+        plan.routes
+            .set_catalog(Arc::new(models::Listed(Arc::downgrade(&models))));
+        // The router reads the listings: which provider lists a model, and
+        // what it costs and can do. Learnt before a client lists.
+        if config.plugins.routing.listings != Some(false) {
+            Models::refresh(&models, std::time::Duration::from_secs(10 * 60));
+        }
         let list = get(models::list).with_state(models.clone());
         let list = list.layer(from_fn_with_state(keys.clone(), auth::require));
         router = router.route("/v1/models", list);

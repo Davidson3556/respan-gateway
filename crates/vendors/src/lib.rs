@@ -13,8 +13,8 @@ use respan_gateway_media_http::openai::OpenAiVideos;
 use respan_gateway_passthrough_http::Passthrough;
 
 pub use respan_gateway_vendor_kit::{
-    Auth, Base, Body, BoxFuture, Connect, HttpTransport, ListModels, Model, Models, Part, Quirk,
-    Reach, Speaks, Vendor, VendorProvider, Wire, built_wrong, http, json, models,
+    Auth, Base, Body, BoxFuture, Connect, HttpTransport, ListModels, Model, Models, Part, Pricing,
+    Quirk, Reach, Speaks, Vendor, VendorProvider, Wire, built_wrong, http, json, models,
 };
 
 mod chat;

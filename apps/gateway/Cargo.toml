@@ -40,6 +40,7 @@ respan-gateway-decision-http.workspace = true
 respan-gateway-plugin-fallback.workspace = true
 respan-gateway-plugin-routing.workspace = true
 respan-gateway-plugin-tool-loop.workspace = true
+respan-gateway-plugin-respan.workspace = true
 respan-gateway-plugin-mcp-aggregate.workspace = true
 respan-gateway-vendors.workspace = true
 respan-gateway-realtime.workspace = true
@@ -53,6 +54,7 @@ getrandom = { workspace = true, features = ["std"] }
 indexmap = { version = "2", features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 toml.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "process", "io-util"] }
 tower = { version = "0.5", features = ["util"] }

@@ -27,6 +27,7 @@ use crate::formats::{KnownFormat, first_of_each_kind};
 use crate::history::{CSV_HEADER, Filter, csv_row};
 use crate::mcp::Transport;
 use crate::requests::{RequestRecord, rfc3339};
+use respan_gateway_plugin_routing::{Ask, By, Kind, Routes};
 
 mod config;
 
@@ -46,7 +47,12 @@ pub struct Admin {
     /// (string or null), `quirks`, `formats`, `kinds`, `base_url` (string),
     /// `credentials` (`"gateway"` or `"client"`), and the counts), but its counts.
     providers: Vec<Value>,
-    routes: Value,
+    /// The formats served, as `/ui/api/routes` lists them.
+    serve: Vec<Value>,
+    /// The router, read live for its record of each candidate.
+    routes: Arc<Routes>,
+    /// A format served of each kind, for the explain endpoint.
+    kinds: Vec<(Kind, String)>,
     /// Each MCP server, as `/ui/api/mcp` lists it but its counts and status.
     mcp: Vec<Value>,
 }
@@ -114,26 +120,18 @@ impl Admin {
                 })
             })
             .collect();
-        let prefixes = plan.routes.prefixes();
-        let prefixes = prefixes
-            .iter()
-            .map(|(prefix, provider)| json!({ "prefix": prefix, "provider": provider }));
-        let defaults = plan.routes.defaults();
-        let defaults = defaults
-            .iter()
-            .map(|(kind, provider)| json!({ "kind": kind, "provider": provider }));
-        let routes = json!({
-            "serve": serve,
-            "routes": prefixes.collect::<Vec<_>>(),
-            "defaults": defaults.collect::<Vec<_>>(),
-        });
+        let served = plan.serve.iter();
+        let served = served.filter_map(|name| formats.iter().find(|f| f.name == *name));
+        let kinds = first_of_each_kind(served.map(|f| (f.kind, f.name.clone())));
         Self {
             process,
             source: config.source.clone(),
             stand_in: config::stand_in(config),
             auth_required: !plan.keys.is_empty(),
             providers,
-            routes,
+            serve,
+            routes: plan.routes.clone(),
+            kinds,
             mcp,
         }
     }
@@ -146,6 +144,7 @@ pub fn router(admin: Arc<Admin>, keys: Arc<ClientKeys>) -> Router {
         .route("/ui/api/providers", get(providers))
         .route("/ui/api/mcp", get(mcp))
         .route("/ui/api/routes", get(routes))
+        .route("/ui/api/routes/explain", get(explain))
         .route("/ui/api/requests", get(requests))
         .route("/ui/api/requests/export", get(export))
         .route("/ui/api/requests/{id}", get(request))
@@ -296,8 +295,179 @@ async fn mcp(State(admin): State<Arc<Admin>>) -> Json<Value> {
     Json(json!({ "servers": servers }))
 }
 
+/// `GET /ui/api/routes`: the formats served, each kind's default, the
+/// routes with each candidate's price and the router's record of it, and
+/// the vendors' claims.
+///
+/// ```json
+/// { "serve": [{ "format": "openai-chat", "kind": "chat", "endpoints": [".."] }],
+///   "defaults": [{ "kind": "chat", "provider": "openai" }],
+///   "rules": [{ "name": "smart", "glob": false, "pick": "first",
+///     "needs": [], "clients": [], "kinds": [], "fallback": true,
+///     "hedge_ms": null, "tries": 1,
+///     "to": [{ "target": "anthropic/claude-opus-4-1", "provider": "anthropic",
+///       "model": "claude-opus-4-1", "weight": 1,
+///       "price": { "input": 15, "output": 75 },
+///       "seen": { "latency_ms": 840.2, "error_rate": 0, "calls": 12,
+///         "failures": 0, "cooling": false } }] }],
+///   "claims": [{ "prefix": "gpt", "provider": "openai" }] }
+/// ```
+///
+/// A candidate's `price` and `seen` are of the model it is sent, so `null`
+/// for one that sends each request its own, as a glob's do.
 async fn routes(State(admin): State<Arc<Admin>>) -> Json<Value> {
-    Json(admin.routes.clone())
+    let routes = &admin.routes;
+    let rules: Vec<Value> = (routes.rules().iter())
+        .map(|rule| {
+            let to: Vec<Value> = (rule.to.iter())
+                .map(|c| {
+                    // A glob's candidate sends each request its own model,
+                    // unless it names one.
+                    let model = match rule.is_glob() {
+                        true => c.model.clone().filter(|m| !m.contains("{model}")),
+                        false => c.model_for(Some(&rule.name)),
+                    };
+                    let mut row = json!({
+                        "target": c.to_string(),
+                        "provider": c.provider,
+                        "model": model,
+                        "weight": c.weight,
+                        "price": null,
+                        "seen": null,
+                    });
+                    if let Some(model) = &model {
+                        row["price"] = price(routes, &c.provider, model);
+                        row["seen"] = seen(routes, &c.provider, model);
+                    }
+                    row
+                })
+                .collect();
+            json!({
+                "name": rule.name,
+                "glob": rule.is_glob(),
+                "pick": rule.pick.name(),
+                "needs": rule.needs,
+                "clients": rule.clients,
+                "kinds": rule.kinds,
+                "fallback": rule.fallback,
+                "hedge_ms": rule.hedge.map(|h| h.as_millis() as u64),
+                "tries": rule.backoff.tries(),
+                "to": to,
+            })
+        })
+        .collect();
+    let defaults = routes.defaults();
+    let defaults = defaults
+        .iter()
+        .map(|(kind, provider)| json!({ "kind": kind, "provider": provider }));
+    let claims = routes.claims().iter();
+    let claims = claims.map(|(prefix, provider)| json!({ "prefix": prefix, "provider": provider }));
+    Json(json!({
+        "serve": admin.serve,
+        "defaults": defaults.collect::<Vec<_>>(),
+        "rules": rules,
+        "claims": claims.collect::<Vec<_>>(),
+    }))
+}
+
+/// A model's price, per million tokens, as the router reads it; `null` if
+/// unknown.
+fn price(routes: &Routes, provider: &str, model: &str) -> Value {
+    let price = routes.facts(provider, model).and_then(|f| f.price);
+    price.map_or(
+        Value::Null,
+        |(input, output)| json!({ "input": input, "output": output }),
+    )
+}
+
+/// The router's record of `model` of `provider`; `null` before its first call.
+fn seen(routes: &Routes, provider: &str, model: &str) -> Value {
+    routes
+        .stats()
+        .seen(provider, model)
+        .map_or(Value::Null, |s| {
+            json!({
+                "latency_ms": s.latency_ms,
+                "error_rate": s.error_rate,
+                "calls": s.calls,
+                "failures": s.failures,
+                "cooling": s.cooling,
+            })
+        })
+}
+
+#[derive(Debug, Deserialize)]
+struct Explain {
+    model: Option<String>,
+    kind: Option<String>,
+    client: Option<String>,
+}
+
+/// `GET /ui/api/routes/explain?model=M&kind=chat&client=NAME`: where a
+/// request would go now, sending nothing: why, in which order, and the
+/// candidates passed over.
+///
+/// ```json
+/// { "by": { "type": "rule", "name": "smart" }, "pick": "cheapest",
+///   "mode": "fallback",
+///   "to": [{ "provider": "openai", "model": "gpt-5-mini",
+///     "price": { "input": 0.25, "output": 2 }, "seen": null }],
+///   "passed": [{ "candidate": "smart → gemini", "why": "lacks tools" }] }
+/// ```
+///
+/// `by.type` is `rule`, `named` (`provider/model`), `listed` (by the
+/// provider's model listing), `claim` (with its `prefix`) or `default`; `mode` is `single`, `fallback` or `hedge`. A
+/// request no provider serves is `{ "by": null }`.
+async fn explain(State(admin): State<Arc<Admin>>, Query(q): Query<Explain>) -> Response {
+    let kind = q.kind.as_deref().unwrap_or("chat");
+    let Some((kind, format)) = admin.kinds.iter().find(|(k, _)| k.label == kind) else {
+        let message = format!("no format of kind '{kind}' is served");
+        return auth::error(StatusCode::BAD_REQUEST, "invalid_request_error", &message);
+    };
+    let model = q.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+    let ask = Ask {
+        kind: *kind,
+        format,
+        model,
+        client: q.client.as_deref(),
+    };
+    let Some(planned) = admin.routes.plan(&ask) else {
+        return Json(json!({ "by": null })).into_response();
+    };
+    let by = match &planned.by {
+        By::Rule(name) => json!({ "type": "rule", "name": name }),
+        By::Named => json!({ "type": "named" }),
+        By::Listed => json!({ "type": "listed" }),
+        By::Claim(prefix) => json!({ "type": "claim", "prefix": prefix }),
+        By::Default => json!({ "type": "default" }),
+    };
+    let rule = planned.rule.as_ref();
+    let mode = match rule {
+        Some(rule) if rule.hedge.is_some() => "hedge",
+        Some(_) if planned.to.len() > 1 => "fallback",
+        _ => "single",
+    };
+    let to: Vec<Value> = (planned.to.iter())
+        .map(|c| {
+            let model = c.sends.as_deref().unwrap_or_default();
+            json!({
+                "provider": c.provider,
+                "model": c.sends,
+                "price": price(&admin.routes, &c.provider, model),
+                "seen": seen(&admin.routes, &c.provider, model),
+            })
+        })
+        .collect();
+    let passed = planned.passed.iter();
+    let passed = passed.map(|(candidate, why)| json!({ "candidate": candidate, "why": why }));
+    Json(json!({
+        "by": by,
+        "pick": rule.map(|r| r.pick.name()),
+        "mode": mode,
+        "to": to,
+        "passed": passed.collect::<Vec<_>>(),
+    }))
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]

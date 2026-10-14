@@ -1,13 +1,17 @@
-import { ArrowRight, ChevronDown } from "lucide-react";
+import { ArrowRight, ChevronDown, Route as RouteIcon } from "lucide-react";
 import { Link } from "react-router";
+import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
 import { ProviderIcon } from "@/components/provider-icon";
+import { RouteCard } from "@/components/route-card";
 import { RouteTester } from "@/components/route-tester";
+import { TomlCode } from "@/components/toml-code";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useProviders, useRoutes } from "@/hooks/queries";
-import type { Provider } from "@/lib/api";
+import type { Provider, Routes } from "@/lib/api";
 import { describeError } from "@/lib/query-client";
+import { EXAMPLE_ROUTES } from "@/lib/routes";
 
 function Destination({ name, providers }: { name: string; providers: Provider[] }) {
   const provider = providers.find((p) => p.name === name);
@@ -19,16 +23,38 @@ function Destination({ name, providers }: { name: string; providers: Provider[] 
   );
 }
 
+/** Each vendor's model names, by provider. */
+function Claims({ claims, providers }: { claims: Routes["claims"]; providers: Provider[] }) {
+  const byProvider = new Map<string, string[]>();
+  for (const c of claims) byProvider.set(c.provider, [...(byProvider.get(c.provider) ?? []), c.prefix]);
+  if (!byProvider.size) return <p className="p-5 text-sm text-muted-foreground">No vendor model names: name a provider as provider/model.</p>;
+  return (
+    <div className="divide-y">
+      {[...byProvider].map(([provider, prefixes]) => (
+        <div key={provider} className="grid grid-cols-[minmax(0,8rem)_minmax(0,1fr)] items-start gap-4 px-5 py-3">
+          <Destination name={provider} providers={providers} />
+          <div className="flex flex-wrap gap-1.5">
+            {prefixes.map((prefix) => (
+              <code key={prefix} className="rounded bg-muted px-1.5 py-0.5 text-xs" title={`Models starting with ${prefix}`}>{prefix}*</code>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function RoutesPage() {
-  const { data, isPending, error } = useRoutes();
+  const { data, isPending, error } = useRoutes(true);
   const { data: providers = [] } = useProviders();
   const kinds = data
-    ? [...new Set([...data.serve.map((s) => s.kind), ...data.defaults.map((d) => d.kind)])]
+    ? [...new Set([...data.serve.map((s) => s.kind), ...data.defaults.map((d) => d.kind)])].filter((k) => k !== "mcp")
     : [];
 
   return (
     <div className="grid min-w-0 grid-cols-1 gap-6">
-      <PageHeader title="Routes" />
+      <PageHeader title="Routes"
+        description="Where each model a client asks for goes: your routes first, then a provider/ prefix, then the provider whose model list has it, then each vendor's own model names, then the kind's default." />
       {error && !data ? (
         <div role="alert" className="text-sm text-destructive">
           <p>Couldn't load routes</p>
@@ -40,13 +66,30 @@ export function RoutesPage() {
         <>
           {kinds.length > 0 && <RouteTester routes={data} providers={providers} kinds={kinds} />}
 
+          <section className="grid min-w-0 gap-3" aria-labelledby="your-routes">
+            <div className="flex items-baseline justify-between gap-4">
+              <h2 id="your-routes" className="text-sm font-semibold">Your routes</h2>
+              {data.rules.length > 0 && (
+                <span className="text-xs text-muted-foreground">An exact name before a pattern; patterns in order</span>
+              )}
+            </div>
+            {data.rules.length ? (
+              data.rules.map((rule) => <RouteCard key={rule.name} rule={rule} providers={providers} />)
+            ) : (
+              <EmptyState icon={RouteIcon} title="No routes yet">
+                <p>Give a model name its own providers: picked in order, by price or by speed, falling back or raced. Add to the config:</p>
+                <pre className="w-full overflow-x-auto rounded-lg border bg-muted/40 p-4 text-left text-xs"><TomlCode code={EXAMPLE_ROUTES} /></pre>
+              </EmptyState>
+            )}
+          </section>
+
           <div className="grid min-w-0 gap-5 lg:grid-cols-2">
             <Card className="min-w-0 gap-0 overflow-hidden py-0">
               <h2 className="border-b px-5 py-4 text-sm font-semibold">Default destinations</h2>
               {data.defaults.length ? (
                 <div className="divide-y">
                   {data.defaults.map((d) => (
-                    <div key={d.kind} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 px-5 py-4">
+                    <div key={d.kind} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 px-5 py-3">
                       <span className="text-sm capitalize">{d.kind}</span>
                       <ArrowRight className="size-4 text-muted-foreground" aria-hidden />
                       <Destination name={d.provider} providers={providers} />
@@ -58,20 +101,10 @@ export function RoutesPage() {
 
             <Card className="min-w-0 gap-0 overflow-hidden py-0">
               <div className="flex items-center justify-between border-b px-5 py-4">
-                <h2 className="text-sm font-semibold">Model overrides</h2>
-                {data.routes.length > 0 && <span className="text-xs text-muted-foreground">First match wins</span>}
+                <h2 className="text-sm font-semibold">Vendor model names</h2>
+                <span className="text-xs text-muted-foreground" title="For a model no provider's list has, such as an alias; and to choose between providers that both list it">For unlisted models · longest match wins</span>
               </div>
-              {data.routes.length ? (
-                <div className="divide-y">
-                  {data.routes.map((r) => (
-                    <div key={r.prefix} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 px-5 py-4">
-                      <code className="truncate text-sm" title={`Models starting with ${r.prefix}`}>{r.prefix}*</code>
-                      <ArrowRight className="size-4 text-muted-foreground" aria-hidden />
-                      <Destination name={r.provider} providers={providers} />
-                    </div>
-                  ))}
-                </div>
-              ) : <p className="p-5 text-sm text-muted-foreground">No overrides. Using defaults.</p>}
+              <Claims claims={data.claims} providers={providers} />
             </Card>
           </div>
 

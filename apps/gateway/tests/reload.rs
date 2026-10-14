@@ -29,7 +29,9 @@ fn config(listen: &str, providers: &[(&str, &str)], extra: &str) -> String {
             format!("{name} = {{ formats = \"openai-chat\", base_url = \"{url}\", key = \"k\" }}\n")
         })
         .collect();
-    format!("listen = \"{listen}\"\n{extra}\n[providers]\n{providers}")
+    support::quiet(&format!(
+        "listen = \"{listen}\"\n{extra}\n[providers]\n{providers}"
+    ))
 }
 
 async fn get(gw: &Gateway, path: &str) -> Value {

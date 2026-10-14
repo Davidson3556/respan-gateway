@@ -95,12 +95,18 @@ export function RequestsTable({
                 </TableCell>
                 <TableCell className={"max-w-44 pl-4 sm:max-w-56 sm:pl-3"}>
                   <div className="truncate font-medium">{r.model ?? r.path}</div>
-                  {!compact && (
-                    <div className="truncate font-mono text-[11px] text-muted-foreground">
-                      {r.method} {r.path}
-                      {r.stream && " · stream"}
-                    </div>
-                  )}
+                  {!compact &&
+                    (r.error ? (
+                      // Why it failed, at a glance; the details page has the rest.
+                      <div className="truncate text-[11px] text-destructive" title={r.error}>
+                        {r.error}
+                      </div>
+                    ) : (
+                      <div className="truncate font-mono text-[11px] text-muted-foreground">
+                        {r.method} {r.path}
+                        {r.stream && " · stream"}
+                      </div>
+                    ))}
                 </TableCell>
                 <TableCell className={hideOnCompact}>
                   <KindBadge kind={r.kind} />
@@ -116,6 +122,11 @@ export function RequestsTable({
                 </TableCell>
                 <TableCell className="text-right text-xs tabular">
                   {formatMs(r.duration_ms)}
+                  {!compact && r.stream && r.ttfb_ms !== null && (
+                    <div className="text-[11px] text-muted-foreground" title="Time to the first byte of the stream">
+                      first {formatMs(r.ttfb_ms)}
+                    </div>
+                  )}
                 </TableCell>
                 <TableCell className={cn("text-right text-xs", !priced && "pr-4", hideOnCompact)}>
                   <Tokens record={r} />

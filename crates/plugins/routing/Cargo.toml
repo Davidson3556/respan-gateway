@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-plugin-routing"
-description = "First-party plugin: route each request to a provider by its model."
+description = "First-party plugin: route each request by its model to providers picked by order, price, speed or weight, with fallback and hedging."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
+respan-gateway-plugin-fallback.workspace = true
+getrandom = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 respan-gateway-conversation.workspace = true

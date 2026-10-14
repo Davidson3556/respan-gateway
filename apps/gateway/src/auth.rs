@@ -147,6 +147,7 @@ fn attribute(req: &mut Request, client: &Client) {
     let mut calls = req.extensions_mut().remove::<Extensions>();
     let calls = calls.get_or_insert_with(Extensions::new);
     crate::requests::attribute(calls, &client.name);
+    calls.insert(respan_gateway_plugin_respan::Customer(client.name.clone()));
     calls.insert(client_id(&client.key));
     if let Some(tools) = &client.tools {
         calls.insert(ToolScope::new(tools.clone()));

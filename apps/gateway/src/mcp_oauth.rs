@@ -10,20 +10,22 @@
 //! expires, and a `401` from the server drops it, gets a new one and sends
 //! the call once more.
 //!
-//! The browser flow (authorization code with PKCE, and a person to approve
-//! it) is not here: a gateway has no person to ask. For such a server, give
-//! `key` a personal access token, or run the flow elsewhere and set the
-//! `refresh_token` it returns.
+//! A server a person must authorize (authorization code with PKCE, or a
+//! device code) is logged in to once, by `respan-gateway mcp login <name>`
+//! ([`crate::mcp_login`]), and named `auth = "login"`: the login it saved,
+//! [`Login`], is read at start, and a refresh token the endpoint rotates is
+//! written back to it, so a restart keeps it.
 //!
 //! A token, a secret and a refresh token are never logged, put in a fault,
 //! or shown by `Debug`.
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use respan_gateway_core::Fault;
 use respan_gateway_http::http::{HeaderValue, header};
 use respan_gateway_http_transport::reqwest;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -38,7 +40,68 @@ const DEFAULT_LIFETIME: Duration = Duration::from_secs(3600);
 /// The longest a token may live in the cache, whatever the endpoint says.
 const MAX_LIFETIME: Duration = Duration::from_secs(24 * 3600);
 
-/// `oauth` of an `mcp` server.
+/// What `mcp login` saved of a server's authorization, to get its tokens
+/// with: the client it registered and the refresh token it was given.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Login {
+    pub token_url: String,
+    pub client_id: String,
+    /// None for a public client, as one registered by the login is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    pub refresh_token: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// The server the tokens are for (RFC 8707), as its metadata names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+}
+
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Login")
+            .field("token_url", &crate::redact::url(&self.token_url))
+            .finish_non_exhaustive()
+    }
+}
+
+/// Where the logins of a config are kept: `.respan/mcp/` beside its file,
+/// else in the working directory.
+pub fn logins_dir(source: &crate::config::Source) -> PathBuf {
+    let base = match source {
+        crate::config::Source::File(path) => path.parent().map(Path::to_path_buf),
+        _ => None,
+    };
+    base.unwrap_or_default().join(".respan").join("mcp")
+}
+
+/// Writes `login` to `path`, readable by its owner alone, beside a
+/// `.gitignore` that keeps `.respan/` out of version control; atomically, so
+/// a reader never sees half of it.
+pub fn save(path: &Path, login: &Login) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    if let Some(respan) = dir.parent().filter(|d| d.ends_with(".respan")) {
+        let ignore = respan.join(".gitignore");
+        if !ignore.exists() {
+            std::fs::write(ignore, "*\n")?;
+        }
+    }
+    let text = serde_json::to_string_pretty(login).map_err(std::io::Error::other)?;
+    let temp = path.with_extension("json.tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    std::io::Write::write_all(&mut options.open(&temp)?, text.as_bytes())?;
+    std::fs::rename(temp, path)
+}
+
+/// `auth = { oauth = { .. } }` of an `mcp` server: the gateway's own client.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthConfig {
@@ -68,8 +131,12 @@ impl std::fmt::Debug for OAuthConfig {
 pub struct OAuth {
     token_url: reqwest::Url,
     client_id: String,
-    client_secret: String,
+    client_secret: Option<String>,
     scope: Option<String>,
+    resource: Option<String>,
+    /// The login file a rotated refresh token is written back to, and what
+    /// it holds.
+    saved: Option<(PathBuf, Login)>,
     http: reqwest::Client,
     state: Mutex<State>,
     /// `env X` or `config`, for a person to read.
@@ -95,8 +162,75 @@ impl OAuth {
     /// in a fault.
     pub fn new(owner: &str, config: &OAuthConfig) -> Result<Self, Fault> {
         let bad = |e: &str| Fault::config(format!("{owner}: oauth: {e}"));
-        let token_url = reqwest::Url::parse(config.token_url.trim())
-            .map_err(|_| bad("`token_url` is not a URL"))?;
+        let read = |what: &str, value: &str| {
+            let value = secret(&format!("{owner}: oauth {what}"), value)?;
+            match value.trim().is_empty() {
+                true => Err(bad(&format!("`{what}` is empty"))),
+                false => Ok(value),
+            }
+        };
+        let client_id = read("client_id", &config.client_id)?;
+        let client_secret = read("client_secret", &config.client_secret)?;
+        let refresh = match &config.refresh_token {
+            Some(token) => Some(read("refresh_token", token)?),
+            None => None,
+        };
+        let from = match config.client_secret.strip_prefix("env:") {
+            Some(var) => format!("env {var}"),
+            None => "config".to_owned(),
+        };
+        Self::build(
+            owner,
+            &config.token_url,
+            client_id,
+            Some(client_secret),
+            &config.scopes,
+            refresh,
+            from,
+        )
+    }
+
+    /// The source of server `name`'s login at `path`, which `mcp login`
+    /// saved.
+    pub fn login(owner: &str, name: &str, path: &Path) -> Result<Self, Fault> {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            Fault::config(format!(
+                "{owner}: oauth: no login at {} ({e}); run `respan-gateway mcp login {name}`",
+                path.display()
+            ))
+        })?;
+        let login: Login = serde_json::from_str(&text).map_err(|e| {
+            Fault::config(format!(
+                "{owner}: oauth: the login at {} is unreadable: {e}",
+                path.display()
+            ))
+        })?;
+        let mut oauth = Self::build(
+            owner,
+            &login.token_url,
+            login.client_id.clone(),
+            login.client_secret.clone(),
+            &login.scopes,
+            Some(login.refresh_token.clone()),
+            format!("login {}", path.display()),
+        )?;
+        oauth.resource.clone_from(&login.resource);
+        oauth.saved = Some((path.to_owned(), login));
+        Ok(oauth)
+    }
+
+    fn build(
+        owner: &str,
+        token_url: &str,
+        client_id: String,
+        client_secret: Option<String>,
+        scopes: &[String],
+        refresh: Option<String>,
+        source: String,
+    ) -> Result<Self, Fault> {
+        let bad = |e: &str| Fault::config(format!("{owner}: oauth: {e}"));
+        let token_url =
+            reqwest::Url::parse(token_url.trim()).map_err(|_| bad("`token_url` is not a URL"))?;
         if !matches!(token_url.scheme(), "http" | "https") || token_url.fragment().is_some() {
             return Err(bad("`token_url` is an http(s) URL with no fragment"));
         }
@@ -112,42 +246,27 @@ impl OAuth {
                  (plain http is for localhost only)",
             ));
         }
-        let read = |what: &str, value: &str| {
-            let value = secret(&format!("{owner}: oauth {what}"), value)?;
-            match value.trim().is_empty() {
-                true => Err(bad(&format!("`{what}` is empty"))),
-                false => Ok(value),
-            }
-        };
-        let client_id = read("client_id", &config.client_id)?;
-        let client_secret = read("client_secret", &config.client_secret)?;
-        let refresh = match &config.refresh_token {
-            Some(token) => Some(read("refresh_token", token)?),
-            None => None,
-        };
-        if config.scopes.iter().any(|s| {
+        if scopes.iter().any(|s| {
             s.is_empty() || s.contains(char::is_whitespace) || s.chars().any(char::is_control)
         }) {
             return Err(bad("a scope is one word, with no spaces"));
         }
-        let scope = (!config.scopes.is_empty()).then(|| config.scopes.join(" "));
+        let scope = (!scopes.is_empty()).then(|| scopes.join(" "));
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(TIMEOUT)
             .build()
             .map_err(|e| Fault::internal("no HTTP client for the token endpoint").with_source(e))?;
-        let from = |value: &str| match value.strip_prefix("env:") {
-            Some(var) => format!("env {var}"),
-            None => "config".to_owned(),
-        };
         Ok(Self {
             token_url,
             client_id,
             client_secret,
             scope,
+            resource: None,
+            saved: None,
             http,
             refreshing: refresh.is_some(),
-            source: from(&config.client_secret),
+            source,
             state: Mutex::new(State {
                 access: None,
                 refresh,
@@ -181,8 +300,22 @@ impl OAuth {
             token.clone(),
             Instant::now() + lifetime.saturating_sub(SKEW),
         ));
-        if rotated.is_some() {
-            state.refresh = rotated;
+        if let Some(rotated) = rotated {
+            if let Some((path, login)) = &self.saved {
+                // The old one is spent: a restart needs the new one.
+                let kept = Login {
+                    refresh_token: rotated.clone(),
+                    ..login.clone()
+                };
+                if let Err(e) = save(path, &kept) {
+                    eprintln!(
+                        "warning: the rotated refresh token could not be saved to {}: {e}; \
+                         log in again after a restart",
+                        path.display()
+                    );
+                }
+            }
+            state.refresh = Some(rotated);
         }
         Ok(token)
     }
@@ -201,10 +334,10 @@ impl OAuth {
         &self,
         refresh: Option<&str>,
     ) -> Result<(String, Duration, Option<String>), Fault> {
-        let mut form: Vec<(&str, &str)> = vec![
-            ("client_id", &self.client_id),
-            ("client_secret", &self.client_secret),
-        ];
+        let mut form: Vec<(&str, &str)> = vec![("client_id", &self.client_id)];
+        if let Some(secret) = &self.client_secret {
+            form.push(("client_secret", secret));
+        }
         match refresh {
             Some(token) => {
                 form.push(("grant_type", "refresh_token"));
@@ -214,6 +347,9 @@ impl OAuth {
         }
         if let Some(scope) = &self.scope {
             form.push(("scope", scope));
+        }
+        if let Some(resource) = &self.resource {
+            form.push(("resource", resource));
         }
         // application/x-www-form-urlencoded, as a URL's query is.
         let mut encoder = self.token_url.clone();

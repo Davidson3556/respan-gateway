@@ -183,7 +183,7 @@ impl App {
     pub async fn models(&self) -> (Vec<Value>, Vec<String>) {
         let built = self.shared.current();
         let models = Models::new(&built.plan.upstreams, built.plan.routes.clone());
-        models.collect().await
+        models.priced(&built.config.prices).collect().await
     }
 
     /// The report of `check --online`: one call to each provider with its

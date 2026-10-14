@@ -75,37 +75,3 @@ export function tokensPerSecond(r: RequestRecord): number | null {
   return tokens / (timing.rest / 1000);
 }
 
-const quote = (json: unknown) => `'${JSON.stringify(json).replaceAll("'", "'\\''")}'`;
-
-/**
- * A curl that repeats a request, with a minimal body of the right shape; the
- * gateway records no bodies, so the prompt is a stand-in. Null for traffic
- * that isn't a plain POST (WebSockets, polling).
- */
-export function reproduceCurl(r: RequestRecord, origin: string, withKey: boolean): string | null {
-  const model = r.model ?? "MODEL";
-  const bodies: Record<string, unknown> = {
-    "openai-chat": { model, messages: [{ role: "user", content: "hi" }], stream: r.stream },
-    "anthropic-messages": {
-      model,
-      max_tokens: 256,
-      messages: [{ role: "user", content: "hi" }],
-      stream: r.stream,
-    },
-    "gemini-generate": { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
-    "openai-images": { model, prompt: "a lighthouse at dusk" },
-    "openai-speech": { model, input: "Hello from the gateway.", voice: "alloy" },
-    "openai-embeddings": { model, input: "hello" },
-    "openai-videos": { model, prompt: "a paper boat" },
-  };
-  const lines = [`curl ${origin}${r.path} \\`];
-  if (withKey) lines.push(`  -H "Authorization: Bearer $GATEWAY_KEY" \\`);
-  if (r.method === "POST" && r.format === "openai-transcriptions") {
-    lines.push(`  -F file=@audio.mp3 \\`, `  -F model=${model}`);
-  } else if (r.method === "POST" && r.format && r.format in bodies) {
-    lines.push(`  -H "content-type: application/json" \\`, `  -d ${quote(bodies[r.format])}`);
-  } else {
-    return null;
-  }
-  return lines.join("\n");
-}

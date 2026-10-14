@@ -45,8 +45,23 @@ export function useMcpServers() {
   });
 }
 
-export function useRoutes() {
-  return useQuery({ queryKey: queryKeys.routes, queryFn: ({ signal }) => api.routes(signal) });
+/** The routes; `live` refetches them for each candidate's latest record. */
+export function useRoutes(live = false) {
+  return useQuery({
+    queryKey: queryKeys.routes,
+    queryFn: ({ signal }) => api.routes(signal),
+    refetchInterval: live ? 5000 : false,
+  });
+}
+
+/** Where a request for `model` of `kind` would go now; idle without a model. */
+export function useExplain(model: string, kind: string, client?: string) {
+  return useQuery({
+    queryKey: ["explain", model, kind, client ?? ""] as const,
+    queryFn: ({ signal }) => api.explain({ model, kind, client }, signal),
+    enabled: model.length > 0,
+    placeholderData: (previous) => previous,
+  });
 }
 
 /**

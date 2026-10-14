@@ -188,6 +188,13 @@ pub struct Config {
     /// vendor's origin. Clients of a format no other translates,
     /// `passthrough` or a session's, go to the one provider of that format.
     pub formats: Option<Vec<String>>,
+    /// Model routes by the model name clients ask for, or a glob of names
+    /// such as `llama-*`: where each goes, and how its candidates are
+    /// picked, retried and raced. An exact name is tried first, then a
+    /// `provider/model` name, then the globs in order, then each vendor's
+    /// own model names, then the kind's default.
+    #[serde(default)]
+    pub routes: IndexMap<String, RouteConfig>,
     /// MCP servers by name, each served to clients at `/mcp/{name}`: a
     /// streamable-HTTP `url`, or a stdio `command`. Name `mcp` in `formats`
     /// if that lists formats.
@@ -224,6 +231,7 @@ impl Default for Config {
             ui: true,
             providers: IndexMap::new(),
             formats: None,
+            routes: IndexMap::new(),
             mcp: IndexMap::new(),
             plugins: PluginsConfig::default(),
             cors: None,
@@ -265,32 +273,58 @@ pub enum Auth {
 
 /// The compiled-in plugins. Each is configured under its own name, and the
 /// gateway registers them in a fixed order: the request log, routing, the
-/// MCP aggregate, video jobs, the tool loop, hedge, then fallback. Video
+/// MCP aggregate, video jobs, the tool loop, then the dispatch of routes. Video
 /// jobs are always on; each vendor's quirks are a plugin of its providers,
 /// not of the gateway.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginsConfig {
-    /// Which provider each request goes to; always on.
+    /// Which provider each request goes to; always on. Its routes are
+    /// the top-level `routes`.
     #[serde(default)]
     pub routing: RoutingConfig,
-    /// Retry a request's target, then fall back to other providers; off if
-    /// unset.
-    pub fallback: Option<FallbackConfig>,
-    /// Race a request's target against other providers started a little
-    /// later; off if unset.
-    pub hedge: Option<HedgeConfig>,
+    /// Retired: a route's `to`, `fallback` and `tries`. Refused with how.
+    #[serde(default)]
+    pub fallback: Option<serde::de::IgnoredAny>,
+    /// Retired: a route's `hedge`. Refused with how.
+    #[serde(default)]
+    pub hedge: Option<serde::de::IgnoredAny>,
     /// Run tools of `mcp` servers inside chat requests; off if unset.
     pub tool_loop: Option<ToolLoopConfig>,
     /// Keep Responses translated to another provider's format, so a
     /// client's `previous_response_id` works with it; off if unset.
     pub responses: Option<ResponsesConfig>,
+    /// Send each request to Respan as a trace; off if unset.
+    pub respan: Option<RespanConfig>,
     /// One MCP endpoint, `/mcp`, that fronts the `mcp` servers as a single
     /// server (tools and prompts as `{server}__{name}`); off if unset.
     pub mcp_aggregate: Option<AggregateConfig>,
     /// The request history the web UI and admin API read; always on.
     #[serde(default)]
     pub request_log: RequestLogConfig,
+}
+
+/// Respan observability: each request a trace, sent to Respan.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RespanConfig {
+    /// The Respan API key, literal or `env:NAME`.
+    pub key: String,
+    /// The OTLP trace endpoint; Respan's if unset.
+    pub url: Option<String>,
+    /// Whether a model's messages and reply are sent; true if unset.
+    pub content: Option<bool>,
+    /// The service the traces are of; `respan-gateway` if unset.
+    pub service: Option<String>,
+}
+
+// Its key is a secret: not printed.
+impl std::fmt::Debug for RespanConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RespanConfig")
+            .field("content", &self.content)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Responses the gateway keeps, for `previous_response_id` with a provider
@@ -311,51 +345,131 @@ fn responses_keep<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoutingConfig {
-    /// Model routes: model prefix to provider, before the vendors' own
-    /// names, for every kind the provider serves.
+    /// Retired: the top-level `routes`. Refused with how.
     #[serde(default)]
-    pub models: Vec<ModelRoute>,
+    pub models: Option<serde::de::IgnoredAny>,
     /// The provider of each kind it serves for requests nothing else
     /// routes; the first provider serving the kind if unset.
     pub default: Option<String>,
+    /// Whether each provider's model list is read at start and every ten
+    /// minutes, so a model one lists goes to it, and routes can pick by
+    /// price and capability; true if unset.
+    pub listings: Option<bool>,
 }
 
-/// Fallback: a request to a provider with a chain is retried as `tries`
-/// allows, then sent to each provider of the chain in turn.
+/// One route: the candidates a model name goes to, and how they are
+/// picked, retried and raced.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FallbackConfig {
-    /// Each provider's chain: the providers tried after it, in order. An
-    /// empty chain retries the provider alone.
-    pub after: IndexMap<String, Vec<String>>,
-    /// Tries per provider, retries included; 1 if unset.
+pub struct RouteConfig {
+    /// Where it goes: `provider`, `provider/model` or `provider/{model}`
+    /// (`{model}` the name asked for), or a list of them, each alone or
+    /// as `{ target = "..", weight = 3 }`.
+    #[serde(deserialize_with = "route_targets")]
+    pub to: Vec<RouteTarget>,
+    /// How the candidates are ordered: `first` (as listed), `cheapest`
+    /// (by `prices` or the provider's listing: input plus three times
+    /// output), `fastest` (by the gateway's own record of each one's time
+    /// to a response), `weighted` or `random`. `first` if unset.
+    #[serde(default)]
+    pub pick: PickName,
+    /// What a candidate's model must be able to do, as its provider's
+    /// listing says, such as `tools` or `vision`; one the listing says
+    /// nothing of is kept.
+    #[serde(default)]
+    pub needs: Vec<String>,
+    /// Which requests it applies to; every request if unset.
+    #[serde(default)]
+    pub when: RouteWhen,
+    /// Whether a failed candidate falls back to the next; true if unset.
+    pub fallback: Option<bool>,
+    /// Races the candidates instead, each started this long after the one
+    /// before, such as `200ms`; off if unset.
+    #[serde(default, deserialize_with = "route_hedge")]
+    pub hedge: Option<Duration>,
+    /// Tries per candidate, retries included; 1 if unset.
     pub tries: Option<u32>,
     /// The first wait before a retry, doubled after each; 250 ms if unset.
-    #[serde(default, deserialize_with = "fallback_backoff")]
+    #[serde(default, deserialize_with = "route_backoff")]
     pub backoff: Option<Duration>,
     /// The longest wait before a retry; a `Retry-After` longer than it means
     /// no retry. 10 s if unset.
-    #[serde(default, deserialize_with = "fallback_max_backoff")]
+    #[serde(default, deserialize_with = "route_max_backoff")]
     pub max_backoff: Option<Duration>,
     /// How far an answer is read before it counts as a success.
     #[serde(default)]
     pub until: Commit,
 }
 
-/// Hedge: a request to a provider with a chain also goes to each provider
-/// of the chain, `stagger` after the one before; the first success wins.
-#[derive(Debug, Clone, Deserialize)]
+/// A route's candidate, alone or weighted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteTarget {
+    /// `provider`, `provider/model` or `provider/{model}`.
+    pub target: String,
+    /// Its share of requests for `pick = "weighted"`; 1 if unset.
+    pub weight: u32,
+}
+
+fn route_targets<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<RouteTarget>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Weighted {
+        target: String,
+        weight: Option<u32>,
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum One {
+        Plain(String),
+        Weighted(Weighted),
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Targets {
+        One(One),
+        Many(Vec<One>),
+    }
+    let shape = "routes: to: a target such as \"openai/gpt-4o\", \
+                 `{ target = \"..\", weight = 3 }`, or a list of them";
+    let targets = Targets::deserialize(d).map_err(|_| serde::de::Error::custom(shape))?;
+    let list = match targets {
+        Targets::One(one) => vec![one],
+        Targets::Many(many) => many,
+    };
+    Ok(list
+        .into_iter()
+        .map(|one| match one {
+            One::Plain(target) => RouteTarget { target, weight: 1 },
+            One::Weighted(w) => RouteTarget {
+                target: w.target,
+                weight: w.weight.unwrap_or(1),
+            },
+        })
+        .collect())
+}
+
+/// How a route orders its candidates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickName {
+    #[default]
+    First,
+    Cheapest,
+    Fastest,
+    Weighted,
+    Random,
+}
+
+/// Which requests a route applies to.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HedgeConfig {
-    /// Each provider's chain: the providers raced against it, started in
-    /// order.
-    pub after: IndexMap<String, Vec<String>>,
-    /// The wait before starting the next provider; 200 ms if unset.
-    #[serde(default, deserialize_with = "hedge_stagger")]
-    pub stagger: Option<Duration>,
-    /// How far an answer is read before it counts as a success.
+pub struct RouteWhen {
+    /// The client keys, by name; any if empty.
     #[serde(default)]
-    pub until: Commit,
+    pub clients: Vec<String>,
+    /// The kinds, such as `chat` or `embedding`; any if empty.
+    #[serde(default)]
+    pub kinds: Vec<String>,
 }
 
 /// How far an attempt's answer is read before it counts as a success, and
@@ -442,13 +556,6 @@ pub struct ToolLoopConfig {
     /// all its steps; 256 KiB if unset.
     #[serde(default, deserialize_with = "tool_loop_max_results")]
     pub max_results: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModelRoute {
-    pub prefix: String,
-    pub provider: String,
 }
 
 /// Where a configuration came from.
@@ -708,16 +815,16 @@ fn request_log_file_max<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>
     byte_size(d, "plugins: request_log: file_max")
 }
 
-fn fallback_backoff<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "plugins: fallback: backoff")
+fn route_backoff<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "routes: backoff")
 }
 
-fn fallback_max_backoff<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "plugins: fallback: max_backoff")
+fn route_max_backoff<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "routes: max_backoff")
 }
 
-fn hedge_stagger<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "plugins: hedge: stagger")
+fn route_hedge<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    span(d, "routes: hedge")
 }
 
 /// Dollars per million tokens of a model prefix.
@@ -922,7 +1029,7 @@ vendor = "anthropic"
     #[test]
     fn debug_shows_no_secret() {
         let config = Config::parse(
-            "client_keys = [\"bare-secret\", { name = \"ops\", key = \"named-secret\", admin = true }]\nproviders = { a = { vendor = \"openai\", key = \"prov-secret\", base_url = \"https://user:url-secret@h.test/v1?k=q-secret\" }, b = { formats = \"openai-chat\", base_url = \"http://b.test\", auth = { type = \"bearer\", key = \"auth-secret\" } } }\nmcp = { m = { command = [\"npx\", \"--token\", \"arg-secret\"], env = { T = \"env-secret\" } }, h = { url = \"https://h.test/mcp/tok-in-path\", key = \"mcp-secret\", oauth = { token_url = \"https://o.test/t\", client_id = \"cid\", client_secret = \"oauth-secret\" } } }\n",
+            "client_keys = [\"bare-secret\", { name = \"ops\", key = \"named-secret\", admin = true }]\nproviders = { a = { vendor = \"openai\", key = \"prov-secret\", base_url = \"https://user:url-secret@h.test/v1?k=q-secret\" }, b = { formats = \"openai-chat\", base_url = \"http://b.test\", auth = { type = \"bearer\", key = \"auth-secret\" } } }\nmcp = { m = { command = \"npx\", args = [\"--token\", \"arg-secret\"], env = { T = \"env-secret\" } }, h = { url = \"https://h.test/mcp/tok-in-path\", headers = { x-k = \"mcp-secret\" }, auth = { oauth = { token_url = \"https://o.test/t\", client_id = \"cid\", client_secret = \"oauth-secret\" } } }, b = { url = \"https://b.test/mcp\", auth = { bearer = \"bearer-secret\" } } }\n",
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let shown = format!("{config:?}");
@@ -936,6 +1043,7 @@ vendor = "anthropic"
             "arg-secret",
             "env-secret",
             "mcp-secret",
+            "bearer-secret",
             "oauth-secret",
             "tok-in-path",
         ] {
@@ -1065,8 +1173,8 @@ vendor = "anthropic"
                 "history",
             ),
             (
-                "plugins = { fallback = { after = {  }, backoff = \"soon\" } }\n",
-                "backoff",
+                "[routes.x]\nto = \"p\"\nbackoff = \"soon\"\n",
+                "routes: backoff",
             ),
             ("ws_message_limit = 0\n", "ws_message_limit"),
             ("ws_message_limit = \"big\"\n", "ws_message_limit"),
@@ -1110,8 +1218,11 @@ vendor = "anthropic"
             "client_keys = \"sk-secret-1\"\n",
             "providers = { p = { vendor = \"openai\", key = [\"sk-secret-1\"] } }\n",
             "providers = { p = { vendor = \"openai\", auth = \"sk-secret-1\" } }\n",
-            "mcp = { m = { command = [\"x\"], env = \"sk-secret-1\" } }\n",
-            "mcp = { m = { url = \"http://h.test\", key = { a = 1 }, forward_auth = \"sk-secret-1\" } }\n",
+            "mcp = { m = { command = \"x\", env = \"sk-secret-1\" } }\n",
+            "mcp = { m = { command = \"x\", args = \"sk-secret-1\" } }\n",
+            "mcp = { m = { url = \"http://h.test\", headers = \"sk-secret-1\" } }\n",
+            "mcp = { m = { url = \"http://h.test\", auth = \"sk-secret-1\" } }\n",
+            "mcp = { m = { url = \"http://h.test\", auth = { bearer = [\"sk-secret-1\"] } } }\n",
             "log = \"sk-secret-1\"\n",
             "providers = { p = { vendor = \"openai\", auth = { type = \"sk-secret-1\", key = \"k\" } } }\n",
         ] {
@@ -1147,23 +1258,50 @@ vendor = "anthropic"
     }
 
     #[test]
-    fn plugins_parse_under_their_names() {
-        let text = "plugins = { routing = { models = [{ prefix = \"llama\", provider = \"groq\" }], default = \"openai\" }, fallback = { after = { openai = [\"anthropic\"] }, tries = 2, backoff = \"100ms\", until = \"end\" }, hedge = { after = { openai = [\"openai-eu\"] }, stagger = \"300ms\" } }\n";
-        let plugins = Config::parse(text)
-            .unwrap_or_else(|e| panic!("{e}"))
-            .plugins;
-        assert_eq!(plugins.routing.models[0].provider, "groq");
-        assert_eq!(plugins.routing.default.as_deref(), Some("openai"));
-        let fallback = plugins.fallback.unwrap_or_else(|| panic!("fallback"));
-        assert_eq!(fallback.after["openai"], ["anthropic"]);
-        assert_eq!(fallback.tries, Some(2));
-        assert_eq!(fallback.backoff, Some(Duration::from_millis(100)));
-        assert_eq!(fallback.until, Commit::End);
-        let hedge = plugins.hedge.unwrap_or_else(|| panic!("hedge"));
-        assert_eq!(hedge.stagger, Some(Duration::from_millis(300)));
-        assert_eq!(hedge.until, Commit::Head);
-        let defaults = Config::parse("").unwrap_or_else(|e| panic!("{e}")).plugins;
-        assert!(defaults.fallback.is_none() && defaults.hedge.is_none());
+    fn routes_parse_by_model_name() {
+        let text = "plugins = { routing = { default = \"openai\" } }\n\
+                    [routes.smart]\n\
+                    to = [\"anthropic/claude\", { target = \"openai/gpt-5\", weight = 3 }]\n\
+                    pick = \"weighted\"\n\
+                    needs = [\"tools\"]\n\
+                    when = { clients = [\"ops\"], kinds = [\"chat\"] }\n\
+                    tries = 2\n\
+                    backoff = \"100ms\"\n\
+                    until = \"end\"\n\
+                    [routes.\"llama-*\"]\n\
+                    to = \"groq\"\n\
+                    hedge = \"300ms\"\n";
+        let config = Config::parse(text).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(config.plugins.routing.default.as_deref(), Some("openai"));
+        let smart = &config.routes["smart"];
+        assert_eq!(
+            smart.to,
+            [
+                RouteTarget {
+                    target: "anthropic/claude".into(),
+                    weight: 1
+                },
+                RouteTarget {
+                    target: "openai/gpt-5".into(),
+                    weight: 3
+                },
+            ]
+        );
+        assert_eq!(smart.pick, PickName::Weighted);
+        assert_eq!(smart.needs, ["tools"]);
+        assert_eq!(smart.when.clients, ["ops"]);
+        assert_eq!(smart.tries, Some(2));
+        assert_eq!(smart.backoff, Some(Duration::from_millis(100)));
+        assert_eq!(smart.until, Commit::End);
+        let llama = &config.routes["llama-*"];
+        assert_eq!(llama.to[0].target, "groq");
+        assert_eq!(llama.hedge, Some(Duration::from_millis(300)));
+        assert_eq!(llama.pick, PickName::First);
+        let said = Config::parse("[routes.x]\nto = 3\n")
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(said.contains("routes: to:"), "{said}");
     }
 
     #[test]

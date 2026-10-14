@@ -40,7 +40,7 @@ pub fn check(config: &AggregateConfig, servers: &[McpServer]) -> Result<Vec<Stri
     if names.is_empty() {
         return Err(bad(
             "no mcp server to front; list some under `mcp` (a server with \
-             `forward_auth` cannot be fronted)"
+             `auth = \"forward\"` cannot be fronted)"
                 .into(),
         ));
     }
@@ -58,7 +58,7 @@ pub fn check(config: &AggregateConfig, servers: &[McpServer]) -> Result<Vec<Stri
         if server.forward_auth {
             return Err(bad(format!(
                 "servers: mcp server '{name}' passes on a client's credentials \
-                 (`forward_auth`); the aggregate's sessions use each server's own"
+                 (`auth = \"forward\"`); the aggregate's sessions use each server's own"
             )));
         }
     }

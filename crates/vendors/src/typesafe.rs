@@ -2,6 +2,8 @@
 
 use respan_gateway_decision_http::SystemOne;
 
+use serde_json::Value;
+
 use crate::{
     Body, BoxFuture, Model, Models, Speaks, Vendor, VendorProvider, built_wrong, http, json,
 };
@@ -24,8 +26,11 @@ fn list_models(p: &VendorProvider) -> BoxFuture<'_, Models> {
         let (answer, _) = p.client()?.send(call.map_err(built_wrong)?).await?;
         let answer = json(answer).await?;
         let models = answer["models"].as_array().into_iter().flatten();
-        Ok(models
-            .filter_map(|m| Some(Model::new(m["name"].as_str()?)))
-            .collect())
+        let model = |m: &Value| {
+            let mut model = Model::new(m["name"].as_str()?);
+            model.description = m["description"].as_str().map(str::to_owned);
+            Some(model)
+        };
+        Ok(models.filter_map(model).collect())
     })
 }

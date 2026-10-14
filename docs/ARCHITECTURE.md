@@ -65,7 +65,8 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/vendor-kit/` | Vendors | A vendor as a template (`Vendor`), and a provider of it (`VendorProvider`): each format (any core `Format`, named by a vendor as `&Speaks::http(F)` or `&Speaks::ws(F, ..)`) at its base URL with its key and quirks, registered; its model list and a client of it | Core, HTTP, HTTP faults, HTTP transport, WS; no format |
 | `crates/vendors/` | Vendors | Every vendor, a file each, and their quirks: data and plugins (such as Groq's usage, DeepSeek's `reasoning_content`, Gemini's `thought_signature` placeholder) | The vendor kit, core, the formats, and the conversation and realtime kinds (for quirk plugins) |
 | `crates/serve/` | Hosting | One Axum router for a gateway: plain HTTP and WebSocket upgrades, body and session limits, graceful stop | Core, HTTP, WS |
-| `crates/plugins/*` | Plugins, one crate each | `routing` (`Routes`, `Routing`), `fallback` (`Fallback`, and the attempt, race and backoff helpers) and `tool-loop` (`ToolLoop`, and the `ToolFilter` and `ToolScope` that say which tools are offered) | Core and the conversation kind |
+| `crates/plugins/*` | Plugins, one crate each | `routing` (`Routes`, `Rule`, `Routing`, and `Dispatch`, which sends a request to a rule's candidates), `fallback` (`Fallback`, `Hedge`, and the attempt, race and backoff helpers `Dispatch` is built on) and `tool-loop` (`ToolLoop`, and the `ToolFilter` and `ToolScope` that say which tools are offered) | Core and the conversation kind |
+| `crates/plugins/respan/` | Plugin | `Respan`: each request a trace sent to Respan over OTLP, a span per call to a model or tool server, posted in batches off the request path | Core, the conversation kind, HTTP transport |
 | `crates/plugins/relay/` | Plugin | `Relay`: a client's request, key, response head and error body forwarded as they came, to a provider of its own format | Core, HTTP |
 | `crates/plugins/credentials/` | Plugin | `ClientCredentials`: a client's own key headers to the named providers that have no key of their own, of the client's format | Core, HTTP |
 | `crates/plugins/mcp-aggregate/` | Plugin | `Aggregate`: one MCP endpoint, `/mcp`, fronting many MCP servers as a single server | Core, HTTP, MCP, mcp-http, tool loop (`ToolFilter`, `ToolScope`) |
@@ -161,16 +162,34 @@ A configured provider is one core provider per format it speaks (`openai`,
 `openai:openai-realtime`, ...), each added to `Routes` as what it `Speaks`.
 Of the providers serving the request's kind, the router picks:
 
-1. `provider/model` with `provider` configured, sending `model` alone;
-2. else the `models` tables, the last defined first;
-3. else the longest claimed prefix (the binary claims each vendor's
-   usual model names, `vendors::claims`);
-4. else the kind's default: the target if it serves the kind, else the
+1. the candidates of a `Rule` named exactly the model;
+2. else `provider/model` with `provider` configured, sending `model` alone;
+3. else the candidates of the first glob `Rule` (`llama-*`) that matches,
+   in the order added;
+4. else the provider whose model listing names it (`Catalog::lists`, read
+   from the listings the binary fetches at start and every ten minutes
+   unless `plugins.routing.listings = false`); of several, the one that
+   claims the name, else the first configured;
+5. else the longest claimed prefix (the binary claims each vendor's
+   usual model names, `vendors::claims`), for aliases and unlisted models;
+6. else the kind's default: the target if it serves the kind, else the
    first provider that does.
 
-It then targets that provider's core provider of the client's own format,
-else, for a kind that translates, its first of the kind. A request of a
-format the router was not given keeps its target.
+A rule none of whose candidates serve the kind, or whose clients or kinds
+exclude the request, is skipped. A rule orders its `Candidate`s by its
+`Pick` (as listed, cheapest, fastest, by weight or at random), from what the
+providers' listings say (`Catalog`, `Facts`: price and capabilities, for
+`needs`) and what the router saw of its own calls (`Stats`: a latency moving
+average and error rate per candidate, recorded in `on_provider_end`); one
+that failed its last 3 calls within 30 s goes last. `Routes::plan` gives the
+`Planned` candidates (each a `Chosen`), why (`By`) and those passed over.
+
+It then targets the first candidate's core provider of the client's own
+format, else, for a kind that translates, its first of the kind, and sends
+it its model. `Dispatch`, registered last, sends a rule-routed request to its
+candidates as the rule says: in turn with retries (`first_success`), or raced
+(`race`, its `hedge`). A request of a format the router was not given keeps
+its target.
 
 ## Design constraints
 
@@ -322,14 +341,14 @@ providers. `apps/gateway/src/mcp.rs` composes them as one format, `mcp`
 (kind `mcp`, which does not translate), whose clients are served at
 `/mcp/{name}` for the configured names only (`StreamableHttp::serving`) and
 whose servers are core providers named by their `mcp:` key, each with its own
-`StreamableHttp` toward it (HTTP upstream path as configured, headers its key)
+`StreamableHttp` toward it (HTTP upstream path as configured, its `headers` and `auth` as headers)
 or its own `StdioTransport` (one child per client session, limits at the
 transport's defaults but 32 sessions). `Routing` does not route the kind; a
 small plugin, `McpRoute`, targets the server named by the request path, so a
 client cannot choose another's. Credentials follow the provider rule: an
 upstream key replaces the client's, and `ClientCredentials`
 (`crates/plugins/credentials`) forwards a
-client's only to a server with `forward_auth`. The request log shows the
+client's only to a server with `auth = "forward"`. The request log shows the
 method (and tool, prompt or resource) where other kinds show a model; the
 server is the provider. Children are the transport's: process groups,
 `stdin` closed then SIGTERM then SIGKILL, and `kill_on_drop` when the runtime
@@ -380,9 +399,9 @@ closers of the tool loop's and the aggregate's sessions; the request log
 (`request_log`); routing (`routing`); the MCP aggregate (`mcp_aggregate`) and
 `/mcp/{name}` routing; video jobs (`VideoJobs` and `LocateContent`, of the
 media kind); whose credentials go where; the tool loop
-(`tool_loop`); then hedge (`hedge`) and fallback (`fallback`). Routing, the
-request log, MCP routing, video jobs and credentials are always on; the tool
-loop, the aggregate, hedge and fallback only when configured.
+(`tool_loop`); then the dispatch of routes (`Dispatch`). Routing, dispatch,
+the request log, MCP routing, video jobs and credentials are always on; the
+tool loop and the aggregate only when configured.
 
 A vendor's quirks are not one of the gateway's plugins: they are a plugin
 of each of its providers (the vendor's `Provider::plugin`, given to the core
@@ -392,14 +411,15 @@ its filters are the provider edge's innermost and every plugin sees the
 kind's events. Nothing turns it off.
 
 The order is what makes them compose. Plugins that target and edit a request
-come before the ones that answer it themselves (the tool loop, hedge,
-fallback), and the first of those that applies answers it: a request the tool
-loop runs is not hedged or retried, and a hedged one is not retried.
+come before the ones that answer it themselves (the tool loop, dispatch),
+and the first of those that applies answers it: a request the tool loop runs
+is not sent to a route's other candidates.
 
-Fallback and hedge chains name configured providers; `apps/gateway/src/attempts.rs`
-turns them into chains of core providers, one per format of the target: each
-provider of the chain by its core provider of that format, else, for a kind
-that translates, its first of the kind.
+Routes (the top-level `routes`) name configured providers;
+`apps/gateway/src/rules.rs` turns each into a `Rule`, its `fallback`, `tries`,
+`backoff`, `hedge` and `until` the rule's attempts, and refuses the retired
+`plugins.routing.models`, `plugins.fallback` and `plugins.hedge` saying how
+each is now written.
 
 ## The tool loop
 
@@ -429,7 +449,7 @@ transport's; the call carries the `Owner` of no client key, and
 field), through a session the runner keeps per server and restarts when lost,
 and a per-server tool list with a TTL, filtered by `plugins.tool_loop.allow` and
 `plugins.tool_loop.deny` (patterns over the name the model has). The config check refuses
-servers with `forward_auth`. `check --online` asks the same runner, through a
+servers with `auth = "forward"`. `check --online` asks the same runner, through a
 request of the gateway's own marked with an extension no client can send, for
 the tools it offers. The steps and tool calls go to the request log through the
 plugin's observer (`ToolLoop::observe`), which the recorder's entry implements.

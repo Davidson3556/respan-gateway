@@ -1,7 +1,7 @@
 // A realtime voice session against the gateway: the WebSocket, in any API
 // the playground speaks (realtime-apis), and the reducer that turns its
 // events, as OpenAI Realtime's, into what the page shows. The audio itself
-// is handled beside this, in realtime-audio.
+// is handled beside this, in realtime-io.
 
 import type { ClientMessage, RealtimeApi } from "@/lib/realtime-apis";
 

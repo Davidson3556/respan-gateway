@@ -82,7 +82,8 @@ curl localhost:8080/v1/videos -d '{"model":"veo-3.0-generate-001","prompt":"a pa
 ```
 
 Other endpoints: `GET /v1/models` (every provider's models with their
-`kind`; `/v1beta/models` in Gemini's shape), `GET /healthz`, and the web UI
+`kind`, and each exact route name, `owned_by: "routes"`; `/v1beta/models` in
+Gemini's shape), `GET /healthz`, and the web UI
 at [localhost:8080/ui/](http://localhost:8080/ui/).
 
 ## The binary
@@ -134,18 +135,20 @@ needs `client_keys`. Without `cors`, nothing changes.
 [`gateway.example.toml`](gateway.example.toml): providers (vendors or
 spelled out), `formats` served, `client_keys`, `mcp` servers, `cors`,
 `listen`, `log`, `ui`, `body_limit`, `ws_message_limit`,
-`prices` (adds a cost to each request), `shutdown_grace`, and `plugins`. Each
-compiled-in plugin is configured under its own name in `plugins`, and the
-gateway runs them in a fixed order whatever the file's:
+`prices` (adds a cost to each request), `shutdown_grace`, `routes`, and
+`plugins`. Each compiled-in plugin is configured under its own name in
+`plugins`, and the gateway runs them in a fixed order whatever the file's:
 
 ```toml
 [plugins.routing]
-default = "openai"
-models = [{ prefix = "llama", provider = "groq" }]
+default = "openai"                      # Each kind's default provider
 
-[plugins.fallback]                      # Enable the backup provider first
-after = { openai = ["backup"] }
-tries = 2
+[routes.smart]                          # Clients send "model": "smart"
+to = ["anthropic/claude-opus-4-1", "openai/gpt-5"]
+tries = 2                               # Then the next candidate
+
+[routes."llama-*"]
+to = "groq"                             # Sent as asked
 
 [plugins.request_log]
 history = 1000
@@ -153,6 +156,10 @@ file = "./requests.jsonl"               # Keep history across restarts
 
 [plugins.responses]                     # previous_response_id with any provider
 keep = "1h"
+
+[plugins.respan]                        # Each request a trace in Respan
+key = "env:RESPAN_API_KEY"
+# content = false                       # Metadata only: no messages or replies
 ```
 
 OpenAI keeps its own Responses, so a Responses client's `previous_response_id`
@@ -172,12 +179,29 @@ output stays plain. Use `--color auto|always|never` (`RESPAN_COLOR`) to
 control this; automatic colors respect `NO_COLOR`. `--log json` emits
 unstyled structured logs and `--log off` disables request logs.
 
-Routing order: `name/model` goes to provider `name`; else `routing.models`
-(the first listed prefix a model matches); else the vendors' prefixes
-(longest wins); else `routing.default`, or the kind's first provider
-([routing](docs/ARCHITECTURE.md#routing)). Fallback retries a provider listed
-under `after` (as `Retry-After` asks), then tries each of its chain in turn;
-hedge races them instead, each started `stagger` after the last. The request
+**Routes** are keyed by the model clients ask for, exact (`smart`, listed in
+`/v1/models`) or a glob (`"llama-*"`). `to` is a candidate or a list:
+`provider`, `provider/model`, or `provider/{model}` (`{model}` the name asked),
+each alone or `{ target, weight }`. `pick` orders them: `first` (default),
+`cheapest` (by `prices` or the provider's listing, input + 3 × output),
+`fastest` (the gateway's own time to first response; unknown ones get
+tried), `weighted` or `random`. `needs = ["tools"]` drops candidates whose
+listing lacks it; `when = { clients, kinds }` limits a route to client key
+names and kinds. A failed candidate falls back to the next (`fallback =
+false` stops it), each tried `tries` times (1 to 10) with `backoff` doubled up
+to `max_backoff` (as `Retry-After` asks); `hedge = "200ms"` races them
+instead, each started that long after the last. `until = "end"` holds an
+answer whole before it counts. A candidate that failed its last 3 calls
+within 30 s goes last, and a response carries the provider's real model.
+
+Routing order: a route of that exact name; else `name/model` goes to provider
+`name`; else the first glob route (in config order); else the provider whose
+model list has it (of several, the vendor that claims the name); else the
+vendors' prefixes (longest wins), for aliases and unlisted models; else
+`routing.default`, or the kind's first provider
+([routing](docs/ARCHITECTURE.md#routing)). A route whose candidates don't serve
+the request's kind, or whose `when` doesn't match, is skipped. `GET
+/ui/api/routes/explain?model=M` says where a model goes and why. The request
 log's file is rotated at `file_max`, and `/ui/api/requests/export` downloads
 the history.
 
@@ -200,8 +224,9 @@ excludes a key). `tools` limits the tool-loop tools (`server__tool` globs, as
 
 **Admin config** (needs an admin key, like the rest of `/ui/api/`):
 `GET /ui/api/config` shows the config file as on disk with every secret
-(`client_keys`, provider and MCP `key`/`auth.key`, MCP `env` values and
-program arguments, and MCP URLs that carry credentials) as `"…"`, while an
+(`client_keys`, provider `key`/`auth.key`, MCP `headers`, `auth.bearer`,
+OAuth client secret and refresh token, `env` values and `args`, and URLs that
+carry credentials) as `"…"`, while an
 `env:NAME` reference stays as written. The Config page is read-only.
 Edit the TOML file on disk, then use Reload to apply changes.
 
@@ -214,16 +239,28 @@ clients over streamable HTTP at `/mcp/{name}`:
 ```toml
 [mcp.github]                       # HTTP upstream
 url = "https://api.githubcopilot.com/mcp/"
-key = "env:GITHUB_TOKEN"
+auth = { bearer = "env:GITHUB_TOKEN" }
 
 [mcp.files]                        # stdio upstream
-command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
 ```
 
-A client points its MCP config at `http://localhost:8080/mcp/github` with a
-gateway key; the upstream key (`key`, or `auth` for another header) stays on
-the gateway, and a client's own credentials are not sent on unless the server
-says `forward_auth: true`. A stdio server runs as a child process, one per
+The fields are those of an MCP client's `mcp.json`, so an entry copies
+across: a `url` with `headers` and `auth`, or a `command` with `args`, `env`
+and `cwd`. A client points its MCP config at `http://localhost:8080/mcp/github`
+with a gateway key; the upstream credentials stay on the gateway. `headers`
+(values literal or `env:NAME`, all treated as secrets) carries a key in a
+header of its own, such as `{ "x-api-key" = "env:KEY" }`. `auth` is one of:
+
+- `{ bearer = "env:KEY" }`: a key, sent as `Authorization: Bearer`.
+- `{ oauth = { .. } }`: the gateway's own OAuth client (below).
+- `"login"`: the login `respan-gateway mcp login <name>` saved in
+  `.respan/mcp/<name>.json` beside the config.
+- `"forward"`: each client's own credentials are sent on; without it they
+  never are.
+
+A stdio server runs as a child process, one per
 client session, started when the session initializes (the `command` must be
 on `PATH` at startup; on Windows `npx` finds `npx.cmd` through `PATHEXT`, and
 the child and what it started are all ended with the session), given only `PATH` and its `env` (values literal or
@@ -241,7 +278,7 @@ naming its `Mcp-Session-Id` gets 404. Name `mcp` in `formats` if you list
 formats.
 
 **OAuth for an HTTP server.** For a server that wants an OAuth access token
-rather than a fixed key, give it `oauth` and the gateway gets its own token
+rather than a fixed key, give it `auth = { oauth = { .. } }` and the gateway gets its own token
 from the token endpoint (machine to machine) and sends it as the Bearer
 token:
 
@@ -249,7 +286,7 @@ token:
 [mcp.crm]
 url = "https://mcp.example.com/mcp"
 
-[mcp.crm.oauth]
+[mcp.crm.auth.oauth]
 token_url = "https://auth.example.com/oauth/token"
 client_id = "env:CRM_CLIENT_ID"
 client_secret = "env:CRM_CLIENT_SECRET"
@@ -265,17 +302,16 @@ environment if the old one was revoked). The access token is cached until it
 expires, and a `401` from the server drops it, gets a new one and sends the
 call once more. `client_id`, `client_secret` and `refresh_token` are literal
 or `env:NAME`; none is logged or shown by `check`, the admin API or the UI.
-`oauth` replaces `key` and `auth` and cannot be combined with `forward_auth`.
-The browser flow (authorization code with PKCE, with a person to approve it)
-is not supported: for such a server use a personal access token as `key`, or
-authorize elsewhere and set the `refresh_token` it gives you.
+For a server that wants a person to approve in a browser (authorization code
+with PKCE), run `respan-gateway mcp login <name>` once and set
+`auth = "login"`.
 
 **One endpoint for all of them.** `[plugins.mcp_aggregate]` turns on `/mcp`, which
 fronts the `mcp` servers as a single MCP server, so a client configures one
 URL:
 
 ```toml
-[plugins.mcp_aggregate]             # All servers without forward_auth by default
+[plugins.mcp_aggregate]             # All servers but `auth = "forward"` ones
 # servers = ["github", "files"]     # Or choose servers, in list order
 # allow = ["github__search_*"]      # Default: all tools
 # deny = ["files__write_*"]         # Wins over allow
@@ -306,7 +342,7 @@ its `DELETE`. What the client sees:
 A server that does not answer `initialize` is left out of that session; the
 aggregate fails only if none does. A session's server sessions are ended by
 the client's `DELETE`; one that never comes is left to each server's idle
-timeout. Servers with `forward_auth` cannot be fronted (the sessions are the
+timeout. Servers with `auth = "forward"` cannot be fronted (the sessions are the
 gateway's own). Each server stays at `/mcp/{name}` too.
 
 ### Tool loop
@@ -369,7 +405,7 @@ header `x-respan-tool-loop: off`.
   `thoughtSignature` are in the assistant message of the next step, as those
   providers require. A provider-run tool's blocks are not replayed.
 - Tools run with the server's own credentials, never a client's (a server with
-  `forward_auth` cannot be a tool server). The gateway is an MCP client of its
+  `auth = "forward"` cannot be a tool server). The gateway is an MCP client of its
   own: one session per server, kept across requests and started again when
   lost, and each tool list kept for `tool_list_ttl`. At a config reload the old
   build's sessions are ended (an HTTP server's `DELETE`d, a stdio server's
@@ -449,7 +485,7 @@ runnable, tested [`examples/`](examples/README.md) of the
 | `crates/formats/` | A kind over a wire, no vendor: `conversation-http`, `media-http`, `decision-http`, `realtime-ws`, `mcp-http` |
 | `crates/vendor-kit/` | A vendor as a template, and a provider of it: register its formats, list its models |
 | `crates/vendors/` | Every vendor, a file each: URL, key, formats, quirks |
-| `crates/plugins/routing`, `fallback`, `tool-loop` | First-party plugins: model routing; retry, fallback and race; the tool loop |
+| `crates/plugins/routing`, `fallback`, `tool-loop` | First-party plugins: model routing and dispatch to a route's candidates; retry, fallback and race; the tool loop |
 | `crates/serve/` | Hosting: one Axum router for HTTP and WebSocket sessions |
 | `apps/gateway/` | The binary and its library: config, composition, client keys, `/v1/models`, request log, admin API |
 | `apps/ui/` | The web UI (React, shadcn/ui), embedded in the binary |

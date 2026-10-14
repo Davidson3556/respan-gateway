@@ -44,7 +44,7 @@ fn one_provider(format: &str, base_url: &str) -> String {
 /// routed to Anthropic, the rest to OpenAI, as in `gateway.example.toml`.
 fn both(openai: &str, anthropic: &str) -> String {
     format!(
-        "providers = {{ openai = {{ formats = \"openai-chat\", base_url = \"{openai}\", auth = {{ type = \"bearer\", key = \"sk-gw-openai\" }} }}, anthropic = {{ formats = \"anthropic-messages\", base_url = \"{anthropic}\", auth = {{ type = \"header\", name = \"x-api-key\", key = \"sk-gw-anthropic\" }} }} }}\nformats = [\"openai-chat\", \"anthropic-messages\"]\nplugins = {{ routing = {{ models = [{{ prefix = \"claude\", provider = \"anthropic\" }}], default = \"openai\" }} }}\n"
+        "providers = {{ openai = {{ formats = \"openai-chat\", base_url = \"{openai}\", auth = {{ type = \"bearer\", key = \"sk-gw-openai\" }} }}, anthropic = {{ formats = \"anthropic-messages\", base_url = \"{anthropic}\", auth = {{ type = \"header\", name = \"x-api-key\", key = \"sk-gw-anthropic\" }} }} }}\nformats = [\"openai-chat\", \"anthropic-messages\"]\nplugins = {{ routing = {{ default = \"openai\" }} }}\n[routes.\"claude*\"]\nto = \"anthropic\"\n"
     )
 }
 
@@ -516,7 +516,7 @@ async fn an_anthropic_client_gets_an_openai_stream_in_anthropic_shape() {
 async fn an_openai_clients_key_does_not_reach_an_anthropic_provider_without_one() {
     let (openai, anthropic) = (FakeOpenAi::start().await, FakeAnthropic::start().await);
     let config = format!(
-        "providers = {{ openai = {{ formats = \"openai-chat\", base_url = \"{}\" }}, anthropic = {{ formats = \"anthropic-messages\", base_url = \"{}\" }} }}\nformats = [\"openai-chat\"]\nplugins = {{ routing = {{ models = [{{ prefix = \"claude\", provider = \"anthropic\" }}], default = \"openai\" }} }}\n",
+        "providers = {{ openai = {{ formats = \"openai-chat\", base_url = \"{}\" }}, anthropic = {{ formats = \"anthropic-messages\", base_url = \"{}\" }} }}\nformats = [\"openai-chat\"]\nplugins = {{ routing = {{ default = \"openai\" }} }}\n[routes.\"claude*\"]\nto = \"anthropic\"\n",
         openai.base_url(),
         anthropic.base_url()
     );

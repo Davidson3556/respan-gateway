@@ -8,7 +8,11 @@ use crate::App;
 /// The gateway of `text`, its plugins included.
 fn resolve(text: &str) -> Result<Gateway, String> {
     Config::parse(text)
-        .and_then(App::new)
+        .and_then(|mut config| {
+            // A provider sees only the calls a test makes.
+            config.plugins.routing.listings.get_or_insert(false);
+            App::new(config)
+        })
         .map(|app| app.gateway().clone())
         .map_err(|e| e.to_string())
 }
@@ -47,10 +51,9 @@ fn models_asked(mock: &FakeOpenAi) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn the_first_listed_prefix_a_model_matches_wins() {
-    let text = format!(
-        "{TWO}plugins = {{ routing = {{ models = [{{ prefix = \"claude\", provider = \"a\" }}, {{ prefix = \"claude-3\", provider = \"b\" }}] }} }}\n"
-    );
+async fn the_first_listed_glob_a_model_matches_wins() {
+    let text =
+        format!("{TWO}[routes.\"claude*\"]\nto = \"a\"\n[routes.\"claude-3*\"]\nto = \"b\"\n");
     let (gateway, a, b) = local(&text).await;
     request(&gateway, "claude-3-x").await;
     assert_eq!(a.requests().len(), 1);
@@ -61,7 +64,7 @@ async fn the_first_listed_prefix_a_model_matches_wins() {
 #[tokio::test]
 async fn the_default_target_answers_what_no_router_targets() {
     let text = format!(
-        "{TWO}plugins = {{ routing = {{ default = \"b\", models = [{{ prefix = \"claude\", provider = \"a\" }}] }} }}\n"
+        "{TWO}plugins = {{ routing = {{ default = \"b\" }} }}\n[routes.\"claude*\"]\nto = \"a\"\n"
     );
     let (gateway, a, b) = local(&text).await;
     request(&gateway, "gpt-x").await;
@@ -451,12 +454,11 @@ fn a_bad_base_url_or_auth_header_is_an_error() {
 
 #[test]
 fn a_bad_plugin_or_default_is_an_error() {
-    let router = "models = [{ prefix = \"c\", provider = \"a\" }]";
+    let router = "default = \"a\"";
     let cases = [
         (
-            "plugins = { routing = { models = [{ prefix = \"c\", provider = \"nope\" }] } }\n"
-                .to_owned(),
-            "plugins: routing: models: unknown provider 'nope'; providers: [a, b]",
+            "[routes.c]\nto = \"nope\"\n".to_owned(),
+            "routes: c: to: unknown provider 'nope'; providers: [a, b]",
         ),
         (
             "plugins = { routing = { default = \"nope\" } }\n".to_owned(),
@@ -476,12 +478,10 @@ fn a_bad_plugin_or_default_is_an_error() {
 fn a_session_provider_is_websocket_and_its_clients_go_to_it_alone() {
     let realtime =
         "realtime = { formats = \"openai-realtime\", base_url = \"wss://api.openai.com/v1\" }";
+    // Its base, given as the vendor's SDKs take it, in its scheme.
+    let lone = "providers = { p = { formats = \"gemini-live\", base_url = \"https://x.test\" } }\nformats = []\n";
+    assert!(resolve(lone).is_ok(), "{:?}", resolve(lone).err());
     let cases = [
-        (
-            "providers = { p = { formats = \"gemini-live\", base_url = \"https://x.test\" } }\nformats = []\n"
-                .to_owned(),
-            "provider 'p': bad base URL: ws or wss with a host, and no query, fragment or credentials (those go in its headers)",
-        ),
         (
             "providers = { p = { formats = \"openai-chat\", base_url = \"http://x.test\" } }\nformats = [\"responses-ws\"]\n"
                 .to_owned(),
@@ -493,24 +493,22 @@ fn a_session_provider_is_websocket_and_its_clients_go_to_it_alone() {
     }
     let both = format!("providers = {{ {realtime} }}\nformats = [\"openai-realtime\"]");
     assert!(resolve(&both).is_ok());
-    // A models route applies to every kind its provider serves.
-    let routed = format!(
-        "{both}\nplugins = {{ routing = {{ models = [{{ prefix = \"gpt\", provider = \"realtime\" }}] }} }}\n"
-    );
+    // A route applies to every kind its provider serves.
+    let routed = format!("{both}\n[routes.\"gpt*\"]\nto = \"realtime\"\n");
     assert!(resolve(&routed).is_ok());
 }
 
 #[tokio::test]
-async fn a_models_route_applies_to_every_kind_its_provider_serves() {
-    let text = "providers = { chat = { formats = \"openai-chat\", base_url = \"https://a.test/v1\", key = \"k\" }, asr = { formats = \"openai-transcriptions\", base_url = \"https://b.test/v1\", key = \"k\" } }\nformats = [\"openai-chat\", \"openai-transcriptions\"]\nplugins = { routing = { models = [{ prefix = \"voice\", provider = \"asr\" }, { prefix = \"voice-chat\", provider = \"chat\" }] } }\n";
+async fn a_route_applies_to_every_kind_its_provider_serves() {
+    let text = "providers = { chat = { formats = \"openai-chat\", base_url = \"https://a.test/v1\", key = \"k\" }, asr = { formats = \"openai-transcriptions\", base_url = \"https://b.test/v1\", key = \"k\" } }\nformats = [\"openai-chat\", \"openai-transcriptions\"]\n[routes.\"voice*\"]\nto = \"asr\"\n[routes.\"voice-chat*\"]\nto = \"chat\"\n";
     let plan = plan(text).unwrap_or_else(|e| panic!("{e}"));
     let route = |kind, format, model| {
         plan.routes
             .route(kind, format, Some(model))
             .map(|r| r.provider)
     };
-    // The prefix reaches the provider of each kind that serves it; a kind
-    // the provider does not serve falls through to that kind's default.
+    // The glob reaches the provider of each kind that serves it; a kind
+    // the provider does not serve falls through to the next route.
     let transcription = route(kind::TRANSCRIPTION, "openai-transcriptions", "voice-1");
     assert_eq!(transcription.as_deref(), Some("asr"));
     let chat = route(kind::CHAT, "openai-chat", "voice-1");
@@ -519,7 +517,7 @@ async fn a_models_route_applies_to_every_kind_its_provider_serves() {
 
 #[tokio::test]
 async fn responses_are_served_by_default_natively_where_a_provider_speaks_them() {
-    let text = "providers = { a = { formats = [\"openai-chat\", \"openai-responses\"], base_url = \"https://a.test/v1\", auth = { type = \"bearer\", key = \"sk-test\" } }, b = { formats = \"openai-chat\", base_url = \"https://b.test/v1\", auth = { type = \"bearer\", key = \"sk-test\" } } }\nplugins = { routing = { models = [{ prefix = \"gpt\", provider = \"a\" }, { prefix = \"llama\", provider = \"b\" }] } }\n";
+    let text = "providers = { a = { formats = [\"openai-chat\", \"openai-responses\"], base_url = \"https://a.test/v1\", auth = { type = \"bearer\", key = \"sk-test\" } }, b = { formats = \"openai-chat\", base_url = \"https://b.test/v1\", auth = { type = \"bearer\", key = \"sk-test\" } } }\n[routes.\"gpt*\"]\nto = \"a\"\n[routes.\"llama*\"]\nto = \"b\"\n";
     let (gateway, a, b) = local(text).await;
     let send = |path: &'static str, body: serde_json::Value| {
         let gateway = gateway.clone();
@@ -673,15 +671,15 @@ fn a_vendors_model_name_with_a_slash_goes_to_the_provider_that_serves_it() {
     );
 }
 
-/// Two providers `a` and `b`, `a` the default, under `plugins`; `a` answers
+/// Two providers `a` and `b`, and `route` for `gpt-x`; `a` answers
 /// `first`, `b` answers `b`.
-async fn with_attempts(plugins: &str, first: Answer) -> (Gateway, FakeOpenAi, FakeOpenAi) {
+async fn routed(route: &str, first: Answer) -> (Gateway, FakeOpenAi, FakeOpenAi) {
     let a = FakeOpenAi::start().await;
     let b = FakeOpenAi::start().await;
     a.answer(first);
     b.answer(Answer::text("b"));
     let text = format!(
-        "{}plugins = {{ routing = {{ default = \"a\" }}, {plugins} }}",
+        "{}[routes.\"gpt-x\"]\n{route}\n",
         TWO.replace("https://a.test/v1", &a.base_url())
             .replace("https://b.test/v1", &b.base_url())
     );
@@ -690,47 +688,69 @@ async fn with_attempts(plugins: &str, first: Answer) -> (Gateway, FakeOpenAi, Fa
 }
 
 #[tokio::test]
-async fn fallback_sends_a_refused_request_down_its_chain() {
+async fn a_route_falls_back_to_its_next_candidate() {
     let refused = Answer::error(503).message("overloaded");
-    let (gateway, a, b) = with_attempts("fallback = { after = { a = [\"b\"] } }", refused).await;
+    let (gateway, a, b) = routed("to = [\"a\", \"b/gpt-y\"]", refused).await;
     request(&gateway, "gpt-x").await;
-    assert_eq!((a.requests().len(), b.requests().len()), (1, 1));
+    assert_eq!(models_asked(&a), ["gpt-x"]);
+    assert_eq!(models_asked(&b), ["gpt-y"], "the candidate's own model");
 }
 
 #[tokio::test]
-async fn hedge_takes_whichever_provider_answers() {
-    let plugins = "hedge = { after = { a = [\"b\"] }, stagger = \"0s\" }";
-    let (gateway, _, b) = with_attempts(plugins, Answer::error(503)).await;
+async fn a_route_without_fallback_retries_its_first_alone() {
+    let route = "to = [\"a\", \"b\"]\nfallback = false\ntries = 2\nbackoff = \"1ms\"";
+    // `a` refuses once, then answers.
+    let (gateway, a, b) = routed(route, Answer::error(503)).await;
+    request(&gateway, "gpt-x").await;
+    assert_eq!((a.requests().len(), b.requests().len()), (2, 0));
+}
+
+#[tokio::test]
+async fn a_hedged_route_takes_whichever_candidate_answers() {
+    let route = "to = [\"a\", \"b\"]\nhedge = \"0s\"";
+    let (gateway, _, b) = routed(route, Answer::error(503)).await;
     request(&gateway, "gpt-x").await;
     assert_eq!(b.requests().len(), 1);
 }
 
 #[test]
-fn bad_fallback_and_hedge_settings_are_errors() {
+fn bad_routes_and_retired_settings_are_errors() {
     let cases = [
         (
-            "fallback = { after = { a = [\"nope\"] } }",
-            "plugins: fallback: after: unknown provider 'nope'; providers: [a, b]",
+            "to = [\"b\", \"b\"]",
+            "routes: gpt-x: to: 'b' is listed twice",
+        ),
+        ("to = []", "routes: gpt-x: to: names no provider"),
+        (
+            "to = \"a/\"",
+            "routes: gpt-x: to: 'a/' names no model after the '/'",
+        ),
+        ("to = \"a\"\ntries = 0", "routes: gpt-x: tries: 0; 1 to 10"),
+        (
+            "to = \"a\"\nbackoff = \"5s\"\nmax_backoff = \"1s\"",
+            "routes: gpt-x: backoff: 5s is longer than max_backoff: 1s",
         ),
         (
-            "fallback = { after = { a = [\"b\", \"b\"] } }",
-            "plugins: fallback: after: a: 'b' is listed twice",
+            "to = \"a\"\nwhen = { clients = [\"ops\"] }",
+            "routes: gpt-x: when: clients: unknown client key 'ops'; named keys: []",
         ),
         (
-            "fallback = { after = { a = [\"b\"] }, tries = 0 }",
-            "plugins: fallback: tries: 0; 1 to 10",
-        ),
-        (
-            "fallback = { after = { a = [\"b\"] }, backoff = \"5s\", max_backoff = \"1s\" }",
-            "plugins: fallback: backoff: 5s is longer than max_backoff: 1s",
-        ),
-        (
-            "hedge = { after = { a = [] } }",
-            "plugins: hedge: after: 'a' has no provider to race it against",
+            "to = \"a\"\nwhen = { kinds = [\"chatt\"] }",
+            "routes: gpt-x: when: kinds: unknown kind 'chatt'; kinds: [",
         ),
     ];
-    for (plugins, expected) in cases {
-        let text = format!("{TWO}plugins = {{ {plugins} }}");
-        assert_eq!(resolve(&text).err().as_deref(), Some(expected), "{text}");
+    for (route, expected) in cases {
+        let text = format!("{TWO}[routes.\"gpt-x\"]\n{route}\n");
+        let said = resolve(&text).err().unwrap_or_default();
+        assert!(said.starts_with(expected), "{text}\n{said}");
+    }
+    for (plugins, now) in [
+        ("routing = { models = [] }", "the top-level `routes`"),
+        ("fallback = { after = { a = [\"b\"] } }", "a route's own"),
+        ("hedge = { after = { a = [\"b\"] } }", "`hedge = \"200ms\"`"),
+    ] {
+        let text = format!("{TWO}plugins = {{ {plugins} }}\n");
+        let said = resolve(&text).err().unwrap_or_default();
+        assert!(said.contains(now), "{text}\n{said}");
     }
 }

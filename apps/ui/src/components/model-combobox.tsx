@@ -10,7 +10,7 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { byProvider, type Listed } from "@/lib/models";
+import { byProvider, modelFacts, type Listed } from "@/lib/models";
 import { cn } from "@/lib/utils";
 
 /**
@@ -30,6 +30,7 @@ export function ModelCombobox({
   allValue = "",
   size = "default",
   className,
+  disabled,
 }: {
   id?: string;
   /** Its accessible name, if no `<Label>` names it by `id`. */
@@ -42,6 +43,7 @@ export function ModelCombobox({
   allValue?: string;
   size?: "sm" | "default";
   className?: string;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -63,6 +65,7 @@ export function ModelCombobox({
           size={size}
           role="combobox"
           aria-expanded={open}
+          disabled={disabled}
           className={cn("w-full min-w-0 justify-between px-3 font-normal", className)}
         >
           <span className={cn("truncate", !(all && value === allValue) && "font-mono text-[13px]")}>
@@ -98,10 +101,15 @@ export function ModelCombobox({
                   <CommandItem
                     key={m.id}
                     value={m.id}
-                    keywords={provider ? [provider] : undefined}
+                    keywords={[provider, m.display_name ?? ""].filter(Boolean)}
                     onSelect={() => pick(m.id)}
                   >
-                    <span className="min-w-0 flex-1 truncate font-mono text-[13px]">{m.id}</span>
+                    <span className="grid min-w-0 flex-1">
+                      <span className="truncate font-mono text-[13px]">{m.id}</span>
+                      {modelFacts(m) && (
+                        <span className="truncate text-[11px] text-muted-foreground">{modelFacts(m)}</span>
+                      )}
+                    </span>
                     {m.id === value && <CheckIcon />}
                   </CommandItem>
                 ))}

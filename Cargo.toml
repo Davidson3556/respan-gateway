@@ -38,6 +38,7 @@ respan-gateway-sse = { path = "crates/wires/sse" }
 respan-gateway-plugin-routing = { path = "crates/plugins/routing" }
 respan-gateway-plugin-fallback = { path = "crates/plugins/fallback" }
 respan-gateway-plugin-tool-loop = { path = "crates/plugins/tool-loop" }
+respan-gateway-plugin-respan = { path = "crates/plugins/respan" }
 respan-gateway-plugin-mcp-aggregate = { path = "crates/plugins/mcp-aggregate" }
 respan-gateway-mcp = { path = "crates/kinds/mcp" }
 respan-gateway-ws = { path = "crates/wires/ws" }

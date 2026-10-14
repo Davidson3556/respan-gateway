@@ -16,7 +16,7 @@ pub fn vendors() -> Vec<&'static str> {
 
 /// The first of `names` set in the environment, as `env:NAME`.
 pub fn key_from_env(names: &[&str]) -> Option<String> {
-    let set = |name: &&&str| std::env::var(name).is_ok_and(|v| !v.is_empty());
+    let set = |name: &&&str| std::env::var(name).is_ok_and(|v| !v.trim().is_empty());
     names.iter().find(set).map(|name| format!("env:{name}"))
 }
 

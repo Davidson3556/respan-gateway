@@ -77,7 +77,7 @@ pub fn check(
         if server.forward_auth {
             return Err(bad(format!(
                 "servers: mcp server '{name}' passes on a client's credentials \
-                 (`forward_auth`); the gateway runs tools with the server's own"
+                 (`auth = \"forward\"`); the gateway runs tools with the server's own"
             )));
         }
     }
