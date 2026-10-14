@@ -643,7 +643,7 @@ fn unknown_structured_output_options_stay_native() {
     assert!(refused(OPENAI, ANTHROPIC, &body));
     let mut body = anthropic(json!([{"role":"user","content":"hi"}]));
     body["output_config"] =
-        json!({"format":{"type":"json_schema","schema":{"type":"object"}},"effort":"high"});
+        json!({"format":{"type":"json_schema","schema":{"type":"object"}},"effort":"max"});
     assert_eq!(same(ANTHROPIC, &body), body);
     assert!(refused(ANTHROPIC, OPENAI, &body));
 }
@@ -1073,4 +1073,25 @@ fn read<S: Schema>(
         values.into_iter().map(Ok).chain(end.err().map(Err))
     };
     respan_gateway_core::EventStream::stream(stream::once(read).flat_map(stream::iter))
+}
+
+#[test]
+fn whether_openai_keeps_a_chat_is_openais_alone() {
+    let mut body = openai(json!([{"role":"user","content":"hi"}]));
+    body["store"] = json!(true);
+    assert_eq!(same(OPENAI, &body), body);
+    assert!(
+        !refused(OPENAI, ANTHROPIC, &body),
+        "Anthropic keeps nothing anyway"
+    );
+}
+
+#[test]
+fn openais_own_fields_go_to_openai_alone() {
+    let mut body = openai(json!([{"role":"user","content":"hi"}]));
+    body["metadata"] = json!({"app": "t"});
+    body["prompt_cache_key"] = json!("k");
+    body["safety_identifier"] = json!("u-1");
+    assert_eq!(same(OPENAI, &body), body);
+    assert!(!refused(OPENAI, ANTHROPIC, &body));
 }

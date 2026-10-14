@@ -5,8 +5,8 @@
 
 use crate::schema::{
     Keep, NativeFieldsExt, decode_content, decode_tools, each_tool, encode_content, encode_native,
-    kept_fields, merge_missing, native_fields, only, own_native, reasoning_of, remainder, rest_of,
-    set, take_native, tool_field, untranslatable,
+    kept_fields, merge_missing, native_fields, only, own_native, remainder, rest_of, set,
+    take_native, tool_field, untranslatable,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use respan_gateway_conversation::{
@@ -325,13 +325,71 @@ pub(crate) fn read_output(v: &Value, input: &mut Input) {
     }
 }
 
+/// The kind's effort of `output_config.effort`, if it is one the kind names
+/// (`xhigh` and `max` are Anthropic's alone): then it leaves the request's
+/// `native`.
+pub(crate) fn read_effort(input: &mut Input) {
+    let named = |effort: &Value| match effort.as_str()? {
+        "low" => Some(Effort::Low),
+        "medium" => Some(Effort::Medium),
+        "high" => Some(Effort::High),
+        _ => None,
+    };
+    let Some(native) = &mut input.native else {
+        return;
+    };
+    let Some(Value::Object(config)) = native.fields.get_mut("output_config") else {
+        return;
+    };
+    let Some(effort) = config.get("effort").and_then(named) else {
+        return;
+    };
+    config.remove("effort");
+    if config.is_empty() {
+        native.fields.shift_remove("output_config");
+    }
+    if native.is_empty() {
+        input.native = None;
+    }
+    // Beside a thinking budget, as Claude Opus 4.5 takes both.
+    let reasoning = input
+        .options
+        .reasoning
+        .get_or_insert_with(Reasoning::default);
+    reasoning.effort = Some(effort);
+}
+
+/// Anthropic's name of a named `effort`: its `output_config.effort`. `Off`
+/// is `thinking`'s, not an effort.
+fn effort_name(effort: Effort) -> Result<Option<&'static str>, Fault> {
+    Ok(match effort {
+        Effort::Off => None,
+        Effort::Minimal | Effort::Low => Some("low"),
+        Effort::Medium => Some("medium"),
+        Effort::High => Some("high"),
+        _ => {
+            return Err(untranslatable(
+                "a reasoning effort Anthropic has no level for",
+            ));
+        }
+    })
+}
+
 /// The request's own `output_config`, with the format the kind's structured
-/// output requirement says.
+/// output requirement says and the effort its reasoning names.
 pub(crate) fn write_output(input: &Input, out: &mut Map<String, Value>) -> Result<(), Fault> {
     let own = input.native.format() == Some(ANTHROPIC);
     let mut config = own
         .then(|| input.native.fields().get("output_config").cloned())
         .flatten();
+    let effort = input.options.reasoning.as_ref().and_then(|r| r.effort);
+    if let Some(effort) = effort.map(effort_name).transpose()?.flatten() {
+        let config = config.get_or_insert_with(|| json!({}));
+        if !config.is_object() {
+            return Err(untranslatable("non-object output_config"));
+        }
+        config["effort"] = effort.into();
+    }
     let schema = match &input.options.response_format {
         None | Some(ResponseFormat::Text) => None,
         Some(ResponseFormat::JsonObject) => {
@@ -386,11 +444,11 @@ pub(crate) fn read_thinking(input: &mut Input) {
 }
 
 /// The request's `thinking`: the kind's reasoning, else the request's own.
-/// Anthropic thinks to a token budget, not an effort, and returns its
-/// thinking whenever it thinks.
+/// Anthropic thinks to a token budget here, its effort is `output_config`'s
+/// ([`write_output`]), and it returns its thinking whenever it thinks.
 pub(crate) fn write_thinking(input: &Input) -> Result<Option<Value>, Fault> {
     let own = || own_native(input, ANTHROPIC, "thinking");
-    let Some(r) = reasoning_of(input)? else {
+    let Some(r) = &input.options.reasoning else {
         return Ok(own());
     };
     if r.summary == Some(false) {
@@ -398,12 +456,7 @@ pub(crate) fn write_thinking(input: &Input) -> Result<Option<Value>, Fault> {
     }
     Ok(match (r.effort, r.budget_tokens) {
         (Some(Effort::Off), _) => Some(json!({ "type": "disabled" })),
-        (Some(_), _) => {
-            return Err(untranslatable(
-                "a named reasoning effort in Anthropic, which takes a token budget",
-            ));
-        }
-        (None, Some(budget)) => Some(json!({ "type": "enabled", "budget_tokens": budget })),
-        (None, None) => own(),
+        (_, Some(budget)) => Some(json!({ "type": "enabled", "budget_tokens": budget })),
+        (_, None) => own(),
     })
 }

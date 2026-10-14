@@ -144,6 +144,22 @@ impl Schema for OpenAiResponses {
         &["openai-beta", "openai-organization", "openai-project"];
     /// The structured output requirement is in `text`.
     const OWN: &'static [&'static str] = &["text", "reasoning"];
+    /// Chat Completions' fields Responses has too, OpenAI's both.
+    const ADOPTED: &'static [(&'static str, &'static str, &'static str)] = &[
+        (crate::openai::OPENAI, "metadata", "metadata"),
+        (crate::openai::OPENAI, "service_tier", "service_tier"),
+        (
+            crate::openai::OPENAI,
+            "prompt_cache_key",
+            "prompt_cache_key",
+        ),
+        (
+            crate::openai::OPENAI,
+            "safety_identifier",
+            "safety_identifier",
+        ),
+        (crate::openai::OPENAI, "verbosity", "text.verbosity"),
+    ];
     type Decoding = ResponsesDecoder;
 
     fn decoder(&self) -> ResponsesDecoder {

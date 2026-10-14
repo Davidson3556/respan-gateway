@@ -49,8 +49,8 @@ use serde_json::{Map, Value, json};
 use decode::AnthropicDecoder;
 use encode::EventStream;
 use request::{
-    arguments_json, read_output, read_thinking, read_tools_of, write_output, write_thinking,
-    write_tools,
+    arguments_json, read_effort, read_output, read_thinking, read_tools_of, write_output,
+    write_thinking, write_tools,
 };
 
 /// The `max_tokens` of a translated request without one, as it is required.
@@ -277,6 +277,7 @@ impl Schema for AnthropicMessages {
         chat.native = native_fields(ANTHROPIC, std::mem::take(chat.native.fields_mut(ANTHROPIC)));
         read_output(v, &mut chat);
         read_thinking(&mut chat);
+        read_effort(&mut chat);
         chat
     }
 

@@ -8,6 +8,7 @@ use respan_gateway_core::{NativeFields, Plugin, ProviderContext, Result, async_t
 use respan_gateway_realtime::Input;
 use serde_json::{Value, json};
 
+use respan_gateway_conversation_http::Schema;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_conversation_http::responses::OpenAiResponses;
 use respan_gateway_media_http::openai::{
@@ -58,31 +59,19 @@ pub const VENDOR: Vendor = Vendor {
 /// The models only Responses serves, by a part of their names.
 const RESPONSES_ONLY: &[&str] = &["-pro", "codex", "deep-research", "computer-use"];
 
-/// Whether Chat Completions would refuse a call of `input`, which then goes
-/// to Responses: one with function tools and a reasoning effort, or for a
-/// model only Responses serves; but not one with a field only Chat
-/// Completions has.
+/// Whether a call of `input` goes to Responses: one Chat Completions
+/// refuses (function tools with a reasoning effort, or a model only
+/// Responses serves) and Responses can write, which a field only Chat
+/// Completions has (`n`, `logprobs`) keeps from it.
 pub fn chat_refuses(input: &respan_gateway_conversation::Input) -> bool {
-    // A field only Chat Completions has (`n`, `logprobs`) would be refused
-    // in Responses: such a chat stays, as it was.
-    // A tool's `strict` is Responses' too.
-    let foreign = |native: &Option<respan_gateway_core::NativeFields>, carried: &[&str]| {
-        let carried = |k: &String| k == "inert" || carried.contains(&k.as_str());
-        native
-            .as_ref()
-            .is_some_and(|n| !n.fields.keys().all(carried))
-    };
-    let tools = input.tools.iter().any(|t| foreign(&t.native, &["strict"]));
-    if foreign(&input.native, &[]) || tools {
-        return false;
-    }
     let reasoning = input.options.reasoning.as_ref().is_some_and(|r| {
         r.effort.as_ref().is_some_and(|e| *e != Effort::Off) || r.budget_tokens.is_some()
     });
     let only = input
         .model()
         .is_some_and(|m| RESPONSES_ONLY.iter().any(|p| m.contains(p)));
-    (reasoning && !input.tools.is_empty()) || only
+    let refused = (reasoning && !input.tools.is_empty()) || only;
+    refused && OpenAiResponses.encode_request(input).is_ok()
 }
 
 /// OpenAI's quirks: a realtime session's input transcription names its

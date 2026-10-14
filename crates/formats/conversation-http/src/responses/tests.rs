@@ -910,3 +910,28 @@ fn a_chat_tools_strict_is_written_as_responses_own() {
         "Chat Completions' tools are not strict by default"
     );
 }
+
+#[test]
+fn chat_fields_responses_has_too_are_written_as_its_own() {
+    let body = json!({
+        "model": "m", "messages": [{ "role": "user", "content": "hi" }],
+        "store": false, "metadata": { "a": "b" }, "service_tier": "flex",
+        "prompt_cache_key": "k", "verbosity": "low",
+    });
+    let chat = OpenAiChat
+        .decode_request(Bytes::from(body.to_string()))
+        .expect("decoded");
+    let v = OpenAiResponses.encode_request(&chat).expect("translated");
+    // Whether OpenAI keeps a chat is Chat Completions' own: not carried.
+    assert!(v.get("store").is_none());
+    assert_eq!(v["metadata"], json!({ "a": "b" }));
+    assert_eq!(v["service_tier"], "flex");
+    assert_eq!(v["prompt_cache_key"], "k");
+    assert_eq!(v["text"]["verbosity"], "low");
+    // One Responses lacks is still refused.
+    let n = json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }], "n": 2 });
+    let chat = OpenAiChat
+        .decode_request(Bytes::from(n.to_string()))
+        .expect("decoded");
+    assert!(OpenAiResponses.encode_request(&chat).is_err());
+}

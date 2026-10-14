@@ -204,9 +204,66 @@ fn off_crosses_everywhere() {
 }
 
 #[test]
-fn an_effort_is_not_a_budget_and_is_refused() {
-    let effort = OpenAiChat.decode_json(&chat(json!({ "reasoning_effort": "high" })));
-    assert!(AnthropicMessages.encode_request(&effort).is_err());
+fn an_effort_is_anthropics_output_config_effort() {
+    for (name, written) in [
+        ("minimal", "low"),
+        ("low", "low"),
+        ("medium", "medium"),
+        ("high", "high"),
+    ] {
+        let input = OpenAiChat.decode_json(&chat(json!({ "reasoning_effort": name })));
+        let a = AnthropicMessages.encode_request(&input).unwrap();
+        assert_eq!(a["output_config"], json!({ "effort": written }), "{name}");
+        assert!(a.get("thinking").is_none(), "{name}");
+    }
+    // Beside a structured output requirement.
+    let both = chat(json!({ "reasoning_effort": "low",
+        "response_format": { "type": "json_schema", "json_schema": { "name": "response", "schema": { "type": "object" }, "strict": true } } }));
+    let a = AnthropicMessages
+        .encode_request(&OpenAiChat.decode_json(&both))
+        .unwrap();
+    assert_eq!(a["output_config"]["effort"], "low");
+    assert_eq!(a["output_config"]["format"]["type"], "json_schema");
+}
+
+#[test]
+fn anthropic_reads_its_effort_and_keeps_its_own_levels() {
+    let v = anthropic(json!({ "output_config": { "effort": "medium" } }));
+    reads(AnthropicMessages, v.clone(), effort(Effort::Medium));
+    assert_eq!(
+        back(AnthropicMessages, &v)["output_config"],
+        json!({ "effort": "medium" })
+    );
+    let r = OpenAiResponses
+        .encode_request(&AnthropicMessages.decode_json(&v))
+        .unwrap();
+    assert_eq!(r["reasoning"], json!({ "effort": "medium" }));
+    // `xhigh` and `max` are Anthropic's alone: native, and back as they came.
+    let max = anthropic(json!({ "output_config": { "effort": "max" } }));
+    assert_eq!(AnthropicMessages.decode_json(&max).options.reasoning, None);
+    assert_eq!(
+        back(AnthropicMessages, &max)["output_config"],
+        json!({ "effort": "max" })
+    );
+    // An effort beside a budget, as Claude Opus 4.5 takes.
+    let both = anthropic(json!({ "output_config": { "effort": "low" },
+        "thinking": { "type": "enabled", "budget_tokens": 2048 } }));
+    let mut want = Reasoning::budget(2048);
+    want.effort = Some(Effort::Low);
+    assert_eq!(
+        AnthropicMessages.decode_json(&both).options.reasoning,
+        Some(want)
+    );
+    let again = back(AnthropicMessages, &both);
+    assert_eq!(
+        again["thinking"],
+        json!({ "type": "enabled", "budget_tokens": 2048 })
+    );
+    assert_eq!(again["output_config"], json!({ "effort": "low" }));
+}
+
+#[test]
+fn a_budget_is_not_an_effort_and_is_refused() {
     let budget = AnthropicMessages.decode_json(&anthropic(
         json!({ "thinking": { "type": "enabled", "budget_tokens": 2048 } }),
     ));

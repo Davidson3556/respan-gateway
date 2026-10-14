@@ -110,6 +110,11 @@ fn openai_responses_only_takes_tools_with_reasoning_and_its_models() {
     assert!(to_responses(chat("o3-pro", json!({}))));
     assert!(to_responses(chat("gpt-5-codex", json!({}))));
     assert!(!to_responses(chat("gpt-4o", json!({}))));
+    // Fields both have go with it.
+    let shared = json!({ "tools": tools, "reasoning_effort": "high", "store": false,
+        "metadata": { "a": "b" }, "service_tier": "auto", "verbosity": "low",
+        "prompt_cache_key": "k", "max_tokens": 100, "parallel_tool_calls": true });
+    assert!(to_responses(chat("gpt-6-luna", shared)));
     let n = json!({ "tools": tools, "reasoning_effort": "high", "n": 2 });
     assert!(
         !to_responses(chat("gpt-5-mini", n)),

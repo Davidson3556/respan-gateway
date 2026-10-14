@@ -90,6 +90,11 @@ pub trait Schema: Copy + Send + Sync + 'static {
     /// The keys of a conversation's `native` this format writes itself, from
     /// the conversation and the native together.
     const OWN: &'static [&'static str] = &[];
+    /// Fields of another format's `native` this format writes as its own,
+    /// meaning the same: `(format, key, path)`, its dotted `path` where it
+    /// goes, such as Chat Completions' `verbosity` as Responses'
+    /// `text.verbosity`.
+    const ADOPTED: &'static [(&'static str, &'static str, &'static str)] = &[];
     /// Decodes the events of a streamed response into events.
     type Decoding: respan_gateway_http::Decoder<Output>;
 
@@ -182,7 +187,25 @@ pub trait Schema: Copy + Send + Sync + 'static {
             droppable: &[],
         };
         let in_the_request = |key: &str| format!("'{key}' in the request");
-        let mut native = kept_fields(Self::NAME, &chat.native, in_the_request, keep)?;
+        // Another format's fields this one writes as its own leave its native.
+        let mut adopted = Vec::new();
+        let mut rest = chat.native.clone();
+        if let Some(n) = rest.as_mut() {
+            for (format, key, path) in Self::ADOPTED {
+                if *n.format != **format {
+                    continue;
+                }
+                // As it came, or set aside as that format's alone.
+                let inert = match n.fields.get_mut(INERT) {
+                    Some(Value::Object(inert)) => inert.shift_remove(*key),
+                    _ => None,
+                };
+                if let Some(value) = n.fields.shift_remove(*key).or(inert) {
+                    adopted.push((*path, value));
+                }
+            }
+        }
+        let mut native = kept_fields(Self::NAME, &rest, in_the_request, keep)?;
         // What only this format needs is written as it came.
         if let Some(Value::Object(inert)) = native.shift_remove(INERT) {
             native.extend(inert);
@@ -191,6 +214,21 @@ pub trait Schema: Copy + Send + Sync + 'static {
         set(&mut v, "model", chat.model.clone().map(Into::into));
         v.extend(self.encode_json(chat)?);
         v.extend(native);
+        for (path, value) in adopted {
+            let mut at = &mut v;
+            let mut keys = path.split('.').peekable();
+            while let Some(key) = keys.next() {
+                if keys.peek().is_none() {
+                    at.entry(key).or_insert(value);
+                    break;
+                }
+                let next = at.entry(key).or_insert_with(|| Value::Object(Map::new()));
+                let Value::Object(next) = next else {
+                    return Err(untranslatable(&format!("'{path}' in the request")));
+                };
+                at = next;
+            }
+        }
         Ok(v)
     }
 
