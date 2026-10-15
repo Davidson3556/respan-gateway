@@ -18,21 +18,14 @@ use respan_gateway_conversation as conversation;
 use std::any::Any;
 use std::collections::HashMap;
 
+use conversation::Usage;
 use respan_gateway_core::{
     ClientContext, Extensions, Fault, Filter, Plugin, ProviderContext, async_trait,
 };
 use respan_gateway_decision as decision;
 use respan_gateway_media::{embedding, image, speech, transcription, video};
 use respan_gateway_realtime as realtime;
-pub use respan_gateway_sdk::{Catalog, Price, Tokens};
-
-fn tokens(usage: &conversation::Usage) -> Tokens {
-    Tokens {
-        input: usage.input_tokens,
-        output: usage.output_tokens,
-        cached_input: usage.cached_input_tokens,
-    }
-}
+pub use respan_gateway_sdk::{Catalog, Price};
 
 /// What one usage report of a call cost.
 #[derive(Debug, Clone, PartialEq)]
@@ -42,7 +35,7 @@ pub struct Charge {
     /// The model it was sent.
     pub model: String,
     /// What the report says was used.
-    pub tokens: Tokens,
+    pub usage: Usage,
     /// What that cost, in US dollars.
     pub usd: f64,
 }
@@ -127,12 +120,12 @@ impl Plugin for Pricing {
         on_usage(
             px,
             Arc::new(move |used| {
-                let Used::Tokens(tokens) = used else { return };
+                let Used::Usage(usage) = used else { return };
                 let charge = Charge {
                     provider: provider.clone(),
                     model: model.clone(),
-                    tokens,
-                    usd: price.charge(&tokens),
+                    usage,
+                    usd: charge(&price, &usage),
                 };
                 on_charge(&extensions, &charge);
             }),
@@ -143,8 +136,8 @@ impl Plugin for Pricing {
 /// What one report of a response says it used.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Used {
-    /// Tokens, of any kind's usage.
-    Tokens(Tokens),
+    /// Tokens, as any kind reports them.
+    Usage(Usage),
     /// Seconds of audio, as a transcription's provider may bill.
     Seconds(f64),
 }
@@ -219,9 +212,18 @@ pub fn on_usage(edge: &mut impl Edge, into: Arc<dyn Fn(Used) + Send + Sync>) -> 
     })
 }
 
-/// A usage report, as tokens.
-fn used(usage: &conversation::Usage) -> Option<Used> {
-    Some(Used::Tokens(tokens(usage)))
+fn used(usage: &Usage) -> Option<Used> {
+    Some(Used::Usage(*usage))
+}
+
+/// What `usage` cost at `price`, in US dollars.
+pub fn charge(price: &Price, usage: &Usage) -> f64 {
+    let cached = usage.cached_input_tokens.min(usage.input_tokens);
+    let cached_rate = price.cached_input.unwrap_or(price.input);
+    let dollars = (usage.input_tokens - cached) as f64 * price.input
+        + cached as f64 * cached_rate
+        + usage.output_tokens as f64 * price.output;
+    dollars / 1e6
 }
 
 /// Gives `into` each report `read` finds in `edge`'s outputs, if they are `T`.
@@ -254,4 +256,25 @@ pub fn model_sent(px: &ProviderContext) -> Option<String> {
         .or_else(|| of(px, embedding::Input::model))
         .or_else(|| of(px, video::Input::model))
         .or_else(|| of(px, decision::Input::model))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_input_costs_its_own_rate() {
+        let price = Price::new(2.0, 8.0, Some(0.5));
+        let usage = Usage {
+            cached_input_tokens: 400_000,
+            ..Usage::new(1_000_000, 500_000)
+        };
+        let cost = charge(&price, &usage);
+        assert!((cost - (0.6 * 2.0 + 0.4 * 0.5 + 0.5 * 8.0)).abs() < 1e-9);
+        let plain = Price {
+            cached_input: None,
+            ..price
+        };
+        assert!((charge(&plain, &usage) - 6.0).abs() < 1e-9);
+    }
 }

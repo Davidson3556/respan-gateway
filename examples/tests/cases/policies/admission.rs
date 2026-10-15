@@ -388,6 +388,38 @@ async fn losing_the_store_cancels_a_call_waiting_for_its_provider_head() -> Resu
 }
 
 #[tokio::test]
+async fn a_request_waits_for_a_busy_database_until_its_own_deadline() -> Result<(), Fault> {
+    use respan_gateway_examples::store::Database;
+    let path = database_path();
+    let slots = Slots::open(&path, 1, Duration::from_secs(3))?;
+    // Another writer holds the lock past the store's busy timeout.
+    let db = Database::open(&path)?;
+    let (locked, lock_ready) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        db.transact(move |_| {
+            let _ = locked.send(());
+            std::thread::sleep(Duration::from_millis(600));
+            Ok(())
+        })
+        .await
+    });
+    lock_ready
+        .await
+        .map_err(|_| Fault::internal("store lock was not acquired"))?;
+    let slot = slots
+        .acquire(0, "patient", Instant::now() + Duration::from_secs(2))
+        .await?
+        .ok_or_else(|| Fault::internal("not admitted before its deadline"))?;
+    blocker
+        .await
+        .map_err(|error| Fault::internal("blocker failed").with_source(error))??;
+    slot.release().await?;
+    drop(slots);
+    let _ = std::fs::remove_file(path);
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_admission_deadline_also_bounds_waiting_for_the_database() -> Result<(), Fault> {
     use respan_gateway_examples::store::Database;
     let path = database_path();

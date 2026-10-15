@@ -112,7 +112,7 @@ async fn the_admin_api_shows_each_candidate_and_explains_a_pick() {
     assert_eq!(smart["to"][1]["model"], "small");
     assert_eq!(
         smart["to"][1]["price"],
-        json!({ "input": 0.1, "output": 0.4, "from": "config" })
+        json!({ "input": 0.1, "output": 0.4 })
     );
     assert_eq!(smart["to"][1]["seen"]["calls"], 1);
     assert!(smart["to"][1]["seen"]["latency_ms"].is_number());

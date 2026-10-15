@@ -5,9 +5,7 @@
 (`POST https://api.respan.ai/api/v2/traces`, `Authorization: Bearer <key>`):
 
 - a root span for the request (`traceloop.span.kind = workflow`), its status
-  and error, and the customer, the request's `Caller` name
-  (`respan.customer_params.customer_identifier`; the gateway's is the client
-  key's name);
+  and error;
 - a span for each call it made: to a model, a `chat` span
   (`llm.request.type = chat`) with `gen_ai.request.model`,
   `gen_ai.response.model`, `gen_ai.usage.*` and, unless `content` is off,

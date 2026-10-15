@@ -52,7 +52,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | Location | Sort | Owns | Internal production dependencies |
 | --- | --- | --- | --- |
 | `crates/core/` | Kernel | Execution, typed streams, plugin hooks, call and response lifecycles, fault extensions and tagged native values | None |
-| `crates/sdk/` | Vocabulary | A model's card (`Model`), its `Price`, the shared `Catalog`, and who a request is for (`Caller`) | None (a leaf) |
+| `crates/sdk/` | Vocabulary | A model's card (`Model`), its `Price` and the shared `Catalog` | None (a leaf) |
 | `crates/kinds/conversation/` | Kind | Conversation requests, reply events, typed usage and assembly | Core |
 | `crates/kinds/media/` | Kind | A kind per media operation (images, transcription, speech, embeddings, video jobs) over the conversation kind's media and usage | Core, conversation |
 | `crates/kinds/decision/` | Kind | Typed questions about a state (yes-or-no, choice, score), each answered with probabilities | Core, conversation (usage) |

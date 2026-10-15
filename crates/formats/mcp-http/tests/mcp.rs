@@ -20,14 +20,12 @@ use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
-    Body, ClientIo, Completion, Credential, ProviderIo, call::credentials,
-    call::strip_origin_headers,
+    Body, ClientIo, Completion, ProviderIo, call::credentials, call::strip_origin_headers,
 };
 use respan_gateway_mcp::{Input, Output};
 #[cfg(unix)]
 use respan_gateway_mcp_http::StdioTransport;
 use respan_gateway_mcp_http::{SESSION, StreamableHttp};
-use respan_gateway_sdk::Caller;
 use serde_json::{Value, json};
 
 use respan_gateway_plugin_relay::Relay;
@@ -943,7 +941,7 @@ async fn a_child_that_exits_is_reaped_and_its_session_forgotten() {
 async fn sessions_are_capped() {
     let gw = gateway(
         StdioTransport::new("sh", ["-c", ECHO])
-            .max_sessions(2)
+            .max_total(2)
             .connect(),
         None,
     );
@@ -958,7 +956,7 @@ async fn sessions_are_capped() {
 #[cfg(unix)]
 #[tokio::test]
 async fn an_idle_session_ends() {
-    let transport = StdioTransport::new("sh", ["-c", ECHO]).max_sessions(1);
+    let transport = StdioTransport::new("sh", ["-c", ECHO]).max_total(1);
     let gw = gateway(transport.idle(Duration::from_secs(60)).connect(), None);
     let session = init(&gw, &[]).await;
     assert_eq!(list(&gw, &session).await, StatusCode::OK);
@@ -1013,56 +1011,14 @@ echo '{"jsonrpc":"2.0","method":"notifications/message"}'; sleep 3"#;
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_session_belongs_to_the_credential_that_started_it() {
+async fn a_sessions_stream_is_not_taken_over_by_a_second_get() {
     let gw = gateway(StdioTransport::new("sh", ["-c", ECHO]).connect(), None);
-    let session = init(&gw, &[("authorization", "Bearer a")]).await;
-    let (a, b) = (
-        [(SESSION, &session[..]), ("authorization", "Bearer a")],
-        [(SESSION, &session[..]), ("authorization", "Bearer b")],
-    );
-    for method in [Method::POST, Method::GET, Method::DELETE] {
-        let (status, ..) = send(&gw, request(method, LIST, &b)).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-    assert_eq!(list(&gw, &session).await, StatusCode::NOT_FOUND);
-    let (status, ..) = send(&gw, request(Method::POST, LIST, &a)).await;
-    assert_eq!(status, StatusCode::OK);
-    // The session's stream is not taken over by a second GET.
-    let (first, _) = serve(&gw, request(Method::GET, "", &a)).await;
+    let session = init(&gw, &[]).await;
+    let with = [(SESSION, &session[..])];
+    let (first, _) = serve(&gw, request(Method::GET, "", &with)).await;
     assert_eq!(first.status(), StatusCode::OK);
-    let (second, _) = serve(&gw, request(Method::GET, "", &a)).await;
+    let (second, _) = serve(&gw, request(Method::GET, "", &with)).await;
     assert_eq!(second.status(), StatusCode::CONFLICT);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn the_session_cap_is_per_owner() {
-    let gw = gateway(
-        StdioTransport::new("sh", ["-c", ECHO])
-            .max_sessions(3)
-            .connect(),
-        None,
-    );
-    for _ in 0..3 {
-        init(&gw, &[("authorization", "Bearer mallory")]).await;
-    }
-    let mallory = [("authorization", "Bearer mallory")];
-    let (status, ..) = send(&gw, request(Method::POST, INIT, &mallory)).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    init(&gw, &[("authorization", "Bearer alice")]).await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn a_flood_from_many_owners_hits_the_total() {
-    let transport = StdioTransport::new("sh", ["-c", ECHO]).max_sessions(2);
-    let gw = gateway(transport.max_total(4).connect(), None);
-    for i in 0..4 {
-        init(&gw, &[("authorization", &format!("Bearer {i}"))]).await;
-    }
-    let fresh = [("authorization", "Bearer 4")];
-    let (status, ..) = send(&gw, request(Method::POST, INIT, &fresh)).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[cfg(unix)]
@@ -1080,49 +1036,6 @@ echo '{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse"}}'; ex
     let ids: Vec<_> = messages(&body).iter().map(|m| m["id"].clone()).collect();
     assert_eq!((status, ids), (StatusCode::OK, vec![Value::Null, json!(2)]));
     assert!(outcome.is_err());
-}
-
-/// Moves the caller's key into a [`Caller`], as an auth plugin would.
-#[cfg_attr(not(unix), allow(dead_code))]
-struct Authenticates;
-
-#[async_trait]
-impl Plugin for Authenticates {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let credential = cx.extensions_mut().remove::<Credential>();
-        let key = credential.and_then(|c| c.get("authorization").cloned());
-        let key = key.and_then(|k| k.to_str().ok().map(String::from));
-        let id = key.unwrap_or_default();
-        cx.extensions_mut().insert(Caller {
-            name: id.clone(),
-            id,
-        });
-        Ok(None)
-    }
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn a_session_belongs_to_the_owner_a_plugin_sets() -> Result<(), Fault> {
-    let gw = Gateway::new()
-        .provider(Provider::new(
-            "mcp",
-            StreamableHttp::default(),
-            StdioTransport::new("sh", ["-c", ECHO]).connect(),
-        ))?
-        .client::<Input, _, _>(StreamableHttp::default())?
-        .plugin(Authenticates)
-        .target("mcp")?;
-    let session = init(&gw, &[("authorization", "Bearer alice")]).await;
-    for (key, status) in [
-        ("Bearer bob", StatusCode::NOT_FOUND),
-        ("Bearer alice", StatusCode::OK),
-    ] {
-        let headers = [(SESSION, &session[..]), ("authorization", key)];
-        let (got, ..) = send(&gw, request(Method::POST, LIST, &headers)).await;
-        assert_eq!(got, status, "{key}");
-    }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -1232,7 +1145,7 @@ async fn a_post_behind_a_child_that_stopped_reading_still_times_out() {
 async fn a_post_the_server_never_answers_times_out_and_frees_its_session() {
     // Answers `initialize` only.
     let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; exec sleep 100"#;
-    let transport = StdioTransport::new("sh", ["-c", script]).max_sessions(1);
+    let transport = StdioTransport::new("sh", ["-c", script]).max_total(1);
     let transport = transport.idle(Duration::from_secs(60));
     let gw = gateway(transport.timeout(Duration::from_secs(30)).connect(), None);
     let session = init(&gw, &[]).await;
@@ -1277,10 +1190,9 @@ async fn a_session_whose_initialize_is_never_answered_idles_out() {
     let gw = gateway(transport.connect(), None);
     let (first, ..) = send(&gw, request(Method::POST, INIT, &[])).await;
     assert_eq!(first, StatusCode::GATEWAY_TIMEOUT);
-    // Its slot frees once it idles out, for any owner.
+    // Its slot frees once it idles out.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let other = [("authorization", "Bearer someone-else")];
-    let (second, _, body, _) = send(&gw, request(Method::POST, INIT, &other)).await;
+    let (second, _, body, _) = send(&gw, request(Method::POST, INIT, &[])).await;
     assert_ne!(
         second,
         StatusCode::SERVICE_UNAVAILABLE,

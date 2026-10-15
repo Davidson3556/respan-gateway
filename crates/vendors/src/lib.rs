@@ -22,7 +22,7 @@ pub use respan_gateway_vendor_kit::{
     http, json, located, models, time,
 };
 
-pub use respan_gateway_vendors_green::{anthropic, gemini, openai, typesafe};
+pub use respan_gateway_vendors_green::{anthropic, gemini, openai, respan, typesafe};
 pub use respan_gateway_vendors_yellow::{
     azure, cloudflare, deepseek, fireworks, groq, mistral, ollama, openrouter, together, vllm, xai,
 };
@@ -50,6 +50,7 @@ pub const ALL: &[&Vendor] = &[
     &vllm::VENDOR,
     &typesafe::VENDOR,
     &cloudflare::VENDOR,
+    &respan::VENDOR,
 ];
 
 /// The vendor `id`.

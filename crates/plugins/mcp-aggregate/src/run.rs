@@ -27,7 +27,6 @@ pub(super) struct Run {
     pub(super) inner: Arc<Inner>,
     /// A call to each server, to make copies of.
     pub(super) calls: Arc<HashMap<String, Call>>,
-    pub(super) owner: Option<String>,
     /// The tools the client key limits its requests to, if it does.
     pub(super) scope: Option<ToolScope>,
 }
@@ -67,12 +66,12 @@ impl Run {
         Ok(select_all(streams).boxed())
     }
 
-    // The session `input` names: this client's, else no such session.
+    // The session `input` names, else no such session.
     pub(super) fn session(&self, input: &Input) -> Result<Arc<Session>, Fault> {
         let missing = || Fault::bad_request("the Mcp-Session-Id header is required");
         let id = input.session.as_deref().ok_or_else(missing)?;
         let mut sessions = lock(&self.inner.sessions);
-        let found = sessions.get(id).filter(|s| s.owner == self.owner);
+        let found = sessions.get(id);
         let Some(session) = found else {
             let fault = Fault::new("no such session");
             let fault = fault
@@ -102,7 +101,6 @@ impl Run {
             .find(|v| Some(**v) == asked)
             .unwrap_or(&VERSIONS[0]);
         let session = Arc::new(Session {
-            owner: self.owner.clone(),
             upstream: (self.inner.servers.iter())
                 .map(|s| (s.clone(), tokio::sync::Mutex::new(None)))
                 .collect(),

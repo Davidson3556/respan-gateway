@@ -16,7 +16,6 @@ respan-gateway-sse.workspace = true
 respan-gateway-http-faults.workspace = true
 getrandom = { workspace = true, features = ["std"] }
 respan-gateway-core.workspace = true
-respan-gateway-sdk.workspace = true
 respan-gateway-http.workspace = true
 respan-gateway-mcp.workspace = true
 serde_json.workspace = true

@@ -6,6 +6,8 @@
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! use respan_gateway::{App, Config};
 //! let app = App::new(Config::discover(None)?)?;
+//! // Its providers' lists, which price and route the first calls.
+//! app.listed().await;
 //! let listener = tokio::net::TcpListener::bind(app.listen()).await?;
 //! println!("{}", app.banner(listener.local_addr()?));
 //! app.serve(listener, respan_gateway::shutdown_signal()).await?;

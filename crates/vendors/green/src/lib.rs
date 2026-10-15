@@ -7,6 +7,7 @@
 pub mod anthropic;
 pub mod gemini;
 pub mod openai;
+pub mod respan;
 pub mod typesafe;
 
 use respan_gateway_vendor_kit::Vendor;
@@ -17,4 +18,5 @@ pub const ALL: &[&Vendor] = &[
     &anthropic::VENDOR,
     &gemini::VENDOR,
     &typesafe::VENDOR,
+    &respan::VENDOR,
 ];

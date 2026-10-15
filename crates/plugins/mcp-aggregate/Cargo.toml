@@ -13,7 +13,6 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
-respan-gateway-sdk.workspace = true
 respan-gateway-http.workspace = true
 respan-gateway-http-faults.workspace = true
 respan-gateway-mcp.workspace = true

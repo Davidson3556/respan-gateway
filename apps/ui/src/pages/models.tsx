@@ -141,7 +141,7 @@ function ModelRow({ model: m }: { model: Model }) {
         )}
       </TableCell>
       <TableCell className="hidden text-right whitespace-nowrap tabular-nums sm:table-cell">
-        <span title={m.pricing?.from === "config" ? "Declared in the config" : "Per million tokens: input / output"}>
+        <span title="Per million tokens: input / output">
           {formatPrice(m.pricing)}
         </span>
       </TableCell>

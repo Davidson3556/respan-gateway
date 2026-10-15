@@ -19,8 +19,7 @@ provider of the conversation kind cannot keep (`Responses`):
   (`EarlierReasoning`), as a Chat client has no place to carry it. Without
   it, a reasoning model loses its reasoning between tool calls.
 
-What is kept is kept for the client key that made it (its `Caller`'s id, from `respan-gateway-sdk`) and
-read by no other, in a `Store`: `Memory` by default, each turn for `keep`
+What is kept is reached by its id alone, which none can guess, in a `Store`: `Memory` by default, each turn for `keep`
 after it was last read, up to about 256 MiB, the stalest dropped first. It
 is one gateway's: not across a restart, nor shared between gateways, so a
 client whose requests reach several gateways must reach the one that kept

@@ -18,8 +18,7 @@
 //!   ([`EarlierReasoning`]), as the client cannot. Without it the model
 //!   loses its reasoning between tool calls.
 //!
-//! What is kept is kept for the client key that made it ([`Owner`]), and
-//! read by none other.
+//! What is kept is reached by its id alone, which none can guess.
 
 mod store;
 
@@ -33,7 +32,6 @@ use respan_gateway_core::{
     ClientContext, Fault, Filter, Plugin, ProviderContext, Result, async_trait,
 };
 use respan_gateway_http::raw::Original;
-use respan_gateway_sdk::Caller;
 use serde_json::Value;
 
 pub use store::{Memory, Store, Turn};
@@ -74,14 +72,14 @@ impl Responses {
     }
 }
 
-/// The conversation up to and including response `id`, oldest first, if it
-/// was kept for `owner` and none of it expired.
-fn conversation(store: &dyn Store, owner: &Option<String>, id: &str) -> Option<Vec<Message>> {
+/// The conversation up to and including response `id`, oldest first, if
+/// none of it expired.
+fn conversation(store: &dyn Store, id: &str) -> Option<Vec<Message>> {
     let mut turns = Vec::new();
     let mut next = Some(id.to_owned());
     while let Some(id) = next.take() {
         let turn = store.get(&id)?;
-        if &turn.owner != owner || turns.len() == MAX_DEPTH {
+        if turns.len() == MAX_DEPTH {
             return None;
         }
         next = turn.parent.clone();
@@ -125,10 +123,6 @@ impl Pending {
     }
 }
 
-fn owner_of(extensions: &respan_gateway_core::Extensions) -> Option<String> {
-    extensions.get::<Caller>().map(|c| c.id.clone())
-}
-
 #[async_trait]
 impl Plugin for Responses {
     async fn on_client(
@@ -147,7 +141,6 @@ impl Plugin for Responses {
         cx.extensions_mut().insert(pending.clone());
         cx.filter(Keep {
             store: self.store.clone(),
-            owner: owner_of(cx.extensions()),
             pending,
             id: None,
             said: Assembled::default(),
@@ -161,9 +154,8 @@ impl Plugin for Responses {
         if !px.is_kind::<Input>() {
             return Ok(());
         }
-        let owner = owner_of(px.extensions());
         if px.client().format() != RESPONSES {
-            return self.carry_reasoning(px, owner);
+            return self.carry_reasoning(px);
         }
         let Some(pending) = px.extensions().get::<Pending>().cloned() else {
             return Ok(());
@@ -192,11 +184,10 @@ impl Plugin for Responses {
             let instructions = usize::from(pending.lock().instructed && leading);
             let added = input.messages[instructions..].to_vec();
             if let Some(id) = &parent {
-                let before = conversation(&*store, &owner, id).ok_or_else(|| {
+                let before = conversation(&*store, id).ok_or_else(|| {
                     Fault::bad_request(format!(
                         "previous_response_id '{id}' is no response this gateway keeps: it keeps \
-                         a response of a provider of another format for {}s, for the client key \
-                         that made it, in a conversation of up to {MAX_DEPTH} responses",
+                         a response of a provider of another format for {}s, in a conversation of up to {MAX_DEPTH} responses",
                         keep.as_secs()
                     ))
                 })?;
@@ -220,10 +211,10 @@ impl Responses {
     /// it is the one to write it, puts back the reasoning kept for its tool
     /// calls; and the reasoning this call's answer gives before its tool
     /// calls is kept under their ids.
-    fn carry_reasoning(&self, px: &mut ProviderContext, owner: Option<String>) -> Result<()> {
-        let (store, mine) = (self.store.clone(), owner.clone());
+    fn carry_reasoning(&self, px: &mut ProviderContext) -> Result<()> {
+        let store = self.store.clone();
         let earlier = move |id: &str| {
-            let turn = store.get(&call_key(id)).filter(|t| t.owner == mine)?;
+            let turn = store.get(&call_key(id))?;
             let reasoning = turn.messages.into_iter().flat_map(|m| m.content);
             Some(reasoning.collect())
         };
@@ -231,7 +222,6 @@ impl Responses {
             .insert(EarlierReasoning(Arc::new(earlier)));
         px.filter(KeepReasoning {
             store: self.store.clone(),
-            owner,
             said: Assembled::default(),
         })
     }
@@ -251,7 +241,6 @@ fn writable(mut message: Message, format: &str) -> Message {
 /// The response its client is given, named anew and kept once it ended well.
 struct Keep {
     store: Arc<dyn Store>,
-    owner: Option<String>,
     pending: Pending,
     /// Its id, once named.
     id: Option<String>,
@@ -288,7 +277,6 @@ impl Filter<Output> for Keep {
         let mut messages = request.added;
         messages.push(reply);
         let turn = Turn {
-            owner: self.owner.clone(),
             parent: request.parent,
             messages,
         };
@@ -302,7 +290,6 @@ impl Filter<Output> for Keep {
 /// reads it back.
 struct KeepReasoning {
     store: Arc<dyn Store>,
-    owner: Option<String>,
     said: Assembled,
 }
 
@@ -330,7 +317,6 @@ impl Filter<Output> for KeepReasoning {
                     let mut message = Message::new(Role::Assistant, "");
                     message.content = reasoning.clone();
                     let turn = Turn {
-                        owner: self.owner.clone(),
                         parent: None,
                         messages: vec![message],
                     };

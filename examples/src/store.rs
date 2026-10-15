@@ -91,14 +91,33 @@ impl Database {
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        self.transact_by(None, operation).await
+    }
+
+    /// As [`transact`](Self::transact), but while another process holds the
+    /// write lock past the busy timeout, keeps trying to begin until
+    /// `deadline`, as a caller with a deadline of its own would wait. Only
+    /// beginning is tried again: `operation` runs once.
+    pub async fn transact_by<T: Send + 'static>(
+        &self,
+        deadline: Option<Instant>,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
         let database = self.0.clone();
         tokio::task::spawn_blocking(move || {
             let mut connection = database
                 .lock()
                 .map_err(|_| Fault::internal("store lock poisoned"))?;
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(sql)?;
+            let transaction = loop {
+                match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
+                    Err(rusqlite::Error::SqliteFailure(error, _))
+                        if matches!(
+                            error.code,
+                            ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+                        ) && deadline.is_some_and(|d| Instant::now() < d) => {}
+                    begun => break begun.map_err(sql)?,
+                }
+            };
             let value = operation(&transaction)?;
             transaction.commit().map_err(sql)?;
             Ok(value)

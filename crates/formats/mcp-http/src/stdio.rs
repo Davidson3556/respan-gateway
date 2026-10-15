@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::hash::{BuildHasher, RandomState};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -14,29 +13,25 @@ use std::time::Duration;
 
 use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_core::{ErrorCode, Extensions, Fault};
-use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{self, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{Body, Completion, Credential};
+use respan_gateway_http::{Body, Completion};
 use respan_gateway_http_faults::Status;
 use respan_gateway_mcp::Message;
-use respan_gateway_sdk::Caller;
 use tokio::process::Command;
 
 use crate::session::{Limits, Session};
 use crate::{PARSE_ERROR, SESSION, lock, read};
 use respan_gateway_mcp::RpcCode;
 
-/// Sessions by id and a keyed hash of their owner; `None` while starting.
-type Sessions = Mutex<HashMap<(String, u64), Option<Arc<Session>>>>;
+/// Sessions by id; `None` while starting.
+type Sessions = Mutex<HashMap<String, Option<Arc<Session>>>>;
 
 /// Runs `program` for each new session (an `initialize` without a session
 /// id), and sends each line it writes to the request waiting for it.
 ///
-/// A session belongs to the owner that started it: the call's [`Caller`]
-/// extension if any, else the client's `Authorization`, as the adapter
-/// lifted it ([`Credential`]); callers with neither are one owner. A
-/// session ends when its child exits, on `DELETE`, when idle, or when the
+/// A session is reached by its id alone, which none can guess. A session
+/// ends when its child exits, on `DELETE`, when idle, or when the
 /// answer to its `initialize` ends before its first message, as when its
 /// client left or it timed out, since its id then reached no one. Its child
 /// is then stopped as MCP asks of a client: stdin closed, then SIGTERM,
@@ -63,27 +58,19 @@ type Sessions = Mutex<HashMap<(String, u64), Option<Arc<Session>>>>;
 /// | When | Status | `error_code` | JSON-RPC |
 /// |---|---|---|---|
 /// | A request other than `initialize` names no session (MCP: "SHOULD respond … with HTTP 400 Bad Request") | 400 | `no_session` | -32003 |
-/// | Its session is not there, or another owner's, as if not there (MCP: a terminated session "MUST respond … with HTTP 404 Not Found") | 404 | `no_session` | -32003 |
+/// | Its session is not there (MCP: a terminated session "MUST respond … with HTTP 404 Not Found") | 404 | `no_session` | -32003 |
 /// | A second `GET` while the session's stream is open | 409 | `busy` | -32004 |
-/// | A new session past [`max_sessions`](Self::max_sessions) or [`max_total`](Self::max_total) | 503 | `too_many_sessions` | -32005 |
+/// | A new session past [`max_total`](Self::max_total) | 503 | `too_many_sessions` | -32005 |
 /// | A `POST`'s requests are not all answered within [`timeout`](Self::timeout) | 504 | `timed_out` | -32001 |
-///
-/// Authenticate callers before this transport. Owners taken from an
-/// unauthenticated `Authorization` header are unbounded, since anyone can
-/// send a new one; only the total limit ([`max_total`](Self::max_total))
-/// then caps the children.
 #[derive(Debug)]
 pub struct StdioTransport {
     program: PathBuf,
     args: Vec<String>,
     env: Vec<(OsString, OsString)>,
     dir: Option<PathBuf>,
-    max_sessions: usize,
     max_total: usize,
     limits: Limits,
     sessions: Arc<Sessions>,
-    /// Secret keys, so an owner's hash cannot be chosen to match another's.
-    keys: RandomState,
 }
 
 impl StdioTransport {
@@ -94,7 +81,6 @@ impl StdioTransport {
             args: args.into_iter().map(Into::into).collect(),
             env: Vec::new(),
             dir: None,
-            max_sessions: 8,
             max_total: 64,
             limits: Limits {
                 idle: Duration::from_secs(600),
@@ -103,7 +89,6 @@ impl StdioTransport {
                 max_line: 32 << 20,
             },
             sessions: Arc::default(),
-            keys: RandomState::new(),
         }
     }
 
@@ -119,18 +104,8 @@ impl StdioTransport {
         self
     }
 
-    /// At most `n` sessions per owner at once. By default 8: an owner runs
-    /// a few clients at once (an editor, an agent, a terminal), each with a
-    /// session per server, and no one owner may take the whole
-    /// [`max_total`](Self::max_total).
-    pub fn max_sessions(mut self, n: usize) -> Self {
-        self.max_sessions = n;
-        self
-    }
-
-    /// At most `n` sessions, so child processes, at once in all. By default
-    /// 64: eight owners at their default [`max_sessions`](Self::max_sessions),
-    /// a number of processes any host holds.
+    /// At most `n` sessions, so child processes, at once. By default 64, a
+    /// number of processes any host holds.
     pub fn max_total(mut self, n: usize) -> Self {
         self.max_total = n;
         self
@@ -195,25 +170,15 @@ impl StdioTransport {
         &self,
         call: http::Request<Body>,
     ) -> Result<(http::Response<Body>, Option<Completion>), Fault> {
-        let (mut head, body) = call.into_parts();
-        let extensions = head.extensions.remove::<Extensions>().unwrap_or_default();
-        let owner = match extensions.get::<Caller>() {
-            Some(caller) => self.keys.hash_one((true, Some(caller.id.as_bytes()))),
-            None => {
-                let credential = extensions.get::<Credential>();
-                let authorization = credential.and_then(|c| c.get(AUTHORIZATION.as_str()));
-                self.keys
-                    .hash_one((false, authorization.map(HeaderValue::as_bytes)))
-            }
-        };
+        let (head, body) = call.into_parts();
         let body = body.collect().await?.to_bytes();
         let Some(id) = head.headers.get(SESSION) else {
             return match head.method {
-                Method::POST => Ok((self.start(owner, &body).await?, None)),
+                Method::POST => Ok((self.start(&body).await?, None)),
                 _ => Err(no_session_named()),
             };
         };
-        let key = (id.to_str().unwrap_or_default().to_owned(), owner);
+        let key = id.to_str().unwrap_or_default().to_owned();
         let Some(session) = lock(&self.sessions).get(&key).cloned().flatten() else {
             return Err(no_session());
         };
@@ -233,18 +198,17 @@ impl StdioTransport {
         Ok((answer, None))
     }
 
-    /// Starts a session for `owner` with the `initialize` in `body`.
-    async fn start(&self, owner: u64, body: &[u8]) -> Result<http::Response<Body>, Fault> {
+    /// Starts a session with the `initialize` in `body`.
+    async fn start(&self, body: &[u8]) -> Result<http::Response<Body>, Fault> {
         let messages = posted(body)?;
         if !messages.iter().any(|m| m.method() == Some("initialize")) {
             return Err(no_session_named());
         }
-        let key = (session_id()?, owner);
+        let key = session_id()?;
         {
             // Its place is held while the child starts, outside the lock.
             let mut sessions = lock(&self.sessions);
-            let owned = sessions.keys().filter(|(_, o)| *o == owner).count();
-            if owned >= self.max_sessions || sessions.len() >= self.max_total {
+            if sessions.len() >= self.max_total {
                 let full = Fault::new("too many sessions");
                 let status = StatusCode::SERVICE_UNAVAILABLE;
                 return Err(own(full, "too_many_sessions", -32005, status));
@@ -294,7 +258,7 @@ impl StdioTransport {
         // which learns the id in the answer's head.
         let mut unclaimed = OnDrop(Some(forget));
         let resp = session.post(messages).await?;
-        let id = HeaderValue::from_str(&key.0).map_err(|e| Fault::internal("an id").with_source(e));
+        let id = HeaderValue::from_str(&key).map_err(|e| Fault::internal("an id").with_source(e));
         let mut resp =
             resp.map(|body| Body::stream(body.inspect_ok(move |_| drop(unclaimed.0.take()))));
         resp.headers_mut().insert(SESSION, id?);

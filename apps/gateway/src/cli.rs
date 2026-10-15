@@ -315,6 +315,8 @@ where
     };
     #[cfg(unix)]
     let hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).ok();
+    // The first calls are priced and routed by the providers' lists.
+    app.listed().await;
     let addr = app.listen();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,

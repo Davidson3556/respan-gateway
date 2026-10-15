@@ -13,10 +13,9 @@
 //! What is queued is sent when the plugin is dropped. How sending goes is
 //! its [`Health`], for its host to show and to say when it starts failing.
 //!
-//! A request's customer is its [`Caller`]'s name, as the gateway names it
-//! with the client key's. It registers
-//! [`Respan`] before its other plugins, which opens a request's trace and
-//! sends it, and [`Respan::calls`] after them, which records each call.
+//! A host registers [`Respan`] before its other plugins, which opens a
+//! request's trace and sends it, and [`Respan::calls`] after them, which
+//! records each call.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -28,7 +27,6 @@ use respan_gateway_core::{
 };
 use respan_gateway_http_transport::reqwest;
 use respan_gateway_mcp as mcp;
-use respan_gateway_sdk::Caller;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -287,8 +285,7 @@ impl Plugin for Respan {
         let Some(Trace(trace)) = cx.extensions().get::<Trace>() else {
             return;
         };
-        let customer = cx.extensions().get::<Caller>().map(|c| c.name.as_str());
-        let spans = spans(&lock(trace), cx.format(), customer, end, self.content);
+        let spans = spans(&lock(trace), cx.format(), end, self.content);
         if self.queue.try_send(spans).is_err() {
             self.health.dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -441,22 +438,13 @@ impl Filter<Output> for Said {
 }
 
 /// A trace's spans: its root, then each call's.
-fn spans(
-    trace: &TraceState,
-    format: &str,
-    customer: Option<&str>,
-    end: &Result<()>,
-    content: bool,
-) -> Vec<Value> {
+fn spans(trace: &TraceState, format: &str, end: &Result<()>, content: bool) -> Vec<Value> {
     let now = SystemTime::now();
-    let mut root = vec![
+    let root = vec![
         attr("traceloop.span.kind", "workflow"),
         attr("traceloop.workflow.name", format),
         attr("gateway.format", format),
     ];
-    if let Some(customer) = customer {
-        root.push(attr("respan.customer_params.customer_identifier", customer));
-    }
     let mut spans = vec![span(
         &trace.trace_id,
         &trace.root_id,
@@ -830,7 +818,7 @@ mod tests {
             start: SystemTime::UNIX_EPOCH,
             calls: vec![call],
         };
-        let spans = spans(&trace, "anthropic-messages", Some("ops"), &Ok(()), true);
+        let spans = spans(&trace, "anthropic-messages", &Ok(()), true);
         let attr_of = |span: &Value, key: &str| {
             let attrs = span["attributes"].as_array().expect("attributes");
             let found = attrs
@@ -841,10 +829,6 @@ mod tests {
         };
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0]["parentSpanId"], "");
-        assert_eq!(
-            attr_of(&spans[0], "respan.customer_params.customer_identifier")["stringValue"],
-            "ops"
-        );
         let chat = &spans[1];
         assert_eq!(chat["parentSpanId"], "c".repeat(16));
         assert_eq!(chat["endTimeUnixNano"], "5000000");
@@ -863,7 +847,7 @@ mod tests {
             "Hello"
         );
 
-        let quiet = super::spans(&trace, "openai-chat", None, &Ok(()), false);
+        let quiet = super::spans(&trace, "openai-chat", &Ok(()), false);
         assert_eq!(attr_of(&quiet[1], "gen_ai.prompt.0.content"), Value::Null);
         assert_eq!(
             attr_of(&quiet[1], "gen_ai.usage.total_tokens")["intValue"],
@@ -900,7 +884,7 @@ mod tests {
             calls: vec![call],
         };
         let failed: Result<()> = Err(Fault::upstream("the provider returned 500"));
-        let spans = spans(&trace, "openai-chat", None, &failed, true);
+        let spans = spans(&trace, "openai-chat", &failed, true);
         assert_eq!(
             spans[0]["status"],
             json!({ "code": 2, "message": "the provider returned 500" })

@@ -14,7 +14,6 @@ workspace = true
 [dependencies]
 respan-gateway-conversation.workspace = true
 respan-gateway-core.workspace = true
-respan-gateway-sdk.workspace = true
 respan-gateway-http-transport.workspace = true
 respan-gateway-mcp.workspace = true
 getrandom = { workspace = true, features = ["std"] }

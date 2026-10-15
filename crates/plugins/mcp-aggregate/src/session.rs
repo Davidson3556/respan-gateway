@@ -33,7 +33,6 @@ pub(super) struct Inner {
 
 /// One client's session.
 pub(super) struct Session {
-    pub(super) owner: Option<String>,
     /// The session with each server: none until opened, and again once the
     /// server lost it.
     pub(super) upstream: HashMap<String, tokio::sync::Mutex<Option<Opened>>>,
@@ -130,7 +129,6 @@ impl Plugin for Closing {
         let run = Run {
             inner: self.0.clone(),
             calls: Arc::new(calls.collect()),
-            owner: None,
             scope: None,
         };
         run.end_all().await;

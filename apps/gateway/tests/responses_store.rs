@@ -153,10 +153,9 @@ async fn a_follow_up_is_sent_with_the_conversation_it_names() {
 }
 
 #[tokio::test]
-async fn a_response_unknown_unkept_or_another_clients_is_refused_before_a_call() {
+async fn a_response_unknown_or_unkept_is_refused_before_a_call() {
     let (base, sent) = fake().await;
     let gw = gateway(&base).await;
-    let (_, kept) = respond(&gw, "ka", json!({ "model": "m", "input": "one" })).await;
     let (_, unkept) = respond(
         &gw,
         "ka",
@@ -164,11 +163,7 @@ async fn a_response_unknown_unkept_or_another_clients_is_refused_before_a_call()
     )
     .await;
     let calls = sent.lock().unwrap().len();
-    for (key, id) in [
-        ("ka", json!("resp_nope")),
-        ("ka", unkept["id"].clone()),
-        ("kb", kept["id"].clone()),
-    ] {
+    for (key, id) in [("ka", json!("resp_nope")), ("ka", unkept["id"].clone())] {
         let (status, body) = respond(
             &gw,
             key,
@@ -184,7 +179,7 @@ async fn a_response_unknown_unkept_or_another_clients_is_refused_before_a_call()
 
 /// A Chat client's turns with OpenAI's Responses, with the plugin on as it
 /// is unless turned off: the reasoning a turn's tool calls came of goes back
-/// before those calls in the next turn, for the client key that made it.
+/// before those calls in the next turn.
 #[tokio::test]
 async fn a_chat_clients_reasoning_between_tool_calls_reaches_responses_again() {
     let openai = mockllm::FakeOpenAi::start().await;
@@ -266,14 +261,4 @@ async fn a_chat_clients_reasoning_between_tool_calls_reaches_responses_again() {
             .is_some_and(|c| c.starts_with("gAAAA")),
         "{input}"
     );
-
-    // Another client key's history gets none of it.
-    second("kb").await;
-    let input = &openai.requests()[2].body["input"];
-    let reasons = input
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|i| i["type"] == "reasoning");
-    assert!(!reasons, "{input}");
 }

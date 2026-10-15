@@ -473,8 +473,11 @@ Details per format: [chat](crates/formats/conversation-http/README.md),
 ## Vendors
 
 `openai`, `anthropic`, `gemini`, `groq`, `deepseek`, `openrouter`, `xai`,
-`mistral`, `together`, `fireworks`, `ollama`, `azure`, `vllm`, `typesafe` and
-`cloudflare` (Workers AI, at `CLOUDFLARE_ACCOUNT_ID`'s base URL), a file each
+`mistral`, `together`, `fireworks`, `ollama`, `azure`, `vllm`, `typesafe`,
+`cloudflare` (Workers AI, at `CLOUDFLARE_ACCOUNT_ID`'s base URL) and `respan`
+(Respan's gateway, one `RESPAN_API_KEY` for its catalog of many vendors'
+models, in Chat Completions, Responses, Anthropic Messages and Gemini's
+`generateContent`), a file each
 in [`crates/vendors`](crates/vendors/README.md), which lists the formats
 each speaks, how the gateway handles where it departs from a spec, and the
 base URL each format takes. Any other compatible endpoint is a

@@ -14,24 +14,20 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use respan_gateway_core::futures::future::join_all;
-use respan_gateway_core::{
-    ClientContext, ErrorCode, Extensions, Fault, Gateway, Plugin, Provider, Response, async_trait,
-};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Provider, Response, async_trait};
 use respan_gateway_http::http::header::{self, HeaderName, HeaderValue};
-use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
+use respan_gateway_http::http::{self, HeaderMap, StatusCode};
 use respan_gateway_http::{Body, Completion, raw::Original};
-use respan_gateway_http_faults::Status;
 use respan_gateway_http_transport::reqwest;
 use respan_gateway_http_transport::{HttpTransport, unreachable};
-use respan_gateway_mcp::{Input, Output, RpcCode};
-use respan_gateway_mcp_http::{SESSION, StdioTransport, StreamableHttp};
+use respan_gateway_mcp::{Input, Output};
+use respan_gateway_mcp_http::{StdioTransport, StreamableHttp};
 use respan_gateway_plugin_routing::Model;
-use respan_gateway_sdk::Caller;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
@@ -46,8 +42,7 @@ use crate::vendors::origin;
 pub use respan_gateway_mcp_http::FORMAT;
 /// Where clients reach a server: `/mcp/{name}`.
 const MOUNT: &str = "/mcp";
-/// The most client sessions, so child processes, one server holds at once
-/// (the transport's limits are per owner and in all; here they are one).
+/// The most client sessions, so child processes, one server holds at once.
 const SESSIONS: usize = 32;
 
 /// One MCP server, as `gateway.toml` writes it under `mcp`, in the fields
@@ -679,7 +674,7 @@ pub fn known(servers: Vec<McpServer>, aggregate: bool, limit: usize) -> KnownFor
         .serving(move |gateway| register(gateway, &servers, &serve_client, limit))
 }
 
-/// `client`'s calls through `owners`, a server that cannot be reached
+/// `client`'s calls, with the server's `oauth` token if it has one, a server that cannot be reached
 /// named in the fault with its host and the cause: the transport's own
 /// message names neither.
 fn reached(
@@ -687,7 +682,7 @@ fn reached(
     server: &str,
     url: &str,
     limit: usize,
-    owners: Arc<SessionOwners>,
+    oauth: Option<Arc<OAuth>>,
 ) -> impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo + Send + Sync + use<>
 {
     let client = Arc::new(client);
@@ -695,9 +690,9 @@ fn reached(
     let who: Arc<str> = format!("provider '{server}' at {host}").into();
     respan_gateway_http::connect(
         move |call| {
-            let (client, who, owners) = (client.clone(), who.clone(), owners.clone());
+            let (client, who, oauth) = (client.clone(), who.clone(), oauth.clone());
             async move {
-                let sent = owners.send(call, |call| client.send(call)).await;
+                let sent = authorized(oauth.as_deref(), call, |call| client.send(call)).await;
                 sent.map_err(|fault| match fault.cause::<reqwest::Error>() {
                     Some(e) => {
                         Fault::upstream(format!("{who} {}", unreachable(e))).with_source(fault)
@@ -719,13 +714,12 @@ fn register(
 ) -> Result<Gateway, Fault> {
     for s in servers {
         let name = s.name.clone();
-        let owners = Arc::new(SessionOwners::new(s.oauth.clone()));
         gateway = match &s.transport {
             Transport::Http {
                 origin, path, auth, ..
             } => {
                 let transport = HttpTransport::new(origin)?.with_headers(auth.clone())?;
-                let io = reached(transport, &s.name, origin, limit, owners.clone());
+                let io = reached(transport, &s.name, origin, limit, s.oauth.clone());
                 gateway.provider(Provider::new(name, StreamableHttp::new(path), io))?
             }
             Transport::Stdio {
@@ -735,9 +729,7 @@ fn register(
                 cwd,
             } => {
                 let args = command.get(1..).unwrap_or_default();
-                let mut child = StdioTransport::new(program, args)
-                    .max_sessions(SESSIONS)
-                    .max_total(SESSIONS);
+                let mut child = StdioTransport::new(program, args).max_total(SESSIONS);
                 for (key, value) in env {
                     child = child.env(key, value);
                 }
@@ -755,126 +747,41 @@ fn register(
     gateway.client::<Input, Output, _>(client.clone())
 }
 
-/// The most sessions of one HTTP server whose owners are remembered; the
-/// oldest is forgotten past it, and its client starts a new session.
-const OWNED: usize = 4096;
-
-/// Whose each session of one HTTP server is. The server holds the session;
-/// the gateway remembers which client it gave the id to, by the call's
-/// [`Owner`], so another client naming that id is told there is none (404),
-/// as the stdio transport does for its own. A call with no owner (no client
-/// keys) is not tracked. Sessions are forgotten at a reload or restart.
-#[derive(Debug, Default)]
-pub struct SessionOwners {
-    owners: Mutex<IndexMap<String, String>>,
-    /// The server's token source, if it has OAuth.
-    oauth: Option<Arc<OAuth>>,
-}
-
-impl SessionOwners {
-    /// For a server with `oauth` as its credentials, if any.
-    pub fn new(oauth: Option<Arc<OAuth>>) -> Self {
-        Self {
-            owners: Mutex::default(),
-            oauth,
-        }
-    }
-
-    fn table(&self) -> std::sync::MutexGuard<'_, IndexMap<String, String>> {
-        self.owners.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Sends `call` with `send` if its session is its owner's, and notes
-    /// the session the answer starts or ends.
-    pub async fn send<F>(
-        &self,
-        call: http::Request<Body>,
-        send: impl Fn(http::Request<Body>) -> F,
-    ) -> Result<(http::Response<Body>, Option<Completion>), Fault>
-    where
-        F: Future<Output = Result<(http::Response<Body>, Option<Completion>), Fault>>,
-    {
-        let owner = call
-            .extensions()
-            .get::<Extensions>()
-            .and_then(|e| e.get::<Caller>())
-            .map(|c| c.id.clone());
-        let Some(owner) = owner else {
-            return self.authorized(call, &send).await;
-        };
-        let session = call
-            .headers()
-            .get(SESSION)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        if let Some(id) = &session
-            && self.table().get(id) != Some(&owner)
-        {
-            let fault = Fault::new("no such session");
-            let fault = fault
-                .with(ErrorCode("no_session".into()))
-                .with(RpcCode(-32003));
-            return Err(fault.with(Status(StatusCode::NOT_FOUND)));
-        }
-        let ends = call.method() == Method::DELETE;
-        let (resp, completion) = self.authorized(call, &send).await?;
-        match (
-            &session,
-            resp.headers().get(SESSION).and_then(|v| v.to_str().ok()),
-        ) {
-            (None, Some(id)) if resp.status().is_success() => {
-                let mut table = self.table();
-                if table.len() >= OWNED {
-                    table.shift_remove_index(0);
-                }
-                table.insert(id.to_owned(), owner);
-            }
-            (Some(id), _) if ends && resp.status().is_success() => {
-                self.table().shift_remove(id);
-            }
-            _ => {}
-        }
-        Ok((resp, completion))
-    }
-}
-
-impl SessionOwners {
-    /// Sends `call` with `send`, with the server's OAuth token if it has
-    /// one. A `401` drops the token, and the call is sent once more with a
-    /// new one, if its body is whole to send again.
-    async fn authorized<F>(
-        &self,
-        call: http::Request<Body>,
-        send: &impl Fn(http::Request<Body>) -> F,
-    ) -> Result<(http::Response<Body>, Option<Completion>), Fault>
-    where
-        F: Future<Output = Result<(http::Response<Body>, Option<Completion>), Fault>>,
-    {
-        let Some(oauth) = &self.oauth else {
-            return send(call).await;
-        };
-        let (parts, body) = call.into_parts();
-        let whole = body.full_bytes().cloned();
-        let with = |token: &str, body: Body| -> Result<http::Request<Body>, Fault> {
-            let mut call = http::Request::new(body);
-            *call.method_mut() = parts.method.clone();
-            *call.uri_mut() = parts.uri.clone();
-            *call.version_mut() = parts.version;
-            *call.headers_mut() = parts.headers.clone();
-            *call.extensions_mut() = parts.extensions.clone();
-            call.headers_mut()
-                .insert(http::header::AUTHORIZATION, OAuth::header(token)?);
-            Ok(call)
-        };
-        let token = oauth.token(None).await?;
-        let (resp, completion) = send(with(&token, body)?).await?;
-        let Some(bytes) = whole.filter(|_| resp.status() == StatusCode::UNAUTHORIZED) else {
-            return Ok((resp, completion));
-        };
-        drop((resp, completion));
-        let fresh = oauth.token(Some(&token)).await?;
-        send(with(&fresh, Body::full(bytes))?).await
-    }
+/// Sends `call` with `send`, with the server's `oauth` token if it has
+/// one. A `401` drops the token, and the call is sent once more with a
+/// new one, if its body is whole to send again.
+async fn authorized<F>(
+    oauth: Option<&OAuth>,
+    call: http::Request<Body>,
+    send: impl Fn(http::Request<Body>) -> F,
+) -> Result<(http::Response<Body>, Option<Completion>), Fault>
+where
+    F: Future<Output = Result<(http::Response<Body>, Option<Completion>), Fault>>,
+{
+    let Some(oauth) = oauth else {
+        return send(call).await;
+    };
+    let (parts, body) = call.into_parts();
+    let whole = body.full_bytes().cloned();
+    let with = |token: &str, body: Body| -> Result<http::Request<Body>, Fault> {
+        let mut call = http::Request::new(body);
+        *call.method_mut() = parts.method.clone();
+        *call.uri_mut() = parts.uri.clone();
+        *call.version_mut() = parts.version;
+        *call.headers_mut() = parts.headers.clone();
+        *call.extensions_mut() = parts.extensions.clone();
+        call.headers_mut()
+            .insert(http::header::AUTHORIZATION, OAuth::header(token)?);
+        Ok(call)
+    };
+    let token = oauth.token(None).await?;
+    let (resp, completion) = send(with(&token, body)?).await?;
+    let Some(bytes) = whole.filter(|_| resp.status() == StatusCode::UNAUTHORIZED) else {
+        return Ok((resp, completion));
+    };
+    drop((resp, completion));
+    let fresh = oauth.token(Some(&token)).await?;
+    send(with(&fresh, Body::full(bytes))?).await
 }
 
 /// What a request does, for the request log in place of a model: its

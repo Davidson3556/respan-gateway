@@ -4,8 +4,7 @@
 //!
 //! The tools are reached as the gateway reaches any MCP server: as its
 //! providers, with the server's own credentials, never a client's. The
-//! gateway is one MCP client of its own (an [`Owner`] no client key can be):
-//! it keeps one session per server across requests, started at the first use
+//! gateway is one MCP client of its own: it keeps one session per server across requests, started at the first use
 //! and started again if the server lost it, and keeps each server's tool list
 //! for a while.
 //!
@@ -33,14 +32,11 @@ use respan_gateway_plugin_tool_loop::{
     Outcome, ToolFilter, ToolHop, ToolLoop, ToolScope, Toolbox, Tools,
 };
 use respan_gateway_realtime_ws::SessionModel;
-use respan_gateway_sdk::Caller;
 use serde_json::{Value, json};
 
 use crate::config::ToolLoopConfig;
 use crate::mcp::McpServer;
 
-/// The owner of the gateway's own sessions.
-const OWNER: &str = "respan-gateway-tool-loop";
 /// How many pages of a server's tool list are read.
 const PAGES: usize = 8;
 /// The longest a tool's name may be, as every chat API has it.
@@ -584,10 +580,6 @@ impl Servers {
             .get(server)
             .ok_or_else(|| Fault::internal(format!("no call to '{server}'")))?;
         let call = call.clone().with_input(input).with_extension(ToolHop);
-        let call = call.with_extension(Caller {
-            id: OWNER.to_owned(),
-            name: OWNER.to_owned(),
-        });
         let mut outputs = call.await?.outputs::<Output>();
         let (mut messages, mut named) = (Vec::new(), None);
         while let Some(output) = outputs.next().await {

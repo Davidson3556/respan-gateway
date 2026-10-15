@@ -22,6 +22,19 @@ impl Catalog {
         }
     }
 
+    /// The models `other` knows that this does not, as they are there.
+    pub fn fill_from(&self, other: &Catalog) {
+        let theirs = other
+            .0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut all = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        for (key, model) in theirs {
+            all.entry(key).or_insert(model);
+        }
+    }
+
     /// `model` of `provider`, if it has it.
     pub fn get(&self, provider: &str, model: &str) -> Option<Model> {
         let all = self.0.read().unwrap_or_else(PoisonError::into_inner);
@@ -41,5 +54,18 @@ mod tests {
         assert_eq!(catalog.get("p", "a"), None);
         assert_eq!(catalog.get("p", "b").map(|m| m.provider), Some("p".into()));
         assert_eq!(catalog.get("q", "b"), None);
+    }
+
+    #[test]
+    fn filling_keeps_its_own_and_adds_what_it_lacks() {
+        let (mine, theirs) = (Catalog::default(), Catalog::default());
+        let mut declared = Model::new("a");
+        declared.display_name = Some("mine".into());
+        mine.set("p", [declared]);
+        theirs.set("p", [Model::new("a"), Model::new("b")]);
+        mine.fill_from(&theirs);
+        let name = mine.get("p", "a").and_then(|m| m.display_name);
+        assert_eq!(name.as_deref(), Some("mine"));
+        assert!(mine.get("p", "b").is_some());
     }
 }

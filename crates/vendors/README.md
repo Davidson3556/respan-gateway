@@ -84,6 +84,7 @@ base URL its config gives.
 | `vllm` | yellow | `openai-chat` |
 | `typesafe` | green | `typesafe-systemone` |
 | `cloudflare` | yellow | `openai-chat`, `openai-embeddings` |
+| `respan` | green | `openai-chat`, `openai-responses`, `anthropic-messages`, `gemini-generate` |
 <!-- /table -->
 
 The table is written from `ALL`: `BLESS=1 cargo test -p respan-gateway-vendors --test registry`.
@@ -104,6 +105,14 @@ base URL as `openai-chat`. Gemini's own formats, `gemini-generate`
 the key in `x-goog-api-key`. Session formats take a `wss://` URL as their
 SDK does: `wss://api.openai.com/v1` for `openai-realtime` and
 `responses-ws`, `wss://generativelanguage.googleapis.com` for `gemini-live`.
+
+Respan's formats sit under one API, `https://api.respan.ai/api`:
+`openai-chat` and `openai-responses` at it, `anthropic-messages` at
+`/anthropic`, `gemini-generate` at `/google/gemini/v1beta` (its key in
+`x-goog-api-key`, as Google's). Its models are its public catalog,
+`https://www.respan.ai/api/gateway-models/list`, read a page at a time and
+sent no key; a provider at another base URL lists at
+`{base}/gateway-models/list`.
 
 Without a config file, `RESPAN_<VENDOR>_BASE_URL` moves a vendor's base URL
 (`OLLAMA_HOST` for `ollama`); with one, only the file's `base_url` counts

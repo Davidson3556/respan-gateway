@@ -146,7 +146,6 @@ export interface Price {
   input: number;
   output: number;
   cached_input?: number;
-  from: "provider" | "config";
 }
 
 export type RoutePick = "first" | "cheapest" | "fastest" | "weighted" | "random";

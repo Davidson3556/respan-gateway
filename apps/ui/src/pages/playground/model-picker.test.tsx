@@ -67,7 +67,7 @@ it("says what a model's list said of it: name, context and price", () => {
       id: "claude-haiku-5-5",
       display_name: "Claude Haiku 5.5",
       context_window: 1_000_000,
-      pricing: { input: 1, output: 5, from: "provider" },
+      pricing: { input: 1, output: 5 },
     }),
   ).toBe("Claude Haiku 5.5 · 1M ctx · $1 / $5 per M");
   expect(modelFacts({ id: "gpt-x", display_name: "gpt-x", context_window: 128_000 })).toBe("128K ctx");

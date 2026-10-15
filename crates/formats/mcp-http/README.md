@@ -20,15 +20,13 @@ as an HTTP transport.
 - `StdioTransport::new(program, args)`: an MCP server run as a child
   process per session. `send(Request<Body>)` returns a native response and
   optional write completion; `.connect()` supplies the provider factory.
-  Its limits, each with a documented default and reason: `.max_sessions(n)`
-  per owner (8), `.max_total(n)` in all (64), `.idle(d)` (10 minutes; an
+  Its limits, each with a documented default and reason: `.max_total(n)`
+  sessions (64), `.idle(d)` (10 minutes; an
   open `GET` stream counts as activity), `.timeout(d)` for a `POST`'s
   answers (5 minutes; then the child is sent `notifications/cancelled`),
   `.backlog(n)` messages a stream may fall behind (64), `.max_line(bytes)`
-  of one message from the child (32 MiB). The owner is the call's `Caller` (its id)
-  extension, else the client's `Authorization`, as the HTTP adapter lifted
-  it (`respan_gateway_http::Credential`); callers with neither are one
-  owner: authenticate first. Its failures
+  of one message from the child (32 MiB). A session is reached by its
+  unguessable id alone. Its failures
   are faults the client's format writes, with their status, `error_code`
   and JSON-RPC code: no session named (400) or none there (404),
   `no_session`, -32003; a second `GET` (409), `busy`, -32004; past a limit

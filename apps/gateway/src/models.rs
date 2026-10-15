@@ -69,6 +69,8 @@ pub struct Models {
     listings: Vec<Listing>,
     routes: Arc<Routes>,
     cached: Mutex<Option<(Instant, Value)>>,
+    /// Whether every provider has answered its first listing, or failed to.
+    listed: tokio::sync::watch::Sender<bool>,
 }
 
 impl Models {
@@ -83,7 +85,15 @@ impl Models {
             listings: listings.collect(),
             routes,
             cached: Mutex::default(),
+            listed: tokio::sync::watch::channel(false).0,
         }
+    }
+
+    /// Becomes `true` once every provider has answered its first listing, or
+    /// failed to: the catalog then holds what their lists say, such as the
+    /// prices calls are charged at.
+    pub fn listed(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.listed.subscribe()
     }
 
     /// Lists every provider's models now and every `every` after, while
@@ -98,6 +108,7 @@ impl Models {
             loop {
                 let Some(held) = models.upgrade() else { return };
                 let _ = held.collect().await;
+                held.listed.send_replace(true);
                 drop(held);
                 tokio::time::sleep(every).await;
             }
@@ -363,14 +374,14 @@ pub async fn list_gemini(State(models): State<Arc<Models>>) -> Response {
     }
 }
 
-/// `GET /v1beta/models/{model}`: one of the merged list, named with or
-/// without `models/`.
+/// `GET /v1beta/models/{model}`, or `.../models/models/{model}`: one of the
+/// merged list.
 pub async fn get_gemini(State(models): State<Arc<Models>>, Path(model): Path<String>) -> Response {
     let list = match models.list().await {
         Ok(list) => list,
         Err(why) => return gemini_error(StatusCode::BAD_GATEWAY, "UNAVAILABLE", &why),
     };
-    let wanted = format!("models/{}", model.strip_prefix("models/").unwrap_or(&model));
+    let wanted = format!("models/{model}");
     match gemini_models(&list)
         .into_iter()
         .find(|m| m["name"] == wanted)

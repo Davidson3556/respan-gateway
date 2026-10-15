@@ -58,7 +58,6 @@ use respan_gateway_http::raw::Original;
 use respan_gateway_mcp::{Input, Message, Output, PROTOCOL};
 use respan_gateway_mcp_http::FORMAT;
 use respan_gateway_plugin_tool_loop::{ToolFilter, ToolScope};
-use respan_gateway_sdk::Caller;
 use run::Run;
 use serde_json::Value;
 use session::Inner;
@@ -78,9 +77,8 @@ const IDLE: Duration = Duration::from_secs(30 * 60);
 /// The protocol versions the aggregate answers with, newest first.
 const VERSIONS: [&str; 3] = [PROTOCOL, "2025-03-26", "2024-11-05"];
 
-/// Answers the MCP format's requests to `/mcp` itself; register it after
-/// the plugin that sets the request's [`Owner`], and before any that routes
-/// MCP requests by their path.
+/// Answers the MCP format's requests to `/mcp` itself; register it before
+/// any plugin that routes MCP requests by their path.
 pub struct Aggregate(Arc<Inner>);
 
 impl std::fmt::Debug for Aggregate {
@@ -124,13 +122,11 @@ impl Plugin for Aggregate {
             return Ok(None);
         }
         let input = cx.input::<Input>()?.clone();
-        let owner = cx.extensions().get::<Caller>().map(|c| c.id.clone());
         let scope = cx.extensions().get::<ToolScope>().cloned();
         let calls = self.0.servers.iter().map(|s| (s.clone(), cx.call(s)));
         let run = Run {
             inner: self.0.clone(),
             calls: Arc::new(calls.collect()),
-            owner,
             scope,
         };
         let outputs = run.handle(input).await?;

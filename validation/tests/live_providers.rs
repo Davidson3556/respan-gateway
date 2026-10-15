@@ -3,7 +3,7 @@
 //! Ignored by default: they cost money and need the network. Each makes
 //! one small call and skips, passing, when its key is not set.
 //!
-//! Run: `OPENAI_API_KEY=... ANTHROPIC_API_KEY=... cargo test --manifest-path validation/Cargo.toml
+//! Run: `OPENAI_API_KEY=... ANTHROPIC_API_KEY=... RESPAN_API_KEY=... cargo test --manifest-path validation/Cargo.toml
 //! --test live_providers -- --ignored`. Override the models
 //! with `OPENAI_MODEL` and `ANTHROPIC_MODEL`.
 
@@ -448,7 +448,8 @@ async fn real_compatible_native_tool_stream_through_passthrough() {
             name.push_str(call["function"]["name"].as_str().unwrap_or(""));
             args.push_str(call["function"]["arguments"].as_str().unwrap_or(""));
         }
-        finished |= event["choices"][0]["finish_reason"] == "tool_calls";
+        // Passthrough sends OpenAI's own: a named tool choice ends as `stop`.
+        finished |= event["choices"][0]["finish_reason"].is_string();
         usage |= event["usage"]["total_tokens"]
             .as_u64()
             .is_some_and(|n| n > 0);
@@ -599,6 +600,184 @@ async fn real_openai_chat_client_to_responses_provider() {
     assert!(
         body["usage"]["completion_tokens"].as_u64().unwrap() > 0,
         "{body}"
+    );
+}
+
+// Respan: one key for many vendors' models, in each spec it serves.
+
+fn respan_model() -> String {
+    model("RESPAN_MODEL", "gpt-4o-mini")
+}
+
+/// Posts `body` to `path` as a client of its format, whole or streamed.
+async fn ask(gw: &Gateway, path: &str, body: serde_json::Value) -> String {
+    let resp = slow_client()
+        .post(gw.url(path))
+        .header("anthropic-version", "2023-06-01")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let (body, ended) = read_all(resp).await;
+    assert_eq!(status, 200, "{path}: {body}");
+    assert_eq!(ended, Ok(()), "{path}");
+    body
+}
+
+#[tokio::test]
+#[ignore = "calls the real Respan gateway; needs RESPAN_API_KEY"]
+async fn real_respan_lists_its_catalog_and_serves_each_spec() {
+    if !has("RESPAN_API_KEY") {
+        return;
+    }
+    let gw = Gateway::start(&vendor_config(
+        "respan",
+        "openai-chat, openai-responses, anthropic-messages, gemini-generate",
+    ))
+    .await;
+    let list = client().get(gw.url("/v1/models")).send().await.unwrap();
+    let list = json(&list.text().await.unwrap());
+    let data = list["data"].as_array().unwrap();
+    assert!(data.len() > 100, "{}", data.len());
+    let mini = data.iter().find(|m| m["id"] == "gpt-4o-mini").unwrap();
+    assert_eq!(mini["owned_by"], "p");
+    assert!(mini["pricing"]["input"].as_f64() > Some(0.0), "{mini}");
+    assert!(mini["context_window"].as_u64() > Some(0), "{mini}");
+    assert!(
+        !data
+            .iter()
+            .any(|m| m["id"].as_str().is_some_and(|id| id.ends_with(":batch")))
+    );
+
+    let hi = serde_json::json!([{ "role": "user", "content": "Say ok." }]);
+    let chat = json(
+        &ask(
+            &gw,
+            "/v1/chat/completions",
+            serde_json::json!({ "model": respan_model(), "max_tokens": 16, "messages": hi }),
+        )
+        .await,
+    );
+    assert!(
+        chat["choices"][0]["message"]["content"].is_string(),
+        "{chat}"
+    );
+    let streamed = ask(
+        &gw,
+        "/v1/chat/completions",
+        serde_json::json!({ "model": respan_model(),
+        "max_tokens": 16, "stream": true, "stream_options": { "include_usage": true },
+        "messages": hi }),
+    )
+    .await;
+    assert!(streamed.ends_with("data: [DONE]\n\n"), "{streamed}");
+    let responses = json(
+        &ask(
+            &gw,
+            "/v1/responses",
+            serde_json::json!({
+        "model": respan_model(), "max_output_tokens": 16, "input": "Say ok." }),
+        )
+        .await,
+    );
+    assert_eq!(responses["status"], "completed", "{responses}");
+    let claude = json(
+        &ask(
+            &gw,
+            "/v1/messages",
+            serde_json::json!({
+        "model": model("RESPAN_CLAUDE", "claude-haiku-4-5"), "max_tokens": 16,
+        "messages": hi }),
+        )
+        .await,
+    );
+    assert_eq!(claude["type"], "message", "{claude}");
+    let gemini = model("RESPAN_GEMINI", "gemini-3.5-flash-lite");
+    let said = json(
+        &ask(
+            &gw,
+            &format!("/v1beta/models/{gemini}:generateContent"),
+            serde_json::json!({ "contents": [{ "role": "user", "parts": [{ "text": "Say ok." }] }],
+            "generationConfig": { "maxOutputTokens": 64 } }),
+        )
+        .await,
+    );
+    assert!(said["candidates"][0]["content"].is_object(), "{said}");
+}
+
+#[tokio::test]
+#[ignore = "calls the real Respan gateway; needs RESPAN_API_KEY"]
+async fn real_respan_chat_answers_an_anthropic_client_streamed() {
+    if !has("RESPAN_API_KEY") {
+        return;
+    }
+    // Only its Chat Completions: the gateway translates.
+    let gw = Gateway::start("providers = { p = { vendor = \"respan\", formats = \"openai-chat\" } }\nformats = [\"anthropic-messages\"]\nplugins = { routing = { default = \"p\" } }\n").await;
+    let hi = serde_json::json!([{ "role": "user", "content": "Say ok." }]);
+    let whole = json(
+        &ask(
+            &gw,
+            "/v1/messages",
+            serde_json::json!({
+        "model": respan_model(), "max_tokens": 16, "messages": hi }),
+        )
+        .await,
+    );
+    assert_eq!(whole["content"][0]["type"], "text", "{whole}");
+    assert!(
+        whole["usage"]["output_tokens"].as_u64() > Some(0),
+        "{whole}"
+    );
+    let streamed = ask(
+        &gw,
+        "/v1/messages",
+        serde_json::json!({
+        "model": respan_model(), "max_tokens": 16, "stream": true, "messages": hi }),
+    )
+    .await;
+    assert!(streamed.contains("event: message_stop"), "{streamed}");
+    // A model behind it that reasons: its reasoning, read as thinking.
+    let reasoned = json(
+        &ask(
+            &gw,
+            "/v1/messages",
+            serde_json::json!({
+        "model": model("RESPAN_THINKER", "span-02"), "max_tokens": 64, "messages": hi }),
+        )
+        .await,
+    );
+    assert_eq!(reasoned["type"], "message", "{reasoned}");
+}
+
+#[tokio::test]
+#[ignore = "calls the real Respan gateway; needs RESPAN_API_KEY"]
+async fn real_respan_chat_with_tools_and_reasoning_goes_to_its_responses() {
+    if !has("RESPAN_API_KEY") {
+        return;
+    }
+    let gw = Gateway::start(&vendor_config("respan", "openai-chat")).await;
+    let tool = serde_json::json!({ "type": "function", "function": { "name": "echo",
+        "description": "Echoes text back",
+        "parameters": { "type": "object", "properties": { "text": { "type": "string" } },
+            "required": ["text"] } } });
+    let body = |stream: bool| {
+        serde_json::json!({
+        "model": model("RESPAN_REASONER", "gpt-6-luna"), "reasoning_effort": "low",
+        "stream": stream, "tools": [tool], "tool_choice": "required",
+        "messages": [{ "role": "user", "content": "Call echo with text exactly 雪😀." }] })
+    };
+    let whole = json(&ask(&gw, "/v1/chat/completions", body(false)).await);
+    let call = &whole["choices"][0]["message"]["tool_calls"][0];
+    assert_eq!(call["function"]["name"], "echo", "{whole}");
+    assert_eq!(
+        json(call["function"]["arguments"].as_str().unwrap())["text"],
+        "雪😀"
+    );
+    let streamed = ask(&gw, "/v1/chat/completions", body(true)).await;
+    assert!(
+        streamed.contains("\"finish_reason\":\"tool_calls\""),
+        "{streamed}"
     );
 }
 

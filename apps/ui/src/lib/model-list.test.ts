@@ -11,8 +11,8 @@ const model = (id: string, over: Partial<Model> = {}): Model => ({
 });
 const now = Date.parse("2026-10-14T00:00:00Z");
 const models = [
-  model("gpt-big", { context_window: 400_000, pricing: { input: 5, output: 20, from: "provider" }, capabilities: ["tools", "reasoning"] }),
-  model("gpt-small", { context_window: 128_000, pricing: { input: 0.1, output: 0.4, from: "provider" }, capabilities: ["tools"], retires_at: "2026-11-01T00:00:00Z" }),
+  model("gpt-big", { context_window: 400_000, pricing: { input: 5, output: 20 }, capabilities: ["tools", "reasoning"] }),
+  model("gpt-small", { context_window: 128_000, pricing: { input: 0.1, output: 0.4 }, capabilities: ["tools"], retires_at: "2026-11-01T00:00:00Z" }),
   model("claude", { owned_by: "anthropic", input_modalities: ["image", "document"], capabilities: ["tools"], retires_at: "2027-06-01T00:00:00Z" }),
   model("whisper", { kind: "transcription", retires_at: "2026-01-01T00:00:00Z" }),
   model("smart", { owned_by: "routes", route: { pick: "random", to: ["openai/gpt-big"] } }),

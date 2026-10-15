@@ -749,19 +749,62 @@ async fn a_listed_model_carries_what_its_list_says_and_the_configs_price() {
     // OpenAI lists no price: the config's.
     assert_eq!(
         model("gpt-4o")["pricing"],
-        json!({"input": 2.5, "output": 10.0, "cached_input": 1.25, "from": "config"})
+        json!({"input": 2.5, "output": 10.0, "cached_input": 1.25})
     );
     // A list that says more: its name, its context, its own price.
     let llama = model("llama-x");
     assert_eq!(llama["display_name"], "Llama X");
     assert_eq!(llama["context_window"], 8192);
-    assert_eq!(
-        llama["pricing"],
-        json!({"input": 0.2, "output": 0.4, "from": "provider"})
-    );
+    assert_eq!(llama["pricing"], json!({"input": 0.2, "output": 0.4}));
     // The config's price overrides a list's.
     assert_eq!(
         model("llama-y")["pricing"],
-        json!({"input": 9.0, "output": 9.0, "from": "config"})
+        json!({"input": 9.0, "output": 9.0})
     );
+}
+
+#[tokio::test]
+async fn the_first_calls_and_those_after_a_reload_know_the_lists_prices() {
+    // A provider whose list takes a second.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let list = || async {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        axum::Json(json!({"object": "list", "data": [
+            {"id": "slow-x", "object": "model", "pricing": {"input": 0.2, "output": 0.4}},
+        ]}))
+    };
+    let app = axum::Router::new().route("/v1/models", axum::routing::get(list));
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let gw = Gateway::start(&format!(
+        "providers = {{ p = {{ vendor = \"openai\", base_url = \"http://{addr}/v1\", key = \"sk\" }} }}\n\
+         plugins = {{ routing = {{ listings = true }} }}\n"
+    ))
+    .await;
+    let price = |gw: &Gateway| {
+        let url = gw.url("/ui/api/routes/explain?model=slow-x&kind=chat");
+        async move {
+            let explained: Value = support::json(
+                &client()
+                    .get(url)
+                    .send()
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap(),
+            );
+            explained["to"][0]["price"].clone()
+        }
+    };
+    // It serves once the list is in.
+    assert_eq!(price(&gw).await, json!({"input": 0.2, "output": 0.4}));
+    // A reload's build knows what the last one did until its own list is in.
+    let reloaded = client()
+        .post(gw.url("/ui/api/reload"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reloaded.status(), 200, "{}", reloaded.text().await.unwrap());
+    assert_eq!(price(&gw).await, json!({"input": 0.2, "output": 0.4}));
 }

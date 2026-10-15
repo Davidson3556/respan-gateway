@@ -45,6 +45,9 @@ pub(super) struct Built {
     pub(super) closer: Option<tool_loop::Closer>,
     /// Ends the aggregate's sessions with its servers.
     pub(super) aggregate: Option<AggregateCloser>,
+    /// Becomes `true` once its providers' first listings are in; none if it
+    /// reads no lists.
+    pub(super) listed: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl Built {
@@ -134,7 +137,7 @@ impl Built {
         };
         let local = (!keys.required())
             .then(|| LocalOnly::new(config.listen.unwrap_or(DEFAULT_LISTEN), cors.clone()));
-        let router = routes(&config, &plan, relay, admin, keys, local.clone(), cors);
+        let (router, listed) = routes(&config, &plan, relay, admin, keys, local.clone(), cors);
         Ok(Built {
             config: Arc::new(config),
             gateway,
@@ -144,6 +147,7 @@ impl Built {
             local,
             closer,
             aggregate,
+            listed,
         })
     }
 
@@ -174,8 +178,8 @@ impl Built {
 /// client key by name.
 fn routing(plan: &Plan, formats: &[KnownFormat]) -> Routing {
     let client = |cx: &respan_gateway_core::ClientContext| {
-        let caller = cx.extensions().get::<respan_gateway_sdk::Caller>();
-        caller.map(|c| c.name.clone())
+        let name = cx.extensions().get::<crate::auth::KeyName>();
+        name.map(|n| n.0.clone())
     };
     formats.iter().filter(|f| f.kind != kind::MCP).fold(
         Routing::new(plan.routes.clone()).client(client),
@@ -335,7 +339,8 @@ fn relay(
 }
 
 /// The application: `/healthz`, `/v1/models`, the web UI, and the formats
-/// served for every other request; without client keys, local alone.
+/// served for every other request; without client keys, local alone. And
+/// what says when its providers' first listings are in, if it reads them.
 fn routes(
     config: &Config,
     plan: &Plan,
@@ -344,8 +349,9 @@ fn routes(
     keys: Arc<ClientKeys>,
     local: Option<Arc<LocalOnly>>,
     cors: Option<Arc<Cors>>,
-) -> Router {
+) -> (Router, Option<tokio::sync::watch::Receiver<bool>>) {
     let mut router = Router::new().route("/healthz", get(|| async { "ok" }));
+    let mut listed = None;
     // A relay lets its vendor answer, with the client's credentials.
     if !config.relay {
         let models = Arc::new(Models::new(&plan.upstreams, plan.routes.clone()));
@@ -353,6 +359,7 @@ fn routes(
         // what it costs and can do. Learnt before a client lists.
         if config.plugins.routing.listings != Some(false) {
             Models::refresh(&models, std::time::Duration::from_secs(10 * 60));
+            listed = Some(models.listed());
         }
         let list = get(models::list).with_state(models.clone());
         let list = list.layer(from_fn_with_state(keys.clone(), auth::require));
@@ -365,7 +372,13 @@ fn routes(
         };
         router = router
             .route("/v1beta/models", gemini(get(models::list_gemini)))
-            .route("/v1beta/models/{*model}", gemini(get(models::get_gemini)));
+            // One segment: a job's operation, `models/{model}/operations/{id}`,
+            // is the relay's.
+            .route("/v1beta/models/{model}", gemini(get(models::get_gemini)))
+            .route(
+                "/v1beta/models/models/{model}",
+                gemini(get(models::get_gemini)),
+            );
     }
     if config.ui {
         router = router.merge(admin::router(admin, keys.clone()));
@@ -376,10 +389,11 @@ fn routes(
         None => router,
     };
     // Outermost: a preflight carries no key, and no host check applies.
-    match cors {
+    let router = match cors {
         Some(cors) => router.layer(from_fn_with_state(cors, auth::cors)),
         None => router,
-    }
+    };
+    (router, listed)
 }
 
 /// The gateway's own 404, which no format writes, as JSON in OpenAI's

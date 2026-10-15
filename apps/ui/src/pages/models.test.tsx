@@ -17,7 +17,7 @@ const list = {
       max_output_tokens: 64_000,
       input_modalities: ["image", "document"],
       capabilities: ["tools", "reasoning"],
-      pricing: { input: 3, output: 15, from: "provider" },
+      pricing: { input: 3, output: 15 },
     },
     { id: "whisper-1", object: "model", owned_by: "openai", kind: "transcription" },
     { id: "smart-model", object: "model", owned_by: "routes", kind: "chat", route: { pick: "random", to: ["openai/gpt-6-luna"] } },

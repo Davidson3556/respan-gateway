@@ -401,10 +401,7 @@ fn parts(r: &RequestRecord) -> Vec<Part> {
         }
     }
     if let Some(cost) = r.cost_usd.filter(|c| *c > 0.0) {
-        details.push(match cost < 0.01 {
-            true => format!("${cost:.4}"),
-            false => format!("${cost:.2}"),
-        });
+        details.push(usd(cost));
     }
     if !r.steps.is_empty() {
         let tools: usize = r.steps.iter().map(|s| s.tools.len()).sum();
@@ -508,6 +505,16 @@ fn escape_controls(line: &str) -> String {
     line.chars().map(escaped).collect()
 }
 
+/// `cost`, in US dollars: cents, or two significant digits below a cent,
+/// so a call's fraction of a cent does not read as nothing.
+fn usd(cost: f64) -> String {
+    if cost >= 0.01 {
+        return format!("${cost:.2}");
+    }
+    let places = (1.0 - cost.log10().floor()).clamp(2.0, 12.0) as usize;
+    format!("${cost:.places$}")
+}
+
 /// Adds what a call to a provider cost to the cost of the request in
 /// `extensions`, as the pricing plugin charges it.
 pub fn charge(extensions: &Extensions, charge: &respan_gateway_plugin_pricing::Charge) {
@@ -528,6 +535,14 @@ pub fn attribute(extensions: &Extensions, client: &str) {
 mod tests {
     use super::*;
     use crate::requests::record::Usage;
+
+    #[test]
+    fn a_fraction_of_a_cent_keeps_two_digits() {
+        assert_eq!(usd(0.00000255), "$0.0000026");
+        assert_eq!(usd(0.000029), "$0.000029");
+        assert_eq!(usd(0.004), "$0.0040");
+        assert_eq!(usd(1.234), "$1.23");
+    }
 
     #[test]
     fn a_client_cannot_forge_a_line() {

@@ -1670,7 +1670,6 @@ dependencies = [
  "respan-gateway-http-transport",
  "respan-gateway-mcp",
  "respan-gateway-plugin-relay",
- "respan-gateway-sdk",
  "respan-gateway-sse",
  "serde_json",
  "tokio",
@@ -1765,7 +1764,6 @@ dependencies = [
  "respan-gateway-mcp",
  "respan-gateway-mcp-http",
  "respan-gateway-plugin-tool-loop",
- "respan-gateway-sdk",
  "serde_json",
  "tokio",
 ]
@@ -1775,11 +1773,14 @@ name = "respan-gateway-plugin-pricing"
 version = "0.1.0"
 dependencies = [
  "respan-gateway-conversation",
+ "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-decision",
+ "respan-gateway-http",
  "respan-gateway-media",
  "respan-gateway-realtime",
  "respan-gateway-sdk",
+ "tokio",
 ]
 
 [[package]]
@@ -1799,7 +1800,6 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-http-transport",
  "respan-gateway-mcp",
- "respan-gateway-sdk",
  "serde_json",
  "tokio",
 ]
@@ -1813,7 +1813,6 @@ dependencies = [
  "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-sdk",
  "serde_json",
 ]
 

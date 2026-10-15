@@ -122,10 +122,6 @@ async fn a_request_is_sent_to_respan_as_a_trace() {
     let (root, chat) = (&spans[0], &spans[1]);
     assert_eq!(chat["traceId"], root["traceId"]);
     assert_eq!(chat["parentSpanId"], root["spanId"]);
-    assert_eq!(
-        attr(root, "respan.customer_params.customer_identifier")["stringValue"],
-        "ops"
-    );
     assert_eq!(attr(chat, "llm.request.type")["stringValue"], "chat");
     assert_eq!(
         attr(chat, "gen_ai.request.model")["stringValue"],

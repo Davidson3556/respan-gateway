@@ -412,6 +412,39 @@ async fn an_openai_videos_client_is_answered_by_veo() {
 }
 
 #[tokio::test]
+async fn a_veo_client_polls_its_operation_through_the_gateway() {
+    let google = Fake::start().await;
+    let app = app(&format!(
+        "gemini = {{ vendor = \"gemini\", key = \"AIza\", formats = {{ gemini-veo = \"{0}/v1beta\", gemini-generate = \"{0}/v1beta\" }} }}\n",
+        google.base
+    ));
+    let (status, op) = post(
+        &app,
+        "/v1beta/models/veo-3.0-generate-001:predictLongRunning",
+        json!({"instances": [{"prompt": "a boat"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{op}");
+    let name = op["name"].as_str().unwrap();
+    assert!(
+        name.starts_with("models/veo-3.0-generate-001/operations/veo_"),
+        "{name}"
+    );
+
+    // Not the model lookup at `/v1beta/models/{model}`: the operation.
+    let polled = get_json(&app, &format!("/v1beta/{name}")).await;
+    assert_eq!(polled["done"], true, "{polled}");
+    let uri = polled["response"]["generateVideoResponse"]["generatedSamples"][0]["video"]["uri"]
+        .as_str()
+        .unwrap();
+    let path = &uri[uri.find("/v1beta/").unwrap()..];
+    let (status, content_type, video) = get(&app, path).await;
+    assert_eq!(status, StatusCode::OK, "{video:?}");
+    assert_eq!(content_type, "video/mp4");
+    assert_eq!(video.as_ref(), VIDEO);
+}
+
+#[tokio::test]
 async fn a_model_prefix_routes_only_within_the_kinds_its_provider_serves() {
     let (groq, openai) = (Fake::start().await, Fake::start().await);
     let app = app(&format!(

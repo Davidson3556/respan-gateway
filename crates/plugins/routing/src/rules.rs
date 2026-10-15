@@ -308,7 +308,7 @@ mod tests {
         let catalog = Catalog::default();
         for (provider, input, output) in [("cheap", 1.0, 1.0), ("dear", 10.0, 30.0)] {
             let mut model = Model::new("m");
-            model.price = Some(Price::provider(input, output, None));
+            model.price = Some(Price::new(input, output, None));
             catalog.set(provider, [model]);
         }
         catalog

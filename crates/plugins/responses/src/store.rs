@@ -14,9 +14,6 @@ use respan_gateway_conversation::{Content, MediaSource, Message};
 /// of, under each call's id.
 #[derive(Debug, Clone)]
 pub struct Turn {
-    /// The client key's id that made it ([`Owner`](respan_gateway_http::Owner)),
-    /// whose alone it is.
-    pub owner: Option<String>,
     /// The response it followed.
     pub parent: Option<String>,
     /// Its messages.

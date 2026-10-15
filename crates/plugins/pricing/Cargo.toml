@@ -18,3 +18,8 @@ respan-gateway-conversation.workspace = true
 respan-gateway-decision.workspace = true
 respan-gateway-media.workspace = true
 respan-gateway-realtime.workspace = true
+
+[dev-dependencies]
+respan-gateway-conversation-http.workspace = true
+respan-gateway-http.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

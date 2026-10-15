@@ -125,7 +125,10 @@ impl Slots {
         let lease = milliseconds(self.lease);
         let expires = after(deadline.saturating_duration_since(Instant::now()));
         let database = self.database.clone();
-        let queued = self.database.transact(move |tx| {
+        // The database may be busy with another process's admission: wait
+        // for it as long as this request waits at all.
+        let by = Some(deadline.into_std());
+        let queued = self.database.transact_by(by, move |tx| {
             tx.execute_batch(SCHEMA).map_err(sql)?;
             tx.execute(
                 "INSERT OR IGNORE INTO admission_config VALUES(1,?1,?2)",
@@ -171,7 +174,7 @@ impl Slots {
         let id = ticket.id;
         let admitted = tokio::time::timeout_at(deadline, async {
             loop {
-                let expires = self.claim(id).await?;
+                let expires = self.claim(id, by).await?;
                 match expires {
                     Some(expires) if expires > 0 => return Ok::<_, Fault>(Some(expires)),
                     None => return Ok(None),
@@ -232,11 +235,11 @@ impl Slots {
         }
     }
 
-    async fn claim(&self, id: i64) -> Result<Option<i64>> {
+    async fn claim(&self, id: i64, by: Option<std::time::Instant>) -> Result<Option<i64>> {
         let capacity = self.capacity;
         let lease = milliseconds(self.lease);
         self.database
-            .transact(move |tx| {
+            .transact_by(by, move |tx| {
                 let at = now();
                 tx.execute(
                     "DELETE FROM admission_waiters WHERE COALESCE(expires,deadline)<=?1",

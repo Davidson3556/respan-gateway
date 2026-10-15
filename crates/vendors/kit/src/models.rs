@@ -79,10 +79,10 @@ fn pricing(p: &Value) -> Option<Price> {
     let number = |v: &Value| v.as_f64().or_else(|| v.as_str()?.parse().ok());
     if let (Some(input), Some(output)) = (number(&p["prompt"]), number(&p["completion"])) {
         let cached = number(&p["input_cache_read"]).map(|c| c * 1e6);
-        return Some(Price::provider(input * 1e6, output * 1e6, cached));
+        return Some(Price::new(input * 1e6, output * 1e6, cached));
     }
     let (input, output) = (number(&p["input"])?, number(&p["output"])?);
-    Some(Price::provider(input, output, number(&p["cached_input"])))
+    Some(Price::new(input, output, number(&p["cached_input"])))
 }
 
 /// OpenAI's model list: `GET /models`.
@@ -132,7 +132,7 @@ mod tests {
         let price = router.price.expect("priced");
         assert!((price.input - 3.0).abs() < 1e-9 && (price.output - 15.0).abs() < 1e-9);
         assert!((price.cached_input.unwrap_or_default() - 0.3).abs() < 1e-9);
-        assert_eq!(models[1].price, Some(Price::provider(0.88, 0.88, None)));
+        assert_eq!(models[1].price, Some(Price::new(0.88, 0.88, None)));
         assert_eq!(models[2].context_window, Some(32000));
         assert_eq!(models[2].input_modalities, [Modality::Image]);
         assert_eq!(models[2].capabilities, [Capability::Tools]);

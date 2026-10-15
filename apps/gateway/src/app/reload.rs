@@ -132,6 +132,13 @@ impl Shared {
             built.local_is_on(*addr);
         }
         let old = self.current();
+        // Until its own lists are in, the new build knows the models the
+        // old one did, such as their prices.
+        built
+            .plan
+            .routes
+            .catalog()
+            .fill_from(old.plan.routes.catalog());
         let mut restart_required = Vec::new();
         if let Some(bound) = process.listen.get()
             && built.listen() != old.listen()

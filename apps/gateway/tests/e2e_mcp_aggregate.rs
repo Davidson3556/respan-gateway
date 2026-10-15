@@ -629,9 +629,9 @@ async fn one_endpoint_fronts_every_server() {
     assert_eq!(alpha.params("notifications/cancelled").len(), 1);
     assert_eq!(beta.params("notifications/cancelled").len(), 1);
 
-    // The session belongs to its key; a stranger and a missing id are told so.
-    let other = call(&gw, "GET", Some(&session), None, Some(OTHER)).await;
-    assert_eq!(other.status, 404);
+    // An unknown and a missing id are told so.
+    let unknown = call(&gw, "GET", Some("s-nope"), None, Some(KEY)).await;
+    assert_eq!(unknown.status, 404);
     let none = call(&gw, "GET", None, None, Some(KEY)).await;
     assert_eq!(none.status, 400);
 

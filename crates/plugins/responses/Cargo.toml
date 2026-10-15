@@ -15,7 +15,6 @@ workspace = true
 respan-gateway-conversation.workspace = true
 respan-gateway-conversation-http.workspace = true
 respan-gateway-core.workspace = true
-respan-gateway-sdk.workspace = true
 respan-gateway-http.workspace = true
 getrandom = { workspace = true, features = ["std"] }
 serde_json.workspace = true

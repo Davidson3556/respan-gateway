@@ -242,13 +242,13 @@ mod tests {
         model.retires_at = time("2026-10-23");
         model.reads(Modality::Image);
         model.can(Capability::StructuredOutputs);
-        model.price = Some(Price::provider(1.0, 2.0, None));
+        model.price = Some(Price::new(1.0, 2.0, None));
         assert_eq!(
             serde_json::to_value(&model).ok(),
             Some(json!({
                 "id": "gpt-x", "owned_by": "openai", "kind": "chat", "created": 1,
                 "input_modalities": ["image"], "capabilities": ["structured_outputs"],
-                "pricing": {"input": 1.0, "output": 2.0, "from": "provider"},
+                "pricing": {"input": 1.0, "output": 2.0},
                 "retires_at": "2026-10-23T00:00:00+00:00",
             }))
         );
@@ -282,13 +282,9 @@ mod tests {
             "retires_at": "2027-01-01",
         }))
         .expect("a card");
-        assert_eq!(
-            declared.price.map(|p| p.from),
-            Some(crate::PriceFrom::Config)
-        );
         let mut listed = Model::new("m");
         listed.display_name = Some("M".into());
-        listed.price = Some(Price::provider(1.0, 1.0, None));
+        listed.price = Some(Price::new(1.0, 1.0, None));
         listed.overlay(&declared);
         assert_eq!(listed.display_name.as_deref(), Some("M"));
         assert_eq!(listed.price.map(|p| p.input), Some(2.0));

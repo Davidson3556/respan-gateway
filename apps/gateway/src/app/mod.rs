@@ -151,6 +151,18 @@ impl App {
         self.shared.current().config.clone()
     }
 
+    /// Once its providers have answered their first listings, or failed
+    /// to, so the first calls are priced and routed by what the lists say;
+    /// at once if it reads no lists. Each listing gives up after a few
+    /// seconds, so this does too.
+    pub async fn listed(&self) {
+        let Some(mut listed) = self.shared.current().listed.clone() else {
+            return;
+        };
+        let waited = listed.wait_for(|done| *done);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), waited).await;
+    }
+
     /// Where it listens: the config's address, or `127.0.0.1:8080`.
     pub fn listen(&self) -> SocketAddr {
         self.shared.current().listen()

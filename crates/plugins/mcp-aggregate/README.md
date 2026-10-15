@@ -24,8 +24,7 @@ let gateway = gateway.plugin(closer.plugin()).plugin(aggregate);
 closer.close(&gateway).await;
 ```
 
-Register it after the plugin that puts the client's `Caller` on the request,
-so a session belongs to the client that opened it, and before any plugin that
-routes MCP requests by path. Give none of its servers a client's credentials:
+Register it before any plugin that routes MCP requests by path. A session is
+reached by its unguessable id alone. Give none of its servers a client's credentials:
 the sessions are the gateway's. Used by the binary's `plugins: mcp_aggregate`
 (its end-to-end tests are `apps/gateway/tests/e2e_mcp_aggregate.rs`).
