@@ -1,41 +1,23 @@
-//! The registry: each vendor once, each quirk tested, and the README's
-//! table of them as the code says.
+//! The registry: each vendor once, and the README's table of them as the
+//! code says.
 
-use respan_gateway_vendors::{ALL, Vendor};
+use respan_gateway_vendors::{ALL, GREEN, Vendor, YELLOW};
 
+/// Each vendor is listed once, in one tier.
 #[test]
-fn every_vendor_is_listed_once() {
-    let mut ids: Vec<&str> = ALL.iter().map(|p| p.id).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    assert_eq!(ids.len(), ALL.len());
-}
-
-/// The tests of each vendor with quirks.
-const TESTS: &[(&str, &str)] = &[
-    ("azure", include_str!("azure.rs")),
-    ("deepseek", include_str!("deepseek.rs")),
-    ("gemini", include_str!("gemini.rs")),
-    ("groq", include_str!("groq.rs")),
-    ("openai", include_str!("openai.rs")),
-    ("openrouter", include_str!("openrouter.rs")),
-    ("vllm", include_str!("vllm.rs")),
-];
-
-/// A quirk is tested by a test of `tests/<vendor>.rs` whose name has it.
-#[test]
-fn every_quirk_has_a_test_named_for_it() {
-    for provider in ALL.iter().filter(|p| !p.quirks.is_empty()) {
-        let tests = TESTS.iter().find(|(id, _)| *id == provider.id);
-        let (_, tests) = tests.unwrap_or_else(|| panic!("no tests/{}.rs", provider.id));
-        for quirk in provider.quirks {
-            let named = tests.lines().any(|l| {
-                let l = l.trim_start();
-                l.starts_with("fn ") || l.starts_with("async fn ")
-            } && l.contains(quirk.name));
-            assert!(named, "{}: no test named for {}", provider.id, quirk.name);
-        }
-    }
+fn every_vendor_is_listed_once_in_one_tier() {
+    let ids = |vendors: &[&Vendor]| {
+        let mut ids: Vec<&str> = vendors.iter().map(|p| p.id).collect();
+        ids.sort_unstable();
+        ids
+    };
+    let mut all = ids(ALL);
+    all.dedup();
+    assert_eq!(all.len(), ALL.len());
+    let mut tiers = ids(&[GREEN, YELLOW].concat());
+    tiers.dedup();
+    assert_eq!(tiers, all);
+    assert_eq!(GREEN.len() + YELLOW.len(), ALL.len());
 }
 
 /// The README's table, between its markers, is the one [`ALL`] makes. Run
@@ -59,7 +41,7 @@ fn the_readme_table_is_current() {
 }
 
 fn table() -> String {
-    let mut table = "| Vendor | Formats | Quirks |\n|---|---|---|\n".to_owned();
+    let mut table = "| Vendor | Tier | Formats |\n|---|---|---|\n".to_owned();
     for provider in ALL {
         table.push_str(&row(provider));
     }
@@ -68,50 +50,79 @@ fn table() -> String {
 
 fn row(provider: &Vendor) -> String {
     let code = |s: &str| format!("`{s}`");
-    let formats: Vec<String> = provider.formats.iter().map(|f| code(f.name())).collect();
-    let quirks: Vec<String> = provider
-        .quirks
+    let formats: Vec<String> = provider
+        .formats
         .iter()
-        .map(|q| format!("{}: {}", code(q.name), q.description))
+        .map(|(f, _)| code(f.name()))
         .collect();
-    format!(
-        "| {} | {} | {} |\n",
-        code(provider.id),
-        formats.join(", "),
-        quirks.join("<br>")
-    )
+    let tier = match GREEN.iter().any(|v| v.id == provider.id) {
+        true => "green",
+        false => "yellow",
+    };
+    let (id, formats) = (code(provider.id), formats.join(", "));
+    format!("| {id} | {tier} | {formats} |\n")
 }
 
-/// A provider of a vendor sits, and takes its key, as the vendor says.
+/// A provider of a vendor sits at the URLs the vendor gives, each format
+/// as its spec has it reached, and takes its key as each format takes it.
 #[test]
-fn each_format_sits_where_and_takes_the_key_as_its_vendor_says() {
-    use respan_gateway_vendors::{anthropic, gemini};
-    let gemini = gemini::VENDOR
-        .provider("g")
-        .base("https://a.test/v1beta/openai");
+fn each_format_sits_where_its_vendor_says_and_takes_the_key_as_its_spec_says() {
+    use respan_gateway_vendors::{anthropic, azure, gemini};
+    let gemini = gemini::VENDOR.provider("g").key("k");
     let parts = gemini.parts().unwrap_or_default();
     let at = |format: &str| {
         let part = parts.iter().find(|p| p.format.name() == format);
         part.map(|p| (p.name.as_str(), p.base_url.as_str()))
     };
-    assert_eq!(at("gemini-generate"), Some(("g", "https://a.test/v1beta")));
+    let google = "https://generativelanguage.googleapis.com";
+    assert_eq!(
+        at("gemini-generate"),
+        Some(("g", &*format!("{google}/v1beta")))
+    );
     assert_eq!(
         at("openai-chat"),
-        Some(("g:openai-chat", "https://a.test/v1beta/openai"))
+        Some(("g:openai-chat", &*format!("{google}/v1beta/openai")))
     );
-    assert_eq!(at("gemini-live"), Some(("g:gemini-live", "wss://a.test")));
-    let claude = anthropic::VENDOR.provider("c").key("k");
-    let parts = claude.parts().unwrap_or_default();
-    let key = parts[0].headers.get("x-api-key");
-    assert_eq!(key.map(|v| v.as_bytes()), Some(&b"k"[..]));
+    // Live's path is whole: it takes the origin, in its scheme.
+    let live = "wss://generativelanguage.googleapis.com";
+    assert_eq!(at("gemini-live"), Some(("g:gemini-live", live)));
+    let key = |parts: &[respan_gateway_vendors::Part], format: &str, header: &str| {
+        let part = parts.iter().find(|p| p.format.name() == format);
+        part.and_then(|p| p.headers.get(header))
+            .map(|v| v.as_bytes().to_vec())
+    };
+    assert_eq!(
+        key(&parts, "gemini-generate", "x-goog-api-key"),
+        Some(b"k".to_vec())
+    );
+    assert_eq!(
+        key(&parts, "openai-chat", "authorization"),
+        Some(b"Bearer k".to_vec())
+    );
+    let claude = anthropic::VENDOR
+        .provider("c")
+        .key("k")
+        .parts()
+        .unwrap_or_default();
+    assert_eq!(
+        key(&claude, "anthropic-messages", "x-api-key"),
+        Some(b"k".to_vec())
+    );
+    // Azure's dialect takes the key in a header of its own.
+    let azure = azure::VENDOR
+        .provider("a")
+        .base("https://r.test/openai/v1")
+        .key("k");
+    let azure = azure.parts().unwrap_or_default();
+    assert_eq!(key(&azure, "openai-chat", "api-key"), Some(b"k".to_vec()));
 }
 
-/// A format of no vendor is spoken as its own vendor speaks it.
+/// A format of no vendor is spoken as its spec has it reached.
 #[test]
-fn a_format_of_no_vendor_is_spoken_as_its_own_vendor_speaks_it() {
-    use respan_gateway_vendors::{Auth, speaks};
-    let messages = speaks(None, "anthropic-messages").map(|f| f.auth());
-    assert_eq!(messages, Some(Auth::Header("x-api-key")));
-    assert!(speaks(None, "passthrough").is_some());
-    assert!(speaks(None, "nope").is_none());
+fn a_format_of_no_vendor_is_spoken_as_its_spec_has_it() {
+    use respan_gateway_vendors::{KeyIn, format};
+    let messages = format(None, "anthropic-messages").map(|(f, url)| (f.key(), url));
+    assert_eq!(messages, Some((KeyIn::Header("x-api-key"), None)));
+    assert!(format(None, "passthrough").is_some_and(|(f, _)| f.at_origin()));
+    assert!(format(None, "nope").is_none());
 }

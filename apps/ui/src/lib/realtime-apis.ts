@@ -3,6 +3,7 @@
 // and reads what the server sends into OpenAI Realtime's events, which the
 // page and its reducer read whatever the API.
 
+import { servedApis } from "@/lib/playground-apis";
 import type { ServerEvent } from "@/lib/realtime";
 import { REALTIME_RATE } from "@/lib/realtime-audio";
 
@@ -16,6 +17,8 @@ export interface RealtimeApi {
   label: string;
   /** The path its sessions open at, as the gateway serves it. */
   path: string;
+  /** That path, as shown. */
+  endpoint: string;
   /** Its URL on the page's host, for `model`, carrying `key` if the API takes it there. */
   url: (model: string, key: string | null, location: Pick<Location, "protocol" | "host">) => string;
   /** The subprotocols it offers, carrying `key` if the API takes it there. */
@@ -49,6 +52,7 @@ export const openaiRealtime: RealtimeApi = {
   id: "openai-realtime",
   label: "OpenAI Realtime",
   path: "/v1/realtime",
+  endpoint: "/v1/realtime",
   url: (model, _key, location) =>
     socketUrl(location, `/v1/realtime?model=${encodeURIComponent(model)}`),
   protocols: (key) => (key ? ["realtime", `openai-insecure-api-key.${key}`] : ["realtime"]),
@@ -86,6 +90,7 @@ export const geminiLive: RealtimeApi = {
   id: "gemini-live",
   label: "Gemini Live",
   path: GEMINI_PATH,
+  endpoint: GEMINI_PATH,
   url: (model, key, location) => {
     const query = new URLSearchParams({ model });
     if (key) query.set("key", key);
@@ -177,12 +182,11 @@ export const geminiLive: RealtimeApi = {
   },
 };
 
-const realtimeApis: RealtimeApi[] = [openaiRealtime, geminiLive];
+export const realtimeApis: RealtimeApi[] = [openaiRealtime, geminiLive];
 
 /** The APIs the gateway serves sessions in; OpenAI Realtime if it lists none. */
 export function servedRealtimeApis(
   serve: { format: string; kind: string }[] | undefined,
 ): RealtimeApi[] {
-  const served = realtimeApis.filter((a) => serve?.some((s) => s.format === a.id));
-  return served.length > 0 ? served : [openaiRealtime];
+  return servedApis("realtime", realtimeApis, serve);
 }

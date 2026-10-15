@@ -161,35 +161,29 @@ impl LogFormat {
                 line.insert("msg".into(), json!(message));
                 Value::Object(line).to_string()
             }
-            _ => {
-                let label = format!("{:<5}", level.label().to_ascii_uppercase());
-                let style = match level {
-                    Level::Info => "32",
-                    Level::Warn => "33",
-                    Level::Error => "31",
-                };
-                let message = escape_controls(message);
-                // Request summaries begin with their HTTP status. Color only that
-                // token after escaping all externally supplied text.
-                let message = if fields.contains_key("method") {
-                    match message.split_once(' ') {
-                        Some((status, rest)) => {
-                            format!("{} {rest}", paint(status, style, true))
-                        }
-                        None => message,
-                    }
-                } else {
-                    message
-                };
-                let time = ts.split_once('T').map_or(ts.as_str(), |(_, time)| time);
-                format!(
-                    "{} {} {}",
-                    paint(time, "2", true),
-                    paint(&label, style, true),
-                    message
-                )
-            }
+            _ => self.tagged(
+                level,
+                &level.label().to_ascii_uppercase(),
+                &escape_controls(message),
+            ),
         }
+    }
+
+    /// A text line: the time, `tag` (a level, or a request's status) in the
+    /// level's color, and `message`, already escaped and styled.
+    pub fn tagged(self, level: Level, tag: &str, message: &str) -> String {
+        let style = match level {
+            Level::Info => "32",
+            Level::Warn => "33",
+            Level::Error => "31",
+        };
+        let ts = rfc3339(SystemTime::now());
+        let time = ts.split_once('T').map_or(ts.as_str(), |(_, time)| time);
+        format!(
+            "{} {} {message}",
+            paint(time, "2", true),
+            paint(&format!("{tag:<5}"), style, true)
+        )
     }
 
     /// Writes a message of the gateway's own to stderr.

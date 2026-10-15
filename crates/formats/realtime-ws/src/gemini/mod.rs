@@ -6,6 +6,8 @@ mod setup;
 #[cfg(test)]
 mod tests;
 
+use respan_gateway_core::Provider;
+use respan_gateway_http::{Connect, KeyIn, Reach, Upstream};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -16,9 +18,44 @@ use respan_gateway_http::{ClientIo, ProviderIo};
 use respan_gateway_realtime::{AudioFormat, Input, Modality, Output, Session};
 use respan_gateway_ws::WsTransport;
 
+use serde_json::Value;
+
+use crate::foreign::{Drop, Harmless};
 use crate::session::{self, Spec};
 
 const NAME: &str = SPEC.name;
+
+/// What of Gemini Live's own natives another format may drop: its
+/// transcription settings, context compression and voice detection's
+/// sensitivities, and the shape of the message a client's event came in;
+/// the start of the user's activity, which a format's voice detection or
+/// its next commit implies, and the end of its audio stream.
+pub(crate) const HARMLESS: Harmless = Harmless {
+    format: NAME,
+    session: &[
+        "setup.contextWindowCompression",
+        "setup.inputAudioTranscription",
+        "setup.outputAudioTranscription",
+    ],
+    vad: &[
+        "startOfSpeechSensitivity",
+        "endOfSpeechSensitivity",
+        "disabled",
+    ],
+    message: &[],
+    event: &["clientContent", "realtimeInput.activityStart", "name"],
+    input: |event| {
+        let first = |v: &Value| v.as_object()?.keys().next().cloned();
+        match event.get("realtimeInput").and_then(first) {
+            Some(field) if field == "activityStart" || field == "audioStreamEnd" => {
+                (Drop::Always, format!("realtimeInput.{field}"))
+            }
+            Some(field) => (Drop::Never, format!("realtimeInput.{field}")),
+            None => (Drop::Never, first(event).unwrap_or_default()),
+        }
+    },
+    said: |_| false,
+};
 
 /// What a session's writer to its provider and reader of it share.
 #[derive(Debug, Default)]
@@ -100,6 +137,32 @@ impl Format<ClientIo, Input, Output> for GeminiLive {
         let mut client = output::Client::new(answering);
         let write = Box::new(move |event: &Output, out: &mut Vec<Bytes>| client.write(event, out));
         Ok(SPEC.client(io, Box::new(read), write))
+    }
+}
+
+/// Its spec's: the key in `x-goog-api-key`, as a WebSocket session at
+/// its base URL's origin, as its path is whole.
+impl Upstream for GeminiLive {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
+
+    fn key(&self) -> KeyIn {
+        KeyIn::Header("x-goog-api-key")
+    }
+
+    fn reach(&self) -> Reach {
+        Reach::Session {
+            binary_text: SPEC.binary_text,
+        }
+    }
+
+    fn at_origin(&self) -> bool {
+        true
+    }
+
+    fn provider(&self, name: String, connect: Connect) -> Provider {
+        Provider::new(name, *self, move |x| connect(x))
     }
 }
 

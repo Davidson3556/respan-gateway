@@ -86,7 +86,7 @@ fn stream_generate(model: &str) -> String {
 
 fn gemini_config(fake: &str) -> String {
     format!(
-        "providers = {{ g = {{ vendor = \"gemini\", formats = \"gemini-generate\", base_url = \"{fake}/v1beta/openai\", key = \"gw-gemini-key\" }} }}\nformats = [\"gemini-generate\"]\nplugins = {{ routing = {{ default = \"g\" }} }}\n"
+        "providers = {{ g = {{ vendor = \"gemini\", formats = \"gemini-generate\", base_url = \"{fake}/v1beta\", key = \"gw-gemini-key\" }} }}\nformats = [\"gemini-generate\"]\nplugins = {{ routing = {{ default = \"g\" }} }}\n"
     )
 }
 

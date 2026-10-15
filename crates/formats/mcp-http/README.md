@@ -25,7 +25,7 @@ as an HTTP transport.
   open `GET` stream counts as activity), `.timeout(d)` for a `POST`'s
   answers (5 minutes; then the child is sent `notifications/cancelled`),
   `.backlog(n)` messages a stream may fall behind (64), `.max_line(bytes)`
-  of one message from the child (32 MiB). The owner is the call's `Owner`
+  of one message from the child (32 MiB). The owner is the call's `Caller` (its id)
   extension, else the client's `Authorization`, as the HTTP adapter lifted
   it (`respan_gateway_http::Credential`); callers with neither are one
   owner: authenticate first. Its failures

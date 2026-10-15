@@ -7,6 +7,9 @@
 
 #![allow(clippy::unwrap_used)]
 
+#[allow(dead_code)]
+#[path = "../../../tests/support/realtime/mod.rs"]
+mod realtime;
 mod support;
 
 use std::sync::{Arc, Mutex};
@@ -816,4 +819,207 @@ async fn tools_the_loop_adds_with_a_reasoning_effort_go_to_openais_responses() {
         openai.requests().last().map(|r| r.path.clone()).as_deref(),
         Some("/v1/chat/completions")
     );
+}
+
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// A live session at `path`, with the client key in `header`.
+async fn live_session(gw: &Gateway, path: &str, header: &'static str) -> Ws {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let url = format!("{}{path}", gw.base.replace("http://", "ws://"));
+    let mut req = url.into_client_request().unwrap();
+    let key = match header {
+        "authorization" => bearer(),
+        _ => KEY.to_owned(),
+    };
+    req.headers_mut().insert(header, key.parse().unwrap());
+    tokio_tungstenite::connect_async(req).await.unwrap().0
+}
+
+async fn say(ws: &mut Ws, event: Value) {
+    use futures::SinkExt;
+    let text = event.to_string().into();
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(text))
+        .await
+        .unwrap();
+}
+
+/// The events `ws` hears up to and including the first `last` says ends.
+async fn hear_until(ws: &mut Ws, last: impl Fn(&Value) -> bool) -> Vec<Value> {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let mut heard = Vec::new();
+    loop {
+        let next = tokio::time::timeout(support::BOUND, ws.next()).await;
+        let event = match next.unwrap() {
+            Some(Ok(Message::Text(text))) => json(&text),
+            Some(Ok(Message::Binary(bytes))) => serde_json::from_slice(&bytes).unwrap(),
+            other => panic!("no event: {other:?}"),
+        };
+        heard.push(event.clone());
+        if last(&event) {
+            return heard;
+        }
+    }
+}
+
+fn of_type(kind: &'static str) -> impl Fn(&Value) -> bool {
+    move |event| event["type"] == kind
+}
+
+#[tokio::test]
+async fn a_realtime_session_gets_the_servers_tools_run_and_sees_only_the_answer() {
+    use realtime::{ToolCall, Turn};
+    let up = FakeMcp::start().await;
+    let openai = realtime::openai::start().await;
+    let gw = Gateway::start(&format!(
+        "client_keys = [\"{KEY}\"]\nproviders = {{ openai = {{ vendor = \"openai\", base_url = \"{}\", key = \"sk-gw\" }} }}\n{}plugins = {{ tool_loop = {{ servers = [\"files\"] }} }}\n",
+        openai.base_url().replace("ws://", "http://"),
+        http_server(&up)
+    ))
+    .await;
+    let mut ws = live_session(&gw, "/v1/realtime?model=gpt-realtime", "authorization").await;
+    hear_until(&mut ws, of_type("session.created")).await;
+    let weather = json!({"type": "function", "name": "weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}});
+    let update = json!({"type": "session.update", "session": {"type": "realtime",
+        "output_modalities": ["text"], "tools": [weather]}});
+    say(&mut ws, update).await;
+    let configured = hear_until(&mut ws, |e| {
+        e["type"] == "session.updated" && e["session"]["tools"][0]["name"] == "weather"
+    })
+    .await;
+    let configured = Value::from(configured).to_string();
+    assert!(!configured.contains("files__"), "{configured}");
+    // The model is offered the server's tools beside the client's.
+    let sent = openai.received(1).await;
+    let offered = sent
+        .iter()
+        .rev()
+        .find(|f| f["type"] == "session.update")
+        .unwrap();
+    let names: Vec<&str> = offered["session"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"weather") && names.contains(&"files__read"),
+        "{names:?}"
+    );
+
+    // A call of the server's tool is run, and the model answers it.
+    openai.answer(Turn {
+        tool_call: Some(ToolCall {
+            name: "files__read".into(),
+            arguments: json!({"path": "a.txt"}),
+        }),
+        ..Turn::default()
+    });
+    openai.answer(Turn {
+        text: Some("The file says hello".into()),
+        ..Turn::default()
+    });
+    let ask = json!({"type": "conversation.item.create", "item": {"type": "message",
+        "role": "user", "content": [{"type": "input_text", "text": "read a.txt"}]}});
+    say(&mut ws, ask).await;
+    say(&mut ws, json!({"type": "response.create"})).await;
+    let heard = hear_until(&mut ws, of_type("response.done")).await;
+    let text = Value::from(heard.clone()).to_string();
+    assert!(text.contains("The file says hello"), "{text}");
+    assert!(
+        !text.contains("files__") && !text.contains("function_call"),
+        "{text}"
+    );
+    let started = heard.iter().filter(|e| e["type"] == "response.created");
+    assert_eq!(
+        started.count(),
+        1,
+        "the call's response is not seen: {text}"
+    );
+    let sent = openai.received(5).await;
+    let output = sent
+        .iter()
+        .find(|f| f["item"]["type"] == "function_call_output")
+        .unwrap();
+    assert!(
+        output["item"]["output"]
+            .as_str()
+            .unwrap()
+            .contains("contents of a.txt"),
+        "{output}"
+    );
+    assert!(up.methods().contains(&"tools/call".to_owned()));
+
+    // A call of the client's tool is the client's.
+    openai.answer(Turn {
+        tool_call: Some(ToolCall {
+            name: "weather".into(),
+            arguments: json!({"city": "Paris"}),
+        }),
+        ..Turn::default()
+    });
+    say(&mut ws, json!({"type": "response.create"})).await;
+    let heard = hear_until(&mut ws, of_type("response.done")).await;
+    let call = heard
+        .iter()
+        .find(|e| e["type"] == "response.function_call_arguments.done")
+        .unwrap();
+    assert_eq!(call["name"], "weather");
+}
+
+#[tokio::test]
+async fn a_gemini_live_session_gets_the_servers_tools_run_and_sees_only_the_answer() {
+    use realtime::{ToolCall, Turn};
+    let up = FakeMcp::start().await;
+    let gemini = realtime::gemini::start().await;
+    let gw = Gateway::start(&format!(
+        "client_keys = [\"{KEY}\"]\nproviders = {{ gemini = {{ vendor = \"gemini\", formats = {}, key = \"AIza-gw\" }} }}\n{}plugins = {{ tool_loop = {{ servers = [\"files\"] }} }}\n",
+        support::gemini_formats(&gemini.base_url().replace("ws://", "http://")),
+        http_server(&up)
+    ))
+    .await;
+    let path = format!("{}?model=gemini-live", realtime::gemini::PATH);
+    let mut ws = live_session(&gw, &path, "x-goog-api-key").await;
+    let setup = json!({"setup": {"model": "models/gemini-live",
+        "generationConfig": {"responseModalities": ["TEXT"]}}});
+    say(&mut ws, setup).await;
+    let ready = hear_until(&mut ws, |e| e.get("setupComplete").is_some()).await;
+    assert!(!Value::from(ready).to_string().contains("files__"));
+    let sent = gemini.received(1).await;
+    let tools = sent[0]["setup"]["tools"].to_string();
+    assert!(tools.contains("files__read"), "{tools}");
+
+    gemini.answer(Turn {
+        tool_call: Some(ToolCall {
+            name: "files__read".into(),
+            arguments: json!({"path": "a.txt"}),
+        }),
+        ..Turn::default()
+    });
+    gemini.answer(Turn {
+        text: Some("The file says hello".into()),
+        ..Turn::default()
+    });
+    say(&mut ws, json!({"realtimeInput": {"text": "read a.txt"}})).await;
+    let heard = hear_until(&mut ws, |e| e["serverContent"]["turnComplete"] == true).await;
+    let said: String = heard
+        .iter()
+        .filter_map(|m| m["serverContent"]["modelTurn"]["parts"][0]["text"].as_str())
+        .collect();
+    assert_eq!(said, "The file says hello");
+    let text = Value::from(heard).to_string();
+    assert!(
+        !text.contains("toolCall") && !text.contains("files__"),
+        "{text}"
+    );
+    let sent = gemini.received(3).await;
+    let answered = sent
+        .iter()
+        .find(|m| m.get("toolResponse").is_some())
+        .unwrap();
+    let response = answered["toolResponse"]["functionResponses"][0].to_string();
+    assert!(response.contains("contents of a.txt"), "{response}");
 }

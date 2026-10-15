@@ -26,14 +26,15 @@
 mod rules;
 mod stats;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use respan_gateway_core::{
     ClientContext, Fault, FaultKind, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_plugin_fallback::{Attempt, first_success, race};
 
-pub use rules::{Candidate, Catalog, Facts, Pick, Rule, glob};
+pub use respan_gateway_sdk::Catalog;
+pub use rules::{Candidate, Pick, Rule, glob};
 pub use stats::{Seen, Stats};
 
 /// What sort of traffic a format carries.
@@ -68,7 +69,7 @@ pub struct Routes {
     claims: Vec<(String, String)>,
     target: Option<String>,
     stats: Stats,
-    catalog: OnceLock<Arc<dyn Catalog>>,
+    catalog: Arc<Catalog>,
 }
 
 impl std::fmt::Debug for Routes {
@@ -182,19 +183,20 @@ impl Routes {
         self
     }
 
-    /// Reads what models can do and cost from `catalog`; a second is ignored.
-    pub fn set_catalog(&self, catalog: Arc<dyn Catalog>) {
-        let _ = self.catalog.set(catalog);
+    /// Reads what models can do and cost from `catalog`.
+    pub fn with_catalog(mut self, catalog: Arc<Catalog>) -> Self {
+        self.catalog = catalog;
+        self
+    }
+
+    /// What it knows of models.
+    pub fn catalog(&self) -> &Arc<Catalog> {
+        &self.catalog
     }
 
     /// What the router saw of its calls.
     pub fn stats(&self) -> &Stats {
         &self.stats
-    }
-
-    /// What is known of `model` of `provider`.
-    pub fn facts(&self, provider: &str, model: &str) -> Option<Facts> {
-        self.catalog.get()?.facts(provider, model)
     }
 
     /// The rules, in the order tried among their sort.
@@ -293,11 +295,11 @@ impl Routes {
     /// The provider whose listing names `model` and that serves `ask`'s
     /// kind; of several, the one claiming it, else the first.
     fn lister(&self, ask: &Ask, model: &str) -> Option<&str> {
-        let catalog = self.catalog.get()?;
+        let catalog = &self.catalog;
         let listers: Vec<&str> = (self.providers.iter())
             .map(|(name, _)| name.as_str())
             .filter(|name| self.internal(name, ask.kind, ask.format).is_some())
-            .filter(|name| catalog.lists(name, model))
+            .filter(|name| catalog.get(name, model).is_some())
             .collect();
         let claimant = (self.claims.iter())
             .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
@@ -330,10 +332,10 @@ impl Routes {
                 continue;
             };
             let sends = candidate.model_for(ask.model);
-            let facts = sends
+            let known = sends
                 .as_deref()
-                .and_then(|m| self.facts(&candidate.provider, m));
-            let lacks = facts.and_then(|f| rule.needs.iter().find(|n| f.lacks(n)).cloned());
+                .and_then(|m| self.catalog.get(&candidate.provider, m));
+            let lacks = known.and_then(|m| rule.needs.iter().find(|n| m.lacks(n)).cloned());
             if let Some(need) = lacks {
                 pass(candidate.to_string(), format!("lacks {need}"));
                 continue;
@@ -349,8 +351,7 @@ impl Routes {
         fn of<'a>((c, chosen): &'a (&Candidate, Chosen)) -> (&'a Candidate, &'a str) {
             (c, chosen.sends.as_deref().unwrap_or_default())
         }
-        let catalog = self.catalog.get().map(|c| &**c);
-        let ordered = rules::order(rule.pick, usable, of, &self.stats, catalog);
+        let ordered = rules::order(rule.pick, usable, of, &self.stats, &self.catalog);
         let mut to: Vec<Chosen> = ordered.into_iter().map(|(_, chosen)| chosen).collect();
         if !rule.sends_many() {
             to.truncate(1);
@@ -904,26 +905,21 @@ mod tests {
 
     #[test]
     fn needs_pass_over_a_model_known_to_lack_them() {
-        struct Listing;
-        impl Catalog for Listing {
-            fn facts(&self, provider: &str, _: &str) -> Option<Facts> {
-                let capabilities = match provider {
-                    "groq" => vec!["reasoning".to_owned()],
-                    _ => vec!["tools".to_owned()],
-                };
-                Some(Facts {
-                    capabilities,
-                    ..Facts::default()
-                })
-            }
+        let listing = Catalog::default();
+        for (provider, id, can) in [
+            ("groq", "x", respan_gateway_sdk::Capability::Reasoning),
+            ("openai", "y", respan_gateway_sdk::Capability::Tools),
+        ] {
+            let mut model = respan_gateway_sdk::Model::new(id);
+            model.can(can);
+            listing.set(provider, [model]);
         }
         let mut rule = Rule::new(
             "agent",
             vec![Candidate::parse("groq/x"), Candidate::parse("openai/y")],
         );
         rule.needs = vec!["tools".into()];
-        let routes = routes(None, &[]).rule(rule);
-        routes.set_catalog(Arc::new(Listing));
+        let routes = routes(None, &[]).rule(rule).with_catalog(Arc::new(listing));
         assert_eq!(to(&routes, "openai-chat", "agent").0, "openai");
     }
 
@@ -1008,20 +1004,16 @@ mod tests {
 
     #[test]
     fn a_listed_model_goes_to_its_lister_and_the_claimant_of_several() {
-        struct Listing;
-        impl Catalog for Listing {
-            fn facts(&self, _: &str, _: &str) -> Option<Facts> {
-                None
-            }
-            fn lists(&self, provider: &str, model: &str) -> bool {
-                matches!(
-                    (provider, model),
-                    ("groq", "kimi-k2" | "gpt-oss-120b") | ("openai", "gpt-oss-120b")
-                )
-            }
-        }
-        let routes = routes(Some("anthropic"), &[("smart", "anthropic/claude")]);
-        routes.set_catalog(Arc::new(Listing));
+        let listing = Catalog::default();
+        let list = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| respan_gateway_sdk::Model::new(*id))
+                .collect::<Vec<_>>()
+        };
+        listing.set("groq", list(&["kimi-k2", "gpt-oss-120b"]));
+        listing.set("openai", list(&["gpt-oss-120b"]));
+        let routes = routes(Some("anthropic"), &[("smart", "anthropic/claude")])
+            .with_catalog(Arc::new(listing));
         let ask = |model| Ask {
             kind: CHAT,
             format: "openai-chat",

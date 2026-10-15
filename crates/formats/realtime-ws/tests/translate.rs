@@ -113,7 +113,7 @@ async fn openai_to_gemini_opens_and_sets_up() {
             "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}}},
         "systemInstruction": {"parts": [{"text": "Be brief."}]},
         "tools": [{"functionDeclarations": [{"name": "weather", "description": "The weather.",
-            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}]}],
+            "parametersJsonSchema": {"type": "object", "properties": {"city": {"type": "string"}}}}]}],
         "realtimeInputConfig": {
             "automaticActivityDetection": {"silenceDurationMs": 500, "prefixPaddingMs": 300},
             "activityHandling": "START_OF_ACTIVITY_INTERRUPTS"},

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use respan_gateway_core::{Fault, NativeFields, NativeValue};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_realtime::{Audio, AudioFormat, Output, Status, Usage};
+use respan_gateway_realtime::{Audio, AudioFormat, Cause, Output, Status, Usage};
 use serde_json::{Value, json};
 
 use super::{NAME, session};
@@ -161,11 +161,19 @@ impl Provider {
                     native: json::native(NAME, rest),
                 }
             }
-            "error" => Output::Error {
-                message: take(v, &["error", "message"], string, text)?,
-                code: take(v, &["error", "type"], string, text),
-                native: json::native(NAME, rest),
-            },
+            "error" => {
+                let cause = match (v["error"]["type"].as_str(), v["error"]["code"].as_str()) {
+                    (_, Some("response_cancel_not_active")) => Cause::NothingToCancel,
+                    (Some("invalid_request_error"), _) => Cause::Invalid,
+                    _ => Cause::Provider,
+                };
+                Output::Error {
+                    cause,
+                    message: take(v, &["error", "message"], string, text)?,
+                    code: take(v, &["error", "type"], string, text),
+                    native: json::native(NAME, rest),
+                }
+            }
             _ => return None,
         };
         out.push(event);
@@ -266,7 +274,7 @@ impl Default for Client {
 
 impl Client {
     pub(super) fn write(&mut self, event: &Output, out: &mut Vec<Bytes>) -> Result<(), Fault> {
-        let Some(event) = foreign::strip(NAME, event) else {
+        let Some(event) = foreign::strip(NAME, event)? else {
             return Ok(());
         };
         let mut events = Vec::new();
@@ -447,13 +455,24 @@ impl Client {
                 return Ok(());
             }
             Output::Error {
+                cause,
                 code,
                 message,
                 native,
             } => {
                 let mut v = json!({"type": "error", "error": {"message": message}});
-                if let Some(code) = code {
-                    v["error"]["type"] = code.as_str().into();
+                // Another format's code is its own: OpenAI's says the cause.
+                let code = match native.as_ref().is_some_and(|n| *n.format == *NAME) {
+                    true => code.clone(),
+                    false => None,
+                };
+                let typed = code.unwrap_or_else(|| match cause {
+                    Cause::Invalid | Cause::NothingToCancel => "invalid_request_error".into(),
+                    _ => "server_error".into(),
+                });
+                v["error"]["type"] = typed.into();
+                if *cause == Cause::NothingToCancel && native.is_none() {
+                    v["error"]["code"] = "response_cancel_not_active".into();
                 }
                 (v, native)
             }

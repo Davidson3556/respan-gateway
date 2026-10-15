@@ -2,6 +2,7 @@
 //! prints.
 
 use std::collections::{HashMap, VecDeque};
+use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Instant, SystemTime};
@@ -14,9 +15,9 @@ use tokio::sync::broadcast;
 
 use super::KEPT;
 use super::record::{RequestRecord, clip, rfc3339};
-use crate::config::{Config, Price};
+use crate::config::Config;
 use crate::history::{self, Filter, Writer};
-use crate::logging::{Level, LogFormat};
+use crate::logging::{Level, LogFormat, paint};
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct Totals {
@@ -25,7 +26,7 @@ pub struct Totals {
     pub in_flight: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
-    /// The sum of the requests' `cost_usd`; present once `prices` is set.
+    /// The sum of the requests' `cost_usd`; present once one has a cost.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
 }
@@ -97,8 +98,6 @@ struct Kept {
     capacity: usize,
     format: LogFormat,
     recent: VecDeque<Arc<Entry>>,
-    /// The config's `prices`.
-    prices: Vec<(String, Price)>,
     /// Where finished requests are also written, if the config says.
     writer: Option<Writer>,
     totals: Totals,
@@ -132,7 +131,6 @@ impl RequestLog {
                 capacity,
                 format: config.log,
                 recent: recent.collect(),
-                prices: Vec::new(),
                 writer: None,
                 totals: Totals::default(),
                 providers: HashMap::new(),
@@ -152,13 +150,6 @@ impl RequestLog {
         while kept.recent.len() > kept.capacity {
             kept.recent.pop_front();
         }
-        kept.prices = (config.prices.iter())
-            .map(|(prefix, price)| (prefix.clone(), *price))
-            .collect();
-        kept.totals.cost_usd = match kept.prices.is_empty() {
-            true => None,
-            false => Some(kept.totals.cost_usd.unwrap_or_default()),
-        };
         if !kept.writer.as_ref().is_some_and(|w| w.is(config)) {
             kept.writer = Writer::from_config(config);
         }
@@ -261,15 +252,11 @@ impl RequestLog {
         if entry.finished.swap(true, Ordering::SeqCst) {
             return;
         }
-        let prices = self.kept().prices.clone();
         let record = {
             let mut record = entry.record();
             record.duration_ms = Some(entry.elapsed_ms());
             if record.error.is_none() {
                 record.error = error;
-            }
-            if let (Some(model), Some(usage)) = (&record.model, &record.usage) {
-                record.cost_usd = history::cost(&prices, model, usage);
             }
             record.clone()
         };
@@ -318,33 +305,87 @@ impl RequestLog {
             Ok(Value::Object(fields)) => fields,
             _ => Map::new(),
         };
-        let message = match format {
-            LogFormat::Json => "request".to_owned(),
-            _ => escape_controls(&line(record)),
-        };
-        eprintln!("{}", format.line(level, &message, fields));
+        if format == LogFormat::Json {
+            eprintln!("{}", format.line(level, "request", fields));
+            return;
+        }
+        let width = std::io::stderr()
+            .is_terminal()
+            .then(|| terminal_size::terminal_size().map(|(w, _)| usize::from(w.0)))
+            .flatten();
+        let status = record.status.map_or("-".to_owned(), |s| s.to_string());
+        let lines = lay_out(parts(record), width).into_iter().enumerate();
+        let text: Vec<String> = lines
+            .map(|(i, line)| {
+                // Each part escaped, so a client's text styles nothing.
+                let message: String = (line.iter())
+                    .map(|p| {
+                        format!(
+                            "{}{}",
+                            p.before,
+                            paint(&escape_controls(&p.text), p.style, true)
+                        )
+                    })
+                    .collect();
+                match i {
+                    0 => format.tagged(level, &status, &message),
+                    _ => format!("{:PREFIX$}{message}", ""),
+                }
+            })
+            .collect();
+        eprintln!("{}", text.join("\n"));
     }
 }
 
-/// One finished request, with the outcome first and secondary details separated.
-fn line(r: &RequestRecord) -> String {
-    let status = r.status.map_or("-".to_owned(), |s| s.to_string());
-    let mut line = format!(
-        "{status}  {:>7}  {:<4} {}",
-        r.duration_ms.map_or_else(|| "-".into(), duration),
-        r.method,
-        r.path
-    );
-    if let Some(model) = &r.model {
-        line.push_str(&format!("  |  {model}"));
-    }
-    if let Some(provider) = &r.provider {
-        line.push_str(&format!(" via {provider}"));
+/// A piece of a request's line: what goes before it, its text, and its
+/// style on a terminal (an SGR code, or none).
+#[derive(Debug, Clone, PartialEq)]
+struct Part {
+    before: &'static str,
+    text: String,
+    style: &'static str,
+    /// It may go on a line of its own: the details, the id, the error.
+    tail: bool,
+}
+
+/// The columns a text line's time and tag take, before its message:
+/// `HH:MM:SS.mmmZ`, a space, a five-column tag and a space.
+const PREFIX: usize = 20;
+
+/// One finished request, after its status: how long it took, what it asked
+/// of whom, then the details, its id, and why it failed.
+fn parts(r: &RequestRecord) -> Vec<Part> {
+    let mut parts = Vec::new();
+    // A tail part may go on a line of its own.
+    let mut push = |before, text: String, style, tail| {
+        parts.push(Part {
+            before,
+            text,
+            style,
+            tail,
+        })
+    };
+    let took = r.duration_ms.map_or_else(|| "-".into(), duration);
+    push("", format!("{took:>6}"), "", false);
+    push("  ", r.method.clone(), "1", false);
+    push(" ", r.path.clone(), "", false);
+    match (&r.model, &r.provider) {
+        (Some(model), provider) => {
+            push("  ", model.clone(), "36", false);
+            // A model that names its provider says it already.
+            let named = |p: &str| model.strip_prefix(p).is_some_and(|m| m.starts_with('/'));
+            if let Some(provider) = provider.as_deref().filter(|p| !named(p)) {
+                push(" ", "→".into(), "2", false);
+                push(" ", provider.to_owned(), "36", false);
+            }
+        }
+        (None, Some(provider)) => {
+            push("  ", "→".into(), "2", false);
+            push(" ", provider.clone(), "36", false);
+        }
+        (None, None) => {}
     }
     let mut details = Vec::new();
-    if let Some(client) = &r.client {
-        details.push(format!("client {client}"));
-    }
     if let Some(ttfb) = r.ttfb_ms.filter(|_| r.stream) {
         details.push(format!("first token {}", duration(ttfb)));
     }
@@ -359,18 +400,95 @@ fn line(r: &RequestRecord) -> String {
             details.push(format!("{seconds} s of audio"));
         }
     }
+    if let Some(cost) = r.cost_usd.filter(|c| *c > 0.0) {
+        details.push(match cost < 0.01 {
+            true => format!("${cost:.4}"),
+            false => format!("${cost:.2}"),
+        });
+    }
     if !r.steps.is_empty() {
         let tools: usize = r.steps.iter().map(|s| s.tools.len()).sum();
-        details.push(format!("{} steps, {tools} tool calls", r.steps.len()));
+        let steps = r.steps.len();
+        let s = |n: usize| if n == 1 { "" } else { "s" };
+        details.push(format!(
+            "{steps} step{}, {tools} tool call{}",
+            s(steps),
+            s(tools)
+        ));
+    }
+    if let Some(client) = &r.client {
+        details.push(format!("client {client}"));
     }
     if !details.is_empty() {
-        line.push_str(&format!("  |  {}", details.join(" · ")));
+        push("  ", details.join(" · "), "2", true);
     }
-    line.push_str(&format!("  |  {}", r.id));
+    push("  ", r.id.clone(), "2", true);
     if let Some(error) = &r.error {
-        line.push_str(&format!("  |  {error}"));
+        push("  ", error.clone(), "31", true);
     }
-    line
+    parts
+}
+
+/// The line of `parts`, unstyled.
+#[cfg(test)]
+fn line(r: &RequestRecord) -> String {
+    parts(r)
+        .iter()
+        .map(|p| format!("{}{}", p.before, p.text))
+        .collect()
+}
+
+/// `parts` as the lines they take in `width` columns, if a terminal has
+/// that many: one, if it fits; else the request on the first, its details
+/// and id below, as many a line as fit, and its error on lines of its own,
+/// wrapped at words. Unbounded, a line a request.
+fn lay_out(parts: Vec<Part>, width: Option<usize>) -> Vec<Vec<Part>> {
+    let columns = |p: &Part| p.before.chars().count() + p.text.chars().count();
+    let wide = PREFIX + parts.iter().map(columns).sum::<usize>();
+    let Some(width) = width.filter(|w| wide > *w && *w > PREFIX + 20) else {
+        return vec![parts];
+    };
+    let (head, tail): (Vec<Part>, Vec<Part>) = parts.into_iter().partition(|p| !p.tail);
+    let room = width - PREFIX;
+    let mut lines = vec![head];
+    let mut open: Vec<Part> = Vec::new();
+    for part in tail {
+        let used: usize = open.iter().map(columns).sum();
+        let error = part.style == "31";
+        if !open.is_empty() && (error || used + columns(&part) > room) {
+            lines.push(std::mem::take(&mut open));
+        }
+        if !error && part.text.chars().count() <= room {
+            let before = if open.is_empty() { "" } else { part.before };
+            open.push(Part { before, ..part });
+            continue;
+        }
+        // Too long for a line, or an error: its words, wrapped.
+        let mut line = String::new();
+        for word in part.text.split(' ') {
+            if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > room {
+                let text = std::mem::take(&mut line);
+                lines.push(vec![Part {
+                    before: "",
+                    text,
+                    ..part.clone()
+                }]);
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        lines.push(vec![Part {
+            before: "",
+            text: line,
+            ..part
+        }]);
+    }
+    if !open.is_empty() {
+        lines.push(open);
+    }
+    lines
 }
 
 fn duration(ms: u64) -> String {
@@ -388,6 +506,14 @@ fn escape_controls(line: &str) -> String {
         false => c.to_string(),
     };
     line.chars().map(escaped).collect()
+}
+
+/// Adds what a call to a provider cost to the cost of the request in
+/// `extensions`, as the pricing plugin charges it.
+pub fn charge(extensions: &Extensions, charge: &respan_gateway_plugin_pricing::Charge) {
+    if let Some(Tracked(entry)) = extensions.get::<Tracked>() {
+        *entry.record().cost_usd.get_or_insert(0.0) += charge.usd;
+    }
 }
 
 /// Names the client whose key the request in `extensions` carried, in its
@@ -439,7 +565,70 @@ mod tests {
         };
         assert_eq!(
             line(&record),
-            "200    812ms  POST /v1/chat/completions  |  gpt-4o-mini via openai  |  first token 230ms · 12 in / 40 out tokens  |  r_000001"
+            " 812ms  POST /v1/chat/completions  gpt-4o-mini → openai  first token 230ms · 12 in / 40 out tokens  r_000001"
         );
+        let looped = RequestRecord {
+            client: Some("ops".into()),
+            stream: false,
+            usage: None,
+            duration_ms: Some(2340),
+            error: Some("the provider returned 500".into()),
+            steps: vec![super::super::record::Step {
+                index: 1,
+                duration_ms: 2000,
+                input_tokens: 0,
+                output_tokens: 0,
+                finish: None,
+                tools: Vec::new(),
+            }],
+            ..record
+        };
+        assert_eq!(
+            line(&looped),
+            " 2.34s  POST /v1/chat/completions  gpt-4o-mini → openai  1 step, 0 tool calls · client ops  r_000001  the provider returned 500"
+        );
+    }
+
+    #[test]
+    fn a_line_too_wide_puts_its_details_below() {
+        let part = |before, text: &str, style, tail| Part {
+            before,
+            text: text.into(),
+            style,
+            tail,
+        };
+        let parts = vec![
+            part("", " 406ms", "", false),
+            part("  ", "POST", "1", false),
+            part(" ", "/v1/chat/completions", "", false),
+            part("  ", "client ops", "2", true),
+            part("  ", "r_000002", "2", true),
+            part(
+                "  ",
+                "Function tools with reasoning_effort are not supported",
+                "31",
+                true,
+            ),
+        ];
+        assert_eq!(lay_out(parts.clone(), None).len(), 1, "unbounded");
+        assert_eq!(lay_out(parts.clone(), Some(400)).len(), 1, "it fits");
+        let lines = lay_out(parts, Some(60));
+        let text: Vec<String> = (lines.iter())
+            .map(|l| {
+                l.iter()
+                    .map(|p| format!("{}{}", p.before, p.text))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            text,
+            [
+                " 406ms  POST /v1/chat/completions",
+                "client ops  r_000002",
+                "Function tools with reasoning_effort are",
+                "not supported",
+            ]
+        );
+        assert!(text.iter().all(|l| l.chars().count() <= 60 - PREFIX));
     }
 }

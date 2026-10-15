@@ -67,6 +67,10 @@ export function formatDateTime(iso: string): string {
   });
 }
 
+export function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" });
+}
+
 /** US dollars: "$0.0042" for small sums, "$12.40" from a dollar up. */
 export function formatCost(usd: number): string {
   if (usd === 0) return "$0.00";

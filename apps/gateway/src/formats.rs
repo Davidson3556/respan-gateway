@@ -81,6 +81,24 @@ pub mod kind {
     /// The kinds of one request and its answer, whose client formats are
     /// served by default once a provider speaks the kind.
     pub const ONE_SHOT: [Kind; 6] = [IMAGE, TRANSCRIPTION, SPEECH, VIDEO, EMBEDDING, DECISION];
+
+    /// The kind labelled `label`.
+    pub fn named(label: &str) -> Option<Kind> {
+        let all = [
+            CHAT,
+            REALTIME,
+            RESPONSES,
+            PASSTHROUGH,
+            IMAGE,
+            TRANSCRIPTION,
+            SPEECH,
+            VIDEO,
+            EMBEDDING,
+            DECISION,
+            MCP,
+        ];
+        all.into_iter().find(|k| k.label == label)
+    }
 }
 
 /// The first of `items` of each kind, in order.
@@ -218,6 +236,11 @@ mod endpoints {
         "GET /v1/videos/{id}/content",
         "POST /v1/videos/{id}/remix",
     ];
+    pub const VEO: &[&str] = &[
+        "POST /v1beta/models/{model}:predictLongRunning",
+        "GET /v1beta/{operation}",
+        "GET /v1beta/files/{id}:download",
+    ];
     pub const PASSTHROUGH: &[&str] = &["ANY /* (every other request)"];
 }
 
@@ -253,7 +276,9 @@ pub fn formats() -> Vec<KnownFormat> {
         KnownFormat::of(kind::CHAT, endpoints::MESSAGES, AnthropicMessages).model(chat()),
         KnownFormat::of(kind::CHAT, endpoints::GENERATE_CONTENT, GeminiGenerate).model(chat()),
         session(kind::REALTIME, GeminiLive, GeminiLive::PATH, true).model(realtime()),
-        KnownFormat::provider_only(kind::VIDEO, &GeminiVeo).job_ids("veo_"),
+        KnownFormat::of(kind::VIDEO, endpoints::VEO, GeminiVeo)
+            .job_ids("veo_")
+            .model(Model::of(video::Input::model, video::Input::set_model)),
         KnownFormat::of(kind::DECISION, endpoints::SYSTEMONE, SystemOne).model(Model::of(
             decision::Input::model,
             decision::Input::set_model,
@@ -308,11 +333,15 @@ mod tests {
     fn every_format_a_vendor_speaks_is_known() {
         let known = formats();
         for vendor in ALL {
-            for speaks in vendor.formats {
-                let name = speaks.name();
+            for (format, _) in vendor.formats {
+                let name = format.name();
                 let found = known.iter().find(|k| k.name == name);
                 let found = found.unwrap_or_else(|| panic!("{}: {name} is unknown", vendor.id));
-                assert_eq!(found.websocket, speaks.websocket(), "{name}");
+                let session = matches!(
+                    format.reach(),
+                    respan_gateway_vendors::Reach::Session { .. }
+                );
+                assert_eq!(found.websocket, session, "{name}");
             }
         }
     }

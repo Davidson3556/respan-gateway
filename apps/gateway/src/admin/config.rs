@@ -30,7 +30,7 @@ fn is_secret(path: &[String], value: &Value) -> bool {
         | ["mcp", _, "auth", "oauth", "client_secret" | "refresh_token"]
         | ["mcp", _, "env", _]
         | ["mcp", _, "args", _] => !value.is_null(),
-        ["mcp", _, "url"] | ["providers", _, "base_url"] => value
+        ["mcp", _, "url"] | ["providers", _, "base_url"] | ["providers", _, "formats", _] => value
             .as_str()
             .is_some_and(|u| u == PLACEHOLDER || url_holds_secret(u)),
         _ => false,
@@ -126,11 +126,11 @@ pub fn stand_in(config: &Config) -> Value {
         if let Some(vendor) = &p.vendor {
             put("vendor", vendor);
         }
-        if let Some(base_url) = &p.base_url {
-            put("base_url", base_url);
-        }
         if let Some(key) = &p.key {
             put("key", key);
+        }
+        if let Some(base_url) = &p.base_url {
+            put("base_url", base_url);
         }
         (name.clone(), Value::Object(provider))
     });

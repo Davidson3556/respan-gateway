@@ -25,14 +25,15 @@ mod values;
 mod tests;
 
 pub(crate) use crate::fields::{rest_of, unix_now};
-#[cfg(test)]
 pub(crate) use errors::answer;
 pub use errors::{merge_details, read_provider_error};
 pub(crate) use errors::{says, says_error};
 pub use exchange::Asked;
 #[cfg(test)]
 pub(crate) use exchange::Held;
-pub(crate) use exchange::{Gate, error_event, response_encoder, unreadable_event};
+pub(crate) use exchange::{
+    Gate, error_event, own_request, post, response_encoder, unreadable_event,
+};
 pub(crate) use values::{
     INERT, Keep, Names, NativeFieldsExt, Totals, UsageFields, block_fields, check_usage, count,
     decode_content, decode_message, decode_tools, each_tool, encode_content, encode_message,
@@ -129,6 +130,9 @@ pub trait Schema: Copy + Send + Sync + 'static {
     /// Prepare the request sent to a provider: add what the gateway needs of it,
     /// such as usage in a stream.
     fn prepare_call(_v: &mut Map<String, Value>) {}
+    /// Prepare a call whose client speaks another format: say what the
+    /// format must for a client that can name nothing it keeps.
+    fn translated(_v: &mut Map<String, Value>) {}
     /// Spell the fields of `v` as `original`, the client's request in this
     /// format, did, where the format has two spellings of one field.
     fn respell(_original: &Value, _v: &mut Map<String, Value>) {}

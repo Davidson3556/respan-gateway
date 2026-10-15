@@ -174,10 +174,8 @@ impl Built {
 /// client key by name.
 fn routing(plan: &Plan, formats: &[KnownFormat]) -> Routing {
     let client = |cx: &respan_gateway_core::ClientContext| {
-        let customer = cx
-            .extensions()
-            .get::<respan_gateway_plugin_respan::Customer>();
-        customer.map(|c| c.0.clone())
+        let caller = cx.extensions().get::<respan_gateway_sdk::Caller>();
+        caller.map(|c| c.name.clone())
     };
     formats.iter().filter(|f| f.kind != kind::MCP).fold(
         Routing::new(plan.routes.clone()).client(client),
@@ -192,7 +190,7 @@ type Plugins = (Gateway, Option<tool_loop::Closer>, Option<AggregateCloser>);
 /// The gateway with the binary's plugins, in a fixed order whatever the
 /// config's: the request log, routing, MCP, video jobs, whose credentials go
 /// where, the tool loop, then the dispatch of routes. The vendors' quirks are
-/// the gateway's plugins: they are their providers' own ([`compose`]).
+/// none of them: they are in the formats their providers speak.
 fn with_plugins(
     gateway: Gateway,
     config: &Config,
@@ -239,7 +237,7 @@ fn with_plugins(
         None => gateway,
     };
     let gateway = gateway
-        .plugin(Recorder::new(log.clone(), formats, names))
+        .plugin(Recorder::new(log.clone(), formats, names.clone()))
         .plugin(routing(plan, formats));
     // `/mcp` answers itself; `/mcp/{name}` is routed to its server.
     let gateway = match aggregate {
@@ -255,14 +253,15 @@ fn with_plugins(
     let forwarded = plan.mcp.iter().filter(|s| s.forward_auth);
     let forwarded = forwarded.map(|s| s.name.clone());
     let gateway = gateway.plugin(ClientCredentials::new(keyless.chain(forwarded)));
-    let gateway = match &config.plugins.responses {
-        Some(responses) => {
+    let responses = &config.plugins.responses;
+    let gateway = match responses.enabled {
+        true => {
             let keep = responses
                 .keep
                 .unwrap_or(std::time::Duration::from_secs(60 * 60));
-            gateway.plugin(crate::responses::Responses::new(keep))
+            gateway.plugin(respan_gateway_plugin_responses::Responses::new(keep))
         }
-        None => gateway,
+        false => gateway,
     };
     // A relay gives its vendor's response heads and error bodies back.
     let mut gateway = match config.relay {
@@ -276,6 +275,17 @@ fn with_plugins(
     // It answers the request itself: a request the tool loop runs is not
     // sent to a route's other candidates.
     let gateway = gateway.plugin(Dispatch::new(respan_gateway_http_faults::retryable));
+    // Last: a call is priced at the model the plugins before chose.
+    let pricing = respan_gateway_plugin_pricing::Pricing::new(plan.routes.catalog().clone())
+        .provider_names(names)
+        .on_charge(requests::charge)
+        // A live session names its model in its handshake.
+        .model_of(|px| {
+            (px.extensions()
+                .get::<respan_gateway_realtime_ws::SessionModel>())
+            .map(|m| m.0.clone())
+        });
+    let gateway = gateway.plugin(pricing);
     (gateway, closer, aggregate_closer)
 }
 
@@ -338,10 +348,7 @@ fn routes(
     let mut router = Router::new().route("/healthz", get(|| async { "ok" }));
     // A relay lets its vendor answer, with the client's credentials.
     if !config.relay {
-        let models = Models::new(&plan.upstreams, plan.routes.clone()).priced(&config.prices);
-        let models = Arc::new(models);
-        plan.routes
-            .set_catalog(Arc::new(models::Listed(Arc::downgrade(&models))));
+        let models = Arc::new(Models::new(&plan.upstreams, plan.routes.clone()));
         // The router reads the listings: which provider lists a model, and
         // what it costs and can do. Learnt before a client lists.
         if config.plugins.routing.listings != Some(false) {

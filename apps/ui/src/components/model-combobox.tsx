@@ -10,6 +10,7 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ProviderIcon } from "@/components/provider-icon";
 import { byProvider, modelFacts, type Listed } from "@/lib/models";
 import { cn } from "@/lib/utils";
 
@@ -95,7 +96,14 @@ export function ModelCombobox({
             {byProvider(models).map(([provider, group]) => (
               <CommandGroup
                 key={provider}
-                heading={provider ? `${provider} · ${group.length}` : undefined}
+                heading={
+                  provider ? (
+                    <span className="flex items-center gap-1.5">
+                      <ProviderIcon name={provider} size="sm" />
+                      {provider} · {group.length}
+                    </span>
+                  ) : undefined
+                }
               >
                 {group.map((m) => (
                   <CommandItem

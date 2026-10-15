@@ -66,7 +66,10 @@ async fn a_call_not_allowed_never_reaches_the_client_and_the_model_hears_why() {
     assert_eq!(text, "I cannot do that.");
     let sent = live.received.lock().unwrap();
     let tools = &sent[0]["setup"]["tools"][0]["functionDeclarations"];
-    assert_eq!(*tools, json!([{"name": "weather", "parameters": {}}]));
+    assert_eq!(
+        *tools,
+        json!([{"name": "weather", "parametersJsonSchema": {}}])
+    );
     let answer = sent
         .iter()
         .find(|m| m.get("toolResponse").is_some())

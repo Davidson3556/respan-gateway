@@ -2,7 +2,7 @@ import { ArrowDownUp, Dices, Gauge, ListOrdered, PiggyBank, Scale, Snowflake } f
 import { ProviderIcon } from "@/components/provider-icon";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
-import type { Provider, RouteCandidate, RoutePick, RouteRule, RouteSeen } from "@/lib/api";
+import type { RouteCandidate, RoutePick, RouteRule, RouteSeen } from "@/lib/api";
 import { formatCount, formatMs, formatPercent } from "@/lib/format";
 import { PICKS, attempts, formatPrice, shares } from "@/lib/routes";
 
@@ -52,18 +52,16 @@ function templated(target: string): string | null {
   return slash > 0 ? target.slice(slash + 1) : null;
 }
 
-function Candidate({ candidate, share, rank, providers }: {
+function Candidate({ candidate, share, rank }: {
   candidate: RouteCandidate;
   share: number | null;
   rank: number;
-  providers: Provider[];
 }) {
-  const provider = providers.find((p) => p.name === candidate.provider);
   return (
     <li className="grid grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-x-3 gap-y-1 px-5 py-3 text-sm md:grid-cols-[1.5rem_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1.2fr)] md:items-center">
       <span className="pt-0.5 font-mono text-xs text-muted-foreground md:pt-0">{rank}</span>
       <span className="flex min-w-0 items-center gap-2">
-        <ProviderIcon name={candidate.provider} baseUrl={provider?.base_url ?? ""} />
+        <ProviderIcon name={candidate.provider} />
         <span className="font-medium">{candidate.provider}</span>
         <code className="min-w-0 truncate text-xs text-muted-foreground" title={candidate.target}>
           {candidate.model ?? templated(candidate.target) ?? "as asked"}
@@ -81,7 +79,7 @@ function Candidate({ candidate, share, rank, providers }: {
 }
 
 /** One `[routes.<name>]`: what it matches, how it picks, and each candidate. */
-export function RouteCard({ rule, providers }: { rule: RouteRule; providers: Provider[] }) {
+export function RouteCard({ rule }: { rule: RouteRule }) {
   const weights = rule.pick === "weighted" ? shares(rule) : null;
   const when = [
     ...(rule.kinds.length ? [`${rule.kinds.join(", ")} only`] : []),
@@ -105,7 +103,7 @@ export function RouteCard({ rule, providers }: { rule: RouteRule; providers: Pro
       <ol className="divide-y" aria-label={`Candidates of ${rule.name}`}>
         {rule.to.map((candidate, i) => (
           <Candidate key={candidate.target} candidate={candidate} rank={i + 1}
-            share={weights ? weights[i] : null} providers={providers} />
+            share={weights ? weights[i] : null} />
         ))}
       </ol>
     </Card>

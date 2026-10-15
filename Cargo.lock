@@ -82,6 +82,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "autocfg"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
 name = "aws-lc-rs"
 version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -231,6 +237,15 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "chrono"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -984,6 +999,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
 name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1083,6 +1104,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "num-traits"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
+dependencies = [
+ "autocfg",
 ]
 
 [[package]]
@@ -1446,18 +1476,22 @@ dependencies = [
  "respan-gateway-plugin-credentials",
  "respan-gateway-plugin-fallback",
  "respan-gateway-plugin-mcp-aggregate",
+ "respan-gateway-plugin-pricing",
  "respan-gateway-plugin-relay",
  "respan-gateway-plugin-respan",
+ "respan-gateway-plugin-responses",
  "respan-gateway-plugin-routing",
  "respan-gateway-plugin-tool-loop",
  "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
+ "respan-gateway-sdk",
  "respan-gateway-serve",
  "respan-gateway-vendors",
  "respan-gateway-ws",
  "serde",
  "serde_json",
  "sha2",
+ "terminal_size",
  "tokio",
  "tokio-tungstenite",
  "toml",
@@ -1636,6 +1670,7 @@ dependencies = [
  "respan-gateway-http-transport",
  "respan-gateway-mcp",
  "respan-gateway-plugin-relay",
+ "respan-gateway-sdk",
  "respan-gateway-sse",
  "serde_json",
  "tokio",
@@ -1730,8 +1765,21 @@ dependencies = [
  "respan-gateway-mcp",
  "respan-gateway-mcp-http",
  "respan-gateway-plugin-tool-loop",
+ "respan-gateway-sdk",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "respan-gateway-plugin-pricing"
+version = "0.1.0"
+dependencies = [
+ "respan-gateway-conversation",
+ "respan-gateway-core",
+ "respan-gateway-decision",
+ "respan-gateway-media",
+ "respan-gateway-realtime",
+ "respan-gateway-sdk",
 ]
 
 [[package]]
@@ -1750,8 +1798,23 @@ dependencies = [
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http-transport",
+ "respan-gateway-mcp",
+ "respan-gateway-sdk",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "respan-gateway-plugin-responses"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "respan-gateway-conversation",
+ "respan-gateway-conversation-http",
+ "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-sdk",
+ "serde_json",
 ]
 
 [[package]]
@@ -1768,6 +1831,7 @@ dependencies = [
  "respan-gateway-http-transport",
  "respan-gateway-passthrough-http",
  "respan-gateway-plugin-fallback",
+ "respan-gateway-sdk",
  "serde_json",
  "tokio",
 ]
@@ -1784,6 +1848,7 @@ dependencies = [
  "respan-gateway-http",
  "respan-gateway-http-faults",
  "respan-gateway-http-transport",
+ "respan-gateway-realtime",
  "serde_json",
  "tokio",
 ]
@@ -1834,6 +1899,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "respan-gateway-sdk"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "respan-gateway-serve"
 version = "0.1.0"
 dependencies = [
@@ -1872,10 +1946,18 @@ dependencies = [
 name = "respan-gateway-vendor-kit"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "respan-gateway-conversation",
+ "respan-gateway-conversation-http",
  "respan-gateway-core",
+ "respan-gateway-decision-http",
  "respan-gateway-http",
  "respan-gateway-http-faults",
  "respan-gateway-http-transport",
+ "respan-gateway-media-http",
+ "respan-gateway-passthrough-http",
+ "respan-gateway-realtime-ws",
+ "respan-gateway-sdk",
  "respan-gateway-ws",
  "serde_json",
 ]
@@ -1884,17 +1966,46 @@ dependencies = [
 name = "respan-gateway-vendors"
 version = "0.1.0"
 dependencies = [
+ "respan-gateway-vendor-kit",
+ "respan-gateway-vendors-green",
+ "respan-gateway-vendors-yellow",
+]
+
+[[package]]
+name = "respan-gateway-vendors-green"
+version = "0.1.0"
+dependencies = [
  "axum",
  "base64 0.22.1",
+ "chrono",
  "respan-gateway-conversation",
  "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-decision-http",
  "respan-gateway-http",
  "respan-gateway-media-http",
- "respan-gateway-passthrough-http",
  "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
+ "respan-gateway-serve",
+ "respan-gateway-vendor-kit",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "respan-gateway-vendors-yellow"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "respan-gateway-conversation",
+ "respan-gateway-conversation-http",
+ "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-media-http",
+ "respan-gateway-realtime",
  "respan-gateway-serve",
  "respan-gateway-vendor-kit",
  "serde_json",
@@ -1973,6 +2084,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
+]
+
+[[package]]
+name = "rustix"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+dependencies = [
+ "bitflags",
+ "errno",
+ "libc",
+ "linux-raw-sys",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2347,6 +2471,16 @@ name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+
+[[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
+ "rustix",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "thiserror"

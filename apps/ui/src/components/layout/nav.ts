@@ -2,6 +2,7 @@ import {
   Activity,
   FileCode,
   Blocks,
+  Boxes,
   FlaskConical,
   LayoutDashboard,
   Route,
@@ -24,6 +25,7 @@ export const monitor: NavItem[] = [
 export const build: NavItem[] = [
   { to: "/playground", label: "Playground", icon: FlaskConical },
   { to: "/providers", label: "Providers", icon: Server },
+  { to: "/models", label: "Models", icon: Boxes },
   { to: "/mcp", label: "MCP", icon: Blocks },
   { to: "/routes", label: "Routes", icon: Route },
   { to: "/config", label: "Config", icon: FileCode },

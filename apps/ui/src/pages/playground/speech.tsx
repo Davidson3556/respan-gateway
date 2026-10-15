@@ -9,7 +9,9 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useModelChoice } from "@/hooks/use-model-choice";
+import { useApiChoice, useLastCall } from "@/hooks/use-playground";
 import { gatewayFetch } from "@/lib/api";
+import { mediaApis } from "@/lib/playground-apis";
 import { MediaLayout } from "./media-form";
 import { ModelPicker } from "./model-picker";
 import { RequestError } from "./request-error";
@@ -23,28 +25,34 @@ const MAX_CHARS = 4096;
 
 export function SpeechTab() {
   const choice = useModelChoice("speech", "gpt-4o-mini-tts");
+  const api = useApiChoice("speech", mediaApis.speech);
+  const call = useLastCall();
   const [text, setText] = useState("");
   const [voice, setVoice] = useState("alloy");
   const [format, setFormat] = useState("mp3");
   const speak = useMutation({
-    mutationFn: async () => {
-      const res = await gatewayFetch("/v1/audio/speech", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model: choice.model,
-          input: text.trim(),
-          voice,
-          response_format: format,
-        }),
-      });
-      return { audio: await res.blob(), voice, format, model: choice.model };
-    },
+    mutationFn: () =>
+      call.track({ api: api.api.id, model: choice.model }, async () => {
+        const res = await gatewayFetch("/v1/audio/speech", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: choice.model,
+            input: text.trim(),
+            voice,
+            response_format: format,
+          }),
+        });
+        return { audio: await res.blob(), voice, format, model: choice.model };
+      }),
   });
   const result = speak.data;
 
   return (
     <MediaLayout
+      id="speech"
+      choice={api}
+      record={call.record}
       onSubmit={() => speak.mutate()}
       pending={speak.isPending}
       disabled={!text.trim() || text.length > MAX_CHARS}

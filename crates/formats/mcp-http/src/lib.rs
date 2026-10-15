@@ -13,7 +13,9 @@ mod session;
 mod stdio;
 mod streamable;
 
-pub use stdio::{Owner, StdioTransport};
+/// Who a call's session belongs to: the HTTP wire's, here for the MCP
+/// crates that name it.
+pub use stdio::StdioTransport;
 pub use streamable::{FORMAT, SESSION, StreamableHttp};
 
 /// JSON-RPC 2.0 (5.1): "Invalid JSON was received by the server".

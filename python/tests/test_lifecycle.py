@@ -74,7 +74,7 @@ def test_export_requests_filters_and_costs(fake, tmp_path):
     config = {
         **config_for(fake),
         "plugins": {"request_log": {"file": str(history)}},
-        "prices": {"fake": {"input": 1_000_000, "output": 1_000_000}},
+        "models": {"openai/fake-1": {"pricing": {"input": 1_000_000, "output": 1_000_000}}},
     }
     with rg.Gateway(config=config) as gw:
         gw.request("POST", "/v1/chat/completions", json=CHAT)

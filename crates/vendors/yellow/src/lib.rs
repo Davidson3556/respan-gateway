@@ -1,0 +1,33 @@
+#![warn(missing_docs)]
+//! The yellow vendors, one module each: maintained, their quirks tested
+//! against fakes of their APIs, but not verified end to end against the
+//! live ones. A vendor moves to green with a live test of its own.
+
+pub mod azure;
+pub mod cloudflare;
+pub mod deepseek;
+pub mod fireworks;
+pub mod groq;
+pub mod mistral;
+pub mod ollama;
+pub mod openrouter;
+pub mod together;
+pub mod vllm;
+pub mod xai;
+
+use respan_gateway_vendor_kit::Vendor;
+
+/// Every yellow vendor.
+pub const ALL: &[&Vendor] = &[
+    &groq::VENDOR,
+    &deepseek::VENDOR,
+    &openrouter::VENDOR,
+    &xai::VENDOR,
+    &mistral::VENDOR,
+    &together::VENDOR,
+    &fireworks::VENDOR,
+    &ollama::VENDOR,
+    &azure::VENDOR,
+    &vllm::VENDOR,
+    &cloudflare::VENDOR,
+];

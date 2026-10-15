@@ -7,11 +7,16 @@ use crate::edge::{bind_provider, content, kept, sends};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use respan_gateway_conversation::{Media, MediaSource};
-use respan_gateway_core::{Connection, ErrorCode, Fault, Format};
+use respan_gateway_core::Provider;
+use respan_gateway_core::{Connection, ErrorCode, Fault, Format, NativeFields};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
-use respan_gateway_http::http::{HeaderValue, Method, Uri, request::Parts as RequestHead};
-use respan_gateway_http::{Decoder, Encoder, ProviderIo, Whole};
+use respan_gateway_http::http::{
+    self, HeaderValue, Method, Uri, request::Parts as RequestHead, response::Parts as ResponseHead,
+};
+use respan_gateway_http::path::forwarded_path;
+use respan_gateway_http::{All, ClientIo, Decoder, Encoder, ProviderIo, Whole};
+use respan_gateway_http::{Connect, KeyIn, Reach, Upstream};
 use serde_json::{Map, Value, json};
 use std::sync::{Arc, OnceLock};
 
@@ -44,8 +49,17 @@ const PREFIX: &str = "veo_";
 /// (`HttpTransport::follow_redirects`), leaving the key behind.
 ///
 /// Veo cannot remix, delete or list videos, nor make a thumbnail or a
-/// spritesheet: those are refused, 400, before any call. As no client
-/// speaks this format, what Veo answers beyond the kind is dropped.
+/// spritesheet: those are refused, 400, before any call. What Veo answers
+/// beyond the kind is dropped.
+///
+/// A client speaks it too, of any provider of the kind: it creates with
+/// `POST .../models/{model}:predictLongRunning`, its parameters the kind
+/// has no place for kept as this format's own; a job is answered as an
+/// operation named `models/{model}/operations/{job id}`, which it polls at
+/// `GET .../{name}`, so a follow-up reaches the job's provider; a finished
+/// job names its video at the gateway, `GET .../files/{job id}:download`,
+/// never the provider's own URL. Veo reports no progress: an operation is
+/// only done or not.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GeminiVeo;
 
@@ -72,6 +86,36 @@ impl GeminiVeo {
 fn is_segment(s: &str) -> bool {
     let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
     !s.is_empty() && s != "." && s != ".." && s.chars().all(plain)
+}
+
+/// The redirects its calls follow: to Google's hosts over HTTPS alone, as
+/// Veo serves a video's bytes from its storage.
+fn google_storage(uri: &Uri) -> bool {
+    let host = uri.host().unwrap_or_default();
+    let google = [".googleapis.com", ".googleusercontent.com"];
+    uri.scheme_str() == Some("https") && google.iter().any(|domain| host.ends_with(domain))
+}
+
+/// Its spec's: the key in `x-goog-api-key`, over HTTP, following a
+/// redirect to Google's storage, which serves a video's bytes.
+impl Upstream for GeminiVeo {
+    fn name(&self) -> &str {
+        NAME
+    }
+
+    fn key(&self) -> KeyIn {
+        KeyIn::Header("x-goog-api-key")
+    }
+
+    fn reach(&self) -> Reach {
+        Reach::Http {
+            follow: Some(google_storage),
+        }
+    }
+
+    fn provider(&self, name: String, connect: Connect) -> Provider {
+        Provider::new(name, *self, move |x| connect(x))
+    }
 }
 
 impl Format<ProviderIo, Output, Input> for GeminiVeo {
@@ -340,6 +384,305 @@ fn job_of(raw: &[u8], parameters: &Value) -> Result<Job, Fault> {
     Ok(job)
 }
 
+// --- A client of Veo's: its requests read, the kind's answers written.
+
+impl Format<ClientIo, Input, Output> for GeminiVeo {
+    fn name(&self) -> &str {
+        NAME
+    }
+
+    fn matches(&self, io: &ClientIo) -> bool {
+        let request = io.request();
+        route(request.method(), request.uri()).is_some()
+    }
+
+    fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
+        Ok(io.with_error(refusal).bind(
+            move |head| {
+                let head = head.clone();
+                Box::new(Whole::new(move |raw: Bytes, out: &mut Vec<Input>| {
+                    out.push(read_request(&head, &raw)?);
+                    Ok(())
+                }))
+            },
+            move |reply| {
+                let mut head = reply.head();
+                let encoder = response_encoder(reply.request(), &mut head);
+                Ok(reply.write(head, encoder))
+            },
+        ))
+    }
+}
+
+/// What a client of Veo's asks, as its method and path say it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Route {
+    /// `POST .../models/{model}:predictLongRunning`.
+    Create(String),
+    /// `GET .../operations/{id}`, as a job's operation is named.
+    Retrieve(String),
+    /// `GET .../files/{id}:download`, where a finished job's video is.
+    Download(String),
+}
+
+/// The operation of a request of `method` to `uri`, by the end of its path
+/// as [`forwarded_path`] reads it, its segments unescaped.
+fn route(method: &Method, uri: &Uri) -> Option<Route> {
+    let path = forwarded_path(uri.path());
+    let segments: Vec<String> = (path.split('/'))
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            percent_encoding::percent_decode_str(s)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+        .collect();
+    let [.., parent, last] = segments.as_slice() else {
+        return None;
+    };
+    match *method {
+        Method::POST if parent == "models" => {
+            let model = last.strip_suffix(":predictLongRunning")?;
+            is_segment(model).then(|| Route::Create(model.to_owned()))
+        }
+        Method::GET if parent == "operations" => Some(Route::Retrieve(last.clone())),
+        Method::GET if parent == "files" => {
+            let id = last.strip_suffix(":download")?;
+            Some(Route::Download(id.to_owned()))
+        }
+        _ => None,
+    }
+}
+
+/// What a client asks: a creation's body read into the kind's, the rest by
+/// its path alone.
+fn read_request(head: &RequestHead, raw: &[u8]) -> Result<Input, Fault> {
+    let route = route(&head.method, &head.uri)
+        .ok_or_else(|| Fault::bad_request("the request is to no Veo endpoint"))?;
+    Ok(match route {
+        Route::Create(model) => Input::Create(read_create(model, raw)?),
+        Route::Retrieve(id) => Input::Retrieve { id },
+        Route::Download(id) => Input::Content {
+            id,
+            variant: Variant::Video,
+            url: None,
+        },
+    })
+}
+
+/// A creation: its one instance's prompt and image, its parameters'
+/// `aspectRatio` and `resolution` as a size and `durationSeconds` as
+/// seconds, and its other parameters as this format's native fields.
+fn read_create(model: String, raw: &[u8]) -> Result<Create, Fault> {
+    let invalid = |what: &str| Fault::bad_request(what.to_owned());
+    let mut v: Map<String, Value> =
+        serde_json::from_slice(raw).map_err(|_| invalid("the body is not a JSON object"))?;
+    let mut instances = match v.remove("instances") {
+        Some(Value::Array(instances)) => instances,
+        _ => return Err(invalid("`instances` must be a list of one instance")),
+    };
+    let (Some(Value::Object(mut instance)), true) = (instances.pop(), instances.is_empty()) else {
+        return Err(invalid("`instances` must be a list of one instance"));
+    };
+    let prompt = match instance.remove("prompt") {
+        Some(Value::String(prompt)) => prompt,
+        _ => return Err(invalid("`instances[0].prompt` is required")),
+    };
+    let mut create = Create::new(prompt);
+    create.model = Some(model);
+    if let Some(image) = instance.remove("image") {
+        let bytes = image["bytesBase64Encoded"]
+            .as_str()
+            .and_then(|b| STANDARD.decode(b).ok());
+        let bytes = bytes.ok_or_else(|| invalid("`instances[0].image` must be base64 bytes"))?;
+        let mime = image["mimeType"].as_str().unwrap_or("image/png");
+        create.reference = Some(Media::new(mime, MediaSource::Bytes(bytes.into())));
+    }
+    if let Some(key) = instance.keys().next() {
+        return Err(invalid(&format!("`instances[0].{key}` is not taken")));
+    }
+    let mut parameters = match v.remove("parameters") {
+        Some(Value::Object(parameters)) => parameters,
+        None => Map::new(),
+        Some(_) => return Err(invalid("`parameters` must be an object")),
+    };
+    if let Some(key) = v.keys().next() {
+        return Err(invalid(&format!("`{key}` is not taken")));
+    }
+    let (aspect, resolution) = (parameters.get("aspectRatio"), parameters.get("resolution"));
+    if aspect.is_some() || resolution.is_some() {
+        let size = size_of(
+            aspect.and_then(Value::as_str),
+            resolution.and_then(Value::as_str),
+        );
+        // A size the kind can say goes as one; another stays Veo's own.
+        if let Some(size) = size {
+            create.size = Some(size);
+            parameters.remove("aspectRatio");
+            parameters.remove("resolution");
+        }
+    }
+    create.seconds = match parameters.remove("durationSeconds") {
+        None => None,
+        Some(n) => Some(
+            n.as_u64()
+                .or_else(|| n.as_str()?.parse().ok())
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| invalid("`parameters.durationSeconds` must be a whole number"))?,
+        ),
+    };
+    if !parameters.is_empty() {
+        create.native = Some(NativeFields::new(NAME, parameters));
+    }
+    Ok(create)
+}
+
+/// The encoder of an answer to `request`: a video's bytes as they come, or
+/// a job as an operation.
+fn response_encoder(
+    request: &http::Request<Bytes>,
+    head: &mut ResponseHead,
+) -> Box<dyn Encoder<Output>> {
+    let content = matches!(
+        route(request.method(), request.uri()),
+        Some(Route::Download(_))
+    );
+    let typed = if content {
+        "video/mp4"
+    } else {
+        "application/json"
+    };
+    head.headers
+        .insert(CONTENT_TYPE, HeaderValue::from_static(typed));
+    if content {
+        return Box::new(|event: &Output, out: &mut Vec<Bytes>| {
+            if let Output::Content(bytes) = event {
+                out.push(bytes.clone());
+            }
+            Ok(())
+        });
+    }
+    let base = gateway_base(request);
+    Box::new(All::new(move |events: &[Output]| {
+        let job = events.iter().rev().find_map(|e| match e {
+            Output::Job(job) => Some(job),
+            _ => None,
+        });
+        let job = job.ok_or_else(|| Fault::upstream("the provider's answer said no video"))?;
+        serde_json::to_vec(&operation_of_job(job, &base))
+            .map_err(|e| Fault::internal("a body could not be written").with_source(e))
+    }))
+}
+
+/// Where the gateway serves Veo to the client of `request`: its origin, as
+/// the request names it, and its path up to the version segment.
+fn gateway_base(request: &http::Request<Bytes>) -> String {
+    let header = |name: &str| request.headers().get(name).and_then(|v| v.to_str().ok());
+    let host = header("host").unwrap_or("localhost");
+    let scheme = header("x-forwarded-proto").unwrap_or("http");
+    let path = forwarded_path(request.uri().path());
+    let at = ["/models/", "/operations/", "/files/"]
+        .iter()
+        .filter_map(|m| path.find(m))
+        .min();
+    format!("{scheme}://{host}{}", &path[..at.unwrap_or(0)])
+}
+
+/// A job as Veo's operation: named for the job's id, so a client polls the
+/// provider that made it; done once it finished; its video, if made, at the
+/// gateway, never the provider's own URL; its failure as an error, or as a
+/// filtered response when the provider's filters took the video.
+fn operation_of_job(job: &Job, base: &str) -> Value {
+    let name = match &job.model {
+        Some(model) => format!("models/{model}/operations/{}", job.id),
+        None => format!("operations/{}", job.id),
+    };
+    let mut operation = json!({ "name": name });
+    match &job.status {
+        Status::Completed => {
+            let uri = format!("{base}/files/{}:download?alt=media", job.id);
+            let mime = job
+                .videos
+                .first()
+                .map_or("video/mp4", |v| v.mime_type.as_str());
+            operation["done"] = true.into();
+            operation["response"] = json!({
+                "@type": "type.googleapis.com/google.ai.generativelanguage.v1beta.PredictLongRunningResponse",
+                "generateVideoResponse": { "generatedSamples": [{ "video": { "uri": uri, "mimeType": mime } }] },
+            });
+        }
+        Status::Failed => {
+            operation["done"] = true.into();
+            let error = job
+                .error
+                .clone()
+                .unwrap_or_else(|| JobError::new(None, "the video failed"));
+            if error.code.as_deref() == Some("content_filtered") {
+                operation["response"] = json!({
+                    "@type": "type.googleapis.com/google.ai.generativelanguage.v1beta.PredictLongRunningResponse",
+                    "generateVideoResponse": {
+                        "raiMediaFilteredCount": 1,
+                        "raiMediaFilteredReasons": [error.message],
+                    },
+                });
+            } else {
+                let status = error
+                    .code
+                    .filter(|c| is_status_name(c))
+                    .unwrap_or_else(|| "INTERNAL".into());
+                operation["error"] =
+                    json!({ "code": code_of(&status), "message": error.message, "status": status });
+            }
+        }
+        _ => {}
+    }
+    operation
+}
+
+/// A client's refusal, in Google's shape: `{"error": {code, message, status}}`.
+fn refusal(fault: &Fault, _request: &http::Request<Bytes>, head: &mut ResponseHead) -> Bytes {
+    let status = head.status.as_u16();
+    head.headers
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let error = json!({ "error": { "code": status, "message": fault.message(), "status": status_name(status) } });
+    Bytes::from(error.to_string())
+}
+
+/// Whether `name` is a `google.rpc.Code` name, such as `NOT_FOUND`.
+fn is_status_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+}
+
+/// The `google.rpc.Code` name Google gives an HTTP `status`.
+fn status_name(status: u16) -> &'static str {
+    match status {
+        400 => "INVALID_ARGUMENT",
+        401 => "UNAUTHENTICATED",
+        403 => "PERMISSION_DENIED",
+        404 => "NOT_FOUND",
+        429 => "RESOURCE_EXHAUSTED",
+        501 => "UNIMPLEMENTED",
+        502 | 503 => "UNAVAILABLE",
+        504 => "DEADLINE_EXCEEDED",
+        s if s >= 500 => "INTERNAL",
+        _ => "FAILED_PRECONDITION",
+    }
+}
+
+/// The HTTP status of a `google.rpc.Code` name.
+fn code_of(status: &str) -> u16 {
+    match status {
+        "INVALID_ARGUMENT" | "FAILED_PRECONDITION" => 400,
+        "UNAUTHENTICATED" => 401,
+        "PERMISSION_DENIED" => 403,
+        "NOT_FOUND" => 404,
+        "RESOURCE_EXHAUSTED" => 429,
+        "UNAVAILABLE" => 503,
+        "DEADLINE_EXCEEDED" => 504,
+        _ => 500,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +743,15 @@ mod tests {
             Some("/files/x")
         );
         assert_eq!(at("https://h.test/v1beta"), None);
+    }
+
+    #[test]
+    fn only_googles_hosts_over_https_are_followed() {
+        let follows = |uri: &str| google_storage(&uri.parse().unwrap_or_default());
+        assert!(follows("https://storage.googleapis.com/v/1"));
+        assert!(follows("https://x.googleusercontent.com/v"));
+        assert!(!follows("http://storage.googleapis.com/v"));
+        assert!(!follows("https://evil.test/storage.googleapis.com"));
+        assert!(!follows("https://googleapis.com.evil.test/v"));
     }
 }

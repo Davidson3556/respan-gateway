@@ -4,7 +4,6 @@
 //! same list in Gemini's shape, for Gemini SDKs; a request to `/v1/models`
 //! with `anthropic-version` gets Anthropic's shape.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -19,11 +18,9 @@ use serde_json::{Value, json};
 
 use crate::auth;
 use crate::compose::Upstream;
-use crate::config::Price;
 use crate::formats::{first_of_each_kind, kind};
 use crate::requests::rfc3339;
-use indexmap::IndexMap;
-use respan_gateway_plugin_routing::{Catalog, Facts, Kind, Routes};
+use respan_gateway_plugin_routing::{Kind, Routes};
 use respan_gateway_vendors::{Model, VendorProvider};
 
 /// How long a provider may take to list its models.
@@ -39,6 +36,8 @@ struct Listing {
     source: VendorProvider,
     /// A format of each kind it serves.
     kinds: Vec<(Kind, String)>,
+    /// The models the config declares of it, laid over its list's.
+    declared: Vec<Model>,
 }
 
 /// Why a provider gave no list, and the status it answered with, if any.
@@ -69,12 +68,7 @@ pub struct Probe {
 pub struct Models {
     listings: Vec<Listing>,
     routes: Arc<Routes>,
-    /// The config's `prices`, for a model its list gives none.
-    prices: Vec<(String, Price)>,
     cached: Mutex<Option<(Instant, Value)>>,
-    /// What the last listings said of each model, by provider and id, for
-    /// routes that pick by price or need a capability.
-    facts: Mutex<HashMap<(String, String), Facts>>,
 }
 
 impl Models {
@@ -83,42 +77,13 @@ impl Models {
             provider: u.name.clone(),
             source: u.provider.clone(),
             kinds: first_of_each_kind(u.entries.iter().map(|e| (e.kind, e.format.clone()))),
+            declared: u.models.clone(),
         });
         Self {
             listings: listings.collect(),
             routes,
-            prices: Vec::new(),
             cached: Mutex::default(),
-            facts: Mutex::default(),
         }
-    }
-
-    /// With `prices`, the config's, for a model whose list gives none.
-    pub fn priced(mut self, prices: &IndexMap<String, Price>) -> Self {
-        self.prices = prices
-            .iter()
-            .map(|(p, price)| (p.clone(), *price))
-            .collect();
-        self
-    }
-
-    /// The price of `model`: its list's, else the longest `prices` prefix's.
-    fn price_of(&self, model: &Model) -> Option<Value> {
-        if let Some(p) = model.pricing {
-            return Some(price_json(p.input, p.output, p.cached_input, "provider"));
-        }
-        let p = self.configured(&model.id)?;
-        Some(price_json(p.input, p.output, p.cached_input, "config"))
-    }
-
-    /// The config's price of `id`: its longest matching `prices` prefix's.
-    fn configured(&self, id: &str) -> Option<&Price> {
-        let (_, p) = self
-            .prices
-            .iter()
-            .filter(|(prefix, _)| id.starts_with(prefix.as_str()))
-            .max_by_key(|(prefix, _)| prefix.len())?;
-        Some(p)
     }
 
     /// Lists every provider's models now and every `every` after, while
@@ -245,51 +210,33 @@ impl Models {
             return Ok(Vec::new());
         };
         let models = listed.map_err(|r| format!("{}: {}", listing.provider, r.why))?;
-        {
-            let mut facts = self.facts.lock().unwrap_or_else(|e| e.into_inner());
-            for m in &models {
-                let known = Facts {
-                    price: m.pricing.map(|p| (p.input, p.output)),
-                    capabilities: m.capabilities.clone(),
-                    input_modalities: m.input_modalities.clone(),
-                };
-                facts.insert((listing.provider.clone(), m.id.clone()), known);
+        // The list's models, each with the config's declaration laid over
+        // it, then the models it declares that the list does not name.
+        let mut cards: Vec<Model> = models;
+        for card in &mut cards {
+            card.provider.clone_from(&listing.provider);
+            card.kind = kind_of(&card.id).map(|k| k.label.to_owned());
+            if let Some(declared) = listing.declared.iter().find(|d| d.id == card.id) {
+                card.overlay(declared);
             }
         }
-        let models = models
+        let unlisted = (listing.declared.iter()).filter(|d| !cards.iter().any(|c| c.id == d.id));
+        cards.extend(unlisted.cloned().collect::<Vec<_>>());
+        self.routes
+            .catalog()
+            .set(&listing.provider, cards.iter().cloned());
+        let models = cards
             .iter()
-            .filter_map(|m| {
-                let id = m.id.as_str();
-                let kind = kind_of(id)?;
+            .filter_map(|card| {
+                let kind = card
+                    .kind
+                    .as_deref()
+                    .and_then(kind::named)
+                    .or_else(|| kind_of(&card.id))?;
                 let (_, format) = listing.kinds.iter().find(|(k, _)| *k == kind)?;
-                let mut model = json!({
-                    "id": self.public_id(listing, kind, format, id),
-                    "object": "model",
-                    "owned_by": listing.provider,
-                    "kind": kind.label,
-                });
-                let fields = [
-                    ("created", m.created.map(Value::from)),
-                    ("display_name", m.display_name.clone().map(Value::from)),
-                    ("description", m.description.clone().map(Value::from)),
-                    ("context_window", m.context_window.map(Value::from)),
-                    ("max_output_tokens", m.max_output_tokens.map(Value::from)),
-                    (
-                        "input_modalities",
-                        (!m.input_modalities.is_empty()).then(|| json!(m.input_modalities)),
-                    ),
-                    (
-                        "capabilities",
-                        (!m.capabilities.is_empty()).then(|| json!(m.capabilities)),
-                    ),
-                    ("pricing", self.price_of(m)),
-                    ("retires_at", m.retires_at.clone().map(Value::from)),
-                ];
-                for (key, value) in fields {
-                    if let Some(value) = value {
-                        model[key] = value;
-                    }
-                }
+                let mut model = serde_json::to_value(card).ok()?;
+                model["id"] = self.public_id(listing, kind, format, &card.id).into();
+                model["object"] = "model".into();
                 Some(model)
             })
             .collect();
@@ -305,51 +252,6 @@ impl Models {
             _ => format!("{}/{id}", listing.provider),
         }
     }
-}
-
-/// The models a router reads, while the gateway serves them: held weakly,
-/// as the models hold the routes.
-pub struct Listed(pub Weak<Models>);
-
-impl Catalog for Listed {
-    fn facts(&self, provider: &str, model: &str) -> Option<Facts> {
-        self.0.upgrade()?.facts(provider, model)
-    }
-
-    fn lists(&self, provider: &str, model: &str) -> bool {
-        self.0.upgrade().is_some_and(|m| m.lists(provider, model))
-    }
-}
-
-impl Catalog for Models {
-    fn facts(&self, provider: &str, model: &str) -> Option<Facts> {
-        let facts = self.facts.lock().unwrap_or_else(|e| e.into_inner());
-        let listed = facts.get(&(provider.to_owned(), model.to_owned())).cloned();
-        let configured = self.configured(model).map(|p| (p.input, p.output));
-        let price = listed.as_ref().and_then(|f| f.price).or(configured);
-        if listed.is_none() && price.is_none() {
-            return None;
-        }
-        Some(Facts {
-            price,
-            ..listed.unwrap_or_default()
-        })
-    }
-
-    fn lists(&self, provider: &str, model: &str) -> bool {
-        let facts = self.facts.lock().unwrap_or_else(|e| e.into_inner());
-        facts.contains_key(&(provider.to_owned(), model.to_owned()))
-    }
-}
-
-/// A price, in US dollars per million tokens, and where it was read: its
-/// provider's list, or the config's `prices`.
-fn price_json(input: f64, output: f64, cached: Option<f64>, from: &str) -> Value {
-    let mut price = json!({ "input": input, "output": output, "from": from });
-    if let Some(cached) = cached {
-        price["cached_input"] = cached.into();
-    }
-    price
 }
 
 /// What a model does, by its name as vendors spell them; `None` for one the

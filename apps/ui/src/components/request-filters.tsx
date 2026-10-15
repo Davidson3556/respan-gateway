@@ -51,7 +51,7 @@ function StatusPills({
   );
 }
 
-function FilterSelect({
+export function FilterSelect({
   label,
   value,
   options,

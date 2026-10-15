@@ -10,8 +10,8 @@ mod record;
 mod recorder;
 
 pub use edge::track;
-pub use log::{RequestLog, attribute};
-pub use record::{RequestRecord, Usage, rfc3339};
+pub use log::{RequestLog, attribute, charge};
+pub use record::{RequestRecord, rfc3339};
 pub use recorder::{Recorder, steps};
 
 /// Whether `cx` is a client's request, which the HTTP edge tracked ([`track`]),

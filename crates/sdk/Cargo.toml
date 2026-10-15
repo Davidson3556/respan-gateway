@@ -1,0 +1,19 @@
+[package]
+name = "respan-gateway-sdk"
+description = "What plugins, vendors and hosts share beyond the core: a model's card and its price."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

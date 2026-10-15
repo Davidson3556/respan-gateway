@@ -12,12 +12,14 @@ use super::{
 };
 use crate::edge::ended_events;
 use respan_gateway_conversation::Usage;
+use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, Fault, Format, NativeValue};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::content;
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
 use respan_gateway_http::path::path_ends_with;
 use respan_gateway_http::{All, ClientIo, Decoder, Encoder, ProviderIo, Whole};
+use respan_gateway_http::{Connect, Upstream};
 use respan_gateway_media::transcription::{Delta, Input, Output, Segment, Task, Transcript, Word};
 use serde_json::{Map, Value};
 
@@ -65,6 +67,17 @@ impl Format<ClientIo, Input, Output> for OpenAiTranscriptions {
 
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         Ok(bind_client(io, decode_request, response_encoder))
+    }
+}
+
+/// Its spec's: a bearer key, over HTTP, beside its base URL.
+impl Upstream for OpenAiTranscriptions {
+    fn name(&self) -> &str {
+        NAME
+    }
+
+    fn provider(&self, name: String, connect: Connect) -> Provider {
+        Provider::new(name, *self, move |x| connect(x))
     }
 }
 

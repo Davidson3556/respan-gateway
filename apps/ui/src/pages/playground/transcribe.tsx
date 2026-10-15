@@ -7,7 +7,9 @@ import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useModelChoice } from "@/hooks/use-model-choice";
+import { useApiChoice, useLastCall } from "@/hooks/use-playground";
 import { gatewayFetch } from "@/lib/api";
+import { mediaApis } from "@/lib/playground-apis";
 import { AudioInput } from "./audio-input";
 import { MediaLayout } from "./media-form";
 import { ModelPicker } from "./model-picker";
@@ -22,22 +24,28 @@ const formats = [
 
 export function TranscribeTab() {
   const choice = useModelChoice("transcription", "whisper-1");
+  const api = useApiChoice("transcription", mediaApis.transcription);
+  const call = useLastCall();
   const [file, setFile] = useState<File | null>(null);
   const [format, setFormat] = useState<TranscriptFormat>("json");
   const transcribe = useMutation({
-    mutationFn: async ({ audio, as }: { audio: File; as: TranscriptFormat }) => {
-      const form = new FormData();
-      form.append("file", audio);
-      form.append("model", choice.model);
-      form.append("response_format", as);
-      const res = await gatewayFetch("/v1/audio/transcriptions", { method: "POST", body: form });
-      const body = as === "json" ? ((await res.json()) as { text: string }).text : await res.text();
-      return { body, as };
-    },
+    mutationFn: ({ audio, as }: { audio: File; as: TranscriptFormat }) =>
+      call.track({ api: api.api.id, model: choice.model }, async () => {
+        const form = new FormData();
+        form.append("file", audio);
+        form.append("model", choice.model);
+        form.append("response_format", as);
+        const res = await gatewayFetch("/v1/audio/transcriptions", { method: "POST", body: form });
+        const body = as === "json" ? ((await res.json()) as { text: string }).text : await res.text();
+        return { body, as };
+      }),
   });
 
   return (
     <MediaLayout
+      id="transcribe"
+      choice={api}
+      record={call.record}
       onSubmit={() => file && transcribe.mutate({ audio: file, as: format })}
       pending={transcribe.isPending}
       disabled={!file}

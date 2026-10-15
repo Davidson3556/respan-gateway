@@ -380,7 +380,7 @@ async fn each_media_kind_is_relayed_to_its_provider_and_logged() {
 async fn an_openai_videos_client_is_answered_by_veo() {
     let google = Fake::start().await;
     let app = app(&format!(
-        "gemini = {{ vendor = \"gemini\", key = \"AIza\", base_url = \"{}/v1beta/openai\" }}\n",
+        "gemini = {{ vendor = \"gemini\", key = \"AIza\", formats = {{ gemini-veo = \"{0}/v1beta\", gemini-generate = \"{0}/v1beta\", gemini-live = \"{0}\", openai-chat = \"{0}/v1beta/openai\", openai-images = \"{0}/v1beta/openai\", openai-embeddings = \"{0}/v1beta/openai\" }} }}\n",
         google.base
     ));
     let (status, job) = post(

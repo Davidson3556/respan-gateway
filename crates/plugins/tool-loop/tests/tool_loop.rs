@@ -629,10 +629,7 @@ async fn the_whole_loop_has_a_wall_clock_limit() {
 
 #[tokio::test]
 async fn a_request_out_of_scope_or_with_no_tools_to_offer_is_untouched() {
-    let rig = Rig::with(Fake::new(), |a| {
-        a.when(|_, input| input.model() == Some("o1"))
-    })
-    .await;
+    let rig = Rig::with(Fake::new(), |a| a.when(|_, model| model == Some("o1"))).await;
     rig.openai.answer(says("plain", (1, 1)));
     let (status, body) = rig.chat(ask_gpt()).await;
     assert_eq!(status, StatusCode::OK);

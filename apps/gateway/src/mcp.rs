@@ -29,8 +29,9 @@ use respan_gateway_http_faults::Status;
 use respan_gateway_http_transport::reqwest;
 use respan_gateway_http_transport::{HttpTransport, unreachable};
 use respan_gateway_mcp::{Input, Output, RpcCode};
-use respan_gateway_mcp_http::{Owner, SESSION, StdioTransport, StreamableHttp};
+use respan_gateway_mcp_http::{SESSION, StdioTransport, StreamableHttp};
 use respan_gateway_plugin_routing::Model;
+use respan_gateway_sdk::Caller;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
@@ -796,8 +797,8 @@ impl SessionOwners {
         let owner = call
             .extensions()
             .get::<Extensions>()
-            .and_then(|e| e.get::<Owner>())
-            .map(|Owner(id)| id.clone());
+            .and_then(|e| e.get::<Caller>())
+            .map(|c| c.id.clone());
         let Some(owner) = owner else {
             return self.authorized(call, &send).await;
         };

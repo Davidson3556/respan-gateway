@@ -177,7 +177,7 @@ fn plan(text: &str) -> Result<Plan, String> {
 #[test]
 fn a_vendor_is_every_format_it_speaks() {
     let plan = plan(
-        "providers = { openai = { vendor = \"openai\", key = \"sk\" }, gemini = { vendor = \"gemini\", key = \"AIza\", base_url = \"http://g.test/v1beta/openai\" } }\n",
+        "providers = { openai = { vendor = \"openai\", key = \"sk\" }, gemini = { vendor = \"gemini\", key = \"AIza\", formats = { gemini-generate = \"http://g.test/v1beta\", openai-chat = \"http://g.test/v1beta/openai\", gemini-live = \"http://g.test\", openai-images = \"http://g.test/v1beta/openai\", gemini-veo = \"http://g.test/v1beta\", openai-embeddings = \"http://g.test/v1beta/openai\" } } }\n",
     )
     .unwrap_or_else(|e| panic!("{e}"));
     let entries = |i: usize| -> Vec<(String, String, String)> {
@@ -280,6 +280,7 @@ fn a_vendor_is_every_format_it_speaks() {
             "openai-embeddings",
             "gemini-generate",
             "gemini-live",
+            "gemini-veo",
             "responses-ws"
         ]
     );
@@ -337,7 +338,15 @@ fn a_bad_provider_is_an_error() {
         ),
         (
             "p = { formats = \"openai-chat\" }",
-            "provider 'p': needs a `base_url`",
+            "provider 'p': format openai-chat needs a `base_url`",
+        ),
+        (
+            "p = { formats = { openai-chat = \"http://x\" }, base_url = \"http://y\" }",
+            "provider 'p': give each format its base URL in `formats`, or one `base_url`, not both",
+        ),
+        (
+            "p = { vendor = \"gemini\", key = \"k\", formats = [\"gemini-generate\", \"openai-chat\"], base_url = \"http://g.test\" }",
+            "provider 'p': its formats are at different URLs, so one `base_url` cannot say where each is; give each its own:\nformats = {\n  \"gemini-generate\" = \"https://generativelanguage.googleapis.com/v1beta\",\n  \"openai-chat\" = \"https://generativelanguage.googleapis.com/v1beta/openai\",\n}",
         ),
         (
             "p = { vendor = \"openai\", key = \"k\", auth = { type = \"bearer\", key = \"k\" } }",
@@ -353,7 +362,7 @@ fn a_bad_provider_is_an_error() {
         ),
         (
             "p = { vendor = \"cloudflare\", key = \"k\" }",
-            "provider 'p': environment variable CLOUDFLARE_ACCOUNT_ID is not set; its base URL needs it, or set `base_url`",
+            "provider 'p': environment variable CLOUDFLARE_ACCOUNT_ID is not set; the base URL of openai-chat needs it, or give it one",
         ),
     ];
     for (provider, expected) in cases {
@@ -570,11 +579,11 @@ fn an_unknown_format_names_the_compiled_in_ones() {
 }
 
 #[test]
-fn a_format_only_providers_speak_cannot_be_served() {
-    assert_eq!(
-        plan("formats = [\"gemini-veo\"]\n").err().as_deref(),
-        Some("formats: gemini-veo is spoken only by providers; no client sends it")
-    );
+fn veo_is_served_to_its_clients() {
+    let text =
+        "providers = { g = { vendor = \"gemini\", key = \"k\" } }\nformats = [\"gemini-veo\"]\n";
+    let served = plan(text).map(|p| p.serve);
+    assert_eq!(served, Ok(vec!["gemini-veo".to_owned()]));
 }
 
 #[test]
@@ -595,6 +604,9 @@ fn an_empty_key_is_refused_and_keys_are_trimmed() {
         plan(empty_provider_key).err().as_deref(),
         Some("provider 'p': a key is empty")
     );
+    let keyless =
+        "providers = { p = { formats = \"openai-chat\", base_url = \"http://x.test\" } }\n";
+    assert!(plan(keyless).is_ok_and(|p| !p.upstreams[0].own_key));
     let empty_auth = "providers = { p = { formats = \"openai-chat\", base_url = \"http://x.test\", auth = { type = \"bearer\", key = \" \" } } }\n";
     assert_eq!(
         plan(empty_auth).err().as_deref(),

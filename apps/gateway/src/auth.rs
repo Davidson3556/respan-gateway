@@ -18,8 +18,8 @@ use respan_gateway_core::Extensions;
 use respan_gateway_http::Credential;
 use respan_gateway_http::http::header::{AUTHORIZATION, HOST, HeaderName, ORIGIN, UPGRADE};
 use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, StatusCode};
-use respan_gateway_mcp_http::Owner;
 use respan_gateway_plugin_tool_loop::ToolScope;
+use respan_gateway_sdk::Caller;
 
 const X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
 const X_GOOG_API_KEY: HeaderName = HeaderName::from_static("x-goog-api-key");
@@ -48,13 +48,16 @@ impl std::fmt::Debug for Client {
 #[derive(Debug, Default)]
 pub struct ClientKeys(Vec<Client>);
 
-/// An opaque id of a client key: a keyed hash, different for every process,
-/// never the key. The gateway hands it on as the call's [`Owner`], for
-/// whatever must tell clients apart, such as whose an MCP session is.
-fn client_id(key: &str) -> Owner {
+/// The [`Caller`] of a client key: its name, and an opaque id of it, a
+/// keyed hash different for every process, never the key, for whatever
+/// must tell clients apart, such as whose an MCP session is.
+fn caller(key: &str, name: &str) -> Caller {
     static SALT: OnceLock<RandomState> = OnceLock::new();
     let hash = SALT.get_or_init(RandomState::new).hash_one(key.trim());
-    Owner(format!("{hash:016x}"))
+    Caller {
+        id: format!("{hash:016x}"),
+        name: name.to_owned(),
+    }
 }
 
 /// What a request's headers say to the client keys.
@@ -140,15 +143,14 @@ impl ClientKeys {
 }
 
 /// Puts what the gateway knows of `client` on a request's extensions: its
-/// name in the request record, its [`Owner`] id, and the tools it is limited
+/// name in the request record, its [`Caller`], and the tools it is limited
 /// to, if it is.
 fn attribute(req: &mut Request, client: &Client) {
     // The gateway's own extensions ride in the request's.
     let mut calls = req.extensions_mut().remove::<Extensions>();
     let calls = calls.get_or_insert_with(Extensions::new);
     crate::requests::attribute(calls, &client.name);
-    calls.insert(respan_gateway_plugin_respan::Customer(client.name.clone()));
-    calls.insert(client_id(&client.key));
+    calls.insert(caller(&client.key, &client.name));
     if let Some(tools) = &client.tools {
         calls.insert(ToolScope::new(tools.clone()));
     }
@@ -548,12 +550,12 @@ mod tests {
         let keys = ClientKeys(vec![client("a", "k1"), client("b", "k2")]);
         let id = |pairs: &[(&'static str, &str)]| {
             let found = keys.identify(&headers(pairs));
-            found.map(|c| (client_id(&c.key), c.name.clone()))
+            found.map(|c| caller(&c.key, &c.name))
         };
         let one = id(&[("authorization", "Bearer k1")]);
         assert_eq!(one, id(&[("x-api-key", "k1")]));
         assert_ne!(one, id(&[("x-api-key", "k2")]));
-        assert!(one.is_some_and(|(Owner(id), _)| !id.contains("k1")));
+        assert!(one.is_some_and(|c| !c.id.contains("k1") && c.name == "a"));
         assert_eq!(id(&[("authorization", "Bearer sk-provider")]), None);
         // The gateway's key is the one named, not the client's own.
         let both = [("authorization", "Bearer sk-provider"), ("x-api-key", "k2")];

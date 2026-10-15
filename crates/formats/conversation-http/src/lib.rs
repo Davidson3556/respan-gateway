@@ -9,10 +9,14 @@
 //! - [`gemini`]: Google Gemini's `generateContent`.
 //!
 //! A format is its spec: what a provider sends beyond it is kept native, at
-//! the place it appeared, for a plugin to read (each module says where).
+//! the place it appeared, for a plugin to read (each module says where), or
+//! for a vendor's [`dialect`] of it. [`either`] is one format, or another for
+//! the calls the first refuses.
 
 use serde_json::Value;
 
+pub mod dialect;
+pub mod either;
 pub mod fields;
 mod schema;
 pub use schema::{Asked, Schema, StreamResponse, merge_details, read_provider_error};

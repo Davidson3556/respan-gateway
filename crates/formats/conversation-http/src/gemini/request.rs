@@ -293,6 +293,32 @@ fn args_json(arguments: &str) -> Result<Value, Fault> {
     }
 }
 
+/// Whether a call to `model` signs the function calls in its history: one
+/// to any model but those before Gemini 3.
+pub fn needs_signatures(model: Option<&str>) -> bool {
+    let model = model.unwrap_or_default();
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    !(model.starts_with("gemini-1") || model.starts_with("gemini-2"))
+}
+
+/// The first call of each `model` content in request `v` signed with the
+/// placeholder, unless it has a signature of its own.
+pub(super) fn sign_calls(v: &mut Map<String, Value>) {
+    let Some(Value::Array(contents)) = v.get_mut("contents") else {
+        return;
+    };
+    for content in contents.iter_mut().filter(|c| c["role"] == "model") {
+        let Some(parts) = content["parts"].as_array_mut() else {
+            continue;
+        };
+        let first = parts.iter_mut().find(|p| p.get("functionCall").is_some());
+        if let Some(Value::Object(call)) = first {
+            call.entry("thoughtSignature")
+                .or_insert_with(|| super::SIGNATURE_PLACEHOLDER.into());
+        }
+    }
+}
+
 /// A part of the kind's as Gemini writes it; `names` has the calls made so
 /// far, by id, for the results that answer them.
 fn write_part(c: &Content, names: &mut Vec<(String, String)>) -> Result<Value, Fault> {

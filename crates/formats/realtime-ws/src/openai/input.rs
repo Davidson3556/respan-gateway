@@ -9,27 +9,8 @@ use serde_json::{Value, json};
 
 use super::{NAME, session};
 use crate::audio::Convert;
-use crate::foreign::Drops;
+use crate::foreign;
 use crate::json::{self, merge, own, string, take, text, untranslatable_input};
-
-/// What of another format's natives OpenAI Realtime drops: Gemini Live's
-/// transcription settings, context compression and voice detection's
-/// sensitivities, and the shape of the message a client's event came in.
-const DROPS: Drops = Drops {
-    format: NAME,
-    session: &[
-        "setup.contextWindowCompression",
-        "setup.inputAudioTranscription",
-        "setup.outputAudioTranscription",
-    ],
-    vad: &[
-        "startOfSpeechSensitivity",
-        "endOfSpeechSensitivity",
-        "disabled",
-    ],
-    message: &[],
-    event: &["clientContent", "realtimeInput.activityStart", "name"],
-};
 
 /// A client's frames as events, beginning with the session the handshake
 /// asked for, its model the one at `?model=`: the client's first
@@ -203,7 +184,7 @@ fn message_json(m: &Message, refuse: fn(&str) -> Fault) -> Result<Value, Fault> 
 /// `event` with the fields of other formats' natives that OpenAI drops
 /// dropped, as its writer does; refused if one could change the answer.
 pub(super) fn admit(event: &Input) -> Result<Input, Fault> {
-    DROPS.admit(event)
+    foreign::admit(NAME, event)
 }
 
 /// The client's events written to the provider.
@@ -231,7 +212,7 @@ impl Provider {
     }
 
     pub(super) fn write(&mut self, event: &Input, out: &mut Vec<Bytes>) -> Result<(), Fault> {
-        let event = DROPS.admit(event)?;
+        let event = foreign::admit(NAME, event)?;
         if let Some(v) = self.encode(&event)? {
             out.push(json::frame(&v)?);
         }
@@ -265,6 +246,13 @@ impl Provider {
                 if v["session"].get("type").is_none() {
                     v["session"]["type"] = "realtime".into();
                 }
+                // It transcribes the user's audio only with a named model.
+                let transcription = v.pointer_mut("/session/audio/input/transcription");
+                if let Some(transcription) = transcription.and_then(Value::as_object_mut) {
+                    transcription
+                        .entry("model")
+                        .or_insert_with(|| super::TRANSCRIPTION_MODEL.into());
+                }
                 return Ok(Some(v));
             }
             Input::Audio { audio, native } => {
@@ -292,7 +280,9 @@ impl Provider {
             Input::Native(NativeValue { format, value }) if **format == *NAME => {
                 return Ok(Some(Value::clone(value)));
             }
-            Input::Native(NativeValue { value, .. }) => return dropped(value).map(|()| None),
+            Input::Native(native) => {
+                return foreign::native_input(NAME, native, true).map(|()| None);
+            }
             _ => return Err(refuse("another format's event")),
         };
         merge(
@@ -300,25 +290,5 @@ impl Provider {
             own(NAME, native, || refuse("another format's event"))?,
         );
         Ok(Some(v))
-    }
-}
-
-/// Whether another format's event, which OpenAI has none of, is dropped:
-/// Gemini Live's start of the user's activity, which OpenAI's voice
-/// detection or the next commit implies, and the end of its audio stream;
-/// any other is refused, by its field.
-fn dropped(event: &Value) -> Result<(), Fault> {
-    let input = event.get("realtimeInput").and_then(Value::as_object);
-    let field = |fields: &serde_json::Map<String, Value>| fields.keys().next().cloned();
-    match input.and_then(field).as_deref() {
-        Some("activityStart" | "audioStreamEnd") => Ok(()),
-        Some(field) => Err(untranslatable_input(
-            NAME,
-            &format!("`realtimeInput.{field}`"),
-        )),
-        None => {
-            let field = event.as_object().and_then(field).unwrap_or_default();
-            Err(untranslatable_input(NAME, &format!("`{field}`")))
-        }
     }
 }

@@ -42,6 +42,9 @@ respan-gateway-plugin-routing.workspace = true
 respan-gateway-plugin-tool-loop.workspace = true
 respan-gateway-plugin-respan.workspace = true
 respan-gateway-plugin-mcp-aggregate.workspace = true
+respan-gateway-plugin-pricing.workspace = true
+respan-gateway-sdk.workspace = true
+respan-gateway-plugin-responses.workspace = true
 respan-gateway-vendors.workspace = true
 respan-gateway-realtime.workspace = true
 respan-gateway-realtime-ws.workspace = true
@@ -55,6 +58,7 @@ indexmap = { version = "2", features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+terminal_size = "0.4"
 toml.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "process", "io-util"] }
 tower = { version = "0.5", features = ["util"] }

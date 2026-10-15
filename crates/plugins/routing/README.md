@@ -18,11 +18,13 @@ another format keeps its target.
 
 A `Rule` routes a model name, or a glob of them, to `Candidate`s
 (`provider`, `provider/model` or `provider/{model}`, `{model}` the name
-asked for), ordered by its `Pick`: `First`, `Cheapest` (by the `Catalog`'s
-`Facts`, input plus three times output), `Fastest` (by the router's own
+asked for), ordered by its `Pick`: `First`, `Cheapest` (by each model's
+`Price` in the routes' `Catalog`, input plus three times output), `Fastest` (by the router's own
 `Stats` of each candidate's time to a response; unknown or stale ones are
 tried), `Weighted` or `Random`. Its `needs` passes over candidates whose
-`Facts` lack a capability; one the catalog says nothing of is kept. A
+model is known to lack one (`Model::lacks`); one the catalog says nothing of is
+kept. The `Catalog` is the SDK's, shared with the host
+(`Routes::with_catalog`, `Routes::catalog`). A
 candidate that failed its last 3 calls within 30 s goes last. The router
 records `Stats` itself, from each call's `Attempt::head` and outcome.
 `Routes::plan(&Ask)` says where a request goes (`Planned`: the `Chosen`

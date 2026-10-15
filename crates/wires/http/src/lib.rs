@@ -45,6 +45,8 @@
 //!   ([`forwarded_path`](crate::path::forwarded_path), [`set_path`](crate::path::set_path)).
 //! - [`content`]: a body's content type, whether a response is a stream,
 //!   and the JSON of a body or event.
+//! - [`upstream`]: a provider format as its spec has it reached
+//!   ([`Upstream`]), for a vendor to list.
 //!
 //! Hosting a gateway is `respan-gateway-serve`'s, not a wire's.
 
@@ -59,6 +61,7 @@ mod edge;
 pub mod path;
 pub mod raw;
 pub mod rules;
+pub mod upstream;
 
 /// The crates HTTP formats and transports use, at these versions.
 pub use {bytes, http, http_body, http_body_util};
@@ -68,3 +71,4 @@ pub use credential::Credential;
 pub use edge::{
     Body, ClientIo, Completion, Frames, ProviderIo, Reply, connect, handle, handle_live,
 };
+pub use upstream::{Connect, KeyIn, Reach, Upstream};

@@ -2,6 +2,7 @@
 // API's streaming request and reads its stream events; nothing else here
 // knows which API is in use.
 
+import { servedApis } from "@/lib/playground-apis";
 import type { SseEvent } from "@/lib/sse";
 
 export type ChatApiId =
@@ -173,9 +174,6 @@ export const chatApi = (id: string): ChatApi => chatApis.find((a) => a.id === id
  * The APIs `serve` lists for chat, in display order; just OpenAI Chat until the
  * gateway has answered (it always serves that one).
  */
-export function servedChatApis(
-  serve: { format: string; kind: string }[] | undefined,
-): ChatApi[] {
-  const served = chatApis.filter((a) => serve?.some((s) => s.kind === "chat" && s.format === a.id));
-  return served.length > 0 ? served : [openaiChat];
+export function servedChatApis(serve: { format: string; kind: string }[] | undefined): ChatApi[] {
+  return servedApis("chat", chatApis, serve);
 }

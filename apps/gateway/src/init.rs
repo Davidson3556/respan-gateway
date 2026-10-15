@@ -111,9 +111,11 @@ pub fn starter(chosen: &[Chosen], client_key: Option<&str>) -> String {
         if let Some(key) = key {
             text.push_str(&format!("key = {}\n", quote(&key)));
         }
-        let base_url = found
-            .and_then(|(.., url)| url.as_deref())
-            .or(vendor.base_url.is_none().then_some("<base URL>"));
+        let base_url = found.and_then(|(.., url)| url.as_deref()).or(vendor
+            .formats
+            .iter()
+            .all(|(_, url)| url.is_none())
+            .then_some("<base URL>"));
         if let Some(url) = base_url {
             text.push_str(&format!("base_url = {}\n", quote(url)));
         }

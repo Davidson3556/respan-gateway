@@ -47,7 +47,7 @@ pub struct Admin {
     stand_in: serde_json::Value,
     auth_required: bool,
     /// Each provider, as `/ui/api/providers` lists it (`name`, `vendor`
-    /// (string or null), `quirks`, `formats`, `kinds`, `base_url` (string),
+    /// (string or null), `formats`, `kinds`, `base_url` (string),
     /// `credentials` (`"gateway"` or `"client"`), and the counts), but its counts.
     providers: Vec<Value>,
     /// The formats served, as `/ui/api/routes` lists them.
@@ -99,9 +99,6 @@ impl Admin {
                 json!({
                     "name": u.name,
                     "vendor": Some(u.provider.vendor().id).filter(|id| !id.is_empty()),
-                    "quirks": u.provider.vendor().quirks.iter()
-                        .map(|q| json!({ "name": q.name, "description": q.description }))
-                        .collect::<Vec<_>>(),
                     "formats": formats,
                     "kinds": kinds,
                     "base_url": u.entries.first().map_or(String::new(), |e| crate::redact::url(&e.base_url)),
@@ -513,11 +510,7 @@ async fn routes(State(admin): State<Arc<Admin>>) -> Json<Value> {
 /// A model's price, per million tokens, as the router reads it; `null` if
 /// unknown.
 fn price(routes: &Routes, provider: &str, model: &str) -> Value {
-    let price = routes.facts(provider, model).and_then(|f| f.price);
-    price.map_or(
-        Value::Null,
-        |(input, output)| json!({ "input": input, "output": output }),
-    )
+    json!(routes.catalog().get(provider, model).and_then(|m| m.price))
 }
 
 /// The router's record of `model` of `provider`; `null` before its first call.

@@ -1,12 +1,8 @@
+import type { Model } from "@/lib/api";
+
 /** A model to choose: its ID, the provider that lists it, and what its list says of it, if known. */
-export interface Listed {
-  id: string;
-  owned_by?: string;
-  display_name?: string;
-  context_window?: number;
-  pricing?: { input: number; output: number };
-  route?: { pick: string; to: string[] };
-}
+export type Listed = Pick<Model, "id"> &
+  Partial<Pick<Model, "owned_by" | "display_name" | "context_window" | "pricing" | "route">>;
 
 /** Tokens as a person reads them: `8K`, `1M`. */
 export function tokensShort(n: number): string {

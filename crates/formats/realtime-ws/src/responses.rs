@@ -1,7 +1,9 @@
 //! OpenAI's Responses over WebSocket.
 
+use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::{ClientIo, ProviderIo};
+use respan_gateway_http::{Connect, Reach, Upstream};
 use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::WsTransport;
 
@@ -49,6 +51,23 @@ impl Format<ClientIo, Input, Output> for ResponsesWs {
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         let (read, write) = session::native_client(Self::NAME);
         Ok(SPEC.client(io, read, write))
+    }
+}
+
+/// Its spec's: a bearer key, as a WebSocket session.
+impl Upstream for ResponsesWs {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
+
+    fn reach(&self) -> Reach {
+        Reach::Session {
+            binary_text: SPEC.binary_text,
+        }
+    }
+
+    fn provider(&self, name: String, connect: Connect) -> Provider {
+        Provider::new(name, *self, move |x| connect(x))
     }
 }
 

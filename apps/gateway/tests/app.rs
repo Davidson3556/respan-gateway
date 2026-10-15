@@ -725,13 +725,15 @@ async fn a_listed_model_carries_what_its_list_says_and_the_configs_price() {
             {"id": "gpt-4o", "object": "model", "created": 1, "owned_by": "x"},
             {"id": "llama-x", "object": "model", "display_name": "Llama X", "context_length": 8192,
              "pricing": {"input": 0.2, "output": 0.4}},
+            {"id": "llama-y", "object": "model", "pricing": {"input": 1.0, "output": 2.0}},
         ]}))
     };
     let app = axum::Router::new().route("/v1/models", axum::routing::get(list));
     tokio::spawn(async move { axum::serve(listener, app).await });
     let gw = Gateway::start(&format!(
         "providers = {{ openai = {{ vendor = \"openai\", base_url = \"http://{addr}/v1\", key = \"sk\" }} }}\n\
-         [prices]\n\"gpt-4o\" = {{ input = 2.5, output = 10.0, cached_input = 1.25 }}\n\
+         [models.\"openai/gpt-4o\"]\npricing = {{ input = 2.5, output = 10.0, cached_input = 1.25 }}\n\
+         [models.\"openai/llama-y\"]\npricing = {{ input = 9.0, output = 9.0 }}\n\
          [routes.\"llama*\"]\nto = \"openai\"\n"
     ))
     .await;
@@ -756,5 +758,10 @@ async fn a_listed_model_carries_what_its_list_says_and_the_configs_price() {
     assert_eq!(
         llama["pricing"],
         json!({"input": 0.2, "output": 0.4, "from": "provider"})
+    );
+    // The config's price overrides a list's.
+    assert_eq!(
+        model("llama-y")["pricing"],
+        json!({"input": 9.0, "output": 9.0, "from": "config"})
     );
 }

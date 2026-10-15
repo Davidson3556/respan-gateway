@@ -1,4 +1,4 @@
-import { ArrowUp, ChevronRight, Eraser, MessageSquare, SlidersHorizontal, Sparkles, Square, Wrench } from "lucide-react";
+import { ArrowUp, ChevronRight, Eraser, MessageSquare, Sparkles, Square, Wrench } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { Link } from "react-router";
 import { CopyButton } from "@/components/copy-button";
@@ -9,16 +9,18 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { useProviders, useRoutes } from "@/hooks/queries";
+import { ServedBadge } from "@/components/served-badge";
+import { useProviders } from "@/hooks/queries";
 import { useModelChoice } from "@/hooks/use-model-choice";
-import { api, type Provider, type RequestRecord } from "@/lib/api";
-import { chatApi, servedChatApis, type ChatApiId } from "@/lib/chat-apis";
+import { useApiChoice } from "@/hooks/use-playground";
+import type { Provider, RequestRecord } from "@/lib/api";
+import { chatApi, chatApis } from "@/lib/chat-apis";
 import { streamChat, type ChatMessage, type ChatStats } from "@/lib/chat";
 import { formatCount, formatMs } from "@/lib/format";
-import { findCall, servedBy } from "@/lib/served";
+import { locateCall, servedBy } from "@/lib/served";
+import { ConfigCard, PlaygroundLayout } from "./layout";
 import { ModelPicker } from "./model-picker";
 import { RequestError } from "./request-error";
-import { SelectField } from "./select-field";
 
 const suggestions = ["Explain how an API gateway works", "Write a haiku about latency", "Summarise HTTP/3 in three bullets"];
 
@@ -32,30 +34,13 @@ interface Turn {
   record?: RequestRecord;
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** The record of the call just made; the gateway finishes it a moment after the stream ends. */
-async function locate(want: { api: ChatApiId; model: string; since: number }) {
-  let found: RequestRecord | undefined;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (attempt > 0) await sleep(400);
-    found = findCall(await api.requests(20), want) ?? found;
-    if (found && found.status !== null) break;
-  }
-  return found;
-}
-
 function Served({ record, providers }: { record: RequestRecord; providers: Provider[] | undefined }) {
   const served = servedBy(record, providers);
   const tools = (served.steps ?? []).flatMap((s) => s.tools);
   return (
     <div className="mt-2 grid gap-2">
       <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-        {served.provider && (
-          <Badge variant="outline" className="font-normal">
-            served by <span className="font-mono">{served.provider}</span>
-          </Badge>
-        )}
+        {served.provider && <ServedBadge provider={served.provider} />}
         {served.translatedFrom && (
           <Badge variant="secondary" className="font-normal">
             translated from {chatApi(served.translatedFrom).label}
@@ -163,13 +148,10 @@ function Message({
 
 export function ChatTab() {
   const choice = useModelChoice("chat", "gpt-4o-mini");
-  const { data: routes } = useRoutes();
   const { data: providers } = useProviders();
-  const apis = servedChatApis(routes?.serve);
-  const [apiChoice, setApiChoice] = useState<ChatApiId>("openai-chat");
-  const selected = apis.find((a) => a.id === apiChoice) ?? apis[0];
+  const apiChoice = useApiChoice("chat", chatApis);
+  const selected = apiChoice.api;
   const [system, setSystem] = useState("");
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [input, setInput] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [controller, setController] = useState<AbortController | null>(null);
@@ -214,7 +196,7 @@ export function ChatTab() {
       updateLast((t) => (ctrl.signal.aborted ? { ...t, stopped: true } : { ...t, error }));
     } finally {
       setController(null);
-      void locate({ api: selected.id, model: choice.model, since })
+      void locateCall({ api: selected.id, model: choice.model, since })
         .then((record) => record && updateLast((t) => ({ ...t, record })))
         .catch(() => undefined);
     }
@@ -228,35 +210,9 @@ export function ChatTab() {
   };
 
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-5 lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)]">
-      <Card className="min-w-0 gap-5 bg-muted/20 p-5 shadow-none">
-        <div className="flex items-center justify-between gap-2">
-          <span className="flex items-center gap-2 text-xs font-medium tracking-wider text-muted-foreground uppercase">
-            <SlidersHorizontal className="size-3.5" /> Configuration
-          </span>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="-my-2 -mr-2 lg:hidden"
-            aria-expanded={settingsOpen}
-            aria-controls="chat-settings"
-            onClick={() => setSettingsOpen(!settingsOpen)}
-          >
-            {settingsOpen ? "Hide" : "Edit"}
-            <ChevronRight className={`size-3.5 transition-transform ${settingsOpen ? "rotate-90" : ""}`} />
-          </Button>
-        </div>
-        <div id="chat-settings" className={`${settingsOpen ? "grid" : "hidden"} min-w-0 gap-5 lg:grid`}>
-          {apis.length > 1 && (
-            <SelectField
-              id="chat-api"
-              label="API"
-              value={selected.id}
-              onChange={(v) => setApiChoice(v as ChatApiId)}
-              options={apis.map((a) => a.id)}
-              optionLabel={(id) => chatApi(id).label}
-            />
-          )}
+    <PlaygroundLayout
+      config={
+        <ConfigCard id="chat" kind="chat" apis={apiChoice.apis} api={selected} onApi={apiChoice.choose} collapsible>
           <ModelPicker id="chat-model" choice={choice} />
           <div className="grid min-w-0 gap-2">
             <Label htmlFor="chat-system">System prompt</Label>
@@ -265,13 +221,12 @@ export function ChatTab() {
               value={system}
               onChange={(e) => setSystem(e.target.value)}
               placeholder="You are a helpful assistant."
-              className="min-h-32 resize-y bg-background/60 text-sm leading-relaxed"
+              className="min-h-32 resize-y text-sm leading-relaxed"
             />
           </div>
-
-        </div>
-      </Card>
-
+        </ConfigCard>
+      }
+    >
       <Card className="flex h-[calc(100dvh-18rem)] min-h-[32rem] flex-col gap-0 overflow-hidden py-0 shadow-sm">
         <div className="flex shrink-0 items-center justify-between gap-3 border-b bg-muted/15 px-4 py-3 sm:px-6">
           <div className="min-w-0">
@@ -280,7 +235,7 @@ export function ChatTab() {
               <span className="truncate">{choice.model || "Conversation"}</span>
             </div>
             <p className="mt-1 flex flex-wrap gap-x-2 text-xs text-muted-foreground">
-              <span>{selected.label}</span><code className="text-[11px]">{selected.endpoint}</code>
+              <span>{selected.label}</span>
             </p>
           </div>
           <Button
@@ -361,6 +316,6 @@ export function ChatTab() {
           </p>
         </form>
       </Card>
-    </div>
+    </PlaygroundLayout>
   );
 }

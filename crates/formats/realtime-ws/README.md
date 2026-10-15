@@ -91,12 +91,22 @@ What one spec has and the other has not is emulated, dropped or refused:
   interrupted, ends its turn with `turnComplete`, as the Live API's do;
   context compression, VAD sensitivities and
   `audioStreamEnd` are dropped; sampling, resumption, proactivity, Google
-  Search, non-blocking functions and video are refused. An OpenAI `error`
-  closes a Gemini client, which knows a refusal only as a close.
+  Search, non-blocking functions and video are refused. An error closes a
+  Gemini client, which knows a refusal only as a close: 1007 if its cause
+  is `Invalid`, and none if `NothingToCancel`.
 
 A refused input is `bad_request`, closing the client 1008; a refused
 output `upstream`. Another format's events and fields a provider sends are
-dropped at the client.
+dropped at the client, but an event its format says tells of what the model
+said (OpenAI's MCP events) is refused.
+
+Which of a format's natives another may drop is for that format alone to
+say, of its own fields and events (`Harmless`, in each spec's module): no
+spec names another's. A writer drops another format's native where its
+format says so and refuses it where not; a format that says nothing has its
+native inputs refused and its native outputs dropped. An error says its
+cause as any format reads it (`Cause`: `Invalid`, `NothingToCancel`,
+`Provider`), set by the format that read it from its own codes.
 
 A session's first input arrives only once it is routed, so routing reads
 its model from the handshake: `requested_model(&Original)` is `?model=`,

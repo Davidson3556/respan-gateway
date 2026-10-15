@@ -14,6 +14,7 @@
 
 use respan_gateway_conversation_http::fields::{merge_missing, rest_of, set};
 use respan_gateway_conversation_http::{merge_details, read_provider_error};
+use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, Details, ErrorCode, Fault, Format, NativeFields};
 use respan_gateway_decision::{Answer, Ask, Input, Output, Question, Start, Usage, Verdict};
 use respan_gateway_http::bytes::Bytes;
@@ -21,6 +22,7 @@ use respan_gateway_http::http::header::{CONTENT_TYPE, HeaderValue};
 use respan_gateway_http::http::{self, Method, response::Parts as ResponseHead};
 use respan_gateway_http::path::{path_ends_with, set_path};
 use respan_gateway_http::{All, ClientIo, Decoder, Encoder, ProviderIo, Whole};
+use respan_gateway_http::{Connect, Upstream};
 use serde_json::{Map, Value, json};
 
 const NAME: &str = "typesafe-systemone";
@@ -61,6 +63,17 @@ impl Format<ClientIo, Input, Output> for SystemOne {
                 Ok(reply.write(head, Box::new(All::new(|e: &[Output]| encode_response(e)))))
             },
         ))
+    }
+}
+
+/// Its spec's: a bearer key, over HTTP, beside its base URL.
+impl Upstream for SystemOne {
+    fn name(&self) -> &str {
+        NAME
+    }
+
+    fn provider(&self, name: String, connect: Connect) -> Provider {
+        Provider::new(name, *self, move |x| connect(x))
     }
 }
 

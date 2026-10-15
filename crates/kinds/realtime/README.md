@@ -12,7 +12,9 @@ event each. Its formats, over WebSocket, are
 - `Output`: the session `Opened` and `Updated`, `SpeechStarted` and
   `SpeechStopped` (barge-in), `InputTranscript`, then a response:
   `ResponseStart`, its `Audio`, `Text`, `Transcript` and `ToolCall`s,
-  `Usage`, and `ResponseDone` with its `Status`; and `Error`.
+  `Usage`, and `ResponseDone` with its `Status`; and `Error`, with its
+  `Cause` (`Invalid`, `NothingToCancel`, `Provider`) beside the provider's
+  own code.
 - `Audio` is decoded bytes in an `AudioFormat` (16-bit PCM at a rate, or
   G.711 μ-law or A-law), never base64; `duration()` says how long it plays.
 

@@ -11,8 +11,11 @@ registers the ones it wants; they compose in registration order.
 | [`credentials`](credentials/README.md) | `respan-gateway-plugin-credentials` | `ClientCredentials` sends a client's own key to the named providers that have none, of the client's format |
 | [`mcp-aggregate`](mcp-aggregate/README.md) | `respan-gateway-plugin-mcp-aggregate` | `Aggregate` fronts many MCP servers as one at `/mcp` |
 | [`respan`](respan/README.md) | `respan-gateway-plugin-respan` | `Respan` sends each request to Respan as a trace: a span per call to a model or tool server |
+| [`pricing`](pricing/README.md) | `respan-gateway-plugin-pricing` | `Pricing` charges each call to a provider at its price for the model sent, as its usage is reported |
+| [`responses`](responses/README.md) | `respan-gateway-plugin-responses` | `Responses` keeps the conversation state a client or provider cannot: Responses' `previous_response_id` with any provider, and a Chat client's reasoning between tool calls with OpenAI's Responses |
 
-Billing is application policy, not a supported plugin export. See
+Billing is application policy, not a supported plugin export: `Pricing`
+measures what calls cost, and what to do with it is the host's. See
 [the billing examples](../../examples/README.md#billing-policies) for pricing,
 conservative per-attempt accounting, nested wallets and per-turn reservations.
 Their support modules are private to the examples, not a replacement billing

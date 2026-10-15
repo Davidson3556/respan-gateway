@@ -3,7 +3,8 @@
 //! Respan's OTLP endpoint: a root span for the request, and a span for each
 //! call it made, to a model (a `chat` span, with its model, token usage and,
 //! unless `content` is off, its messages and reply) or to an MCP server, as
-//! the tool loop's calls are (a `tool` span).
+//! the tool loop's calls are (a `tool` span for a `tools/call`, with the
+//! tool's name and, unless `content` is off, its arguments and result).
 //!
 //! Spans are sent off the request path: queued, then posted in batches (by
 //! [`BATCH`] spans or every [`EVERY`]) as OTLP/HTTP JSON by a task of their
@@ -12,8 +13,8 @@
 //! What is queued is sent when the plugin is dropped. How sending goes is
 //! its [`Health`], for its host to show and to say when it starts failing.
 //!
-//! A host names a request's customer by putting a [`Customer`] in its
-//! extensions, as the gateway does with the client key's name. It registers
+//! A request's customer is its [`Caller`]'s name, as the gateway names it
+//! with the client key's. It registers
 //! [`Respan`] before its other plugins, which opens a request's trace and
 //! sends it, and [`Respan::calls`] after them, which records each call.
 
@@ -26,6 +27,8 @@ use respan_gateway_core::{
     ClientContext, Fault, Filter, Plugin, ProviderContext, Response, Result, async_trait,
 };
 use respan_gateway_http_transport::reqwest;
+use respan_gateway_mcp as mcp;
+use respan_gateway_sdk::Caller;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -37,11 +40,6 @@ pub const BATCH: usize = 100;
 pub const EVERY: Duration = Duration::from_secs(2);
 /// How many traces wait at most to be posted.
 pub const QUEUE: usize = 4096;
-
-/// The customer a request is for, as Respan names it: put in a request's
-/// extensions by its host.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Customer(pub String);
 
 /// The plugin: one per gateway, its task posting what it queues.
 pub struct Respan {
@@ -241,8 +239,27 @@ struct CallState {
     /// Whether it is of the conversation kind: a call to a model.
     chat: bool,
     model: Option<String>,
-    prompt: Vec<(String, String)>,
+    prompt: Vec<Message>,
+    /// The tools offered: name, description, and parameters as JSON.
+    tools: Vec<(String, Option<String>, String)>,
     said: Assembled,
+    /// What it asked an MCP server, if it is a call to one.
+    rpc: Option<Rpc>,
+}
+
+/// A call's JSON-RPC request to an MCP server (or notification), and its
+/// answer.
+#[derive(Debug, Default)]
+struct Rpc {
+    /// The request's id; none for a notification, which has no answer.
+    id: Option<Value>,
+    method: String,
+    /// The tool a `tools/call` calls.
+    tool: Option<String>,
+    /// Its parameters (a tool's arguments), unless content is off.
+    input: Option<Value>,
+    /// Its answer's result or error, unless content is off.
+    output: Option<Value>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -270,10 +287,7 @@ impl Plugin for Respan {
         let Some(Trace(trace)) = cx.extensions().get::<Trace>() else {
             return;
         };
-        let customer = cx
-            .extensions()
-            .get::<Customer>()
-            .map(|Customer(c)| c.as_str());
+        let customer = cx.extensions().get::<Caller>().map(|c| c.name.as_str());
         let spans = spans(&lock(trace), cx.format(), customer, end, self.content);
         if self.queue.try_send(spans).is_err() {
             self.health.dropped.fetch_add(1, Ordering::Relaxed);
@@ -307,10 +321,15 @@ impl Plugin for Calls {
             chat,
             model: None,
             prompt: Vec::new(),
+            tools: Vec::new(),
             said: Assembled::default(),
+            rpc: None,
         })));
         lock(&trace).calls.push(call.clone());
         px.extensions_mut().insert(call.clone());
+        if px.is_kind::<mcp::Input>() {
+            return rpc(px, call, self.content);
+        }
         if !chat {
             return Ok(());
         }
@@ -319,10 +338,15 @@ impl Plugin for Calls {
             let mut state = lock(&asked.0);
             state.model.clone_from(&input.model);
             if content {
-                state.prompt = input
-                    .messages
-                    .iter()
-                    .map(|m| (role(&m.role), text(&m.content)))
+                state.prompt = input.messages.iter().flat_map(messages_of).collect();
+                state.tools = (input.tools.iter())
+                    .map(|t| {
+                        (
+                            t.name.clone(),
+                            t.description.clone(),
+                            t.parameters.to_string(),
+                        )
+                    })
                     .collect();
             }
             Ok(())
@@ -334,9 +358,74 @@ impl Plugin for Calls {
         if let Some(Call(call)) = px.extensions().get::<Call>() {
             let mut state = lock(call);
             state.end = Some(SystemTime::now());
-            state.error = end.as_ref().err().map(|f| f.message().to_owned());
+            if let Err(fault) = end {
+                state.error = Some(fault.message().to_owned());
+            }
         }
     }
+}
+
+/// Records a call to an MCP server: its request, and the answer to it.
+fn rpc(px: &mut ProviderContext, call: Call, content: bool) -> Result<()> {
+    let asked = call.clone();
+    px.filter(move |input: &mut mcp::Input| {
+        // Its request, else a notification (as `initialized` is).
+        let sent = input.messages.iter();
+        let request = sent.clone().find(|m| m.request_id().is_some());
+        let Some(request) = request.or_else(|| sent.clone().find(|m| m.method().is_some())) else {
+            return Ok(());
+        };
+        let params = request.params().cloned().unwrap_or(Value::Null);
+        let method = request.method().unwrap_or_default().to_owned();
+        let tool = (method == "tools/call")
+            .then(|| params["name"].as_str().map(str::to_owned))
+            .flatten();
+        let input = match &tool {
+            Some(_) => params["arguments"].clone(),
+            None => params,
+        };
+        let input = Some(input).filter(|i| content && !i.is_null());
+        lock(&asked.0).rpc = Some(Rpc {
+            id: request.request_id(),
+            method,
+            tool,
+            input,
+            output: None,
+        });
+        Ok(())
+    })?;
+    px.filter(move |output: &mut mcp::Output| {
+        let mut state = lock(&call.0);
+        let state = &mut *state;
+        let Some(rpc) = state.rpc.as_mut() else {
+            return Ok(());
+        };
+        let answer = output.messages.iter().find_map(|m| match m {
+            mcp::Message::Response { outcome, .. }
+                if rpc.id.is_some() && m.response_id() == rpc.id =>
+            {
+                Some(outcome)
+            }
+            _ => None,
+        });
+        let (output, error) = match answer {
+            None => return Ok(()),
+            Some(mcp::Outcome::Error(e)) => (json!({ "error": e }), Some(e.message.clone())),
+            // A tool says it failed in its result, not as an error.
+            Some(mcp::Outcome::Success(result)) => {
+                let failed = result["isError"] == true;
+                (
+                    result.clone(),
+                    failed.then(|| "the tool answered an error".to_owned()),
+                )
+            }
+        };
+        if content {
+            rpc.output = Some(output);
+        }
+        state.error = state.error.take().or(error);
+        Ok(())
+    })
 }
 
 /// Folds what a model said, for its span.
@@ -404,20 +493,41 @@ fn spans(
                 ));
             }
             if content {
-                for (n, (role, text)) in c.prompt.iter().enumerate() {
-                    attrs.push(attr(&format!("gen_ai.prompt.{n}.role"), role));
-                    attrs.push(attr(&format!("gen_ai.prompt.{n}.content"), text));
+                for (n, said) in c.prompt.iter().enumerate() {
+                    said.attrs(&format!("gen_ai.prompt.{n}"), &mut attrs);
                 }
-                attrs.push(attr("gen_ai.completion.0.role", "assistant"));
-                attrs.push(attr("gen_ai.completion.0.content", &reply(&c.said)));
+                reply(&c.said).attrs("gen_ai.completion.0", &mut attrs);
+                for (m, (name, description, parameters)) in c.tools.iter().enumerate() {
+                    let at = format!("llm.request.functions.{m}");
+                    attrs.push(attr(&format!("{at}.name"), name));
+                    if let Some(description) = description {
+                        attrs.push(attr(&format!("{at}.description"), description));
+                    }
+                    attrs.push(attr(&format!("{at}.parameters"), parameters));
+                }
+            }
+        } else if let Some(rpc) = &c.rpc {
+            let kind = if rpc.tool.is_some() { "tool" } else { "task" };
+            attrs.push(attr("traceloop.span.kind", kind));
+            attrs.push(attr("mcp.method", &rpc.method));
+            let entity = rpc.tool.as_deref().unwrap_or(&rpc.method);
+            attrs.push(attr("traceloop.entity.name", entity));
+            if let Some(input) = &rpc.input {
+                attrs.push(attr("traceloop.entity.input", &input.to_string()));
+            }
+            if let Some(output) = &rpc.output {
+                attrs.push(attr("traceloop.entity.output", &output.to_string()));
             }
         } else {
-            let kind = if c.format == "mcp" { "tool" } else { "task" };
-            attrs.push(attr("traceloop.span.kind", kind));
+            attrs.push(attr("traceloop.span.kind", "task"));
         }
-        let name = match c.chat {
-            true => c.model.clone().unwrap_or_else(|| c.provider.clone()),
-            false => c.provider.clone(),
+        let name = match (&c.model, &c.rpc) {
+            (Some(model), _) if c.chat => model.clone(),
+            (_, Some(rpc)) => {
+                let entity = rpc.tool.as_deref().unwrap_or(&rpc.method);
+                format!("{}.{entity}", c.provider)
+            }
+            _ => c.provider.clone(),
         };
         spans.push(span(
             &trace.trace_id,
@@ -485,15 +595,83 @@ fn role(role: &Role) -> String {
     }
 }
 
-/// A message's parts as text: its text, its tool calls and results, and a
-/// mark for each medium.
+/// One message of a span, as OpenLLMetry writes it: its role and text, the
+/// tools it called, and the call it answers if it is a tool's.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Message {
+    role: String,
+    content: String,
+    /// Each call's id, tool and arguments (JSON text).
+    calls: Vec<(String, String, String)>,
+    /// The call a tool's result answers.
+    answers: Option<String>,
+}
+
+impl Message {
+    /// Its attributes under `at`, such as `gen_ai.prompt.0`.
+    fn attrs(&self, at: &str, attrs: &mut Vec<Value>) {
+        attrs.push(attr(&format!("{at}.role"), &self.role));
+        if !self.content.is_empty() || self.calls.is_empty() {
+            attrs.push(attr(&format!("{at}.content"), &self.content));
+        }
+        if let Some(id) = &self.answers {
+            attrs.push(attr(&format!("{at}.tool_call_id"), id));
+        }
+        for (m, (id, name, arguments)) in self.calls.iter().enumerate() {
+            let call = format!("{at}.tool_calls.{m}");
+            attrs.push(attr(&format!("{call}.id"), id));
+            attrs.push(attr(&format!("{call}.name"), name));
+            attrs.push(attr(&format!("{call}.arguments"), arguments));
+        }
+    }
+}
+
+/// A message as the span's messages: each tool's result its own `tool`
+/// message, then the message's text and calls, if it has any.
+fn messages_of(message: &respan_gateway_conversation::Message) -> Vec<Message> {
+    let mut said: Vec<Message> = (message.content.iter())
+        .filter_map(|c| match c {
+            Content::ToolResult { id, content, .. } => Some(Message {
+                role: "tool".into(),
+                content: text(content),
+                answers: Some(id.clone()),
+                ..Message::default()
+            }),
+            _ => None,
+        })
+        .collect();
+    let own = Message {
+        role: role(&message.role),
+        content: text(&message.content),
+        calls: calls(&message.content),
+        answers: None,
+    };
+    if said.is_empty() || !own.content.is_empty() || !own.calls.is_empty() {
+        said.push(own);
+    }
+    said
+}
+
+/// The tool calls among `content`: each one's id, tool and arguments.
+fn calls(content: &[Content]) -> Vec<(String, String, String)> {
+    (content.iter())
+        .filter_map(|c| match c {
+            Content::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } => Some((id.clone(), name.clone(), arguments.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A message's text, with a mark for each medium; its tool calls and
+/// results are said apart ([`Message`]).
 fn text(content: &[Content]) -> String {
     let part = |c: &Content| match c {
         Content::Text { text, .. } => text.clone(),
-        Content::ToolCall {
-            name, arguments, ..
-        } => format!("[call {name}({arguments})]"),
-        Content::ToolResult { content, .. } => text(content),
         Content::Image(_) => "[image]".into(),
         Content::Audio(_) => "[audio]".into(),
         Content::Document(_) => "[document]".into(),
@@ -503,15 +681,14 @@ fn text(content: &[Content]) -> String {
     parts.join("\n")
 }
 
-/// What a model said: its text, else its tool calls.
-fn reply(said: &Assembled) -> String {
-    let text = said.text();
-    if !text.is_empty() {
-        return text;
+/// What a model said: its text and its tool calls.
+fn reply(said: &Assembled) -> Message {
+    Message {
+        role: "assistant".into(),
+        content: said.text(),
+        calls: calls(&said.replay()),
+        answers: None,
     }
-    let mut message = respan_gateway_conversation::Message::new(Role::Assistant, "");
-    message.content = said.replay();
-    self::text(&message.content)
 }
 
 /// `bytes` random bytes, as hex: a trace's (16) or a span's (8) id.
@@ -638,8 +815,14 @@ mod tests {
             error: None,
             chat: true,
             model: Some("gpt-4o-mini".into()),
-            prompt: vec![("user".into(), "Say hi".into())],
+            prompt: vec![Message {
+                role: "user".into(),
+                content: "Say hi".into(),
+                ..Message::default()
+            }],
+            tools: Vec::new(),
             said,
+            rpc: None,
         })));
         let trace = TraceState {
             trace_id: "a".repeat(32),
@@ -700,7 +883,15 @@ mod tests {
             chat: false,
             model: None,
             prompt: Vec::new(),
+            tools: Vec::new(),
             said: Assembled::default(),
+            rpc: Some(Rpc {
+                id: Some(json!(3)),
+                method: "tools/call".into(),
+                tool: Some("read".into()),
+                input: Some(json!({ "path": "a.txt" })),
+                output: Some(json!({ "content": [], "isError": true })),
+            }),
         })));
         let trace = TraceState {
             trace_id: "a".repeat(32),
@@ -720,5 +911,80 @@ mod tests {
             .and_then(|a| a.iter().find(|a| a["key"] == "traceloop.span.kind"))
             .map(|a| a["value"]["stringValue"].clone());
         assert_eq!(kind, Some(json!("tool")));
+        let attr_of = |key: &str| {
+            let attrs = spans[1]["attributes"].as_array().expect("attributes");
+            let found = attrs.iter().find(|a| a["key"] == key);
+            found.map(|a| a["value"]["stringValue"].clone())
+        };
+        assert_eq!(spans[1]["name"], "files.read");
+        assert_eq!(attr_of("traceloop.entity.name"), Some(json!("read")));
+        assert_eq!(
+            attr_of("traceloop.entity.input"),
+            Some(json!(r#"{"path":"a.txt"}"#))
+        );
+        assert!(attr_of("traceloop.entity.output").is_some());
+    }
+
+    #[test]
+    fn tool_calls_and_their_results_are_said_as_openllmetry_says_them() {
+        use respan_gateway_conversation::Message as Chat;
+        let mut asked = Chat::new(Role::Assistant, "Looking.");
+        asked.content.push(Content::tool_call(
+            "call_1",
+            "files__read",
+            r#"{"path":"a"}"#,
+        ));
+        let mut answered = Chat::new(Role::User, "");
+        answered.content = vec![Content::tool_result(
+            "call_1",
+            vec![Content::from("hi")],
+            false,
+        )];
+        let prompt: Vec<Message> = [asked, answered].iter().flat_map(messages_of).collect();
+        let mut said = Assembled::default();
+        for output in [
+            Output::Start(Start::new("r", "m")),
+            Output::block_start(
+                0,
+                Block::ToolCall {
+                    id: "call_2".into(),
+                    name: "files__read".into(),
+                },
+            ),
+            Output::Delta {
+                block: 0,
+                delta: Delta::Arguments(r#"{"path":"b"}"#.into()),
+            },
+        ] {
+            said.push(&output).expect("folded");
+        }
+        let mut attrs = Vec::new();
+        for (n, message) in prompt.iter().enumerate() {
+            message.attrs(&format!("gen_ai.prompt.{n}"), &mut attrs);
+        }
+        reply(&said).attrs("gen_ai.completion.0", &mut attrs);
+        let found = |key: &str| {
+            let attr = attrs.iter().find(|a| a["key"] == key);
+            attr.map(|a| a["value"]["stringValue"].clone())
+        };
+        assert_eq!(found("gen_ai.prompt.0.content"), Some(json!("Looking.")));
+        assert_eq!(
+            found("gen_ai.prompt.0.tool_calls.0.id"),
+            Some(json!("call_1"))
+        );
+        assert_eq!(
+            found("gen_ai.prompt.0.tool_calls.0.name"),
+            Some(json!("files__read"))
+        );
+        assert_eq!(found("gen_ai.prompt.1.role"), Some(json!("tool")));
+        assert_eq!(found("gen_ai.prompt.1.tool_call_id"), Some(json!("call_1")));
+        assert_eq!(found("gen_ai.prompt.1.content"), Some(json!("hi")));
+        assert_eq!(prompt.len(), 2, "the empty user message says nothing more");
+        // The reply's call is a call, not text.
+        assert_eq!(found("gen_ai.completion.0.content"), None);
+        assert_eq!(
+            found("gen_ai.completion.0.tool_calls.0.arguments"),
+            Some(json!(r#"{"path":"b"}"#))
+        );
     }
 }

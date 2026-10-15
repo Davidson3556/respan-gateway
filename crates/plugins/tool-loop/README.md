@@ -1,7 +1,8 @@
 # respan-gateway-plugin-tool-loop
 
 `ToolLoop` runs tools inside chat requests, for every chat format and
-provider, as a plugin over the conversation kind. A `Tools` runner opens a
+provider, as a plugin over the conversation kind, and inside live sessions,
+over the realtime kind. A `Tools` runner opens a
 `Toolbox` per request (`list` the tools to offer, `call` one by name with
 JSON arguments, answering an `Outcome` whose failure the model reads). The
 tool loop adds the tools to the request, calls the target, and while the reply
@@ -17,7 +18,7 @@ the request itself:
 let tool_loop = ToolLoop::new(MyTools) // impl Tools
     .max_steps(8)
     .tool_timeout(Duration::from_secs(60))
-    .when(|cx, input| input.model().is_some_and(|m| m.starts_with("gpt")))
+    .when(|cx, model| model.is_some_and(|m| m.starts_with("gpt")))
     .observe(|cx| Some(sink_for(cx))); // each step and tool call, reported
 let gateway = gateway.plugin(Routing::new(routes)).plugin(tool_loop);
 ```
@@ -32,3 +33,13 @@ Gemini `thoughtSignature`); native events of later steps are renumbered with
 their blocks. The timeout fails the request with `tool_loop_timeout`, a 504.
 Used by the binary's `tool_loop:` section, with MCP servers as the tools
 ([tests](tests/tool_loop.rs)).
+
+A live session (the realtime kind) gets the same tools: they are added to
+each configuration of the session that sets tools, and a call of one is run
+while the session goes on, its answer sent back and the model asked to
+respond. The client sees neither the call, nor its answer, nor a response
+that said nothing else; what a format says of the call only in its own
+events (OpenAI's items and argument deltas) is left out with it, as is any
+object naming one of the gateway's tools or carrying one of its calls' ids.
+Its `scope` sees no model (`None`): a host reads a session's from its
+extensions.

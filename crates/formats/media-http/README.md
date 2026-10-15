@@ -52,7 +52,7 @@ version, as OpenAI's SDKs take it: `https://api.openai.com/v1`,
 Vendors' fields the kind has no form for (Groq's `x_groq`, Together's
 `steps`) stay native, so a relay in the same format keeps them.
 
-`gemini::GeminiVeo`, named `gemini-veo`: Google's Veo as the Gemini API serves it, a provider format only,
+`gemini::GeminiVeo`, named `gemini-veo`: Google's Veo as the Gemini API serves it, to clients and providers,
 at `https://generativelanguage.googleapis.com/v1beta` with the key in
 `x-goog-api-key`.
 
@@ -76,8 +76,19 @@ at `https://generativelanguage.googleapis.com/v1beta` with the key in
   answer is a 502. A redirect to another origin leaves the key behind.
 - Veo cannot remix, delete or list videos, nor make a thumbnail or
   spritesheet: those are refused, 400 `unsupported`, before any call.
-- No client speaks the format, so what Veo answers beyond the kind is
-  dropped rather than kept native.
+- What Veo answers beyond the kind is dropped rather than kept native.
+- A client of it, served by any provider of the kind: it creates with
+  `POST .../models/{model}:predictLongRunning` (one instance; its prompt,
+  its base64 `image`; `aspectRatio` and `resolution` read as a size,
+  `durationSeconds` as seconds, its other parameters kept as `gemini-veo`
+  native fields). A job is answered as an operation named
+  `models/{model}/operations/{job id}`, polled at `GET .../{name}`, so a
+  follow-up reaches the job's provider by its id; done, it names its video
+  at the gateway, `GET .../files/{job id}:download?alt=media`, never the
+  provider's own URL, which would need its key. A failure is the
+  operation's `error`, or, filtered, a response of
+  `raiMediaFilteredReasons`; a refusal is Google's `{"error": {code,
+  message, status}}`. Veo reports no progress: an operation is done or not.
 
 ## Tests
 

@@ -9,7 +9,9 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useModelChoice } from "@/hooks/use-model-choice";
+import { useApiChoice, useLastCall } from "@/hooks/use-playground";
 import { postJson } from "@/lib/api";
+import { mediaApis } from "@/lib/playground-apis";
 import { MediaLayout } from "./media-form";
 import { ModelPicker } from "./model-picker";
 import { RequestError } from "./request-error";
@@ -69,19 +71,23 @@ function ImageCard({ src, caption, index }: { src: string; caption?: string; ind
 
 export function ImageTab() {
   const choice = useModelChoice("image", "gpt-image-1");
+  const api = useApiChoice("image", mediaApis.image);
+  const call = useLastCall();
   const [prompt, setPrompt] = useState("");
   const [size, setSize] = useState(sizes[0].value);
   const [quality, setQuality] = useState("auto");
   const [n, setN] = useState("1");
   const generate = useMutation({
     mutationFn: () =>
-      postJson<ImagesResponse>("/v1/images/generations", {
-        model: choice.model,
-        prompt: prompt.trim(),
-        size,
-        quality,
-        n: Number(n),
-      }),
+      call.track({ api: api.api.id, model: choice.model }, () =>
+        postJson<ImagesResponse>("/v1/images/generations", {
+          model: choice.model,
+          prompt: prompt.trim(),
+          size,
+          quality,
+          n: Number(n),
+        }),
+      ),
   });
 
   const images = (generate.data?.data ?? []).map((img) => ({
@@ -92,6 +98,9 @@ export function ImageTab() {
 
   return (
     <MediaLayout
+      id="image"
+      choice={api}
+      record={call.record}
       onSubmit={() => generate.mutate()}
       pending={generate.isPending}
       disabled={!prompt.trim()}

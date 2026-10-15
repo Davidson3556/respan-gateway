@@ -11,10 +11,11 @@ use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use respan_gateway_ws::Limits;
 
 use crate::auth::Client;
-use crate::config::{Auth, ClientKey, Config, ProviderConfig};
+use crate::config::{Auth, ClientKey, Config, Formats, ProviderConfig};
 use crate::formats::{KnownFormat, kind};
 use crate::vendors;
 use respan_gateway_plugin_routing::{Kind, Routes, Rule, Speaks};
+use respan_gateway_sdk::{Catalog, Model};
 use respan_gateway_vendors::VendorProvider;
 
 /// The name of the format that relays what no other served format accepts.
@@ -32,6 +33,8 @@ pub struct Upstream {
     /// Where its key comes from, such as `env OPENAI_API_KEY` or `config`;
     /// never the key.
     pub key_from: String,
+    /// The models the config declares of it.
+    pub models: Vec<Model>,
 }
 
 /// One format of a provider: the core provider registered for it.
@@ -78,7 +81,11 @@ pub fn compose(
     limit: usize,
     sessions: Limits,
 ) -> Result<(Gateway, Plan), Fault> {
-    let (gateway, upstreams) = providers(config, formats, limit, sessions)?;
+    let (gateway, mut upstreams) = providers(config, formats, limit, sessions)?;
+    for u in &mut upstreams {
+        let declared = config.models.values().filter(|m| m.provider == u.name);
+        u.models = declared.cloned().collect();
+    }
     let serve = match &config.formats {
         Some(serve) => serve.clone(),
         None => default_serve(&upstreams, formats),
@@ -100,7 +107,8 @@ pub fn compose(
             "providers: none configured; add one, such as `[providers.openai]` with `vendor = 'openai'`",
         ));
     }
-    let routes = Arc::new(routes(&upstreams, rules, routing.default.clone()));
+    let catalog = catalog(&upstreams, config)?;
+    let routes = Arc::new(routes(&upstreams, rules, routing.default.clone()).with_catalog(catalog));
     let plan = Plan {
         upstreams,
         serve,
@@ -109,6 +117,27 @@ pub fn compose(
         mcp: Vec::new(),
     };
     Ok((gateway, plan))
+}
+
+/// What the gateway knows of its providers' models, to begin with: the
+/// models the config declares of each, until it lists its own.
+fn catalog(upstreams: &[Upstream], config: &Config) -> Result<Arc<Catalog>, Fault> {
+    let named = |m: &&Model| upstreams.iter().any(|u| u.name == m.provider);
+    if let Some(m) = config.models.values().find(|m| !named(m)) {
+        let names: Vec<&str> = upstreams.iter().map(|u| u.name.as_str()).collect();
+        return Err(Fault::config(format!(
+            "models: {}/{}: no provider '{}'; providers: [{}]",
+            m.provider,
+            m.id,
+            m.provider,
+            names.join(", ")
+        )));
+    }
+    let catalog = Catalog::default();
+    for u in upstreams {
+        catalog.set(&u.name, u.models.iter().cloned());
+    }
+    Ok(Arc::new(catalog))
 }
 
 /// The routes to `upstreams`: by `rules`, then their vendors' claims,
@@ -249,6 +278,13 @@ fn default_serve(upstreams: &[Upstream], formats: &[KnownFormat]) -> Vec<String>
     serve
 }
 
+/// Whether a vendor puts `formats` at more than one base URL of its own.
+fn at_different_urls(formats: &[(&dyn respan_gateway_vendors::Upstream, Option<&str>)]) -> bool {
+    let mut urls = formats.iter().filter_map(|(_, url)| *url);
+    let first = urls.next();
+    urls.any(|url| Some(url) != first)
+}
+
 /// A provider's formats, each with its base URL and credentials.
 fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<Upstream, Fault> {
     let owner = format!("provider '{name}'");
@@ -272,8 +308,8 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
         None => VendorProvider::new(name),
     };
     let names: Vec<&str> = match (&p.formats, vendor) {
-        (Some(names), _) => names.iter().map(String::as_str).collect(),
-        (None, Some(vendor)) => vendor.formats.iter().map(|f| f.name()).collect(),
+        (Some(formats), _) => formats.names(),
+        (None, Some(vendor)) => vendor.formats.iter().map(|(f, _)| f.name()).collect(),
         (None, None) => return Err(bad("needs a `vendor` or `formats`".into())),
     };
     if names.is_empty() {
@@ -290,24 +326,61 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
     if unique.len() != names.len() {
         return Err(bad("lists a format twice".into()));
     }
-    if p.formats.is_some() {
-        let speaks = names
-            .iter()
-            .map(|name| respan_gateway_vendors::speaks(vendor, name));
-        let speaks = speaks.collect::<Option<Vec<_>>>();
-        provider =
-            provider.formats(speaks.ok_or_else(|| bad("speaks a format no vendor does".into()))?);
+    // Each format as its vendor speaks it, at the vendor's URL for it, else
+    // as its spec has it.
+    let mut speaks = Vec::new();
+    for format in &names {
+        let found = respan_gateway_vendors::format(vendor, format);
+        speaks.push(
+            found.ok_or_else(|| bad(format!("speaks {format}, which no vendor or spec does")))?,
+        );
     }
-    let located = match (&p.base_url, vendor) {
-        (Some(base_url), _) => Some(base_url.clone()),
-        (None, Some(vendor)) => vendor.located().map_err(|var| {
-            bad(format!(
-                "environment variable {var} is not set; its base URL needs it, or set `base_url`"
-            ))
-        })?,
-        (None, None) => None,
-    };
-    provider = provider.base(located.ok_or_else(|| bad("needs a `base_url`".into()))?);
+    let table = p.formats.as_ref().filter(|f| matches!(f, Formats::At(_)));
+    match (&p.base_url, table) {
+        (Some(_), Some(_)) => {
+            return Err(bad(
+                "give each format its base URL in `formats`, or one `base_url`, not both".into(),
+            ));
+        }
+        // One URL for formats the vendor puts at different ones would send
+        // some where they are not.
+        (Some(_), None) if at_different_urls(&speaks) => {
+            let each = speaks.iter().map(|(f, url)| {
+                format!("  \"{}\" = \"{}\"", f.name(), url.unwrap_or("<base URL>"))
+            });
+            let each = each.collect::<Vec<_>>().join(",\n");
+            return Err(bad(format!(
+                "its formats are at different URLs, so one `base_url` cannot say where each is; \
+                 give each its own:\nformats = {{\n{each},\n}}"
+            )));
+        }
+        _ => {}
+    }
+    // Each format at the URL `formats` gives it, else at its vendor's, each
+    // `{NAME}` in it from the environment; or, with one `base_url`, at that.
+    let given = |format: &str| p.formats.as_ref().and_then(|f| f.url_of(format));
+    let mut at = Vec::new();
+    for (format, default) in &speaks {
+        let url = match (given(format.name()), default) {
+            (Some(url), _) => Some(url.to_owned()),
+            // One base URL, set below, is every format's.
+            (None, _) if p.base_url.is_some() => None,
+            (None, Some(url)) => Some(respan_gateway_vendors::located(url).map_err(|var| {
+                bad(format!(
+                    "environment variable {var} is not set; the base URL of {} needs it, or give \
+                     it one",
+                    format.name()
+                ))
+            })?),
+            (None, None) => None,
+        };
+        at.push((*format, url));
+    }
+    provider = provider.formats(at);
+    // One base URL is its API's, shared by every format.
+    if let Some(url) = &p.base_url {
+        provider = provider.base(url.clone());
+    }
     // Where its own key comes from; none for the client's credentials.
     let key_from = match (&p.key, &p.auth, vendor) {
         (Some(_), Some(_), _) => return Err(bad("set `key` or `auth`, not both".into())),
@@ -347,6 +420,7 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
         entries: entries.collect::<Result<_, Fault>>()?,
         own_key: key_from.is_some(),
         key_from: key_from.unwrap_or_else(|| "client credentials".to_owned()),
+        models: Vec::new(),
         provider,
     })
 }

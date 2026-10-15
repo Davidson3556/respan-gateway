@@ -6,16 +6,60 @@ mod session;
 #[cfg(test)]
 mod tests;
 
+use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::{ClientIo, ProviderIo, raw::Original};
+use respan_gateway_http::{Connect, Reach, Upstream};
 use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::WsTransport;
 
+use crate::foreign::{Drop, Harmless};
 use crate::session::{Spec, model_at};
 use crate::{SessionModel, requested_model};
 
 const NAME: &str = SPEC.name;
+
+/// The model OpenAI transcribes a session's input with, unless the session
+/// names one: it transcribes only with a named model, so a session that
+/// turns transcription on without one asks for this one.
+const TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
+
+/// What of OpenAI Realtime's own natives another format may drop: its
+/// event and item ids, its session's type, noise reduction, speed,
+/// transcription settings, tracing, includes, context truncation and output
+/// cap, and its voice detection's tuning, as each format manages its
+/// context, and detects voices, itself; its truncation of what was heard
+/// and clearing of what is played, as a format keeps only what it sent, and
+/// its clearing of the user's audio if there is none. Its MCP events tell
+/// of what the model said.
+pub(crate) const HARMLESS: Harmless = Harmless {
+    format: NAME,
+    session: &[
+        "event_id",
+        "session.type",
+        "session.audio.input.noise_reduction",
+        "session.audio.input.transcription",
+        "session.audio.output.speed",
+        "session.include",
+        "session.tracing",
+        "session.truncation",
+        "session.max_output_tokens",
+    ],
+    vad: &["type", "threshold", "eagerness"],
+    message: &["id"],
+    event: &["event_id", "item.id", "response_id"],
+    input: |event| {
+        let kind = event["type"].as_str().unwrap_or_default().to_owned();
+        let drop = match kind.as_str() {
+            "conversation.item.truncate" | "output_audio_buffer.clear" => Drop::Always,
+            "input_audio_buffer.clear" => Drop::Unheard,
+            _ => Drop::Never,
+        };
+        (drop, kind)
+    },
+    said: |event| event["type"].as_str().is_some_and(|t| t.contains("mcp")),
+};
 
 const SPEC: Spec = Spec {
     name: "openai-realtime",
@@ -83,6 +127,23 @@ impl Format<ClientIo, Input, Output> for OpenAiRealtime {
         let mut client = output::Client::default();
         let write = Box::new(move |event: &Output, out: &mut Vec<Bytes>| client.write(event, out));
         Ok(SPEC.client(io, Box::new(read), write))
+    }
+}
+
+/// Its spec's: a bearer key, as a WebSocket session.
+impl Upstream for OpenAiRealtime {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
+
+    fn reach(&self) -> Reach {
+        Reach::Session {
+            binary_text: SPEC.binary_text,
+        }
+    }
+
+    fn provider(&self, name: String, connect: Connect) -> Provider {
+        Provider::new(name, *self, move |x| connect(x))
     }
 }
 

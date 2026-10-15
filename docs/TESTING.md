@@ -25,7 +25,7 @@ processes or several components.
 | Kernel contracts | Hook ordering, ownership, cancellation, buffering, panic handling and progress | `crates/core/tests/`, core unit tests |
 | Shared data contracts | Input assembly, text access and message representation | Input unit tests |
 | HTTP behavior | Encoding, framing, credentials, headers, retry hints, body handling and stream completion | `crates/wires/http/tests/`, HTTP unit tests |
-| Provider compatibility | Native relay and translation among OpenAI Chat, Anthropic Messages, Gemini `generateContent` and Responses, tools, reasoning controls, errors and usage; realtime relay and OpenAI Realtime/Gemini Live translation | `crates/formats/conversation-http/tests/{relay,translate,round_trips,gemini,responses,reasoning}`, `crates/formats/realtime-ws/tests/{relay,translate,fakes}`, format unit tests; each vendor's quirks in `crates/vendors/tests/<vendor>.rs` |
+| Provider compatibility | Native relay and translation among OpenAI Chat, Anthropic Messages, Gemini `generateContent` and Responses, tools, reasoning controls, errors and usage; realtime relay and OpenAI Realtime/Gemini Live translation | `crates/formats/conversation-http/tests/{relay,translate,round_trips,gemini,responses,reasoning}`, `crates/formats/realtime-ws/tests/{relay,translate,fakes}`, format unit tests; each vendor's quirks in `crates/vendors/{green,yellow}/tests/<vendor>.rs` |
 | Hosting and WebSocket sessions | HTTP ingress, upgrade, subprotocols, session events, backpressure, concurrency and close/recovery behavior | `crates/wires/ws/tests/`, `crates/serve/tests/`, WS unit tests |
 | MCP behavior | JSON-RPC messages, session state, streamable HTTP, stdio and reference-server interoperability | `crates/formats/mcp-http/tests/`, MCP unit tests |
 | Routing policy | Route rules and picks, attempts, retries, fallback, races and explicit retry classification | `crates/plugins/fallback/tests/fallback.rs`, `crates/plugins/routing/tests/routing.rs`, unit tests |
@@ -90,7 +90,9 @@ cargo test --workspace --all-targets --all-features -- --list
 | `apps/gateway/tests/` | The built executable against mockllm: `e2e` (chat), `e2e_native` (Gemini `generateContent` and Responses), `e2e_media` (media kinds), `e2e_mcp` (MCP servers), `e2e_mcp_aggregate` (the aggregate MCP endpoint), `e2e_tool_loop` (the tool loop), `reload` (config reload); the command line (`cli`: init, check, models, proxy, `PORT`, the non-loopback guard); the admin API's config view and edits (`admin_config`), the request history file (`history`); browser WebSocket keys (`ws_auth`) and browser access (`cors`); the app and library in process (`app`, `library`); the media kinds against a strict fake of OpenAI's media endpoints and Veo (`media`); vendor quirks (`quirks`); `redirects`; bounded error bodies (`error_bodies`) |
 | `crates/core/tests/` | The kernel: `buffering`, `cancellation`, `contract`, `edge` and `edge_runtime`, `faults`, `lifecycle`, `output_wrap` and `wrap`, `ownership`, `panic_matrix`, `progress`, `stress`, `symmetric`, `transports`, `until`, `upload` |
 | `crates/plugins/*/tests/` | `tool_loop` (the tool loop), `fallback` (attempts, retries, fallback, races) and `routing` (model routing, route rules and dispatch) |
-| `crates/vendors/tests/` | `registry`, and one file per vendor's quirks: `azure`, `deepseek`, `gemini`, `groq`, `openai`, `openrouter`, `vllm` |
+| `crates/vendors/tests/` | `registry`: each vendor once, in one tier, and the README's table |
+| `crates/vendors/green/tests/` | The green vendors' quirks (`gemini`, `openai`) and model lists (`models`), and `live`: each green vendor has a live test of its own |
+| `crates/vendors/yellow/tests/` | The yellow vendors' quirks (`azure`, `deepseek`, `groq`, `openrouter`, `vllm`) and model lists (`models`) |
 | `crates/serve/tests/` | `http`: HTTP ingress |
 | `python/tests/` | `test_gateway`, `test_kinds`, `test_lifecycle`, `test_config_types`, `test_examples` (pytest against the built extension) |
 | `apps/ui/src/**/*.test.ts(x)` | The web UI: components, hooks, pages and `lib/` (API client, export, filters, chat and realtime helpers), vitest under jsdom |
@@ -184,6 +186,11 @@ WebSocket suite uses `OPENAI_API_KEY` and `GEMINI_API_KEY`. Set only the
 credentials needed for the tests you select; individual test names can be
 used as Cargo filters. Provider endpoint/model overrides are documented in
 the test sources.
+
+A vendor these tests cover with a test of its own (`real_<id>_...`) is
+green, in `crates/vendors/green`, and `crates/vendors/green/tests/live.rs`
+checks each green vendor has one; the others are yellow, tested against
+fakes alone.
 
 ## External tools
 

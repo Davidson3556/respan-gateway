@@ -1,7 +1,7 @@
 use respan_gateway_core::FaultKind;
 use respan_gateway_core::NativeFields;
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_realtime::{AudioFormat, Input, Output, Session, Status, ToolResult};
+use respan_gateway_realtime::{AudioFormat, Cause, Input, Output, Session, Status, ToolResult};
 use serde_json::{Value, json};
 
 use super::{input, output};
@@ -428,14 +428,43 @@ fn a_response_of_another_format_is_told_of_as_openai_does() {
 
 #[test]
 fn an_error_is_written_as_openais() {
-    let error = Output::Error {
-        code: Some("invalid_request_error".into()),
+    let error = |cause| Output::Error {
+        cause,
+        code: Some("another format's code".into()),
         message: "no".into(),
         native: None,
     };
-    let written = heard(&[error]).expect("written");
+    let written = heard(&[error(Cause::Invalid), error(Cause::Provider)]).expect("written");
     assert_eq!(
         written[0]["error"],
         json!({"type": "invalid_request_error", "message": "no"})
     );
+    assert_eq!(written[1]["error"]["type"], "server_error");
+}
+
+#[test]
+fn an_error_says_its_cause_as_any_format_reads_it() {
+    let error = |error: Value| json!({"type": "error", "error": error});
+    let read = outputs(&[
+        error(json!({"type": "invalid_request_error", "message": "bad"})),
+        error(
+            json!({"type": "invalid_request_error", "code": "response_cancel_not_active",
+            "message": "none"}),
+        ),
+        error(json!({"type": "server_error", "message": "down"})),
+    ]);
+    let causes: Vec<Cause> = read
+        .iter()
+        .filter_map(|o| match o {
+            Output::Error { cause, .. } => Some(*cause),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        causes,
+        [Cause::Invalid, Cause::NothingToCancel, Cause::Provider]
+    );
+    // OpenAI's own error is written back as it came.
+    let written = heard(&read[1..2]).expect("written");
+    assert_eq!(written[0]["error"]["code"], "response_cancel_not_active");
 }

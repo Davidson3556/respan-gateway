@@ -12,7 +12,6 @@ const provider = (name: string): Provider => ({
   kinds: ["chat"],
   base_url: `https://api.${name}.test`,
   credentials: "gateway",
-  quirks: [],
   requests: 0,
   errors: 0,
   avg_latency_ms: null,
@@ -34,7 +33,7 @@ const routes: Routes = {
       to: [
         {
           target: "groq/llama-3.3", provider: "groq", model: "llama-3.3", weight: 1,
-          price: { input: 0.59, output: 0.79 },
+          price: { input: 0.59, output: 0.79, from: "provider" as const },
           seen: { latency_ms: 240, error_rate: 0.5, calls: 4, failures: 3, cooling: true },
         },
         { target: "anthropic/claude", provider: "anthropic", model: "claude", weight: 1, price: null, seen: null },
@@ -62,7 +61,7 @@ const explained: Explained = {
   mode: "fallback",
   to: [
     { provider: "anthropic", model: "claude", price: null, seen: null },
-    { provider: "groq", model: "llama-3.3", price: { input: 0.59, output: 0.79 }, seen: null },
+    { provider: "groq", model: "llama-3.3", price: { input: 0.59, output: 0.79, from: "provider" as const }, seen: null },
   ],
   passed: [{ candidate: "smart → openai", why: "lacks tools" }],
 };

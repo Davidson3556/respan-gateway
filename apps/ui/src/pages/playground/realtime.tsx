@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useGatewayKey, useRoutes } from "@/hooks/queries";
 import { useModelChoice } from "@/hooks/use-model-choice";
+import { useApiChoice } from "@/hooks/use-playground";
 import {
   initialRealtime,
   openRealtime,
@@ -14,11 +15,13 @@ import {
   type ServerEvent,
   type RealtimeState,
 } from "@/lib/realtime";
-import { servedRealtimeApis, type RealtimeApi, type RealtimeApiId } from "@/lib/realtime-apis";
+import type { RequestRecord } from "@/lib/api";
+import { realtimeApis, type RealtimeApi } from "@/lib/realtime-apis";
+import { locateCall } from "@/lib/served";
 import { Player, startMic, type Mic as MicHandle } from "@/lib/realtime-io";
 import { cn } from "@/lib/utils";
 import { ModelPicker } from "./model-picker";
-import { SelectField } from "./select-field";
+import { ConfigCard, PlaygroundLayout } from "./layout";
 
 const REFUSED =
   "The gateway refused the session. Check that a provider serves realtime for this model and that the gateway key is right.";
@@ -220,11 +223,27 @@ function Transcript({ lines }: { lines: Line[] }) {
 export function RealtimeTab() {
   const choice = useModelChoice("realtime", "gpt-realtime");
   const { data: routes } = useRoutes();
-  const apis = servedRealtimeApis(routes?.serve);
-  const [apiChoice, setApiChoice] = useState<RealtimeApiId>("openai-realtime");
-  const api = apis.find((a) => a.id === apiChoice) ?? apis[0];
+  const apiChoice = useApiChoice("realtime", realtimeApis);
+  const api = apiChoice.api;
   const { state, level, start, stop, interrupt } = useRealtimeSession(api, choice.model);
   const active = state.phase === "connecting" || state.phase === "live";
+  // A session's record is finished when it ends.
+  const [record, setRecord] = useState<RequestRecord>();
+  const began = useRef<number | null>(null);
+  const begin = () => {
+    began.current = Date.now();
+    setRecord(undefined);
+    start();
+  };
+  useEffect(() => {
+    if ((state.phase === "ended" || state.phase === "failed") && began.current !== null) {
+      const since = began.current;
+      began.current = null;
+      void locateCall({ api: api.id, model: choice.model, since })
+        .then((found) => found && setRecord(found))
+        .catch(() => undefined);
+    }
+  }, [state.phase, api.id, choice.model]);
   const unserved =
     !choice.isPending &&
     !choice.models?.length &&
@@ -245,19 +264,17 @@ export function RealtimeTab() {
   }
 
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[18rem_minmax(0,1fr)]">
-      <Card className="h-fit gap-5 p-4">
-        {apis.length > 1 && (
-          <SelectField
-            id="realtime-api"
-            label="API"
-            value={api.id}
-            onChange={(v) => setApiChoice(v as RealtimeApiId)}
-            options={apis.map((a) => a.id)}
-            optionLabel={(id) => apis.find((a) => a.id === id)?.label ?? id}
-            disabled={active}
-          />
-        )}
+    <PlaygroundLayout
+      config={
+        <ConfigCard
+          id="realtime"
+          kind="realtime"
+          apis={apiChoice.apis}
+          api={api}
+          onApi={apiChoice.choose}
+          locked={active}
+          record={record}
+        >
         <ModelPicker id="realtime-model" choice={choice} disabled={active} />
         {active ? (
           <div className="grid gap-2">
@@ -271,7 +288,7 @@ export function RealtimeTab() {
             </Button>
           </div>
         ) : (
-          <Button onClick={start}>
+          <Button onClick={begin}>
             <Mic /> {state.phase === "idle" ? "Start session" : "Start a new session"}
           </Button>
         )}
@@ -280,7 +297,9 @@ export function RealtimeTab() {
           as the gateway translates. The browser asks for your microphone once the session opens;
           audio is sent as 24 kHz PCM16.
         </p>
-      </Card>
+        </ConfigCard>
+      }
+    >
 
       <Card className="flex h-[calc(100dvh-17rem)] min-h-[28rem] flex-col gap-0 overflow-hidden py-0">
         <div className="border-b bg-muted/20 p-3">
@@ -301,6 +320,6 @@ export function RealtimeTab() {
           )}
         </div>
       </Card>
-    </div>
+    </PlaygroundLayout>
   );
 }

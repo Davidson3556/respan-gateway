@@ -16,6 +16,8 @@
 
 mod paths;
 
+use respan_gateway_core::Provider;
+use respan_gateway_http::{Connect, Upstream};
 use std::marker::PhantomData;
 
 use respan_gateway_core::{Connection, EventSink, Fault, Format};
@@ -290,6 +292,22 @@ impl Format<ClientIo, Input<Self>, Output<Self>> for Passthrough {
         Ok(io.bind(read_request, write_response))
     }
 }
+/// A bearer key, over HTTP, at its base URL's origin, as it relays the
+/// client's whole path.
+impl Upstream for Passthrough {
+    fn name(&self) -> &str {
+        "passthrough"
+    }
+
+    fn at_origin(&self) -> bool {
+        true
+    }
+
+    fn provider(&self, name: String, connect: Connect) -> Provider {
+        Provider::new(name, *self, move |x| connect(x))
+    }
+}
+
 impl Format<ProviderIo, Output<Self>, Input<Self>> for Passthrough {
     fn name(&self) -> &str {
         "passthrough"

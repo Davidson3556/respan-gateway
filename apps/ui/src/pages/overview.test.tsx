@@ -24,7 +24,6 @@ const provider: Provider = {
   kinds: ["chat"],
   base_url: "https://api.anthropic.com",
   credentials: "gateway",
-  quirks: [],
   requests: 40,
   errors: 2,
   avg_latency_ms: 1250,

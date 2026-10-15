@@ -18,7 +18,7 @@ protocols and adapters all depend on it directly.
   `on_provider` and `on_provider_end` once per call, in registration order.
   `Provider::plugin` gives one to a single provider instead: its
   provider-edge hooks run on that provider's calls alone, after the
-  gateway's plugins, as part of the provider (a vendor's quirks).
+  gateway's plugins, as part of the provider.
 - `Filter<T>`: edits a kind's inputs or outputs as they stream; its type
   says which. `ClientContext::wrap` is for work that awaits.
 - `Call` / `Response`: a plugin's call to a provider (`cx.call`), and what

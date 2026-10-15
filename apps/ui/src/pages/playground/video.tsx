@@ -8,49 +8,52 @@ import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useModelChoice } from "@/hooks/use-model-choice";
+import { useApiChoice, useLastCall } from "@/hooks/use-playground";
 import { useNow } from "@/hooks/use-now";
 import { useObjectUrl } from "@/hooks/use-object-url";
 import { gatewayFetch, getJson, postJson } from "@/lib/api";
 import { formatMs } from "@/lib/format";
 import { describeError } from "@/lib/query-client";
+import { videoApis, type VideoApi, type VideoJob } from "@/lib/video-apis";
 import { MediaLayout } from "./media-form";
 import { ModelPicker } from "./model-picker";
 import { RequestError } from "./request-error";
 import { SelectField } from "./select-field";
 import { submitOnModEnter } from "./submit-on-mod-enter";
 
-interface VideoJob {
-  id: string;
-  status: "queued" | "in_progress" | "completed" | "failed" | string;
-  progress?: number;
-  error?: { message?: string } | null;
-}
+type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 const POLL_MS = 2000;
 const done = (job: VideoJob | undefined) => job?.status === "completed" || job?.status === "failed";
 
-function useVideoJob(id: string | undefined) {
+/** The job `created` made in `api`, polled until done, and its video once it is. */
+function useVideoJob(api: VideoApi, created: Json | undefined) {
+  const first = created && api.read(created);
   const job = useQuery({
-    queryKey: ["video", id],
-    queryFn: ({ signal }) => getJson<VideoJob>(`/v1/videos/${encodeURIComponent(id!)}`, signal),
-    enabled: !!id,
+    queryKey: ["video", api.id, first?.id],
+    queryFn: ({ signal }) => getJson<Json>(api.poll(first!, created!), signal),
+    enabled: !!first,
     // A failing poll (a 404 after a restart, say) is final: stop asking.
-    refetchInterval: (q) => (done(q.state.data) || q.state.error ? false : POLL_MS),
+    refetchInterval: (q) =>
+      done(q.state.data && api.read(q.state.data)) || q.state.error ? false : POLL_MS,
   });
+  const answer = job.data ?? created;
+  const current = answer && api.read(answer);
   const content = useQuery({
-    queryKey: ["video-content", id],
-    queryFn: async ({ signal }) =>
-      (await gatewayFetch(`/v1/videos/${encodeURIComponent(id!)}/content`, { signal })).blob(),
-    enabled: job.data?.status === "completed",
+    queryKey: ["video-content", api.id, current?.id],
+    queryFn: async ({ signal }) => (await gatewayFetch(api.content(current!, answer!), { signal })).blob(),
+    enabled: current?.status === "completed",
     staleTime: Infinity,
   });
-  return { job, content };
+  return { job, content, current };
 }
 
 /** A running job: its stage, a determinate bar, and how long it has been going. */
 function Progress({ job, since, prompt }: { job: VideoJob; since: number; prompt: string }) {
   const now = useNow(1000);
-  const percent = Math.min(100, Math.max(0, job.progress ?? 0));
+  // An API that reports no progress, as Veo, gets a bar that only moves.
+  const known = job.progress !== undefined || job.status === "completed";
+  const percent = Math.min(100, Math.max(0, job.status === "completed" ? 100 : (job.progress ?? 0)));
   const queued = job.status === "queued";
   return (
     <Card className="gap-4 p-6" aria-busy="true">
@@ -62,20 +65,24 @@ function Progress({ job, since, prompt }: { job: VideoJob; since: number; prompt
           </span>
           {queued ? "Queued" : "Rendering"}
         </span>
-        <span className="text-sm text-muted-foreground tabular">{percent}%</span>
+        {known && <span className="text-sm text-muted-foreground tabular">{percent}%</span>}
       </div>
       <div
         className="h-2 overflow-hidden rounded-full bg-muted"
         role="progressbar"
-        aria-valuenow={percent}
+        aria-valuenow={known ? percent : undefined}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-label="Video progress"
       >
-        <div
-          className="h-full rounded-full bg-brand transition-[width] duration-700"
-          style={{ width: `${Math.max(2, percent)}%` }}
-        />
+        {known ? (
+          <div
+            className="h-full rounded-full bg-brand transition-[width] duration-700"
+            style={{ width: `${Math.max(2, percent)}%` }}
+          />
+        ) : (
+          <div className="h-full w-1/3 animate-pulse rounded-full bg-brand/60" />
+        )}
       </div>
       <p className="line-clamp-2 text-sm text-muted-foreground">{prompt}</p>
       <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
@@ -116,20 +123,27 @@ function Failure({ title, message, onRetry }: { title: string; message: string; 
 
 export function VideoTab() {
   const choice = useModelChoice("video", "veo-3.0-generate-001");
+  const api = useApiChoice("video", videoApis);
+  const call = useLastCall();
   const [prompt, setPrompt] = useState("");
   const [seconds, setSeconds] = useState("4");
   const create = useMutation({
-    mutationFn: (request: { prompt: string; seconds: string }) =>
-      postJson<VideoJob>("/v1/videos", { model: choice.model, ...request }),
+    mutationFn: (request: { prompt: string; seconds: string }) => {
+      const { path, body } = api.api.create(choice.model, request.prompt, request.seconds);
+      // The job's creation, not its polls.
+      return call.track({ api: api.api.id, model: choice.model, path }, () => postJson<Json>(path, body));
+    },
   });
-  const { job, content } = useVideoJob(create.data?.id);
-  const current = job.data ?? create.data;
+  const { job, content, current } = useVideoJob(api.api, create.data);
   const url = useObjectUrl(content.data);
   const submit = () => create.mutate({ prompt: prompt.trim(), seconds });
   const running = create.isPending || (!!current && !done(current) && !job.error);
 
   return (
     <MediaLayout
+      id="video"
+      choice={api}
+      record={call.record}
       onSubmit={submit}
       pending={running}
       disabled={!prompt.trim()}
@@ -170,7 +184,7 @@ export function VideoTab() {
       ) : current?.status === "failed" ? (
         <Failure
           title="The video couldn't be made"
-          message={current.error?.message ?? "The provider reported a failure."}
+          message={current.error ?? "The provider reported a failure."}
           onRetry={submit}
         />
       ) : content.error ? (
@@ -198,14 +212,14 @@ export function VideoTab() {
         <Progress job={{ id: "", status: "queued" }} since={create.submittedAt} prompt={prompt} />
       ) : current ? (
         <Progress
-          job={current.status === "completed" ? { ...current, progress: 100 } : current}
+          job={current}
           since={create.submittedAt}
           prompt={create.variables?.prompt ?? ""}
         />
       ) : (
         <EmptyState icon={Clapperboard} title="Generate a video">
           <p>
-            Creates a job at <code>/v1/videos</code>, follows its progress, and plays the result
+            Creates a job at <code>{api.api.endpoint}</code>, follows it, and plays the result
             when it's done.
           </p>
         </EmptyState>

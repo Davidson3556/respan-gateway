@@ -39,7 +39,6 @@ const provider: Provider = {
   kinds: ["chat"],
   base_url: "https://api.anthropic.com",
   credentials: "client",
-  quirks: [{ name: "x_groq_usage", description: "A response reports usage under `x_groq`." }],
   requests: 40,
   errors: 2,
   avg_latency_ms: 1250,
@@ -64,11 +63,12 @@ const record: RequestRecord = {
 
 describe("ProvidersPage", () => {
   it("renders each provider with its formats, credentials and stats", async () => {
-    serve({ "/ui/api/providers": { providers: [provider] } });
+    const keyed = { ...provider, name: "keyed", credentials: "gateway" as const, requests: 0, errors: 0, avg_latency_ms: null };
+    serve({ "/ui/api/providers": { providers: [provider, keyed] } });
     renderPage(<ProvidersPage />);
-    expect(await screen.findByText("anthropic-messages")).toBeInTheDocument();
-    expect(screen.getByText("Client key")).toBeInTheDocument();
-    expect(screen.getByText("x_groq_usage")).toBeInTheDocument();
+    expect(await screen.findAllByText("anthropic-messages")).toHaveLength(2);
+    // Only the provider without a key of its own says whose it uses.
+    expect(screen.getAllByText("No key")).toHaveLength(1);
     expect(screen.getByText("5.0%")).toBeInTheDocument();
     expect(screen.getByText("1.25 s")).toBeInTheDocument();
   });

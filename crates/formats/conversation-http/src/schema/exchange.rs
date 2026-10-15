@@ -56,9 +56,7 @@ pub(crate) fn post<C: Schema>(
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     // The client's request, if of this format: its spec's headers and query
     // parameters go on, and it spells what the format spells two ways.
-    let original = wire
-        .and_then(Original::get)
-        .filter(|r| r.uri().path().ends_with(C::PATH));
+    let original = own_request::<C>(wire);
     if let Some(original) = original {
         for name in C::CARRIED {
             for value in original.headers().get_all(*name) {
@@ -100,6 +98,13 @@ pub(crate) fn post<C: Schema>(
     }))
 }
 
+/// The client's request, if of `C`'s format: one to a path ending in
+/// [`Schema::PATH`].
+pub(crate) fn own_request<C: Schema>(wire: Option<&Original>) -> Option<&http::Request<Bytes>> {
+    wire.and_then(Original::get)
+        .filter(|r| r.uri().path().ends_with(C::PATH))
+}
+
 /// Writes a conversation as a request, asking for a stream if `stream`, in
 /// the spelling of the client's `original` request, then what the format
 /// adds ([`Schema::finish`]). What cannot be written is the client's fault:
@@ -123,8 +128,9 @@ impl<C: Schema> RequestEncoder<C> {
         if self.stream && C::STREAM_FLAG {
             v.insert("stream".into(), true.into());
         }
-        if let Some(original) = &self.original {
-            C::respell(original, &mut v);
+        match &self.original {
+            Some(original) => C::respell(original, &mut v),
+            None => C::translated(&mut v),
         }
         C::prepare_call(&mut v);
         out.extend_from_slice(&to_bytes(&v)?);

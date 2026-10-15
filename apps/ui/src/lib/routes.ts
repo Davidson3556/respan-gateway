@@ -1,4 +1,4 @@
-import type { RoutePick, RoutePrice, RouteRule } from "@/lib/api";
+import type { Price, RoutePick, RouteRule } from "@/lib/api";
 
 export const PICKS: Record<RoutePick, { label: string; hint: string }> = {
   first: { label: "In order", hint: "The first that can serve it; the rest as listed" },
@@ -9,7 +9,7 @@ export const PICKS: Record<RoutePick, { label: string; hint: string }> = {
 };
 
 /** "$0.15 / $0.6 per M" */
-export function formatPrice(price: RoutePrice | null | undefined): string {
+export function formatPrice(price: Price | null | undefined): string {
   if (!price) return "—";
   return `$${+price.input.toFixed(3)} / $${+price.output.toFixed(3)}`;
 }

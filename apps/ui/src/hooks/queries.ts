@@ -87,6 +87,15 @@ export function useExplain(model: string, kind: string, client?: string) {
   });
 }
 
+/** Every model /v1/models lists, routes among them. */
+export function useAllModels() {
+  return useQuery({
+    queryKey: queryKeys.models,
+    queryFn: ({ signal }) => api.models(signal),
+    staleTime: 60_000,
+  });
+}
+
 /**
  * Models from /v1/models that serve `kind`. `kind` on a model is an optional
  * extension: when the gateway reports none, every model is taken to be a chat

@@ -10,8 +10,8 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 use serde::Deserialize;
 
-use crate::config::{Config, Price};
-use crate::requests::{RequestRecord, Usage};
+use crate::config::Config;
+use crate::requests::RequestRecord;
 
 /// The most records waiting for the writer; past it, records miss the file
 /// (never memory) rather than slow requests.
@@ -142,20 +142,6 @@ pub fn load(path: &Path, keep: usize) -> Vec<RequestRecord> {
     last.into()
 }
 
-/// What a request cost, by the longest `prices` prefix of its model.
-pub fn cost(prices: &[(String, Price)], model: &str, usage: &Usage) -> Option<f64> {
-    let (_, price) = prices
-        .iter()
-        .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
-        .max_by_key(|(prefix, _)| prefix.len())?;
-    let cached = usage.cached_input_tokens.min(usage.input_tokens);
-    let cached_rate = price.cached_input.unwrap_or(price.input);
-    let dollars = (usage.input_tokens - cached) as f64 * price.input
-        + cached as f64 * cached_rate
-        + usage.output_tokens as f64 * price.output;
-    Some(dollars / 1e6)
-}
-
 /// The export's filters, as the UI's: every one given must match.
 #[derive(Debug, Default, Deserialize)]
 pub struct Filter {
@@ -260,29 +246,5 @@ mod tests {
         assert_eq!(csv_cell("plain"), "plain");
         assert_eq!(csv_cell("a,\"b\""), "\"a,\"\"b\"\"\"");
         assert_eq!(csv_cell("=1+1"), "'=1+1");
-    }
-
-    #[test]
-    fn the_longest_price_prefix_wins_and_cached_tokens_cost_less() {
-        let price = |input, output, cached_input| Price {
-            input,
-            output,
-            cached_input,
-        };
-        let prices = vec![
-            ("gpt-4o".to_owned(), price(2.5, 10.0, Some(1.25))),
-            ("gpt-4o-mini".to_owned(), price(0.15, 0.6, None)),
-        ];
-        let usage = Usage {
-            input_tokens: 1_000_000,
-            output_tokens: 1_000_000,
-            cached_input_tokens: 500_000,
-            seconds: None,
-        };
-        let big = cost(&prices, "gpt-4o-2024", &usage).unwrap();
-        assert!((big - (1.25 + 0.625 + 10.0)).abs() < 1e-9);
-        let small = cost(&prices, "gpt-4o-mini", &usage).unwrap();
-        assert!((small - 0.75).abs() < 1e-9);
-        assert!(cost(&prices, "claude", &usage).is_none());
     }
 }

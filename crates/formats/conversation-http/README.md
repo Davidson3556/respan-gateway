@@ -127,8 +127,9 @@ What the kind has no form for stays native and is refused in another format:
 [reasoning](#reasoning-and-sampling) maps, and other `generationConfig` fields, tools Google runs (`googleSearch`), a `toolConfig`
 beyond the choice, video parts. A part's `thoughtSignature` is the one native
 field another format drops, as it only hints at the thinking behind the part
-(Gemini 3 needs one on a function call in the history; the
-[Gemini quirk](../../providers/README.md) supplies its documented placeholder).
+(Gemini 3 needs one on a function call in the history: written for one,
+the first call of each turn without one takes Google's documented
+placeholder).
 Writing, a request for several candidates, one tool call at a time and an end
 user's id are refused.
 

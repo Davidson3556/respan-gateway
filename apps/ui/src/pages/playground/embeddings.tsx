@@ -7,8 +7,10 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useModelChoice } from "@/hooks/use-model-choice";
+import { useApiChoice, useLastCall } from "@/hooks/use-playground";
 import { postJson } from "@/lib/api";
 import { cosineSimilarity } from "@/lib/embeddings";
+import { mediaApis } from "@/lib/playground-apis";
 import { SimilarityMeter, VectorStrip } from "./embedding-visuals";
 import { MediaLayout } from "./media-form";
 import { ModelPicker } from "./model-picker";
@@ -22,17 +24,20 @@ const SHOWN = 8;
 
 export function EmbeddingsTab() {
   const choice = useModelChoice("embedding", "text-embedding-3-small");
+  const api = useApiChoice("embedding", mediaApis.embedding);
+  const call = useLastCall();
   const [a, setA] = useState("");
   const [b, setB] = useState("");
   const embed = useMutation({
-    mutationFn: async () => {
-      const res = await postJson<EmbeddingsResponse>("/v1/embeddings", {
-        model: choice.model,
-        input: [a.trim(), b.trim()],
-        encoding_format: "float",
-      });
-      return [...res.data].sort((x, y) => x.index - y.index).map((d) => d.embedding);
-    },
+    mutationFn: () =>
+      call.track({ api: api.api.id, model: choice.model }, async () => {
+        const res = await postJson<EmbeddingsResponse>("/v1/embeddings", {
+          model: choice.model,
+          input: [a.trim(), b.trim()],
+          encoding_format: "float",
+        });
+        return [...res.data].sort((x, y) => x.index - y.index).map((d) => d.embedding);
+      }),
   });
 
   const [first, second] = embed.data ?? [];
@@ -41,6 +46,9 @@ export function EmbeddingsTab() {
 
   return (
     <MediaLayout
+      id="embedding"
+      choice={api}
+      record={call.record}
       onSubmit={() => embed.mutate()}
       pending={embed.isPending}
       disabled={!a.trim() || !b.trim()}

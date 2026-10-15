@@ -42,7 +42,8 @@ async fn start() -> (Gateway, FakeOpenAi, FakeOpenAi) {
     let gw = Gateway::start(&format!(
         "providers = {{ dear = {{ formats = \"openai-chat\", base_url = \"{}\", key = \"k\" }}, \
          cheap = {{ formats = \"openai-chat\", base_url = \"{}\", key = \"k\" }} }}\n\
-         [prices]\n\"big\" = {{ input = 10.0, output = 30.0 }}\n\"small\" = {{ input = 0.1, output = 0.4 }}\n\
+         [models.\"dear/big\"]\npricing = {{ input = 10.0, output = 30.0 }}\n\
+         [models.\"cheap/small\"]\npricing = {{ input = 0.1, output = 0.4 }}\n\
          [routes.smart]\nto = [\"dear/big\", \"cheap/small\"]\npick = \"cheapest\"\n\
          [routes.\"llama-*\"]\nto = \"cheap/{{model}}-turbo\"\n",
         dear.base_url(),
@@ -111,7 +112,7 @@ async fn the_admin_api_shows_each_candidate_and_explains_a_pick() {
     assert_eq!(smart["to"][1]["model"], "small");
     assert_eq!(
         smart["to"][1]["price"],
-        json!({ "input": 0.1, "output": 0.4 })
+        json!({ "input": 0.1, "output": 0.4, "from": "config" })
     );
     assert_eq!(smart["to"][1]["seen"]["calls"], 1);
     assert!(smart["to"][1]["seen"]["latency_ms"].is_number());

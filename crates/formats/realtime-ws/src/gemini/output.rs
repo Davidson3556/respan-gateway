@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 
 use respan_gateway_core::{Fault, NativeFields, NativeValue};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_realtime::{Audio, AudioFormat, Output, Status, Usage};
+use respan_gateway_realtime::{Audio, AudioFormat, Cause, Output, Status, Usage};
 use respan_gateway_ws::CloseCode;
 use serde_json::{Map, Value, json};
 
@@ -457,19 +457,10 @@ impl Client {
     }
 
     pub(super) fn write(&mut self, event: &Output, out: &mut Vec<Bytes>) -> Result<(), Fault> {
-        if let Output::Native(NativeValue { format, value }) = event
-            && **format != *NAME
-            && value["type"].as_str().is_some_and(|t| t.contains("mcp"))
-        {
-            return Err(untranslatable_output(NAME, "an MCP event"));
-        }
-        if cancel_found_none(event) {
-            return Ok(());
-        }
         if let Output::ResponseStart { native, .. } = event {
             self.foreign = native.as_ref().is_some_and(|n| *n.format != *NAME);
         }
-        let Some(event) = foreign::strip(NAME, event) else {
+        let Some(event) = foreign::strip(NAME, event)? else {
             return Ok(());
         };
         match &event {
@@ -603,14 +594,16 @@ impl Client {
                 }
                 return Ok(messages);
             }
-            Output::Error { code, message, .. } => {
-                // A Live API client knows a refusal only as its session's close.
-                return Err(match code.as_deref() {
-                    Some("invalid_request_error") => {
-                        Fault::bad_request(message.clone()).with(CloseCode(1007))
+            Output::Error { cause, message, .. } => {
+                // A Live API client knows a refusal only as its session's
+                // close; a cancel that found nothing changed nothing.
+                return match cause {
+                    Cause::NothingToCancel => Ok(Vec::new()),
+                    Cause::Invalid => {
+                        Err(Fault::bad_request(message.clone()).with(CloseCode(1007)))
                     }
-                    _ => Fault::upstream(message.clone()),
-                });
+                    _ => Err(Fault::upstream(message.clone())),
+                };
             }
             Output::Native(NativeValue { format, value }) if **format == *NAME => {
                 (Value::clone(value), &None)
@@ -627,22 +620,6 @@ impl Client {
         }
         Ok(vec![v])
     }
-}
-
-/// Whether `event` is OpenAI's refusal of a cancel because no response was
-/// active. A Live API client cancels by speaking over the model, and may do
-/// so as the response ends: that cancel found nothing to cancel, which the
-/// client has no message for and no fault in.
-fn cancel_found_none(event: &Output) -> bool {
-    let Output::Error {
-        native: Some(native),
-        ..
-    } = event
-    else {
-        return false;
-    };
-    let code = native.fields.get("error").and_then(|e| e.get("code"));
-    *native.format != *NAME && code.and_then(Value::as_str) == Some("response_cancel_not_active")
 }
 
 /// A `voiceActivity` message of `kind`, at `at_ms` into the user's audio.

@@ -333,10 +333,11 @@ async fn a_file_that_cannot_be_written_does_not_fail_requests() {
 }
 
 #[tokio::test]
-async fn prices_give_each_request_a_cost_and_the_totals_their_sum() {
+async fn a_declared_models_pricing_gives_each_request_a_cost_and_the_totals_their_sum() {
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("hello"));
-    let prices = "prices = { gpt-4o = { input = 1000000, output = 2000000 }, gpt-4o-mini = { input = 100000, output = 200000, cached_input = 0 } }\n";
+    let prices = "models = { \"openai/gpt-4o\" = { pricing = { input = 1000000, output = 2000000 } }, \
+                  \"openai/gpt-4o-mini\" = { pricing = { input = 100000, output = 200000, cached_input = 0 } } }\n";
     let gw = Gateway::start(&config(&up, prices)).await;
     for model in ["gpt-4o", "gpt-4o-mini", "o3"] {
         assert_eq!(chat(&gw, model).await, 200);
@@ -354,7 +355,7 @@ async fn prices_give_each_request_a_cost_and_the_totals_their_sum() {
     assert!(i > 0.0 && o > 0.0, "{}", all[0]);
     // $1M per million tokens is $1 a token.
     assert_eq!(all[0]["cost_usd"].as_f64().unwrap(), i + 2.0 * o);
-    // The longest prefix wins.
+    // Each model its own.
     let (i, o) = usage(&all[1]);
     let cost = all[1]["cost_usd"].as_f64().unwrap();
     assert!((cost - (0.1 * i + 0.2 * o)).abs() < 1e-9, "{cost}");
@@ -377,10 +378,21 @@ async fn prices_give_each_request_a_cost_and_the_totals_their_sum() {
 
 #[tokio::test]
 async fn bad_prices_and_sizes_are_refused() {
+    let openai = "providers = { openai = { formats = \"openai-chat\", base_url = \"http://x.test\", key = \"k\" } }\n";
     for text in [
-        "prices = { gpt-4o = { input = -1, output = 1 } }\n",
-        "prices = { gpt-4o = { input = 1 } }\n",
-        "plugins = { request_log = { file_max = 0 } }\n",
+        format!(
+            "{openai}models = {{ \"openai/gpt-4o\" = {{ pricing = {{ input = -1, output = 1 }} }} }}\n"
+        ),
+        format!("{openai}models = {{ \"openai/gpt-4o\" = {{ pricing = {{ input = 1 }} }} }}\n"),
+        format!(
+            "{openai}models = {{ \"gpt-4o\" = {{ pricing = {{ input = 1, output = 1 }} }} }}\n"
+        ),
+        format!(
+            "{openai}models = {{ \"groq/x\" = {{ pricing = {{ input = 1, output = 1 }} }} }}\n"
+        ),
+        // Retired, saying what replaced it.
+        format!("{openai}prices = {{ gpt-4o = {{ input = 1, output = 1 }} }}\n"),
+        "plugins = { request_log = { file_max = 0 } }\n".to_owned(),
     ] {
         let path = support::write_config(&format!("listen = \"127.0.0.1:0\"\n{text}\n"));
         let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
@@ -473,4 +485,22 @@ async fn the_history_file_is_private() {
     lines_in(&file, 1).await;
     let mode = std::fs::metadata(&file).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+#[tokio::test]
+async fn a_request_is_priced_by_the_model_that_served_it() {
+    let up = FakeOpenAi::start().await;
+    up.answer(Answer::text("hello"));
+    // Only the route's candidate is priced, not the name the client asks.
+    let extra = "models = { \"openai/gpt-4o-mini\" = { pricing = { input = 1000000, output = 1000000 } } }\nroutes = { smart = { to = [\"openai/gpt-4o-mini\"] } }\n";
+    let gw = Gateway::start(&config(&up, extra)).await;
+    assert_eq!(chat(&gw, "smart").await, 200);
+    settled(&gw).await;
+    let all = records(&gw).await;
+    assert_eq!(all[0]["model"], "smart");
+    let (i, o) = (
+        all[0]["usage"]["input_tokens"].as_f64().unwrap(),
+        all[0]["usage"]["output_tokens"].as_f64().unwrap(),
+    );
+    assert_eq!(all[0]["cost_usd"].as_f64(), Some(i + o), "{}", all[0]);
 }

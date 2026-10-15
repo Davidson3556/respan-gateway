@@ -14,6 +14,7 @@ use crate::logging::LogFormat;
 use crate::mcp::McpConfig;
 use crate::mcp_aggregate::AggregateConfig;
 use crate::vendors;
+pub use respan_gateway_sdk::{Model, Price};
 
 /// A client key in the config: the key alone, or with the name its requests
 /// are logged under and what it may do.
@@ -111,12 +112,56 @@ impl From<&str> for ClientKey {
     }
 }
 
+/// A provider's formats: by name, each at its vendor's base URL or the
+/// provider's `base_url`; or each at a base URL of its own.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum Formats {
+    /// One format, by name.
+    One(String),
+    /// Several, by name.
+    Many(Vec<String>),
+    /// Each format's base URL, by the format's name.
+    At(IndexMap<String, String>),
+}
+
+impl Formats {
+    /// Its formats' names, in order.
+    pub fn names(&self) -> Vec<&str> {
+        match self {
+            Formats::One(name) => vec![name.as_str()],
+            Formats::Many(names) => names.iter().map(String::as_str).collect(),
+            Formats::At(urls) => urls.keys().map(String::as_str).collect(),
+        }
+    }
+
+    /// The base URL it gives format `name`, if it gives one.
+    pub fn url_of(&self, name: &str) -> Option<&str> {
+        match self {
+            Formats::At(urls) => urls.get(name).map(String::as_str),
+            _ => None,
+        }
+    }
+
+    /// It, with what a URL may hold of a secret redacted.
+    fn redacted(&self) -> Formats {
+        match self {
+            Formats::At(urls) => Formats::At(
+                urls.iter()
+                    .map(|(format, url)| (format.clone(), crate::redact::url(url)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+}
+
 // Secrets stay out of a debug print: a key, `env:NAME` or not, is not shown.
 impl std::fmt::Debug for ProviderConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProviderConfig")
             .field("vendor", &self.vendor)
-            .field("formats", &self.formats)
+            .field("formats", &self.formats.as_ref().map(Formats::redacted))
             .field(
                 "base_url",
                 &self.base_url.as_deref().map(crate::redact::url),
@@ -152,12 +197,15 @@ pub struct Config {
     /// bytes or a size such as `16MiB`; 16 MiB if unset.
     #[serde(default, deserialize_with = "ws_message_limit")]
     pub ws_message_limit: Option<usize>,
-    /// What models cost, by model prefix (the longest matching wins), in
-    /// dollars per million tokens. Set, each request in the history gets a
-    /// `cost_usd`, and the overview's totals the sum; there is no built-in
-    /// price list.
-    #[serde(default, deserialize_with = "prices")]
-    pub prices: IndexMap<String, Price>,
+    /// Models declared by `provider/model`, each a card (`pricing`,
+    /// `display_name`, `context_window`, `capabilities`, ...) laid over what
+    /// the provider's list says of it, or the whole of what is known of a
+    /// model it does not list. A call's cost is its model's `pricing`.
+    #[serde(default, deserialize_with = "models")]
+    pub models: IndexMap<String, Model>,
+    /// Retired: `models`, each with its `pricing`. Refused with how.
+    #[serde(default)]
+    pub prices: Option<serde::de::IgnoredAny>,
     /// How long open responses and end hooks get, together, after a stop
     /// signal, before they are cut: seconds, or a duration such as `30s`,
     /// `2m` or `500ms`; 30 s if unset.
@@ -224,7 +272,8 @@ impl Default for Config {
             listen: None,
             body_limit: None,
             ws_message_limit: None,
-            prices: IndexMap::new(),
+            models: IndexMap::new(),
+            prices: None,
             shutdown_grace: None,
             client_keys: Vec::new(),
             log: LogFormat::Text,
@@ -248,11 +297,15 @@ impl Default for Config {
 pub struct ProviderConfig {
     /// A vendor: `openai`, `anthropic`, `gemini`, `groq`, ...
     pub vendor: Option<String>,
-    /// Its format, or several; a vendor's are every format it speaks
-    /// compiled in.
-    #[serde(default, deserialize_with = "one_or_many")]
-    pub formats: Option<Vec<String>>,
-    /// The base URL its SDK takes; a vendor's is its own.
+    /// Its format, or several: by name, or a table of each format's base
+    /// URL by its name, which a vendor whose formats sit at different URLs
+    /// (Gemini) needs to be moved; a vendor's are every format it speaks
+    /// compiled in, each at its own URL.
+    #[serde(default)]
+    pub formats: Option<Formats>,
+    /// The base URL its formats share, its API's, in place of a table's
+    /// or its vendor's; a format of whole paths, such as `passthrough`,
+    /// takes its origin.
     pub base_url: Option<String>,
     /// Its key, literal or `env:NAME`, sent as its formats expect; a
     /// vendor's is `env:<VENDOR>_API_KEY`.
@@ -274,8 +327,8 @@ pub enum Auth {
 /// The compiled-in plugins. Each is configured under its own name, and the
 /// gateway registers them in a fixed order: the request log, routing, the
 /// MCP aggregate, video jobs, the tool loop, then the dispatch of routes. Video
-/// jobs are always on; each vendor's quirks are a plugin of its providers,
-/// not of the gateway.
+/// jobs are always on; a vendor's quirks are in the formats it speaks, not
+/// plugins.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginsConfig {
@@ -291,9 +344,13 @@ pub struct PluginsConfig {
     pub hedge: Option<serde::de::IgnoredAny>,
     /// Run tools of `mcp` servers inside chat requests; off if unset.
     pub tool_loop: Option<ToolLoopConfig>,
-    /// Keep Responses translated to another provider's format, so a
-    /// client's `previous_response_id` works with it; off if unset.
-    pub responses: Option<ResponsesConfig>,
+    /// Keep the conversation state a client or provider cannot: Responses
+    /// translated to another provider's format, so a client's
+    /// `previous_response_id` works with it, and a Chat client's reasoning
+    /// between tool calls with OpenAI's Responses. On unless
+    /// `enabled = false`.
+    #[serde(default)]
+    pub responses: ResponsesConfig,
     /// Send each request to Respan as a trace; off if unset.
     pub respan: Option<RespanConfig>,
     /// One MCP endpoint, `/mcp`, that fronts the `mcp` servers as a single
@@ -327,14 +384,29 @@ impl std::fmt::Debug for RespanConfig {
     }
 }
 
-/// Responses the gateway keeps, for `previous_response_id` with a provider
-/// of another format.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// The conversation state the gateway keeps
+/// (`respan_gateway_plugin_responses`), in its memory: not across a
+/// restart, nor shared between gateways, so a client whose requests reach
+/// several gateways needs them to reach the one that kept its conversation.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponsesConfig {
-    /// How long a response is kept; an hour if unset.
+    /// Whether it is kept; it is unless `false`.
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+    /// How long what is kept is kept after it was last read; an hour if
+    /// unset.
     #[serde(default, deserialize_with = "responses_keep")]
     pub keep: Option<Duration>,
+}
+
+impl Default for ResponsesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            keep: None,
+        }
+    }
 }
 
 fn responses_keep<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
@@ -368,8 +440,7 @@ pub struct RouteConfig {
     #[serde(deserialize_with = "route_targets")]
     pub to: Vec<RouteTarget>,
     /// How the candidates are ordered: `first` (as listed), `cheapest`
-    /// (by `prices` or the provider's listing: input plus three times
-    /// output), `fastest` (by the gateway's own record of each one's time
+    /// (by each model's `pricing`: input plus three times output), `fastest` (by the gateway's own record of each one's time
     /// to a response), `weighted` or `random`. `first` if unset.
     #[serde(default)]
     pub pick: PickName,
@@ -667,7 +738,10 @@ impl Config {
         // The chat format writes its own path after the vendor's API base;
         // passthrough relays the client's path at the vendor's origin.
         let provider = ProviderConfig {
-            formats: Some(vec![format.to_owned(), "passthrough".to_owned()]),
+            formats: Some(Formats::Many(vec![
+                format.to_owned(),
+                "passthrough".to_owned(),
+            ])),
             base_url: Some(url.to_owned()),
             ..ProviderConfig::default()
         };
@@ -827,27 +901,28 @@ fn route_hedge<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::E
     span(d, "routes: hedge")
 }
 
-/// Dollars per million tokens of a model prefix.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Price {
-    pub input: f64,
-    pub output: f64,
-    /// For input tokens read from a cache; `input` if unset.
-    pub cached_input: Option<f64>,
-}
-
-fn prices<'de, D: Deserializer<'de>>(d: D) -> Result<IndexMap<String, Price>, D::Error> {
-    let prices = IndexMap::<String, Price>::deserialize(d)?;
-    for (prefix, p) in &prices {
-        let rates = [Some(p.input), Some(p.output), p.cached_input];
-        if rates.iter().flatten().any(|r| !r.is_finite() || *r < 0.0) {
-            return Err(serde::de::Error::custom(format!(
-                "prices: {prefix}: a price must be a number of dollars, 0 or more"
-            )));
+/// Each declared model, its id and provider those its key names.
+fn models<'de, D: Deserializer<'de>>(d: D) -> Result<IndexMap<String, Model>, D::Error> {
+    let models = IndexMap::<String, Model>::deserialize(d)?;
+    let bad = |key: &str, why: &str| serde::de::Error::custom(format!("models: {key}: {why}"));
+    let mut declared = IndexMap::new();
+    for (key, mut model) in models {
+        let Some((provider, id)) = key
+            .split_once('/')
+            .filter(|(p, m)| !p.is_empty() && !m.is_empty())
+        else {
+            return Err(bad(&key, "name it as `provider/model`"));
+        };
+        if let Some(p) = &model.price {
+            let rates = [Some(p.input), Some(p.output), p.cached_input];
+            if rates.iter().flatten().any(|r| !r.is_finite() || *r < 0.0) {
+                return Err(bad(&key, "a price must be a number of dollars, 0 or more"));
+            }
         }
+        (model.id, model.provider) = (id.to_owned(), provider.to_owned());
+        declared.insert(key, model);
     }
-    Ok(prices)
+    Ok(declared)
 }
 
 fn request_log_history<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
@@ -949,21 +1024,6 @@ pub fn parse_size(text: &str) -> Result<usize, String> {
         .ok()
         .and_then(|n| n.checked_mul(factor))
         .ok_or_else(|| format!("'{text}' is not a size such as 32MiB or 33554432"))
-}
-
-/// A string or a list of them.
-fn one_or_many<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum OneOrMany {
-        One(String),
-        Many(Vec<String>),
-    }
-    Ok(match Option::<OneOrMany>::deserialize(d)? {
-        None => None,
-        Some(OneOrMany::One(one)) => Some(vec![one]),
-        Some(OneOrMany::Many(many)) => Some(many),
-    })
 }
 
 #[cfg(test)]
@@ -1112,12 +1172,12 @@ vendor = "anthropic"
         );
         let both = &config.providers["both"];
         assert_eq!(
-            both.formats.as_deref(),
-            Some(&["openai-chat".to_owned(), "anthropic-messages".to_owned()][..])
+            both.formats.as_ref().map(Formats::names),
+            Some(vec!["openai-chat", "anthropic-messages"])
         );
         assert_eq!(
-            config.providers["one"].formats.as_ref().map(Vec::len),
-            Some(1)
+            config.providers["one"].formats.as_ref().map(Formats::names),
+            Some(vec!["openai-chat"])
         );
         assert_eq!(
             config.providers["claude"].key.as_deref(),
@@ -1314,13 +1374,28 @@ vendor = "anthropic"
     }
 
     #[test]
+    fn a_provider_s_formats_are_names_or_each_at_its_url() {
+        let config = Config::parse(
+            "providers = { g = { vendor = \"gemini\", formats = { gemini-generate = \"http://g.test/v1beta\", openai-chat = \"http://g.test/v1beta/openai\" } } }\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let formats = config.providers["g"].formats.as_ref();
+        assert_eq!(
+            formats.map(Formats::names),
+            Some(vec!["gemini-generate", "openai-chat"])
+        );
+        let url = formats.and_then(|f| f.url_of("openai-chat"));
+        assert_eq!(url, Some("http://g.test/v1beta/openai"));
+    }
+
+    #[test]
     fn proxy_is_one_provider_of_the_chat_format_and_passthrough_at_its_api_base() {
         let config = Config::proxy(ProxyVendor::OpenAi, Some("http://h.test/v1/"));
         let provider = &config.providers["openai"];
         assert_eq!(provider.base_url.as_deref(), Some("http://h.test/v1"));
         assert_eq!(
-            provider.formats.as_deref(),
-            Some(&["openai-chat".to_owned(), "passthrough".to_owned()][..])
+            provider.formats.as_ref().map(Formats::names),
+            Some(vec!["openai-chat", "passthrough"])
         );
         assert!(config.relay);
         assert_eq!(config.source().to_string(), "proxy");

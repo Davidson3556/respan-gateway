@@ -1605,9 +1605,9 @@ async fn realtime_sessions_from_toml_cross_vendors_by_the_model_they_ask_for() {
     let gemini = realtime::gemini::start().await;
     let http = |ws: String| ws.replace("ws://", "http://");
     let mut gw = Gateway::start(&format!(
-        "providers = {{ openai = {{ vendor = \"openai\", base_url = \"{}\", key = \"sk-gw\" }}, gemini = {{ vendor = \"gemini\", base_url = \"{}/v1beta/openai\", key = \"AIza-gw\" }} }}\nformats = [\"openai-realtime\", \"gemini-live\"]\n",
+        "providers = {{ openai = {{ vendor = \"openai\", base_url = \"{}\", key = \"sk-gw\" }}, gemini = {{ vendor = \"gemini\", formats = {}, key = \"AIza-gw\" }} }}\nformats = [\"openai-realtime\", \"gemini-live\"]\n",
         http(openai.base_url()),
-        http(gemini.base_url())
+        support::gemini_formats(&http(gemini.base_url()))
     ))
     .await;
 

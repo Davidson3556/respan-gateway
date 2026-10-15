@@ -170,12 +170,10 @@ fn tool(v: &Value) -> Option<Tool> {
     let mut rest = v.clone();
     let rest = &mut rest;
     let name = take(rest, &["name"], string, text)?;
-    let parameters = take(
-        rest,
-        &["parameters"],
-        |p| Some(p.clone()),
-        |p| Some(p.clone()),
-    );
+    // JSON Schema, or the OpenAPI subset of it Gemini also takes.
+    let schema =
+        |key: &str, rest: &mut Value| take(rest, &[key], |p| Some(p.clone()), |p| Some(p.clone()));
+    let parameters = schema("parametersJsonSchema", rest).or_else(|| schema("parameters", rest));
     let mut tool = Tool::new(name, parameters.unwrap_or(Value::Null));
     tool.description = take(rest, &["description"], string, text);
     tool.native = json::native(NAME, std::mem::take(rest));
@@ -191,8 +189,17 @@ fn tools_json(tools: &[Tool], refuse: fn(&str) -> Fault) -> Result<Value, Fault>
         if let Some(description) = &t.description {
             v["description"] = description.as_str().into();
         }
+        // Gemini's OpenAPI subset (its types upper case) as it came; any
+        // other as JSON Schema, which that subset refuses much of.
         if !t.parameters.is_null() {
-            v["parameters"] = t.parameters.clone();
+            let typed = t.parameters["type"].as_str().unwrap_or_default();
+            let openapi = !typed.is_empty() && typed.bytes().all(|b| b.is_ascii_uppercase());
+            let key = if openapi {
+                "parameters"
+            } else {
+                "parametersJsonSchema"
+            };
+            v[key] = t.parameters.clone();
         }
         merge(
             &mut v,

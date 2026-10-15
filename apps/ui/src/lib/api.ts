@@ -65,12 +65,6 @@ export interface Reloaded {
   restart_required: string[];
 }
 
-/** A vendor quirk the gateway handles for a provider. */
-export interface Quirk {
-  name: string;
-  description: string;
-}
-
 export interface Provider {
   name: string;
   vendor: string | null;
@@ -78,7 +72,6 @@ export interface Provider {
   kinds: Kind[];
   base_url: string;
   credentials: "gateway" | "client";
-  quirks: Quirk[];
   requests: number;
   errors: number;
   avg_latency_ms: number | null;
@@ -148,9 +141,12 @@ export interface RouteSeen {
 }
 
 /** US dollars per million tokens. */
-export interface RoutePrice {
+/** A model's price, in US dollars per million tokens, and who says it: the config, which overrides, or the provider's list. */
+export interface Price {
   input: number;
   output: number;
+  cached_input?: number;
+  from: "provider" | "config";
 }
 
 export type RoutePick = "first" | "cheapest" | "fastest" | "weighted" | "random";
@@ -162,7 +158,7 @@ export interface RouteCandidate {
   /** The model it is sent; null when each request sends its own, as a glob's do. */
   model: string | null;
   weight: number;
-  price: RoutePrice | null;
+  price: Price | null;
   seen: RouteSeen | null;
 }
 
@@ -200,7 +196,7 @@ export interface Explained {
     | { type: "default" };
   pick?: RoutePick | null;
   mode?: "single" | "fallback" | "hedge";
-  to?: { provider: string; model: string | null; price: RoutePrice | null; seen: RouteSeen | null }[];
+  to?: { provider: string; model: string | null; price: Price | null; seen: RouteSeen | null }[];
   passed?: { candidate: string; why: string }[];
 }
 
@@ -279,10 +275,11 @@ export interface Model {
   description?: string;
   context_window?: number;
   max_output_tokens?: number;
-  input_modalities?: string[];
-  capabilities?: string[];
-  /** US dollars per million tokens, from the provider's list or the config's `prices`. */
-  pricing?: { input: number; output: number; cached_input?: number; from: "provider" | "config" };
+  /** What it reads beyond text. */
+  input_modalities?: ("image" | "audio" | "video" | "document")[];
+  capabilities?: ("tools" | "reasoning" | "structured_outputs")[];
+  pricing?: Price;
+  /** When it is retired, an RFC 3339 time. */
   retires_at?: string;
   /** A route of the config named for this model (`owned_by: "routes"`): how it picks, and its candidates. */
   route?: { pick: RoutePick; to: string[] };

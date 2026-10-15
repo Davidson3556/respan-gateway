@@ -178,3 +178,14 @@ pub async fn read_all(resp: reqwest::Response) -> (String, Result<(), String>) {
 pub fn json(text: &str) -> serde_json::Value {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"))
 }
+
+/// Gemini's formats at `base`, a fake of its API, as a provider's
+/// `formats` table: its own API at `/v1beta`, its OpenAI-compatible one
+/// at `/v1beta/openai`, and Live at the origin, as Google has them.
+pub fn gemini_formats(base: &str) -> String {
+    let (own, openai) = (format!("{base}/v1beta"), format!("{base}/v1beta/openai"));
+    format!(
+        "{{ gemini-generate = \"{own}\", openai-chat = \"{openai}\", gemini-live = \"{base}\", \
+         openai-images = \"{openai}\", gemini-veo = \"{own}\", openai-embeddings = \"{openai}\" }}"
+    )
+}

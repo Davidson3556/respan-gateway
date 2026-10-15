@@ -867,6 +867,10 @@ async fn a_chat_client_reaches_a_responses_provider() {
         assert_eq!(sent["input"], json!([{ "role": "user", "content": "hi" }]));
         assert_eq!(sent["max_output_tokens"], 20);
         assert_eq!(sent.get("stream"), stream.then_some(&json!(true)));
+        // Its client can name no response: none is stored, and reasoning
+        // comes encrypted, to be carried to a later call.
+        assert_eq!(sent["store"], false);
+        assert_eq!(sent["include"], json!(["reasoning.encrypted_content"]));
         if stream {
             assert!(body.contains("\"content\":\"Hi\""), "{body}");
             assert!(body.contains("\"completion_tokens\":2"), "{body}");
@@ -878,6 +882,81 @@ async fn a_chat_client_reaches_a_responses_provider() {
             assert_eq!(v["usage"]["completion_tokens"], 2);
         }
     }
+}
+
+/// Gives each call the reasoning `call_1` came of, as a plugin keeping it
+/// would.
+struct Earlier;
+
+#[async_trait]
+impl Plugin for Earlier {
+    async fn on_provider(
+        &self,
+        px: &mut respan_gateway_core::ProviderContext,
+    ) -> Result<(), Fault> {
+        use respan_gateway_conversation::Content;
+        use respan_gateway_conversation_http::Schema;
+        use respan_gateway_conversation_http::responses::EarlierReasoning;
+        let fields = json!({ "id": "rs_1", "encrypted_content": "gAAAA1" });
+        let native = respan_gateway_core::NativeFields::new(
+            OpenAiResponses::NAME,
+            fields.as_object().cloned().unwrap_or_default(),
+        );
+        let reasoning = Content::Reasoning {
+            text: "look it up".into(),
+            native: Some(native),
+        };
+        let earlier = move |id: &str| (id == "call_1").then(|| vec![reasoning.clone()]);
+        px.extensions_mut()
+            .insert(EarlierReasoning(Arc::new(earlier)));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_chat_clients_earlier_reasoning_goes_back_before_its_tool_calls() {
+    let openai = FakeOpenAi::start().await;
+    openai.answer(Answer::text("Sunny."));
+    let send = provider_http(&openai.base_url(), "authorization", "Bearer sk-test");
+    let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(Target("responses")), Arc::new(Earlier)];
+    let gw = providers([add_provider("responses", OpenAiResponses, send)])
+        .and_then(|gw| gw.client::<Input, _, _>(OpenAiChat))
+        .map(|gw| with_plugins(gw, plugins))
+        .unwrap_or_else(|e| panic!("gateway: {e}"));
+    let call_1 = json!({ "id": "call_1", "type": "function",
+        "function": { "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" } });
+    let request = json!({
+        "model": "gpt-x",
+        "tools": [{ "type": "function", "function": { "name": "get_weather",
+            "parameters": { "type": "object", "properties": { "city": { "type": "string" } } } } }],
+        "messages": [
+            { "role": "user", "content": "weather?" },
+            { "role": "assistant", "content": null, "tool_calls": [call_1] },
+            { "role": "tool", "tool_call_id": "call_1", "content": "sunny" },
+        ],
+    });
+    let (status, _, body) = read_whole(serve(&gw, call(CHAT, request)).await.0).await;
+    gw.idle().await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let sent = &openai.requests()[0].body;
+    let input = sent["input"].as_array().cloned().unwrap_or_default();
+    let kinds: Vec<&str> = input
+        .iter()
+        .map(|i| i["type"].as_str().unwrap_or("message"))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "message",
+            "reasoning",
+            "function_call",
+            "function_call_output"
+        ],
+        "{sent}"
+    );
+    assert_eq!(input[1]["id"], "rs_1");
+    assert_eq!(input[1]["encrypted_content"], "gAAAA1");
+    assert_eq!(input[2]["call_id"], "call_1");
 }
 
 #[tokio::test]

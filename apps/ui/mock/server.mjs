@@ -22,50 +22,8 @@ const NO_REALTIME = !!process.env.MOCK_NO_REALTIME;
 const startedAt = new Date();
 
 // Providers as the registry in crates/vendors/README.md has them: each
-// vendor's formats and quirks. `gateway` credentials are the gateway's own
-// key; `client` providers take the caller's.
-const quirk = {
-  thought_signature: {
-    name: "thought_signature",
-    description:
-      "A Gemini 3 model refuses a function call in a request's history that has no `thoughtSignature`, as one from another format has none; it takes its documented placeholder in place of one.",
-  },
-  openai_transcription_model: {
-    name: "openai_transcription_model",
-    description:
-      "Realtime transcribes the user's audio only with a named model: a session that turns transcription on without one asks for `gpt-4o-mini-transcribe`.",
-  },
-  model_id_prefix: {
-    name: "model_id_prefix",
-    description: "Its OpenAI-compatible model list names each model `models/<id>`.",
-  },
-  x_groq_usage: {
-    name: "x_groq_usage",
-    description:
-      "A response reports usage under `x_groq`, beside it, rather than in `usage`; the object's other fields stay native.",
-  },
-  reasoning_content: {
-    name: "reasoning_content",
-    description:
-      "Reasoning is `reasoning_content`, in a request's messages and a response's message or delta.",
-  },
-  azure_inert: {
-    name: "inert_choice",
-    description:
-      "A choice's `content_filter_results` and `content_filter_offsets` describe the moderation it passed.",
-  },
-  openrouter_inert: {
-    name: "inert_choice",
-    description:
-      "A choice's `native_finish_reason`, the upstream provider's own reason, describes its finish.",
-  },
-  vllm_inert: {
-    name: "inert_choice",
-    description:
-      "A choice's `stop_reason`, the stop token or string that ended it, describes its finish.",
-  },
-};
-
+// vendor's formats. `gateway` credentials are the gateway's own key;
+// `client` providers take the caller's.
 const kindOf = {
   "openai-chat": "chat",
   "openai-responses": "chat",
@@ -82,14 +40,13 @@ const kindOf = {
   "openai-embeddings": "embedding",
 };
 
-const vendor = (name, formats, quirks, base_url, credentials = "gateway") => ({
+const vendor = (name, formats, base_url, credentials = "gateway") => ({
   name,
   vendor: name,
   formats,
   kinds: [...new Set(formats.map((f) => kindOf[f]))],
   base_url,
   credentials,
-  quirks,
 });
 
 const providers = [
@@ -105,10 +62,9 @@ const providers = [
       "openai-speech",
       "openai-embeddings",
     ],
-    [quirk.openai_transcription_model],
     "https://api.openai.com/v1",
   ),
-  vendor("anthropic", ["anthropic-messages"], [], "https://api.anthropic.com"),
+  vendor("anthropic", ["anthropic-messages"], "https://api.anthropic.com"),
   vendor(
     "gemini",
     [
@@ -119,23 +75,20 @@ const providers = [
       "gemini-veo",
       "openai-embeddings",
     ],
-    [quirk.model_id_prefix, quirk.thought_signature],
     "https://generativelanguage.googleapis.com/v1beta/openai",
   ),
   vendor(
     "groq",
     ["openai-chat", "openai-transcriptions", "openai-speech"],
-    [quirk.x_groq_usage],
     "https://api.groq.com/openai/v1",
     "client",
   ),
-  vendor("deepseek", ["openai-chat"], [quirk.reasoning_content], "https://api.deepseek.com"),
-  vendor("openrouter", ["openai-chat"], [quirk.openrouter_inert], "https://openrouter.ai/api/v1"),
-  vendor("azure", ["openai-chat"], [quirk.azure_inert], "https://acme.openai.azure.com/openai/v1"),
+  vendor("deepseek", ["openai-chat"], "https://api.deepseek.com"),
+  vendor("openrouter", ["openai-chat"], "https://openrouter.ai/api/v1"),
+  vendor("azure", ["openai-chat"], "https://acme.openai.azure.com/openai/v1"),
   vendor(
     "vllm",
     ["openai-chat"],
-    [quirk.reasoning_content, quirk.vllm_inert],
     "http://gpu-box:8000/v1",
     "client",
   ),

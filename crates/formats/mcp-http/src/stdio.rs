@@ -20,6 +20,7 @@ use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Body, Completion, Credential};
 use respan_gateway_http_faults::Status;
 use respan_gateway_mcp::Message;
+use respan_gateway_sdk::Caller;
 use tokio::process::Command;
 
 use crate::session::{Limits, Session};
@@ -32,7 +33,7 @@ type Sessions = Mutex<HashMap<(String, u64), Option<Arc<Session>>>>;
 /// Runs `program` for each new session (an `initialize` without a session
 /// id), and sends each line it writes to the request waiting for it.
 ///
-/// A session belongs to the owner that started it: the call's [`Owner`]
+/// A session belongs to the owner that started it: the call's [`Caller`]
 /// extension if any, else the client's `Authorization`, as the adapter
 /// lifted it ([`Credential`]); callers with neither are one owner. A
 /// session ends when its child exits, on `DELETE`, when idle, or when the
@@ -84,12 +85,6 @@ pub struct StdioTransport {
     /// Secret keys, so an owner's hash cannot be chosen to match another's.
     keys: RandomState,
 }
-
-/// Who a call's session belongs to, set as an extension by a plugin that
-/// knows the caller, such as one that authenticates it
-/// (`cx.extensions_mut().insert(Owner(tenant))`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Owner(pub String);
 
 impl StdioTransport {
     /// Run `program` with `args` per session, with the default limits.
@@ -202,8 +197,8 @@ impl StdioTransport {
     ) -> Result<(http::Response<Body>, Option<Completion>), Fault> {
         let (mut head, body) = call.into_parts();
         let extensions = head.extensions.remove::<Extensions>().unwrap_or_default();
-        let owner = match extensions.get::<Owner>() {
-            Some(Owner(owner)) => self.keys.hash_one((true, Some(owner.as_bytes()))),
+        let owner = match extensions.get::<Caller>() {
+            Some(caller) => self.keys.hash_one((true, Some(caller.id.as_bytes()))),
             None => {
                 let credential = extensions.get::<Credential>();
                 let authorization = credential.and_then(|c| c.get(AUTHORIZATION.as_str()));

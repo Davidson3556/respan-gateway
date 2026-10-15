@@ -1,11 +1,14 @@
 [workspace]
 members = [
+    "crates/sdk",
     "crates/core",
     "crates/plugins/*",
     "crates/kinds/*",
     "crates/wires/*",
     "crates/formats/*",
-    "crates/vendor-kit",
+    "crates/vendors/kit",
+    "crates/vendors/green",
+    "crates/vendors/yellow",
     "crates/vendors",
     "crates/serve",
     "apps/gateway",
@@ -26,6 +29,7 @@ publish = false
 [workspace.dependencies]
 respan-gateway-realtime = { path = "crates/kinds/realtime" }
 respan-gateway-core = { path = "crates/core" }
+respan-gateway-sdk = { path = "crates/sdk" }
 respan-gateway-conversation = { path = "crates/kinds/conversation" }
 respan-gateway-media = { path = "crates/kinds/media" }
 respan-gateway-decision = { path = "crates/kinds/decision" }
@@ -40,6 +44,8 @@ respan-gateway-plugin-fallback = { path = "crates/plugins/fallback" }
 respan-gateway-plugin-tool-loop = { path = "crates/plugins/tool-loop" }
 respan-gateway-plugin-respan = { path = "crates/plugins/respan" }
 respan-gateway-plugin-mcp-aggregate = { path = "crates/plugins/mcp-aggregate" }
+respan-gateway-plugin-pricing = { path = "crates/plugins/pricing" }
+respan-gateway-plugin-responses = { path = "crates/plugins/responses" }
 respan-gateway-mcp = { path = "crates/kinds/mcp" }
 respan-gateway-ws = { path = "crates/wires/ws" }
 respan-gateway-conversation-http = { path = "crates/formats/conversation-http" }
@@ -48,7 +54,9 @@ respan-gateway-decision-http = { path = "crates/formats/decision-http" }
 respan-gateway-realtime-ws = { path = "crates/formats/realtime-ws" }
 respan-gateway-mcp-http = { path = "crates/formats/mcp-http" }
 respan-gateway-passthrough-http = { path = "crates/formats/passthrough-http" }
-respan-gateway-vendor-kit = { path = "crates/vendor-kit" }
+respan-gateway-vendor-kit = { path = "crates/vendors/kit" }
+respan-gateway-vendors-green = { path = "crates/vendors/green" }
+respan-gateway-vendors-yellow = { path = "crates/vendors/yellow" }
 respan-gateway-vendors = { path = "crates/vendors" }
 respan-gateway-serve = { path = "crates/serve" }
 async-trait = "0.1"
@@ -67,6 +75,7 @@ percent-encoding = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "http2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 toml = { version = "0.8.23", features = ["preserve_order"] }
 tokio = "1"
 url = "2"

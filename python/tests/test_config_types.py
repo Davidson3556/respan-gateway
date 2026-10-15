@@ -15,7 +15,7 @@ def test_a_full_typed_config_parses() -> None:
         "listen": "127.0.0.1:0",
         "body_limit": "32MiB",
         "ws_message_limit": "16MiB",
-        "prices": {"gpt-4o": {"input": 2.5, "output": 10, "cached_input": 1.25}},
+        "models": {"openai/gpt-4o": {"pricing": {"input": 2.5, "output": 10, "cached_input": 1.25}}},
         "shutdown_grace": "10s",
         "client_keys": ["client-key", {"name": "ci", "key": "ci-key"}],
         "log": "off",

@@ -20,6 +20,7 @@ export const routes = [
       },
       { path: "playground", ...page(() => import("@/pages/playground"), "PlaygroundPage") },
       { path: "providers", ...page(() => import("@/pages/providers"), "ProvidersPage") },
+      { path: "models", ...page(() => import("@/pages/models"), "ModelsPage") },
       { path: "mcp", ...page(() => import("@/pages/mcp"), "McpPage") },
       { path: "routes", ...page(() => import("@/pages/routes"), "RoutesPage") },
       { path: "config", ...page(() => import("@/pages/config"), "ConfigPage") },

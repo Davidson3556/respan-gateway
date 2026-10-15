@@ -8,23 +8,22 @@ import { RouteTester } from "@/components/route-tester";
 import { TomlCode } from "@/components/toml-code";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useProviders, useRoutes } from "@/hooks/queries";
-import type { Provider, Routes } from "@/lib/api";
+import { useRoutes } from "@/hooks/queries";
+import type { Routes } from "@/lib/api";
 import { describeError } from "@/lib/query-client";
 import { EXAMPLE_ROUTES } from "@/lib/routes";
 
-function Destination({ name, providers }: { name: string; providers: Provider[] }) {
-  const provider = providers.find((p) => p.name === name);
+function Destination({ name }: { name: string }) {
   return (
     <Link to="/providers" className="flex min-w-0 items-center gap-2 text-sm font-medium hover:underline">
-      <ProviderIcon name={name} baseUrl={provider?.base_url ?? ""} />
+      <ProviderIcon name={name} />
       <span className="truncate">{name}</span>
     </Link>
   );
 }
 
 /** Each vendor's model names, by provider. */
-function Claims({ claims, providers }: { claims: Routes["claims"]; providers: Provider[] }) {
+function Claims({ claims }: { claims: Routes["claims"] }) {
   const byProvider = new Map<string, string[]>();
   for (const c of claims) byProvider.set(c.provider, [...(byProvider.get(c.provider) ?? []), c.prefix]);
   if (!byProvider.size) return <p className="p-5 text-sm text-muted-foreground">No vendor model names: name a provider as provider/model.</p>;
@@ -32,7 +31,7 @@ function Claims({ claims, providers }: { claims: Routes["claims"]; providers: Pr
     <div className="divide-y">
       {[...byProvider].map(([provider, prefixes]) => (
         <div key={provider} className="grid grid-cols-[minmax(0,8rem)_minmax(0,1fr)] items-start gap-4 px-5 py-3">
-          <Destination name={provider} providers={providers} />
+          <Destination name={provider} />
           <div className="flex flex-wrap gap-1.5">
             {prefixes.map((prefix) => (
               <code key={prefix} className="rounded bg-muted px-1.5 py-0.5 text-xs" title={`Models starting with ${prefix}`}>{prefix}*</code>
@@ -46,7 +45,6 @@ function Claims({ claims, providers }: { claims: Routes["claims"]; providers: Pr
 
 export function RoutesPage() {
   const { data, isPending, error } = useRoutes(true);
-  const { data: providers = [] } = useProviders();
   const kinds = data
     ? [...new Set([...data.serve.map((s) => s.kind), ...data.defaults.map((d) => d.kind)])].filter((k) => k !== "mcp")
     : [];
@@ -64,7 +62,7 @@ export function RoutesPage() {
         <Skeleton className="h-64 w-full" />
       ) : data && (
         <>
-          {kinds.length > 0 && <RouteTester routes={data} providers={providers} kinds={kinds} />}
+          {kinds.length > 0 && <RouteTester routes={data} kinds={kinds} />}
 
           <section className="grid min-w-0 gap-3" aria-labelledby="your-routes">
             <div className="flex items-baseline justify-between gap-4">
@@ -74,7 +72,7 @@ export function RoutesPage() {
               )}
             </div>
             {data.rules.length ? (
-              data.rules.map((rule) => <RouteCard key={rule.name} rule={rule} providers={providers} />)
+              data.rules.map((rule) => <RouteCard key={rule.name} rule={rule} />)
             ) : (
               <EmptyState icon={RouteIcon} title="No routes yet">
                 <p>Give a model name its own providers: picked in order, by price or by speed, falling back or raced. Add to the config:</p>
@@ -92,7 +90,7 @@ export function RoutesPage() {
                     <div key={d.kind} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 px-5 py-3">
                       <span className="text-sm capitalize">{d.kind}</span>
                       <ArrowRight className="size-4 text-muted-foreground" aria-hidden />
-                      <Destination name={d.provider} providers={providers} />
+                      <Destination name={d.provider} />
                     </div>
                   ))}
                 </div>
@@ -104,7 +102,7 @@ export function RoutesPage() {
                 <h2 className="text-sm font-semibold">Vendor model names</h2>
                 <span className="text-xs text-muted-foreground" title="For a model no provider's list has, such as an alias; and to choose between providers that both list it">For unlisted models · longest match wins</span>
               </div>
-              <Claims claims={data.claims} providers={providers} />
+              <Claims claims={data.claims} />
             </Card>
           </div>
 

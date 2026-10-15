@@ -1,5 +1,6 @@
 #![warn(missing_docs)]
-//! The tool loop: the gateway runs tools inside a chat request.
+//! The tool loop: the gateway runs tools inside a chat request, or a live
+//! session (see `live` for how a session's differs).
 //!
 //! [`ToolLoop`] is a plugin over the conversation kind, so it serves every chat
 //! format and provider, translated or not. It offers the model the tools of a
@@ -43,6 +44,7 @@
 //! fails the request.
 
 mod filter;
+mod live;
 mod replay;
 mod steps;
 mod tools;
@@ -154,7 +156,7 @@ pub struct StepReport {
 /// Where a request's steps are reported.
 pub type Sink = Arc<dyn Fn(StepReport) + Send + Sync>;
 
-type Scope = dyn Fn(&ClientContext, &Input) -> bool + Send + Sync;
+type Scope = dyn Fn(&ClientContext, Option<&str>) -> bool + Send + Sync;
 type Flags = dyn Fn(&str) -> bool + Send + Sync;
 type Observe = dyn Fn(&ClientContext) -> Option<Sink> + Send + Sync;
 
@@ -258,11 +260,14 @@ impl ToolLoop {
     }
 
     /// Runs the loop only for requests `scope` accepts, which see the
-    /// request and its conversation as routing left it. Others pass.
+    /// request and the model it names, as routing left them: a chat's, or
+    /// `None` for a live session, which names it in its inputs (a host
+    /// that put it in the request's extensions reads it there). Others
+    /// pass.
     #[must_use]
     pub fn when(
         mut self,
-        scope: impl Fn(&ClientContext, &Input) -> bool + Send + Sync + 'static,
+        scope: impl Fn(&ClientContext, Option<&str>) -> bool + Send + Sync + 'static,
     ) -> Self {
         self.scope = Some(Arc::new(scope));
         self
@@ -289,9 +294,28 @@ impl ToolLoop {
     }
 }
 
+impl ToolLoop {
+    /// Runs the loop over a live session, if it has tools to offer.
+    async fn live(&self, cx: &mut ClientContext) -> Result<(), Fault> {
+        if !self.scope.as_ref().is_none_or(|scope| scope(cx, None)) {
+            return Ok(());
+        }
+        let toolbox = self.tools.open(cx);
+        let listed = timeout(self.limits.tool_timeout, toolbox.list()).await;
+        let offered = listed.unwrap_or_default();
+        if offered.is_empty() {
+            return Ok(());
+        }
+        live::run(cx, toolbox, offered, self.limits)
+    }
+}
+
 #[async_trait]
 impl Plugin for ToolLoop {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        if cx.is_kind::<respan_gateway_realtime::Input>() {
+            return self.live(cx).await.map(|()| None);
+        }
         if !cx.is_kind::<Input>() {
             return Ok(None);
         }
@@ -302,7 +326,7 @@ impl Plugin for ToolLoop {
             return Ok(None);
         };
         let no_tools = input.options.tool_choice == Some(ToolChoice::None);
-        let in_scope = self.scope.as_ref().is_none_or(|scope| scope(cx, &input));
+        let in_scope = (self.scope.as_ref()).is_none_or(|scope| scope(cx, input.model()));
         if no_tools || !in_scope {
             return Ok(None);
         }

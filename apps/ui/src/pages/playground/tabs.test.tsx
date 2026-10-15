@@ -144,3 +144,30 @@ describe("EmbeddingsTab", () => {
     });
   });
 });
+
+describe("every tab", () => {
+  it("names the API it speaks and links to its kind's requests", async () => {
+    serve({ "GET /v1/models": models });
+    const tabs = [
+      [<ChatTab key="chat" />, "chat", "OpenAI Chat"],
+      [<ImageTab key="image" />, "image", "OpenAI Images"],
+      [<TranscribeTab key="transcribe" />, "transcription", "OpenAI Transcriptions"],
+      [<SpeechTab key="speech" />, "speech", "OpenAI Speech"],
+      [<EmbeddingsTab key="embedding" />, "embedding", "OpenAI Embeddings"],
+    ] as const;
+    for (const [tab, kind, api] of tabs) {
+      const { unmount } = renderApp(tab);
+      expect(await screen.findByText(api, { selector: "p" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Requests" })).toHaveAttribute("href", `/requests?kind=${kind}`);
+      unmount();
+    }
+  });
+});
+
+describe("a link to the playground", () => {
+  it("starts the tab of the kind it names on the model it names", async () => {
+    serve({ "GET /v1/models": models });
+    renderApp(<ChatTab />, "/playground?tab=chat&kind=chat&model=claude-sonnet-5-5");
+    expect(await screen.findByPlaceholderText("Message claude-sonnet-5-5…")).toBeInTheDocument();
+  });
+});

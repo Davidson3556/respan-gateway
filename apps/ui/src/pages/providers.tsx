@@ -1,4 +1,4 @@
-import { KeyRound, Server, TriangleAlert, UserRound } from "lucide-react";
+import { KeyRound, Server } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { CodeBlock } from "@/components/code-block";
@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useProviders } from "@/hooks/queries";
-import type { Provider, Quirk } from "@/lib/api";
+import type { Provider } from "@/lib/api";
 import { formatCount, formatMs, formatPercent } from "@/lib/format";
 
 const exampleConfig = `[providers.openai]
@@ -35,40 +35,6 @@ function Chips({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-/** A description with its `backticked` parts set as code. */
-function Prose({ text }: { text: string }) {
-  return text.split("`").map((part, i) =>
-    i % 2 ? (
-      <code key={i} className="rounded bg-muted px-1 py-0.5 text-[11px] text-foreground">
-        {part}
-      </code>
-    ) : (
-      part
-    ),
-  );
-}
-
-function Quirks({ quirks }: { quirks: Quirk[] }) {
-  return (
-    <div className="grid gap-2">
-      <span className="flex items-center gap-1.5 text-[11px] font-medium tracking-wide text-warning uppercase">
-        <TriangleAlert className="size-3" aria-hidden="true" />
-        Quirks
-      </span>
-      <ul className="grid gap-2">
-        {quirks.map((q) => (
-          <li key={q.name} className="rounded-md border-l-2 border-warning bg-warning/10 py-2 pr-3 pl-3">
-            <div className="font-mono text-xs font-medium">{q.name}</div>
-            <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-              <Prose text={q.description} />
-            </p>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
 function ProviderCard({ provider: p }: { provider: Provider }) {
   const gatewayKey = p.credentials === "gateway";
   return (
@@ -76,7 +42,7 @@ function ProviderCard({ provider: p }: { provider: Provider }) {
       <CardHeader className="gap-1">
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2.5">
-            <ProviderIcon name={p.name} baseUrl={p.base_url} />
+            <ProviderIcon name={p.name} vendor={p.vendor} baseUrl={p.base_url} />
             <div className="min-w-0">
               <CardTitle className="truncate text-base">{p.name}</CardTitle>
               {p.vendor && p.vendor !== p.name && (
@@ -84,18 +50,15 @@ function ProviderCard({ provider: p }: { provider: Provider }) {
               )}
             </div>
           </div>
-          <Badge
-            variant="outline"
-            className="shrink-0 font-normal text-muted-foreground"
-            title={
-              gatewayKey
-                ? "The gateway sends its own configured key"
-                : "Each client's own credentials pass through"
-            }
-          >
-            {gatewayKey ? <KeyRound /> : <UserRound />}
-            {gatewayKey ? "Gateway key" : "Client key"}
-          </Badge>
+          {!gatewayKey && (
+            <Badge
+              variant="outline"
+              className="shrink-0 font-normal text-muted-foreground"
+              title="No key in the config: it gets none from the gateway, only each caller's own credentials (Authorization, x-api-key or x-goog-api-key) if they bring any beyond their gateway key"
+            >
+              <KeyRound /> No key
+            </Badge>
+          )}
         </div>
         <div className="flex min-w-0 items-center gap-1 pt-1">
           <p className="truncate font-mono text-xs text-muted-foreground" title={p.base_url}>
@@ -121,7 +84,6 @@ function ProviderCard({ provider: p }: { provider: Provider }) {
             </Badge>
           ))}
         </Chips>
-        {p.quirks.length > 0 && <Quirks quirks={p.quirks} />}
         <div className="mt-auto grid grid-cols-3 gap-3 border-t pt-4">
           <Metric label="Requests" value={formatCount(p.requests)} />
           <Metric label="Errors" value={p.requests ? formatPercent(p.errors / p.requests) : "—"} />

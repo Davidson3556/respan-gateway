@@ -7,6 +7,7 @@ use std::time::Duration;
 use respan_gateway_plugin_fallback::{Backoff, Until};
 
 use crate::stats::Stats;
+use respan_gateway_sdk::Catalog;
 
 /// A route: requests for model `name` go to one of `to`.
 #[derive(Debug, Clone)]
@@ -168,54 +169,13 @@ impl Pick {
     }
 }
 
-/// What a provider's model listing says of a model.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Facts {
-    /// US dollars per million input and output tokens.
-    pub price: Option<(f64, f64)>,
-    /// What it can do, such as `tools` or `vision`.
-    pub capabilities: Vec<String>,
-    /// What it takes, such as `text` or `image`.
-    pub input_modalities: Vec<String>,
-}
-
-impl Facts {
-    /// What [`Pick::Cheapest`] ranks by.
-    pub fn cost(&self) -> Option<f64> {
-        self.price.map(|(input, output)| input + 3.0 * output)
-    }
-
-    /// Whether it is known to lack `need`. `vision` is met by taking images.
-    pub fn lacks(&self, need: &str) -> bool {
-        if self.capabilities.is_empty() && self.input_modalities.is_empty() {
-            return false;
-        }
-        let has = |list: &[String], what: &str| list.iter().any(|c| c == what);
-        let met = has(&self.capabilities, need)
-            || has(&self.input_modalities, need)
-            || (need == "vision" && has(&self.input_modalities, "image"));
-        !met
-    }
-}
-
-/// Where the router reads [`Facts`], such as the gateway's model listings.
-pub trait Catalog: Send + Sync {
-    /// What is known of `model` of `provider`.
-    fn facts(&self, provider: &str, model: &str) -> Option<Facts>;
-
-    /// Whether `provider`'s model listing names `model`.
-    fn lists(&self, _provider: &str, _model: &str) -> bool {
-        false
-    }
-}
-
 /// The order `pick` gives `candidates`, each with the model it is sent.
 pub(crate) fn order<T>(
     pick: Pick,
     mut candidates: Vec<T>,
     of: impl Fn(&T) -> (&Candidate, &str),
     stats: &Stats,
-    catalog: Option<&dyn Catalog>,
+    catalog: &Catalog,
 ) -> Vec<T> {
     match pick {
         Pick::First => {}
@@ -223,8 +183,9 @@ pub(crate) fn order<T>(
             let cost = |c: &T| {
                 let (candidate, model) = of(c);
                 catalog
-                    .and_then(|cat| cat.facts(&candidate.provider, model))
-                    .and_then(|f| f.cost())
+                    .get(&candidate.provider, model)
+                    .and_then(|m| m.price)
+                    .map(|p| p.weight())
                     .unwrap_or(f64::INFINITY)
             };
             candidates.sort_by(|a, b| cost(a).total_cmp(&cost(b)));
@@ -313,6 +274,7 @@ pub fn glob(pattern: &str, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use respan_gateway_sdk::{Model, Price};
 
     #[test]
     fn globs_match_any_run_of_characters() {
@@ -341,24 +303,20 @@ mod tests {
         assert_eq!(kept.model_for(None), None);
     }
 
-    struct Prices;
-    impl Catalog for Prices {
-        fn facts(&self, provider: &str, _: &str) -> Option<Facts> {
-            let price = match provider {
-                "cheap" => (1.0, 1.0),
-                "dear" => (10.0, 30.0),
-                _ => return None,
-            };
-            Some(Facts {
-                price: Some(price),
-                ..Facts::default()
-            })
+    /// `cheap` and `dear` list `m` at their prices.
+    fn prices() -> Catalog {
+        let catalog = Catalog::default();
+        for (provider, input, output) in [("cheap", 1.0, 1.0), ("dear", 10.0, 30.0)] {
+            let mut model = Model::new("m");
+            model.price = Some(Price::provider(input, output, None));
+            catalog.set(provider, [model]);
         }
+        catalog
     }
 
     fn names(pick: Pick, list: &[&str], stats: &Stats) -> Vec<String> {
         let candidates = list.iter().map(|s| Candidate::parse(s)).collect();
-        let ordered = order(pick, candidates, |c| (c, "m"), stats, Some(&Prices));
+        let ordered = order(pick, candidates, |c| (c, "m"), stats, &prices());
         ordered.into_iter().map(|c| c.provider).collect()
     }
 
@@ -393,17 +351,5 @@ mod tests {
         let mut got = names(Pick::Weighted, &["a", "b", "c"], &stats);
         got.sort();
         assert_eq!(got, ["a", "b", "c"]);
-    }
-
-    #[test]
-    fn needs_pass_over_only_what_is_known_to_lack() {
-        let unknown = Facts::default();
-        assert!(!unknown.lacks("tools"));
-        let images = Facts {
-            input_modalities: vec!["text".into(), "image".into()],
-            ..Facts::default()
-        };
-        assert!(!images.lacks("vision"));
-        assert!(images.lacks("tools"));
     }
 }

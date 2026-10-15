@@ -26,7 +26,8 @@ use respan_gateway_http::{
 use respan_gateway_mcp::{Input, Output};
 #[cfg(unix)]
 use respan_gateway_mcp_http::StdioTransport;
-use respan_gateway_mcp_http::{Owner, SESSION, StreamableHttp};
+use respan_gateway_mcp_http::{SESSION, StreamableHttp};
+use respan_gateway_sdk::Caller;
 use serde_json::{Value, json};
 
 use respan_gateway_plugin_relay::Relay;
@@ -1081,7 +1082,7 @@ echo '{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse"}}'; ex
     assert!(outcome.is_err());
 }
 
-/// Moves the caller's key into an [`Owner`], as an auth plugin would.
+/// Moves the caller's key into a [`Caller`], as an auth plugin would.
 #[cfg_attr(not(unix), allow(dead_code))]
 struct Authenticates;
 
@@ -1091,7 +1092,11 @@ impl Plugin for Authenticates {
         let credential = cx.extensions_mut().remove::<Credential>();
         let key = credential.and_then(|c| c.get("authorization").cloned());
         let key = key.and_then(|k| k.to_str().ok().map(String::from));
-        cx.extensions_mut().insert(Owner(key.unwrap_or_default()));
+        let id = key.unwrap_or_default();
+        cx.extensions_mut().insert(Caller {
+            name: id.clone(),
+            id,
+        });
         Ok(None)
     }
 }

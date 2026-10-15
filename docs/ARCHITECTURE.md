@@ -35,35 +35,44 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
   `Format`. A format is a spec and names no vendor: what a provider sends
   beyond the spec stays native to it, where it appeared. It picks the wire
   capabilities its spec uses, such as a subprotocol or binary frames.
-- The **vendor kit** crate (`crates/vendor-kit/`) is a vendor as a template, and
+- The **vendor kit** crate (`crates/vendors/kit/`) is a vendor as a template, and
   a provider of one at a base URL with a key, which registers a core
-  provider of each of its formats and lists its models. The **vendors**
-  crate (`crates/vendors/`) is every vendor, a file each: where it is, its
-  key, the formats it speaks, and its quirks, each described. A quirk, a deployment's departure from a spec, is
-  data (such as a key header) or the vendor's plugin, which turns what it
-  sends beyond the spec into the kind's events and back.
+  provider of each of its formats and lists its models, and what vendors
+  share. The **vendors** crate (`crates/vendors/`) is every vendor, a file
+  each in its tier's crate: green (`crates/vendors/green/`), verified end to
+  end against its live API, or yellow (`crates/vendors/yellow/`), tested
+  against fakes alone. A vendor says where it is, its key, and the formats
+  it speaks. A quirk, a deployment's departure from a
+  spec, is data (such as a key header) or in a format it speaks: its
+  dialect of the spec (`conversation-http`'s `dialect`), which turns what it
+  sends beyond the spec into the kind's events and back inside the format,
+  or a format of its own. What a spec's own vendor does is the spec's
+  format's.
 
 | Location | Sort | Owns | Internal production dependencies |
 | --- | --- | --- | --- |
 | `crates/core/` | Kernel | Execution, typed streams, plugin hooks, call and response lifecycles, fault extensions and tagged native values | None |
+| `crates/sdk/` | Vocabulary | A model's card (`Model`), its `Price`, the shared `Catalog`, and who a request is for (`Caller`) | None (a leaf) |
 | `crates/kinds/conversation/` | Kind | Conversation requests, reply events, typed usage and assembly | Core |
 | `crates/kinds/media/` | Kind | A kind per media operation (images, transcription, speech, embeddings, video jobs) over the conversation kind's media and usage | Core, conversation |
 | `crates/kinds/decision/` | Kind | Typed questions about a state (yes-or-no, choice, score), each answered with probabilities | Core, conversation (usage) |
 | `crates/kinds/realtime/` | Kind | A live session's events both ways: configuration, audio, messages, responses, barge-in and tool calls, over the conversation kind's messages, tools and usage | Core, conversation |
 | `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes | Core |
-| `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, path matching and forwarding, the raw request and answer, and what a transport does to a call | Core, HTTP faults, SSE |
+| `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, path matching and forwarding, the raw request and answer, what a transport does to a call, and how a provider format is reached (`Upstream`) | Core, HTTP faults, SSE |
 | `crates/wires/http-faults/` | Wire | Faults in HTTP terms, with no I/O: a fault's status and error code, retry eligibility, a provider's error answer as a fault | Core |
 | `crates/wires/sse/` | Wire | Server-sent events as bytes: an incremental splitter, and events written so no value forges a field | Core |
 | `crates/wires/http-transport/` | Wire | `HttpTransport`, a pooled Reqwest backend for the provider edge | Core, HTTP |
 | `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`) | Core, HTTP |
 | `crates/formats/conversation-http/` | Format | The HTTP binding (`Schema`) and four chat formats: OpenAI Chat, Anthropic Messages, Gemini `generateContent` and OpenAI Responses; reasoning controls map between them | Conversation, HTTP |
-| `crates/formats/media-http/` | Format | OpenAI's media endpoints as compatible vendors serve them, and Veo's as a provider | Media, conversation-http, HTTP |
+| `crates/formats/media-http/` | Format | OpenAI's media endpoints as compatible vendors serve them, and Veo's | Media, conversation-http, HTTP |
 | `crates/formats/decision-http/` | Format | TypeSafe's System One | Decision, conversation-http, HTTP |
 | `crates/formats/realtime-ws/` | Format | OpenAI Realtime and Gemini Live, translated both ways (audio converted, the other's scaffolding emulated), and Responses over WebSocket, sharing their session's handshake | Realtime, HTTP, WS |
 | `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
 | `crates/formats/passthrough-http/` | Format | `Input<F>` / `Output<F>`, HTTP traffic of no kind relayed unread, and the `Passthrough` format | HTTP |
-| `crates/vendor-kit/` | Vendors | A vendor as a template (`Vendor`), and a provider of it (`VendorProvider`): each format (any core `Format`, named by a vendor as `&Speaks::http(F)` or `&Speaks::ws(F, ..)`) at its base URL with its key and quirks, registered; its model list and a client of it | Core, HTTP, HTTP faults, HTTP transport, WS; no format |
-| `crates/vendors/` | Vendors | Every vendor, a file each, and their quirks: data and plugins (such as Groq's usage, DeepSeek's `reasoning_content`, Gemini's `thought_signature` placeholder) | The vendor kit, core, the formats, and the conversation and realtime kinds (for quirk plugins) |
+| `crates/vendors/kit/` | Vendors | A vendor as a template (`Vendor`), and a provider of it (`VendorProvider`): each format (any core `Format` that says how its spec has it reached, `Upstream`) at its base URL with its key, registered; its model list and a client of it; what vendors share (every spec's format, `FORMATS`; Chat Completions' dialect helpers, `chat`) | Core, HTTP, HTTP faults, HTTP transport, WS, the formats, the conversation kind |
+| `crates/vendors/green/` | Vendors | The green vendors (OpenAI, Anthropic, Gemini, TypeSafe), a file each, and their quirks: verified end to end by the validation package's live tests | The vendor kit, core, the formats, the conversation kind |
+| `crates/vendors/yellow/` | Vendors | The yellow vendors, a file each, and their quirks (such as Groq's usage, DeepSeek's `reasoning_content`): tested against fakes, not end to end | The vendor kit, core, the formats, the conversation kind |
+| `crates/vendors/` | Vendors | Every vendor, by name (`ALL`, `GREEN`, `YELLOW`, `find`) | The vendor kit, the green and yellow vendors |
 | `crates/serve/` | Hosting | One Axum router for a gateway: plain HTTP and WebSocket upgrades, body and session limits, graceful stop | Core, HTTP, WS |
 | `crates/plugins/*` | Plugins, one crate each | `routing` (`Routes`, `Rule`, `Routing`, and `Dispatch`, which sends a request to a rule's candidates), `fallback` (`Fallback`, `Hedge`, and the attempt, race and backoff helpers `Dispatch` is built on) and `tool-loop` (`ToolLoop`, and the `ToolFilter` and `ToolScope` that say which tools are offered) | Core and the conversation kind |
 | `crates/plugins/respan/` | Plugin | `Respan`: each request a trace sent to Respan over OTLP, a span per call to a model or tool server, posted in batches off the request path | Core, the conversation kind, HTTP transport |
@@ -284,8 +293,7 @@ the provider edge own them (see [One shape at both edges](#one-shape-at-both-edg
 - **Provider**: a name, the format it speaks, how each call gets a
   transport, and its own plugins (`Provider::new(..).plugin(..)`, added with
   `Gateway::provider`). A provider's own plugins' `on_provider` and
-  `on_provider_end` run on its calls alone, after the gateway's plugins. A
-  vendor's quirks are one.
+  `on_provider_end` run on its calls alone, after the gateway's plugins.
 - **Filter**: edits a request's inputs or a response's outputs as they
   stream; its type says which. For work that waits, such as a remote check
   or a deadline, a plugin wraps the stream in its own (`cx.wrap`).
@@ -403,12 +411,10 @@ media kind); whose credentials go where; the tool loop
 the request log, MCP routing, video jobs and credentials are always on; the
 tool loop and the aggregate only when configured.
 
-A vendor's quirks are not one of the gateway's plugins: they are a plugin
-of each of its providers (the vendor's `Provider::plugin`, given to the core
-provider with `Provider::plugin` when it is composed). Its provider-edge
-hooks run on that provider's calls alone, after the gateway's plugins, so
-its filters are the provider edge's innermost and every plugin sees the
-kind's events. Nothing turns it off.
+A vendor's quirks are not plugins: they are in the formats its providers
+speak, its dialect of a spec among them, so they are the provider edge's
+innermost, every plugin sees the kind's events, and nothing turns them
+off.
 
 The order is what makes them compose. Plugins that target and edit a request
 come before the ones that answer it themselves (the tool loop, dispatch),
@@ -430,7 +436,7 @@ conversation kind alone, so it serves every chat format and provider. In
 it asks a `Tools` runner for the request's `Toolbox` (`list` and `call`),
 adds the listed tools to the conversation and answers the request itself with
 `Response::stream`: each step is a `Call` of the target with its own input
-(`Call::with_input`, so translation, provider-edge filters and the quirks apply
+(`Call::with_input`, so translation, provider-edge filters and the provider's format apply
 as for any call), read as `Output` events. A step's events flow to the client
 (blocks renumbered without gaps over the steps), except the runner's tool
 calls, usage and the finish, which are decided when the step ends: calls only to
@@ -439,6 +445,16 @@ a per-request byte budget) and appended to the conversation as
 the assistant's calls and a user message of results; anything else ends the
 loop, with the usage summed. Because the plugin replies, it is registered
 after the plugins that route or edit the request.
+
+Over a live session (the realtime kind) the plugin answers nothing: it wraps
+the session's two directions. The inputs get the tools in each configuration
+that sets tools, and are merged with what the loop sends: the answers of the
+calls it runs, as they come (bounded by `parallel`), then a request to
+respond once the calls of a response are answered and no response is being
+made. The outputs lose those calls, every object of the format's own events
+that names one of the loop's tools or carries one of its calls' ids, and a
+response that said nothing else (its start is held until it says something,
+and a format's own events after its end are dropped until the next starts).
 
 The binary supplies the runner and the policy: `apps/gateway/src/tool_loop.rs`
 implements `Tools` with MCP, as the gateway's own client of the `mcp:`

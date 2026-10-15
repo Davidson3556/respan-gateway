@@ -593,3 +593,28 @@ fn an_error_body_is_googles() {
         json!({ "error": { "code": 400, "message": "no good", "status": "INVALID_ARGUMENT" } })
     );
 }
+
+/// A history in which the model called `f` and `g` at once, `g` signed,
+/// written for `model`.
+fn signed_for(model: &str) -> Value {
+    let body = json!({ "contents": [
+        { "role": "user", "parts": [{ "text": "go" }] },
+        { "role": "model", "parts": [
+            { "functionCall": { "name": "f", "args": {} } },
+            { "functionCall": { "name": "g", "args": {} }, "thoughtSignature": "own" }] },
+        { "role": "user", "parts": [
+            { "functionResponse": { "name": "f", "response": { "a": 1 } } },
+            { "functionResponse": { "name": "g", "response": { "b": 2 } } }] },
+    ] });
+    written(body, |chat| chat.model = Some(model.into())).expect("a request")
+}
+
+#[test]
+fn a_gemini_3_turns_first_call_without_a_signature_takes_the_placeholder() {
+    let parts = &signed_for("gemini-3-flash-preview")["contents"][1]["parts"];
+    assert_eq!(parts[0]["thoughtSignature"], SIGNATURE_PLACEHOLDER);
+    assert_eq!(parts[1]["thoughtSignature"], "own");
+
+    let parts = &signed_for("models/gemini-2.5-flash")["contents"][1]["parts"];
+    assert!(parts[0].get("thoughtSignature").is_none(), "{parts}");
+}

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router";
 import type { Kind, Model } from "@/lib/api";
 import { useModels } from "@/hooks/queries";
 
@@ -23,7 +24,9 @@ export function preferred(models: Model[] | undefined): string | undefined {
 
 export function useModelChoice(kind: Kind, fallback: string): ModelChoice {
   const { data: models, isPending } = useModels(kind);
-  const [chosen, setModel] = useState("");
+  // A link may name the model to start with, as the models page's do.
+  const [params] = useSearchParams();
+  const [chosen, setModel] = useState(() => (params.get("kind") === kind ? (params.get("model") ?? "") : ""));
   const model = chosen.trim() || preferred(models) || fallback;
   return { model, chosen, setModel, models, isPending, fallback };
 }

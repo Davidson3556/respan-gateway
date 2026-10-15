@@ -127,17 +127,6 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
         "log",
         vec![format!("{:?}", config.log).to_lowercase()],
     );
-
-    let quirks = plan.upstreams.iter().flat_map(|u| {
-        let quirks = u.provider.vendor().quirks;
-        quirks
-            .iter()
-            .map(move |q| format!("{}: {}: {}", u.name, q.name, q.description))
-    });
-    let quirks: Vec<String> = quirks.collect();
-    if !quirks.is_empty() {
-        row(&mut lines, "quirks", quirks);
-    }
     lines.join("\n")
 }
 

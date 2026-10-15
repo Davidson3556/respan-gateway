@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useExplain } from "@/hooks/queries";
-import type { Explained, Provider, Routes } from "@/lib/api";
+import type { Explained, Routes } from "@/lib/api";
 import { describeError } from "@/lib/query-client";
 import { formatPrice } from "@/lib/routes";
 
@@ -37,9 +37,8 @@ function examples(routes: Routes): string[] {
   return [...new Set([...named, ...claimed])].slice(0, 5);
 }
 
-export function RouteTester({ routes, providers, kinds }: {
+export function RouteTester({ routes, kinds }: {
   routes: Routes;
-  providers: Provider[];
   kinds: string[];
 }) {
   const id = useId();
@@ -111,11 +110,10 @@ export function RouteTester({ routes, providers, kinds }: {
                 </p>
                 <ol className="divide-y rounded-lg border bg-muted/30" aria-label="Where it goes">
                   {data.to?.map((c, i) => {
-                    const provider = providers.find((p) => p.name === c.provider);
                     return (
                       <li key={`${c.provider}/${c.model}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-sm">
                         <span className="w-4 font-mono text-xs text-muted-foreground">{i + 1}</span>
-                        <ProviderIcon name={c.provider} baseUrl={provider?.base_url ?? ""} />
+                        <ProviderIcon name={c.provider} />
                         <span className="font-semibold">{c.provider}</span>
                         {c.model && <code className="min-w-0 break-all text-xs text-muted-foreground">{c.model}</code>}
                         <span className="ml-auto flex flex-wrap items-center gap-3 text-xs">

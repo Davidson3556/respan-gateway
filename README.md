@@ -135,9 +135,15 @@ needs `client_keys`. Without `cors`, nothing changes.
 [`gateway.example.toml`](gateway.example.toml): providers (vendors or
 spelled out), `formats` served, `client_keys`, `mcp` servers, `cors`,
 `listen`, `log`, `ui`, `body_limit`, `ws_message_limit`,
-`prices` (adds a cost to each request), `shutdown_grace`, `routes`, and
-`plugins`. Each compiled-in plugin is configured under its own name in
-`plugins`, and the gateway runs them in a fixed order whatever the file's:
+`models` (declared by `provider/model`, each laid over what that provider's
+list says of it: its `pricing` in US dollars per million tokens, and
+anything else a model card has), `shutdown_grace`, `routes`, and
+`plugins`. Each request's cost is the sum of its calls' to providers, each
+priced at the `pricing` of the model it sent, as declared or as its
+provider's list says (a route's pick, each step of a tool loop, a retry, a
+race's loser). Each compiled-in plugin is configured under its own
+name in `plugins`, and the gateway runs them in a fixed order whatever the
+file's:
 
 ```toml
 [plugins.routing]
@@ -154,7 +160,7 @@ to = "groq"                             # Sent as asked
 history = 1000
 file = "./requests.jsonl"               # Keep history across restarts
 
-[plugins.responses]                     # previous_response_id with any provider
+[plugins.responses]                     # Conversation state: on unless enabled = false
 keep = "1h"
 
 [plugins.respan]                        # Each request a trace in Respan
@@ -164,10 +170,15 @@ key = "env:RESPAN_API_KEY"
 
 OpenAI keeps its own Responses, so a Responses client's `previous_response_id`
 works when OpenAI answers. Translated to another provider, which keeps
-nothing, it is refused unless `[plugins.responses]` is set: the gateway then
-keeps each translated response in memory, for the client key that made it and
-for `keep`, and sends a follow-up the conversation it names. A request that
-says `store: false` is not kept.
+nothing, the gateway keeps each translated response in memory, for the client
+key that made it and for `keep`, and sends a follow-up the conversation it
+names. A request that says `store: false` is not kept. The other way, a Chat
+Completions client's call to OpenAI's Responses stores nothing at OpenAI
+(`store: false`), and the reasoning its tool calls came of is kept the same
+way, under each call's id, and sent back before those calls in the next turn,
+as a Chat client cannot carry it. Both live in one gateway's memory: a client
+whose requests reach several gateways must reach the one that kept them.
+`[plugins.responses] enabled = false` turns it off.
 
 Configuration is TOML only. The gateway reads `gateway.toml` from the working
 directory, or uses provider keys from the environment when no file exists.
@@ -183,10 +194,12 @@ unstyled structured logs and `--log off` disables request logs.
 `/v1/models`) or a glob (`"llama-*"`). `to` is a candidate or a list:
 `provider`, `provider/model`, or `provider/{model}` (`{model}` the name asked),
 each alone or `{ target, weight }`. `pick` orders them: `first` (default),
-`cheapest` (by `prices` or the provider's listing, input + 3 × output),
+`cheapest` (by each model's `pricing`, input + 3 × output),
 `fastest` (the gateway's own time to first response; unknown ones get
 tried), `weighted` or `random`. `needs = ["tools"]` drops candidates whose
-listing lacks it; `when = { clients, kinds }` limits a route to client key
+listing lacks it (a capability, `tools`, `reasoning` or `structured_outputs`,
+or what it reads, `image`, `audio`, `video` or `document`; `vision` and `pdf`
+name the same); `when = { clients, kinds }` limits a route to client key
 names and kinds. A failed candidate falls back to the next (`fallback =
 false` stops it), each tried `tries` times (1 to 10) with `backoff` doubled up
 to `max_backoff` (as `Retry-After` asks); `hedge = "200ms"` races them
@@ -384,6 +397,16 @@ calls again. The client sees one reply: the final step's, with the usage of
 every step summed. A client can leave the loop out of one request with the
 header `x-respan-tool-loop: off`.
 
+A live session (OpenAI Realtime, Gemini Live, either way across) gets the
+servers' tools too, beside its own, in each configuration that sets tools.
+When the model calls one, the gateway runs it while the session goes on,
+sends the model the answer and asks it to respond; the client sees neither the
+call nor its answer, nor the response that only made it, but the response that
+answers. A call of the client's own tool is the client's, as is asking for the
+next response when a response called both. Each call is bounded by
+`tool_timeout`, and the session's answers by `max_results`; `max_steps` and
+`timeout` are a chat's.
+
 - It stops at a reply that calls no gateway tool; at a reply that calls one of
   the client's *own* tools (the client runs those; the gateway's calls in that
   reply are left out of what it sees); at `max_steps`, where the last call
@@ -433,7 +456,7 @@ different formats of one kind.
 | image | `openai-images` (Imagen through Gemini's OpenAI-compatible endpoint) |
 | transcription, speech | `openai-transcriptions`, `openai-speech` |
 | embedding | `openai-embeddings` |
-| video | `openai-videos` for clients; `gemini-veo` (Veo) as a provider |
+| video | `openai-videos`, `gemini-veo` (Veo's `predictLongRunning`, its operations and file downloads) |
 
 Realtime usage after a tool call or an interruption may arrive in the next
 `response.done` rather than the one that ended the turn
@@ -453,9 +476,11 @@ Details per format: [chat](crates/formats/conversation-http/README.md),
 `mistral`, `together`, `fireworks`, `ollama`, `azure`, `vllm`, `typesafe` and
 `cloudflare` (Workers AI, at `CLOUDFLARE_ACCOUNT_ID`'s base URL), a file each
 in [`crates/vendors`](crates/vendors/README.md), which lists the formats
-each speaks, the quirks the gateway handles for it (`check` prints them)
-and the base URL each format takes. Any other compatible endpoint is a
-provider with a `base_url` and a format.
+each speaks, how the gateway handles where it departs from a spec, and the
+base URL each format takes. Any other compatible endpoint is a
+provider with a `base_url` and a format; `formats` can also give each
+format a base URL of its own, `formats = { "openai-chat" = "https://h/v1" }`,
+as moving Gemini, whose formats sit at different URLs, needs.
 
 ## Web UI
 
@@ -486,8 +511,8 @@ runnable, tested [`examples/`](examples/README.md) of the
 | `crates/kinds/` | Event types per kind: `conversation`, `media`, `decision`, `realtime`, `mcp` |
 | `crates/wires/` | Bytes at both edges, no kind: `http` (bodies, credentials, path matching), `http-transport` (Reqwest), `http-faults`, `sse`, `ws` |
 | `crates/formats/` | A kind over a wire, no vendor: `conversation-http`, `media-http`, `decision-http`, `realtime-ws`, `mcp-http` |
-| `crates/vendor-kit/` | A vendor as a template, and a provider of it: register its formats, list its models |
-| `crates/vendors/` | Every vendor, a file each: URL, key, formats, quirks |
+| `crates/vendors/kit/` | A vendor as a template, and a provider of it: register its formats, list its models; what vendors share |
+| `crates/vendors/` | Every vendor, a file each, in two tiers: `green/`, verified end to end against the live API, and `yellow/`, tested against fakes |
 | `crates/plugins/routing`, `fallback`, `tool-loop` | First-party plugins: model routing and dispatch to a route's candidates; retry, fallback and race; the tool loop |
 | `crates/serve/` | Hosting: one Axum router for HTTP and WebSocket sessions |
 | `apps/gateway/` | The binary and its library: config, composition, client keys, `/v1/models`, request log, admin API |

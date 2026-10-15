@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { render, screen, within } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it } from "vitest";
+import { json, renderApp, serve } from "@/test/render";
 import { byProvider, modelFacts } from "@/lib/models";
 import type { Model } from "@/lib/api";
 import { ModelPicker } from "./model-picker";
@@ -30,7 +31,8 @@ it("groups models by provider, in the order providers are first listed", () => {
 });
 
 it("picks a listed model, found by its provider's name", async () => {
-  render(<Picker />);
+  serve({ "GET /ui/api/providers": () => json({ providers: [] }) });
+  renderApp(<Picker />);
   await userEvent.click(screen.getByRole("combobox", { name: "Model" }));
   await userEvent.type(screen.getByPlaceholderText(/Search 3 models/), "openai");
   const options = screen.getAllByRole("option");
@@ -42,7 +44,8 @@ it("picks a listed model, found by its provider's name", async () => {
 });
 
 it("uses a typed ID no provider lists", async () => {
-  render(<Picker />);
+  serve({ "GET /ui/api/providers": () => json({ providers: [] }) });
+  renderApp(<Picker />);
   await userEvent.click(screen.getByRole("combobox", { name: "Model" }));
   await userEvent.type(screen.getByPlaceholderText(/or enter an ID/), "my-provider/private-model-v2");
   await userEvent.click(screen.getByRole("option", { name: "Use my-provider/private-model-v2" }));
@@ -50,7 +53,8 @@ it("uses a typed ID no provider lists", async () => {
 });
 
 it("offers no typed ID that is already listed", async () => {
-  render(<Picker />);
+  serve({ "GET /ui/api/providers": () => json({ providers: [] }) });
+  renderApp(<Picker />);
   await userEvent.click(screen.getByRole("combobox", { name: "Model" }));
   await userEvent.type(screen.getByPlaceholderText(/Search/), "gpt-5-mini");
   const list = screen.getByRole("listbox");
@@ -63,7 +67,7 @@ it("says what a model's list said of it: name, context and price", () => {
       id: "claude-haiku-5-5",
       display_name: "Claude Haiku 5.5",
       context_window: 1_000_000,
-      pricing: { input: 1, output: 5 },
+      pricing: { input: 1, output: 5, from: "provider" },
     }),
   ).toBe("Claude Haiku 5.5 · 1M ctx · $1 / $5 per M");
   expect(modelFacts({ id: "gpt-x", display_name: "gpt-x", context_window: 128_000 })).toBe("128K ctx");
@@ -71,7 +75,7 @@ it("says what a model's list said of it: name, context and price", () => {
 });
 
 it("says where a route goes", () => {
-  const route = { pick: "cheapest", to: ["openai/gpt-4.1", "groq/llama"] };
+  const route = { pick: "cheapest" as const, to: ["openai/gpt-4.1", "groq/llama"] };
   expect(modelFacts({ id: "smart", owned_by: "routes", route })).toBe("cheapest: openai/gpt-4.1 +1");
   expect(modelFacts({ id: "pin", route: { pick: "first", to: ["openai/gpt-4o"] } })).toBe("→ openai/gpt-4o");
 });

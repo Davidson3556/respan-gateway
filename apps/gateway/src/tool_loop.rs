@@ -1,6 +1,6 @@
 //! The tool loop of the binary: `plugins.tool_loop` in the config names `mcp` servers
-//! whose tools the gateway offers to the model in chat requests and runs for
-//! it ([`respan_gateway_plugin_tool_loop`] is the loop; this is the tools).
+//! whose tools the gateway offers to the model in chat requests and live
+//! sessions and runs for it ([`respan_gateway_plugin_tool_loop`] is the loop; this is the tools).
 //!
 //! The tools are reached as the gateway reaches any MCP server: as its
 //! providers, with the server's own credentials, never a client's. The
@@ -29,10 +29,11 @@ use respan_gateway_core::{
 use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, Method};
 use respan_gateway_mcp::{Input, Message, Output, PROTOCOL, RpcError, answer};
-use respan_gateway_mcp_http::Owner;
 use respan_gateway_plugin_tool_loop::{
     Outcome, ToolFilter, ToolHop, ToolLoop, ToolScope, Toolbox, Tools,
 };
+use respan_gateway_realtime_ws::SessionModel;
+use respan_gateway_sdk::Caller;
 use serde_json::{Value, json};
 
 use crate::config::ToolLoopConfig;
@@ -117,8 +118,9 @@ pub fn check(
 }
 
 /// The loop, with the tools of the servers `tool_loop` names. Which requests it
-/// applies to: chat requests of a model `tool_loop.models` names (all, if it
-/// names none), unless the client sends `x-respan-tool-loop: off`.
+/// applies to: chat requests and live sessions of a model `tool_loop.models`
+/// names (all, if it names none), unless the client sends
+/// `x-respan-tool-loop: off`.
 pub fn plugin(
     tool_loop: &ToolLoopConfig,
     anthropic: impl Fn(&str) -> bool + Send + Sync + 'static,
@@ -130,9 +132,11 @@ pub fn plugin(
     let prefixes = tool_loop.models.clone();
     let mut plugin = ToolLoop::new(tools)
         .flag_errors_for(anthropic)
-        .when(move |cx, input| {
+        .when(move |cx, model| {
             let opted_out = opted_out(cx);
-            let model = input.model().unwrap_or_default();
+            // A live session's, as routing dialed it.
+            let session = cx.extensions().get::<SessionModel>();
+            let model = model.or(session.map(|m| m.0.as_str())).unwrap_or_default();
             let named = prefixes.is_empty() || prefixes.iter().any(|p| model.starts_with(p));
             named && !opted_out
         });
@@ -580,7 +584,10 @@ impl Servers {
             .get(server)
             .ok_or_else(|| Fault::internal(format!("no call to '{server}'")))?;
         let call = call.clone().with_input(input).with_extension(ToolHop);
-        let call = call.with_extension(Owner(OWNER.to_owned()));
+        let call = call.with_extension(Caller {
+            id: OWNER.to_owned(),
+            name: OWNER.to_owned(),
+        });
         let mut outputs = call.await?.outputs::<Output>();
         let (mut messages, mut named) = (Vec::new(), None);
         while let Some(output) = outputs.next().await {

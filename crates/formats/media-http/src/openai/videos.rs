@@ -10,6 +10,7 @@ use super::{
     whole_json, write_field,
 };
 use crate::edge::{bind_provider, content};
+use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, ErrorCode, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
@@ -18,6 +19,7 @@ use respan_gateway_http::http::{
 };
 use respan_gateway_http::path::forwarded_path;
 use respan_gateway_http::{All, ClientIo, Decoder, Encoder, ProviderIo, Whole};
+use respan_gateway_http::{Connect, Upstream};
 use respan_gateway_media::video::{Create, Input, Job, JobError, Jobs, Output, Status, Variant};
 use serde_json::{Map, Value, json};
 
@@ -54,6 +56,17 @@ impl Format<ClientIo, Input, Output> for OpenAiVideos {
 
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         Ok(bind_client(io, decode_request, response_encoder))
+    }
+}
+
+/// Its spec's: a bearer key, over HTTP, beside its base URL.
+impl Upstream for OpenAiVideos {
+    fn name(&self) -> &str {
+        NAME
+    }
+
+    fn provider(&self, name: String, connect: Connect) -> Provider {
+        Provider::new(name, *self, move |x| connect(x))
     }
 }
 

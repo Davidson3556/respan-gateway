@@ -357,7 +357,9 @@ pub enum Output {
     /// The provider refused something the client sent; the session goes on
     /// where the format allows it.
     Error {
-        /// The provider's code, such as `invalid_request_error`.
+        /// Why, as any format reads it.
+        cause: Cause,
+        /// The provider's own code for it, which only its format reads.
         code: Option<String>,
         /// What it said.
         message: String,
@@ -375,6 +377,20 @@ impl Output {
     pub fn native(format: impl Into<FormatId>, raw: impl Into<Value>) -> Self {
         Output::Native(NativeValue::new(format, raw))
     }
+}
+
+/// Why a provider answered an [`Output::Error`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Cause {
+    /// What the client sent is invalid: sent again as it is, it is
+    /// refused again.
+    Invalid,
+    /// A cancel found no response being made, as when one just ended: no
+    /// one's fault, and nothing changed.
+    NothingToCancel,
+    /// The provider failed.
+    Provider,
 }
 
 /// How a response ended.

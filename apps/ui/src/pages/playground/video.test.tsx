@@ -114,4 +114,45 @@ describe("VideoTab", () => {
     create();
     expect(await screen.findByText("No provider serves video yet")).toBeInTheDocument();
   });
+
+  it("speaks Gemini Veo: an operation polled by its name, its video at the gateway", async () => {
+    const name = "models/veo-3.0-generate-001/operations/veo_op1";
+    const operation = (extra: object = {}) => () => json({ name, ...extra });
+    const uri = "http://gateway.example/v1beta/files/veo_op1:download?alt=media";
+    const calls = serve({
+      "GET /v1/models": models,
+      "GET /ui/api/routes": () =>
+        json({
+          serve: [
+            { format: "openai-videos", kind: "video", endpoints: [] },
+            { format: "gemini-veo", kind: "video", endpoints: [] },
+          ],
+          routes: [],
+          defaults: [],
+        }),
+      "POST /v1beta/models/veo-3.0-generate-001:predictLongRunning": operation(),
+      [`GET /v1beta/${name}`]: poll(
+        operation(),
+        operation({ done: true, response: { generateVideoResponse: { generatedSamples: [{ video: { uri } }] } } }),
+      ),
+      "GET /v1beta/files/veo_op1:download": mp4,
+    });
+    renderApp(<VideoTab />);
+    fireEvent.click(await screen.findByRole("combobox", { name: "API" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Gemini Veo" }));
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "a paper boat" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create video" }));
+    // Veo says no progress: the bar shows none.
+    const bar = await screen.findByRole("progressbar", { name: "Video progress" });
+    expect(bar).not.toHaveAttribute("aria-valuenow");
+    const sent = calls.find((c) => c.key.startsWith("POST /v1beta/"))?.init.body;
+    expect(JSON.parse(String(sent))).toEqual({
+      instances: [{ prompt: "a paper boat" }],
+      parameters: { durationSeconds: 4 },
+    });
+    await advance(2000);
+    expect(await screen.findByLabelText("Generated video")).toHaveAttribute("src", "blob:video");
+    // The video came from the gateway, at the path the URI names.
+    expect(calls.some((c) => c.key === "GET /v1beta/files/veo_op1:download")).toBe(true);
+  });
 });

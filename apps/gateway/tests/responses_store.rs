@@ -1,6 +1,7 @@
-//! Responses the gateway keeps (`plugins.responses`): a Responses client's
-//! `previous_response_id`, to a provider of Chat Completions, which keeps
-//! nothing, is sent as the conversation it names.
+//! Conversation state the gateway keeps (`plugins.responses`): a Responses
+//! client's `previous_response_id`, to a provider of Chat Completions, which
+//! keeps nothing, is sent as the conversation it names; and a Chat client's
+//! reasoning between tool calls reaches OpenAI's Responses again.
 //!
 //! Run: `cargo test -p respan-gateway --test responses_store`.
 
@@ -179,4 +180,100 @@ async fn a_response_unknown_unkept_or_another_clients_is_refused_before_a_call()
         assert!(message.contains("previous_response_id"), "{body}");
     }
     assert_eq!(sent.lock().unwrap().len(), calls, "no call was made");
+}
+
+/// A Chat client's turns with OpenAI's Responses, with the plugin on as it
+/// is unless turned off: the reasoning a turn's tool calls came of goes back
+/// before those calls in the next turn, for the client key that made it.
+#[tokio::test]
+async fn a_chat_clients_reasoning_between_tool_calls_reaches_responses_again() {
+    let openai = mockllm::FakeOpenAi::start().await;
+    let gw = Gateway::start(&format!(
+        "client_keys = [{{ name = \"a\", key = \"ka\" }}, {{ name = \"b\", key = \"kb\" }}]\n\
+         formats = [\"openai-chat\"]\n\
+         providers = {{ p = {{ formats = \"openai-responses\", base_url = \"{}\", key = \"sk\" }} }}\n",
+        openai.base_url()
+    ))
+    .await;
+    let tools = json!([{ "type": "function", "function": { "name": "get_weather",
+        "parameters": { "type": "object", "properties": { "city": { "type": "string" } } } } }]);
+    let chat = |key: &'static str, body: Value| {
+        let gw = &gw;
+        async move {
+            let resp = client()
+                .post(gw.url("/v1/chat/completions"))
+                .bearer_auth(key)
+                .header("content-type", "application/json")
+                .body(body.to_string())
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status().as_u16();
+            let body = parse(&resp.text().await.unwrap());
+            assert_eq!(status, 200, "{body}");
+            body
+        }
+    };
+
+    // The first turn: the model reasons, then calls a tool.
+    openai.answer(
+        mockllm::Answer::tool_call("get_weather", json!({ "city": "Paris" }))
+            .reasoning("look it up"),
+    );
+    let first = chat(
+        "ka",
+        json!({ "model": "o3", "tools": tools,
+            "messages": [{ "role": "user", "content": "weather?" }] }),
+    )
+    .await;
+    let calls = first["choices"][0]["message"]["tool_calls"].clone();
+    let id = calls[0]["id"].as_str().unwrap().to_owned();
+    let sent = &openai.requests()[0].body;
+    assert_eq!(sent["store"], false, "{sent}");
+
+    // The second turn, as the client sends it: its history has no reasoning.
+    let second = |key: &'static str| {
+        chat(
+            key,
+            json!({ "model": "o3", "tools": tools, "messages": [
+                { "role": "user", "content": "weather?" },
+                { "role": "assistant", "content": null, "tool_calls": calls },
+                { "role": "tool", "tool_call_id": id, "content": "sunny" },
+            ] }),
+        )
+    };
+    second("ka").await;
+    let input = openai.requests()[1].body["input"].clone();
+    let kinds: Vec<&str> = input
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["type"].as_str().unwrap_or("message"))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "message",
+            "reasoning",
+            "function_call",
+            "function_call_output"
+        ],
+        "{input}"
+    );
+    assert!(
+        input[1]["encrypted_content"]
+            .as_str()
+            .is_some_and(|c| c.starts_with("gAAAA")),
+        "{input}"
+    );
+
+    // Another client key's history gets none of it.
+    second("kb").await;
+    let input = &openai.requests()[2].body["input"];
+    let reasons = input
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["type"] == "reasoning");
+    assert!(!reasons, "{input}");
 }

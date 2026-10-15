@@ -42,8 +42,10 @@ use crate::schema::{
 use respan_gateway_conversation::{
     Assembled, AssembledItem, Block, Content, Finish, Input, Message, Output, Role, Usage,
 };
+use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, Fault, Format, NativeValue};
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo, http};
+use respan_gateway_http::{Connect, KeyIn, Upstream};
 use serde_json::{Map, Value, json};
 
 use decode::AnthropicDecoder;
@@ -106,6 +108,21 @@ impl Format<ClientIo, Input, Output> for AnthropicMessages {
     }
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         self.bind_client(io)
+    }
+}
+
+/// Its spec's: the key in `x-api-key`, over HTTP.
+impl Upstream for AnthropicMessages {
+    fn name(&self) -> &str {
+        ANTHROPIC
+    }
+
+    fn key(&self) -> KeyIn {
+        KeyIn::Header("x-api-key")
+    }
+
+    fn provider(&self, name: String, connect: Connect) -> Provider {
+        Provider::new(name, *self, move |x| connect(x))
     }
 }
 

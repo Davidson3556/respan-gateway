@@ -1,6 +1,6 @@
 //! What the vendors' tests share: a gateway serving OpenAI Chat and
-//! Anthropic Messages, whose one provider speaks Chat Completions with a
-//! vendor's plugin and answers as told.
+//! Anthropic Messages, whose one provider speaks a vendor's format, or Chat
+//! Completions with a vendor's plugin, and answers as told.
 
 #![allow(dead_code)]
 
@@ -33,15 +33,33 @@ impl Vendor {
     }
 
     /// As [`Vendor::new`], its provider speaking `format`.
-    pub fn speaking<F>(
+    pub fn speaking<F: ProviderFormat>(
         format: F,
         plugin: &'static dyn Plugin,
         content_type: &'static str,
         body: String,
-    ) -> Self
-    where
-        F: respan_gateway_core::Format<respan_gateway_http::ProviderIo, Output, Input>,
-    {
+    ) -> Self {
+        Self::serving(format, Some(plugin), content_type, body)
+    }
+
+    /// A provider speaking `format`, a vendor's own, answering with
+    /// `chunks` as a stream, then `[DONE]`.
+    pub fn streaming_in<F: ProviderFormat>(format: F, chunks: &[Value]) -> Self {
+        Self::serving(format, None, "text/event-stream", stream_of(chunks))
+    }
+
+    /// A provider speaking `format`, a vendor's own, answering with `body`,
+    /// whole.
+    pub fn whole_in<F: ProviderFormat>(format: F, body: Value) -> Self {
+        Self::serving(format, None, "application/json", body.to_string())
+    }
+
+    fn serving<F: ProviderFormat>(
+        format: F,
+        plugin: Option<&'static dyn Plugin>,
+        content_type: &'static str,
+        body: String,
+    ) -> Self {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let seen = sent.clone();
         let answer = move |request: http::Request<Body>| {
@@ -58,8 +76,12 @@ impl Vendor {
             }
         };
         let transport = respan_gateway_http::connect(answer, http_support::LIMIT);
+        let mut provider = Provider::new("p", format, transport);
+        if let Some(plugin) = plugin {
+            provider = provider.plugin(plugin);
+        }
         let gateway = Gateway::new()
-            .provider(Provider::new("p", format, transport).plugin(plugin))
+            .provider(provider)
             .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
             .and_then(|g| g.client::<Input, _, _>(AnthropicMessages))
             .and_then(|g| g.target("p"))
@@ -69,9 +91,7 @@ impl Vendor {
 
     /// A provider answering with `chunks` as a stream, then `[DONE]`.
     pub fn streaming(plugin: &'static dyn Plugin, chunks: &[Value]) -> Self {
-        let mut stream: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
-        stream.push_str("data: [DONE]\n\n");
-        Self::new(plugin, "text/event-stream", stream)
+        Self::new(plugin, "text/event-stream", stream_of(chunks))
     }
 
     /// A provider answering with `body`, whole.
@@ -104,6 +124,24 @@ impl Vendor {
         self.gateway.idle().await;
         body
     }
+}
+
+/// A provider format of the conversation kind.
+pub trait ProviderFormat:
+    respan_gateway_core::Format<respan_gateway_http::ProviderIo, Output, Input>
+{
+}
+
+impl<F: respan_gateway_core::Format<respan_gateway_http::ProviderIo, Output, Input>> ProviderFormat
+    for F
+{
+}
+
+/// `chunks` as a stream, then `[DONE]`.
+fn stream_of(chunks: &[Value]) -> String {
+    let mut stream: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+    stream.push_str("data: [DONE]\n\n");
+    stream
 }
 
 /// An OpenAI Chat request, streamed if `stream`, asking for usage.
@@ -148,6 +186,6 @@ pub async fn listing(path: &'static str, body: Value) -> String {
 }
 
 /// The ids of `models`.
-pub fn ids(models: Vec<respan_gateway_vendors::Model>) -> Vec<String> {
+pub fn ids(models: Vec<respan_gateway_vendor_kit::Model>) -> Vec<String> {
     models.into_iter().map(|m| m.id).collect()
 }

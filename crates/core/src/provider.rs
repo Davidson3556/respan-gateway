@@ -17,7 +17,7 @@ use crate::{ClientContext, Extensions, Filter, Format, Plugin, Result};
 /// speaks, how each call gets a transport, and its own plugins.
 ///
 /// ```ignore
-/// let groq = Provider::new("groq", OpenAiChat, connect(..)).plugin(GroqQuirks);
+/// let groq = Provider::new("groq", OpenAiChat, connect(..)).plugin(Audit);
 /// let gateway = Gateway::new().provider(groq)?;
 /// ```
 #[derive(Clone)]

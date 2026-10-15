@@ -19,5 +19,7 @@ mod speech;
 mod transcriptions;
 #[path = "media/veo.rs"]
 mod veo;
+#[path = "media/veo_clients.rs"]
+mod veo_clients;
 #[path = "media/videos.rs"]
 mod videos;

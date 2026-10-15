@@ -64,8 +64,10 @@ use respan_gateway_conversation::{
     Assembled, AssembledBlock, AssembledItem, Block, Content, Finish, Input, Output, Reasoning,
     Role, Usage,
 };
+use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, Fault, Format, NativeValue};
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo};
+use respan_gateway_http::{Connect, Upstream};
 use serde_json::{Map, Value, json};
 
 use decode::OpenAiDecoder;
@@ -114,6 +116,17 @@ impl Format<ClientIo, Input, Output> for OpenAiChat {
     }
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         self.bind_client(io)
+    }
+}
+
+/// Its spec's: a bearer key, over HTTP, beside its base URL.
+impl Upstream for OpenAiChat {
+    fn name(&self) -> &str {
+        OPENAI
+    }
+
+    fn provider(&self, name: String, connect: Connect) -> Provider {
+        Provider::new(name, *self, move |x| connect(x))
     }
 }
 

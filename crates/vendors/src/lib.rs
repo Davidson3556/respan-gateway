@@ -1,43 +1,39 @@
 #![warn(missing_docs)]
-//! The vendors, one module each: where a vendor is, how it takes a key, the
-//! formats it speaks, and its quirks, each a [`Vendor`]. [`ALL`] lists them.
-//! [`Vendor::provider`] makes a provider of one ([`VendorProvider`]), which
-//! registers a core provider of each of its formats and lists its models.
+//! The vendors, in two tiers, each a crate: green
+//! (`respan-gateway-vendors-green`), maintained and verified end to end
+//! against their live APIs, and yellow (`respan-gateway-vendors-yellow`),
+//! maintained and tested against fakes but not verified end to end. Each
+//! vendor is a module of its tier's crate, here by its name: where it is,
+//! how it takes a key, and the formats it speaks, a [`Vendor`]. [`ALL`]
+//! lists them. [`Vendor::provider`] makes a provider of one
+//! ([`VendorProvider`]), which registers a core provider of each of its
+//! formats and lists its models.
 //!
 //! A quirk is a vendor's deployment departing from a spec it speaks; its
-//! module handles it, as data or as a plugin each of its core providers
-//! carries ([`Vendor::plugin`]), and tests it in `tests/<id>.rs` by a test
-//! named for it.
-
-use respan_gateway_media_http::openai::OpenAiVideos;
-use respan_gateway_passthrough_http::Passthrough;
+//! module handles it, as data or as its dialect of the spec's format
+//! (`respan_gateway_conversation_http::dialect`), and tests it in its
+//! crate's `tests/<id>.rs` by a test named for it. What a spec's own vendor
+//! does, as Gemini's signatures or OpenAI Realtime's transcription model,
+//! is the spec's, in its format.
 
 pub use respan_gateway_vendor_kit::{
-    Auth, Base, Body, BoxFuture, Connect, Either, HttpTransport, ListModels, Model, Models, Part,
-    Pricing, Quirk, Reach, Speaks, Vendor, VendorProvider, Wire, built_wrong, http, json, models,
+    Body, BoxFuture, Capability, Connect, FORMATS, HttpTransport, KeyIn, ListModels, Modality,
+    Model, Models, Part, Price, Reach, Upstream, Vendor, VendorProvider, built_wrong, chat, format,
+    http, json, located, models, time,
 };
 
-mod chat;
+pub use respan_gateway_vendors_green::{anthropic, gemini, openai, typesafe};
+pub use respan_gateway_vendors_yellow::{
+    azure, cloudflare, deepseek, fireworks, groq, mistral, ollama, openrouter, together, vllm, xai,
+};
 
-pub mod anthropic;
-pub mod azure;
-pub mod cloudflare;
-pub mod deepseek;
-pub mod fireworks;
-pub mod gemini;
-pub mod groq;
-pub mod mistral;
-pub mod ollama;
-pub mod openai;
-pub mod openrouter;
-pub mod together;
-pub mod typesafe;
-pub mod vllm;
-pub mod xai;
+/// The green vendors: maintained, and verified end to end.
+pub const GREEN: &[&Vendor] = respan_gateway_vendors_green::ALL;
 
-/// Every vendor. A format's own vendor, whose spec it is, comes before any
-/// other that speaks it: a provider of no vendor takes its key and sits as
-/// that vendor's does.
+/// The yellow vendors: maintained, not verified end to end.
+pub const YELLOW: &[&Vendor] = respan_gateway_vendors_yellow::ALL;
+
+/// Every vendor.
 pub const ALL: &[&Vendor] = &[
     &openai::VENDOR,
     &anthropic::VENDOR,
@@ -60,20 +56,3 @@ pub const ALL: &[&Vendor] = &[
 pub fn find(id: &str) -> Option<&'static Vendor> {
     ALL.iter().copied().find(|p| p.id == id)
 }
-
-/// Format `name` as `vendor` speaks it, else as a provider of no vendor
-/// does: as the format's own vendor, the first in [`ALL`] that speaks it,
-/// else as its spec has it ([`UNSPOKEN`]). `None` for a format of neither.
-pub fn speaks(vendor: Option<&Vendor>, name: &str) -> Option<&'static dyn Wire> {
-    let own = vendor.into_iter().flat_map(|v| v.formats);
-    let spoken = own.chain(ALL.iter().flat_map(|v| v.formats));
-    spoken.chain(UNSPOKEN).copied().find(|f| f.name() == name)
-}
-
-/// The formats no vendor speaks, as a provider of no vendor speaks them:
-/// passthrough at the origin, and OpenAI's Videos, which OpenAI no longer
-/// serves, at the base URL as its spec has it, for a provider that does.
-pub const UNSPOKEN: &[&dyn Wire] = &[
-    &Speaks::http(Passthrough).at(Base::Origin),
-    &Speaks::http(OpenAiVideos),
-];

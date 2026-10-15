@@ -1,0 +1,32 @@
+[package]
+name = "respan-gateway-vendors-green"
+description = "The green vendors: maintained, and verified end to end against their live APIs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+respan-gateway-conversation.workspace = true
+respan-gateway-conversation-http.workspace = true
+respan-gateway-core.workspace = true
+respan-gateway-decision-http.workspace = true
+respan-gateway-media-http.workspace = true
+respan-gateway-realtime-ws.workspace = true
+respan-gateway-vendor-kit.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+respan-gateway-http.workspace = true
+respan-gateway-realtime.workspace = true
+respan-gateway-serve.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }

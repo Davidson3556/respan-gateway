@@ -56,8 +56,9 @@ use respan_gateway_core::futures::stream::BoxStream;
 use respan_gateway_core::{ClientContext, Fault, Plugin, Response, async_trait};
 use respan_gateway_http::raw::Original;
 use respan_gateway_mcp::{Input, Message, Output, PROTOCOL};
-use respan_gateway_mcp_http::{FORMAT, Owner};
+use respan_gateway_mcp_http::FORMAT;
 use respan_gateway_plugin_tool_loop::{ToolFilter, ToolScope};
+use respan_gateway_sdk::Caller;
 use run::Run;
 use serde_json::Value;
 use session::Inner;
@@ -123,7 +124,7 @@ impl Plugin for Aggregate {
             return Ok(None);
         }
         let input = cx.input::<Input>()?.clone();
-        let owner = cx.extensions().get::<Owner>().map(|Owner(id)| id.clone());
+        let owner = cx.extensions().get::<Caller>().map(|c| c.id.clone());
         let scope = cx.extensions().get::<ToolScope>().cloned();
         let calls = self.0.servers.iter().map(|s| (s.clone(), cx.call(s)));
         let run = Run {

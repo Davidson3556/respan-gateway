@@ -14,32 +14,9 @@ use serde_json::{Map, Value, json};
 
 use super::{Answering, NAME, Shared, lock, setup};
 use crate::audio::Convert;
-use crate::foreign::Drops;
+use crate::foreign;
 use crate::json::{self, merge, own, untranslatable_input};
 use crate::session::{self, Say};
-
-/// What of another format's natives the Live API drops: OpenAI's event and
-/// item ids, its session's type, noise reduction, speed, transcription
-/// settings, tracing, includes, context truncation and output cap, and its
-/// voice detection's tuning. Each manages its context, and detects voices,
-/// itself.
-const DROPS: Drops = Drops {
-    format: NAME,
-    session: &[
-        "event_id",
-        "session.type",
-        "session.audio.input.noise_reduction",
-        "session.audio.input.transcription",
-        "session.audio.output.speed",
-        "session.include",
-        "session.tracing",
-        "session.truncation",
-        "session.max_output_tokens",
-    ],
-    vad: &["type", "threshold", "eagerness"],
-    message: &["id"],
-    event: &["event_id", "item.id", "response_id"],
-};
 
 /// A client's messages as events: its `setup` first and once, and each
 /// message one of `setup`, `clientContent`, `realtimeInput` and
@@ -329,7 +306,7 @@ impl Provider {
     }
 
     pub(super) fn write(&mut self, event: &Input, out: &mut Vec<Bytes>) -> Result<(), Fault> {
-        let event = DROPS.admit(event)?;
+        let event = foreign::admit(NAME, event)?;
         let mut messages = Vec::new();
         self.encode(&event, &mut messages)?;
         for message in &messages {
@@ -428,7 +405,9 @@ impl Provider {
                         out.push(Value::clone(value));
                         return Ok(());
                     }
-                    Input::Native(NativeValue { value, .. }) => return self.dropped(value),
+                    Input::Native(native) => {
+                        return foreign::native_input(NAME, native, self.heard);
+                    }
                     _ => return Err(refuse("another format's event")),
                 }
             }
@@ -483,20 +462,6 @@ impl Provider {
             out.push(json!({"realtimeInput": {"activityStart": {}}}));
         }
         Ok(())
-    }
-
-    /// Another format's event, which the Live API has none of: OpenAI's
-    /// truncation of what was heard and clearing of what is played are
-    /// dropped, as the Live API keeps only what it sent, and its clearing
-    /// of the user's audio if there is none since the last turn; any other
-    /// is refused.
-    fn dropped(&self, event: &Value) -> Result<(), Fault> {
-        let kind = event["type"].as_str().unwrap_or_default();
-        match kind {
-            "conversation.item.truncate" | "output_audio_buffer.clear" => Ok(()),
-            "input_audio_buffer.clear" if !self.heard => Ok(()),
-            _ => Err(untranslatable_input(NAME, &format!("`{kind}`"))),
-        }
     }
 
     /// The message that asks for an answer to what is held: messages as

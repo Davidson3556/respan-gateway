@@ -37,6 +37,13 @@
 //! A request for several candidates, one tool call at a time, or an end
 //! user's id is refused when written.
 //!
+//! A Gemini 3 model refuses a function call in the history that has no
+//! `thoughtSignature`, as a call made in another format has none: written
+//! for one, the first call of each `model` content without a signature of
+//! its own takes Google's placeholder ([`SIGNATURE_PLACEHOLDER`]), as Gemini
+//! signs only the first of a turn's parallel calls. A model before Gemini 3
+//! takes none.
+//!
 //! # Responses as events
 //!
 //! A stream and a whole body decode into the same events, by these rules:
@@ -80,20 +87,28 @@ use crate::schema::{
     kept_fields, merge_details, merge_fields, native_fields, set, unwritable_content, usage_extra,
 };
 use respan_gateway_conversation::{Assembled, AssembledItem, Block, Finish, Input, Output, Usage};
+use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, Fault, Format, NativeValue};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, StatusCode, request::Parts as RequestHead};
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo};
+use respan_gateway_http::{Connect, KeyIn, Upstream};
 use serde_json::{Map, Value, json};
 
 use decode::GeminiDecoder;
 use encode::{EventStream, JsonArray, ResponseFields, part_of};
+pub use request::needs_signatures;
 use request::{
-    read_config, read_messages, read_tools, split_system, write_config, write_messages, write_tools,
+    read_config, read_messages, read_tools, sign_calls, split_system, write_config, write_messages,
+    write_tools,
 };
 
 /// This format's name.
 const GEMINI: &str = "gemini-generate";
+
+/// What a Gemini 3 model accepts as the signature of a function call made
+/// elsewhere, as Google documents it.
+pub const SIGNATURE_PLACEHOLDER: &str = "skip_thought_signature_validator";
 
 /// What starts the id of a tool call Gemini named none for.
 const SYNTHETIC: &str = "gemini_call_";
@@ -177,6 +192,21 @@ impl Format<ClientIo, Input, Output> for GeminiGenerate {
     }
     fn bind(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         self.bind_client(io)
+    }
+}
+
+/// Its spec's: the key in `x-goog-api-key`, over HTTP.
+impl Upstream for GeminiGenerate {
+    fn name(&self) -> &str {
+        GEMINI
+    }
+
+    fn key(&self) -> KeyIn {
+        KeyIn::Header("x-goog-api-key")
+    }
+
+    fn provider(&self, name: String, connect: Connect) -> Provider {
+        Provider::new(name, *self, move |x| connect(x))
     }
 }
 
@@ -264,6 +294,9 @@ impl Schema for GeminiGenerate {
         let native = kept_fields(GEMINI, &chat.native, in_the_request, keep)?;
         let mut v = self.encode_json(chat)?;
         v.extend(native);
+        if needs_signatures(chat.model.as_deref()) {
+            sign_calls(&mut v);
+        }
         Ok(v)
     }
 

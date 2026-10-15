@@ -157,6 +157,21 @@ class Price(_Rates, total=False):
     cached_input: float  # for cached input tokens; `input` if unset
 
 
+class ModelConfig(TypedDict, total=False):
+    """A declared model, laid over what its provider's list says of it."""
+
+    pricing: Price  # a call's cost is its model's pricing
+    kind: str
+    display_name: str
+    description: str
+    context_window: int
+    max_output_tokens: int
+    input_modalities: List[str]  # "image", "audio", "video", "document"
+    capabilities: List[str]  # "tools", "reasoning", "structured_outputs"
+    created: str  # RFC 3339 or a date
+    retires_at: str  # RFC 3339 or a date
+
+
 class _NamedKey(TypedDict):
     name: str  # what the request log calls this client
     key: str  # literal or env:NAME
@@ -183,7 +198,7 @@ class GatewayConfig(TypedDict, total=False):
     body_limit: Union[int, str]  # bytes, or a size such as "32MiB"
     log: str  # "text", "json" or "off"
     ws_message_limit: Union[int, str]  # bytes, or a size such as "16MiB"
-    prices: Dict[str, Price]  # by model prefix; requests then get a `cost_usd`
+    models: Dict[str, ModelConfig]  # by "provider/model": laid over its provider's list
     shutdown_grace: Union[int, float, str]  # seconds, or "30s", "2m", "500ms"
     mcp: Dict[str, McpConfig]
     cors: CorsConfig

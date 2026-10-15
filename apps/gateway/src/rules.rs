@@ -148,6 +148,11 @@ fn retired(config: &Config) -> Result<(), Fault> {
              `max_backoff` and `until` are the route's too",
         ),
         (
+            config.prices.is_some(),
+            "prices are now each model's own: `[prices.\"gpt-4o\"]` is \
+             `[models.\"openai/gpt-4o\"]` with `pricing = { input = 2.5, output = 10 }`",
+        ),
+        (
             plugins.hedge.is_some(),
             "plugins: hedge is now a route's own: `[routes.\"gpt-*\"]` with \
              `to = [\"openai\", \"azure\"]` and `hedge = \"200ms\"`",
