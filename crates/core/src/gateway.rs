@@ -1,8 +1,9 @@
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::FutureExt;
 
@@ -10,7 +11,6 @@ use crate::call::SharedCall;
 use crate::client_output::client_flow;
 use crate::fault::PANICKED;
 use crate::format::{AnyFormat, Erased};
-use crate::layers::locked;
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
 use crate::response::Batch;
@@ -248,7 +248,7 @@ struct Delivery {
 impl Delivery {
     fn finish(&mut self, end: Result<()>) {
         if let (Err(fault), Some(call)) = (&end, &self.call) {
-            locked(call).finish(Err(fault.clone()));
+            call.lock().finish(Err(fault.clone()));
         }
         // On failure/cancellation, cut both directions before releasing the
         // pump's source. On success, an unread ready end may still settle its
@@ -259,7 +259,7 @@ impl Delivery {
         drop(self.writing.take());
         // Settle discarded provider ends only after the delivery result is
         // known; a write failure takes precedence over an unread ready end.
-        let discarded = std::mem::take(&mut *locked(&self.discarded));
+        let discarded = std::mem::take(&mut *self.discarded.lock());
         for mut batch in discarded {
             let _ = std::panic::catch_unwind(AssertUnwindSafe(|| batch.read()));
         }

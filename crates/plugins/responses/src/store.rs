@@ -2,9 +2,7 @@
 //! memory ([`Memory`]), or wherever a deployment of several gateways shares
 //! it.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use respan_gateway_conversation::{Content, MediaSource, Message};
 
@@ -32,93 +30,41 @@ pub trait Store: Send + Sync + 'static {
 
 /// Turns kept in this gateway's memory, each for `keep` after it was last
 /// written or read, up to [`Memory::BUDGET`] bytes of them, roughly, the
-/// stalest dropped first: not across a restart, nor shared between
-/// gateways.
+/// least recently used dropped first: not across a restart, nor shared
+/// between gateways.
 #[derive(Debug)]
 pub struct Memory {
-    keep: Duration,
-    kept: Mutex<Kept>,
+    turns: moka::sync::Cache<String, Turn>,
 }
 
 impl Memory {
     /// The bytes of messages kept at most, roughly.
-    pub const BUDGET: usize = 256 << 20;
+    pub const BUDGET: u64 = 256 << 20;
 
     /// Turns kept for `keep`.
     pub fn new(keep: Duration) -> Self {
-        Self {
-            keep,
-            kept: Mutex::default(),
-        }
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Kept> {
-        self.kept.lock().unwrap_or_else(PoisonError::into_inner)
+        let bytes = |_: &String, turn: &Turn| {
+            let bytes: usize = turn.messages.iter().map(bytes_of).sum();
+            u32::try_from(bytes).unwrap_or(u32::MAX)
+        };
+        let turns = moka::sync::Cache::builder()
+            .time_to_idle(keep)
+            .weigher(bytes)
+            .max_capacity(Self::BUDGET)
+            .eviction_policy(moka::policy::EvictionPolicy::lru())
+            .build();
+        Self { turns }
     }
 }
 
 impl Store for Memory {
     fn put(&self, key: String, turn: Turn) {
-        let mut kept = self.lock();
-        let bytes = turn.messages.iter().map(bytes_of).sum();
-        let held = Held {
-            turn,
-            bytes,
-            at: Instant::now(),
-        };
-        kept.bytes += bytes;
-        if let Some(had) = kept.turns.insert(key, held) {
-            kept.bytes -= had.bytes;
-        }
-        let expired: Vec<String> = kept
-            .turns
-            .iter()
-            .filter(|(_, h)| h.at.elapsed() > self.keep)
-            .map(|(key, _)| key.clone())
-            .collect();
-        expired.iter().for_each(|key| kept.remove(key));
-        while kept.bytes > Self::BUDGET {
-            let stalest = kept.turns.iter().min_by_key(|(_, h)| h.at);
-            match stalest.map(|(key, _)| key.clone()) {
-                Some(key) => kept.remove(&key),
-                None => break,
-            }
-        }
+        self.turns.insert(key, turn);
     }
 
     fn get(&self, key: &str) -> Option<Turn> {
-        let mut kept = self.lock();
-        let held = kept.turns.get_mut(key)?;
-        if held.at.elapsed() > self.keep {
-            kept.remove(key);
-            return None;
-        }
-        held.at = Instant::now();
-        Some(held.turn.clone())
+        self.turns.get(key)
     }
-}
-
-/// The turns kept, by key, and their bytes.
-#[derive(Debug, Default)]
-struct Kept {
-    turns: HashMap<String, Held>,
-    bytes: usize,
-}
-
-impl Kept {
-    fn remove(&mut self, key: &str) {
-        if let Some(held) = self.turns.remove(key) {
-            self.bytes -= held.bytes;
-        }
-    }
-}
-
-/// A turn held, its bytes, and when it was last written or read.
-#[derive(Debug)]
-struct Held {
-    turn: Turn,
-    bytes: usize,
-    at: Instant,
 }
 
 /// Roughly the bytes `message` holds: its text and media.

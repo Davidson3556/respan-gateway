@@ -21,9 +21,10 @@
 //! into the call, and a session the server names ([`Output::session`]) is
 //! written into the head of the client's answer.
 
+use parking_lot::Mutex;
 use respan_gateway_core::FaultKind;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, ready};
 
 use respan_gateway_core::futures::{Sink, SinkExt};
@@ -40,7 +41,7 @@ use respan_gateway_http::{Sse, Whole};
 use respan_gateway_http_faults::{ProviderError, Status};
 use serde_json::{Value, json};
 
-use crate::{PARSE_ERROR, body, lock, messages, read};
+use crate::{PARSE_ERROR, body, messages, read};
 use respan_gateway_mcp::{Input, Output, RpcCode, error};
 use respan_gateway_mcp::{Message, Outcome};
 
@@ -133,7 +134,7 @@ impl Format<ClientIo, Input, Output> for StreamableHttp {
         let io = io.with_error(move |fault, request, head| {
             content::default_content_type(head, JSON);
             match refused.get() {
-                Some(answered) => lock(answered).refusal(fault),
+                Some(answered) => answered.lock().refusal(fault),
                 None => Answered::of(request.body()).refusal(fault),
             }
             .into()
@@ -502,7 +503,7 @@ impl Answered {
 fn answer(reply: h::Reply, started: &Started) -> EventSink<Output> {
     let ask = reply.request();
     let answered = Arc::new(Mutex::new(Answered::of(ask.body())));
-    let asks = !lock(&answered).pending.is_empty();
+    let asks = !answered.lock().pending.is_empty();
     let head = |status| {
         let mut head = Response::new(()).into_parts().0;
         head.status = status;
@@ -592,7 +593,7 @@ impl h::Encoder<Output> for Answer {
     }
 
     fn encode(&mut self, output: &Output, out: &mut Vec<Bytes>) -> Result<(), Fault> {
-        let mut answered = lock(&self.answered);
+        let mut answered = self.answered.lock();
         if !self.events && output.messages.iter().any(|m| m.request_id().is_some()) {
             return Err(Fault::upstream(
                 "a server request requires an MCP event stream",
@@ -617,7 +618,7 @@ impl h::Encoder<Output> for Answer {
     }
 
     fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Bytes>) -> Result<(), Fault> {
-        let answered = lock(&self.answered);
+        let answered = self.answered.lock();
         match (&end, self.events) {
             (Ok(()), false) if !answered.messages.is_empty() => {
                 let json = body(answered.messages.clone(), answered.batch).to_string();

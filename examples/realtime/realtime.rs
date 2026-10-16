@@ -72,10 +72,11 @@ mod audio;
 #[path = "../support/text.rs"]
 mod text;
 
+use parking_lot::Mutex;
 use respan_gateway_core::ErrorCode;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use respan_gateway_conversation::Content;
@@ -97,10 +98,6 @@ use text::{Placeholders, Rewrite};
 
 /// The longest a session may last, unless a plugin says otherwise.
 const HOUR: Duration = Duration::from_secs(3600);
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// `text` with every e-mail address hidden in `vault`. A plain word scan; put
 /// a real detector here (see `pii`).
@@ -381,11 +378,11 @@ struct Meter {
 
 impl Meter {
     fn turns(&self) -> Vec<Turn> {
-        lock(&self.turns).clone()
+        self.turns.lock().clone()
     }
 
     fn ended(&self) -> Vec<Ended> {
-        lock(&self.ended).clone()
+        self.ended.lock().clone()
     }
 }
 
@@ -471,7 +468,7 @@ fn finish(status: &Finish) -> String {
 
 impl TurnMeter {
     fn record(&self, status: &str, usage: &Usage) {
-        lock(&self.turns).push(Turn {
+        self.turns.lock().push(Turn {
             session: self.session,
             status: status.to_owned(),
             input_tokens: usage.tokens.input_tokens,
@@ -579,7 +576,7 @@ impl Plugin for Meter {
                 .err()
                 .map_or("ok".into(), |f| f.code().to_owned());
             let turns = turns.load(Ordering::SeqCst);
-            lock(&self.ended).push(Ended {
+            self.ended.lock().push(Ended {
                 session: *session,
                 code,
                 turns,
@@ -663,10 +660,10 @@ impl<L: Ledger> Wallet<L> {
     /// as unsent), so a client that leaves during the wait still has it
     /// settled (to no effect if it never landed).
     async fn hold(&self, asked: bool) -> Result<HoldId, Fault> {
-        let amount = lock(&self.turns).bytes + TURN;
+        let amount = self.turns.lock().bytes + TURN;
         let hold = HoldId::new();
         {
-            let mut turns = lock(&self.turns);
+            let mut turns = self.turns.lock();
             turns.holds.push_back((hold, amount));
             if asked {
                 turns.unsent.push(hold);
@@ -695,7 +692,7 @@ impl<L: Ledger> Wallet<L> {
         }
         let said = input_context(&event)?;
         {
-            let mut turns = lock(&self.turns);
+            let mut turns = self.turns.lock();
             turns.bytes = turns.bytes.saturating_add(said);
             if turns.bytes > 128_000 {
                 return Err(Fault::new("session context exceeds its bound")
@@ -734,7 +731,7 @@ impl<L: Ledger> Wallet<L> {
                 let hold = self.hold(true).await?;
                 // Begun-able only once held: a turn the provider starts itself
                 // meanwhile must not take this entry.
-                let mut turns = lock(&self.turns);
+                let mut turns = self.turns.lock();
                 turns.unsent.retain(|held| *held != hold);
                 turns.unbegun.push_back((id, hold));
             }
@@ -751,29 +748,29 @@ impl<L: Ledger> Wallet<L> {
     async fn after(self: Arc<Self>, event: Output) -> Result<Output, Fault> {
         match &event {
             Output::ResponseStart { .. } => {
-                let asked = lock(&self.turns).unbegun.pop_front();
+                let asked = self.turns.lock().unbegun.pop_front();
                 let hold = match asked {
                     Some((_, hold)) => hold,
                     None => self.hold(false).await?,
                 };
-                lock(&self.turns).begun.push_back(hold);
+                self.turns.lock().begun.push_back(hold);
             }
             Output::Usage(usage) => {
                 let used = usage.tokens.input_tokens + usage.tokens.output_tokens;
-                let mut turns = lock(&self.turns);
+                let mut turns = self.turns.lock();
                 turns.used = Some(turns.used.unwrap_or_default().saturating_add(used));
             }
             Output::ResponseDone { .. } => {
                 let done = {
-                    let turns = lock(&self.turns);
+                    let turns = self.turns.lock();
                     let begun = turns.begun.front().copied();
                     begun.and_then(|b| turns.holds.iter().find(|(h, _)| *h == b).copied())
                 };
-                let used = lock(&self.turns).used.take();
+                let used = self.turns.lock().used.take();
                 if let Some((hold, amount)) = done {
                     let used = used.map(|n| Amount::try_from(n).unwrap_or(Amount::MAX));
                     self.ledger.settle(&hold, used.unwrap_or(amount)).await?;
-                    let mut turns = lock(&self.turns);
+                    let mut turns = self.turns.lock();
                     turns.begun.pop_front();
                     turns.holds.retain(|(h, _)| *h != hold);
                 }
@@ -782,7 +779,9 @@ impl<L: Ledger> Wallet<L> {
                 // A `response.create` the provider refused never ran: its hold
                 // is released, not charged at the session's end.
                 let id = refused(event).unwrap_or_default();
-                let refused = lock(&self.turns)
+                let refused = self
+                    .turns
+                    .lock()
                     .unbegun
                     .iter()
                     .find(|(asked, _)| asked == id)
@@ -791,14 +790,14 @@ impl<L: Ledger> Wallet<L> {
                     // Settled before it leaves the lists: a client that leaves
                     // meanwhile still has it settled by `end`.
                     self.ledger.settle(&hold, 0).await?;
-                    let mut turns = lock(&self.turns);
+                    let mut turns = self.turns.lock();
                     turns.unbegun.retain(|(_, held)| *held != hold);
                     turns.holds.retain(|(held, _)| *held != hold);
                 }
             }
         }
         let seen = output_context(&event)?;
-        let mut turns = lock(&self.turns);
+        let mut turns = self.turns.lock();
         turns.bytes = turns.bytes.saturating_add(seen);
         Ok(event)
     }
@@ -809,7 +808,7 @@ impl<L: Ledger> Wallet<L> {
     /// already settled is settled again to no effect.
     async fn end(&self) {
         let (cut, unsent) = {
-            let mut turns = lock(&self.turns);
+            let mut turns = self.turns.lock();
             turns.unbegun.clear();
             turns.begun.clear();
             (
@@ -1131,7 +1130,7 @@ struct Outcomes(Arc<Mutex<Vec<Result<(), Fault>>>>);
 impl Outcomes {
     #[cfg(test)]
     fn only(&self) -> Result<(), Fault> {
-        let mut all = lock(&self.0).clone();
+        let mut all = self.0.lock().clone();
         assert_eq!(all.len(), 1, "expected exactly one end: {all:?}");
         all.remove(0)
     }
@@ -1140,7 +1139,7 @@ impl Outcomes {
 #[async_trait]
 impl Plugin for Outcomes {
     async fn on_client_end(&self, _cx: &ClientContext, end: &Result<(), Fault>) {
-        lock(&self.0).push(end.clone());
+        self.0.lock().push(end.clone());
     }
 }
 

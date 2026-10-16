@@ -8,7 +8,7 @@ use respan_gateway_core::{
 };
 use respan_gateway_http::{self as h, bytes::Bytes, http};
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -111,7 +111,7 @@ async fn exercise(
 ) -> (http::Request<Bytes>, http::Response<Bytes>, usize) {
     use h::http_body_util::BodyExt;
     let decodes = Arc::new(AtomicUsize::new(0));
-    let sent = Arc::new(Mutex::new(None));
+    let sent = Arc::new(parking_lot::Mutex::new(None));
     let seen = sent.clone();
     let format = Text(decodes.clone());
     let mut gateway = Gateway::new()
@@ -126,7 +126,7 @@ async fn exercise(
                     async move {
                         h::call::credentials(&mut request, &http::HeaderMap::new());
                         let (head, body) = request.into_parts();
-                        *seen.lock().expect("record") = Some(http::Request::from_parts(
+                        *seen.lock() = Some(http::Request::from_parts(
                             head,
                             BodyExt::collect(body).await?.to_bytes(),
                         ));
@@ -171,7 +171,7 @@ async fn exercise(
     let bytes = BodyExt::collect(body).await.expect("body").to_bytes();
     let _ = end.await;
     gateway.idle().await;
-    let request = sent.lock().expect("record").take().expect("sent");
+    let request = sent.lock().take().expect("sent");
     (
         request,
         http::Response::from_parts(head, bytes),

@@ -1,10 +1,11 @@
 //! The log itself: the kept requests, their totals, and the line each
 //! prints.
 
+use parking_lot::{Mutex, MutexGuard};
 use std::collections::{HashMap, VecDeque};
 use std::io::IsTerminal;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Instant, SystemTime};
 
 use axum::extract::Request;
@@ -72,7 +73,7 @@ impl Entry {
     }
 
     pub(super) fn record(&self) -> MutexGuard<'_, RequestRecord> {
-        self.record.lock().unwrap_or_else(|e| e.into_inner())
+        self.record.lock()
     }
 
     pub fn snapshot(&self) -> RequestRecord {
@@ -156,7 +157,7 @@ impl RequestLog {
     }
 
     fn kept(&self) -> MutexGuard<'_, Kept> {
-        self.kept.lock().unwrap_or_else(|e| e.into_inner())
+        self.kept.lock()
     }
 
     /// The last `limit` requests that match `filter`, newest first.

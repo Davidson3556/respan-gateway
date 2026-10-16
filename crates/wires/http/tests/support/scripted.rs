@@ -3,8 +3,9 @@
 //! Replies are consumed in send order, not looked up by URL.
 #![allow(dead_code)]
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use respan_gateway_core::Fault;
 use respan_gateway_core::futures::stream;
@@ -63,7 +64,6 @@ impl Scripted {
     pub fn reply(&self, base: &str, response: Reply) -> &Self {
         self.queued
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .push_back((base.trim_end_matches('/').to_owned(), response));
         self
     }
@@ -77,10 +77,7 @@ impl Scripted {
     }
 
     pub fn sent(&self) -> Vec<http::Request<Bytes>> {
-        self.sent
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.sent.lock().clone()
     }
 }
 
@@ -114,13 +111,11 @@ impl ScriptedAt {
         self.fixture
             .sent
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .push(http::Request::from_parts(head, body));
         let (expected, reply) = self
             .fixture
             .queued
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .pop_front()
             .ok_or_else(|| Fault::upstream(format!("no mock response for {url}")))?;
         assert_eq!(

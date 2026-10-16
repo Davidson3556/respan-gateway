@@ -4,11 +4,12 @@
 #[path = "../../../../tests/support/http.rs"]
 mod http_support;
 use http_support::LIMIT;
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
 use h::bytes::Bytes;
@@ -45,7 +46,7 @@ struct Probe {
 impl Probe {
     fn release(&self) {
         let waiting = {
-            let mut state = self.state.lock().expect("body state");
+            let mut state = self.state.lock();
             state.released = true;
             state.waiting.take().expect("body registered its waker")
         };
@@ -80,7 +81,7 @@ struct External {
 impl External {
     fn new(steps: impl IntoIterator<Item = Step>) -> (Self, Arc<Probe>) {
         let probe = Arc::new(Probe::default());
-        probe.state.lock().expect("body state").steps = steps.into_iter().collect();
+        probe.state.lock().steps = steps.into_iter().collect();
         (
             Self {
                 probe: probe.clone(),
@@ -101,7 +102,7 @@ impl HttpBody for External {
     ) -> Poll<Option<Result<Frame<Bytes>, Fault>>> {
         let this = self.as_ref().get_ref();
         this.probe.polls.fetch_add(1, Ordering::SeqCst);
-        let mut state = this.probe.state.lock().expect("body state");
+        let mut state = this.probe.state.lock();
         if matches!(state.steps.front(), Some(Step::Wait)) {
             if !state.released {
                 state.waiting = Some(cx.waker().clone());
@@ -137,7 +138,7 @@ impl HttpBody for External {
 
 impl Drop for External {
     fn drop(&mut self) {
-        self.probe.state.lock().expect("body state").waiting.take();
+        self.probe.state.lock().waiting.take();
         self.probe.drops.fetch_add(1, Ordering::SeqCst);
     }
 }

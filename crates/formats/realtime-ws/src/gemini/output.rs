@@ -15,7 +15,7 @@ use respan_gateway_realtime::{Audio, AudioFormat, Cause, Output, Status, Usage};
 use respan_gateway_ws::CloseCode;
 use serde_json::{Map, Value, json};
 
-use super::{Answering, NAME, Shared, State, lock};
+use super::{Answering, NAME, Shared, State};
 use crate::audio::Convert;
 use crate::foreign;
 use crate::json::{self, at, count, merge, own, set, string, take, text, untranslatable_output};
@@ -66,7 +66,7 @@ impl Provider {
         let used = usage(&mut v);
         let mut events = Vec::new();
         let shared = self.shared.clone();
-        if self.decode(&mut lock(&shared), &mut v, &mut events) {
+        if self.decode(&mut shared.lock(), &mut v, &mut events) {
             out.push(Output::ResponseStart {
                 id: None,
                 native: None,

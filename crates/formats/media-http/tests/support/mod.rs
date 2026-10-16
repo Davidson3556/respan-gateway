@@ -4,8 +4,9 @@
 //! it does not take, a stream a model cannot give), and answers in its
 //! framing. A vendor's differences are its [`Rules`].
 
+use parking_lot::Mutex;
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body as Original;
@@ -95,10 +96,7 @@ impl Fake {
 
     /// The calls it took, in order.
     pub fn seen(&self) -> Vec<Seen> {
-        self.seen
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.seen.lock().clone()
     }
 
     /// A transport to it, with its key.
@@ -211,9 +209,7 @@ async fn answer(
     };
     call.path = path.clone();
     call.content_type = content_type;
-    seen.lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(call.clone());
+    seen.lock().push(call.clone());
     if head.method != http::Method::POST {
         return error(
             StatusCode::METHOD_NOT_ALLOWED,

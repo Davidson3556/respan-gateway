@@ -9,7 +9,8 @@
 mod edge;
 mod faults;
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use edge::*;
 use respan_gateway_core::futures::{FutureExt, StreamExt};
@@ -97,7 +98,7 @@ impl Plugin for Tap {
             }
             got
         });
-        lock(&self.0).push(task);
+        self.0.lock().push(task);
         let z = futures::stream::iter([Ok::<_, Fault>(Out("z".into()))]);
         Ok(Some(Response::stream(z)))
     }
@@ -117,7 +118,7 @@ async fn take_inputs_ends_with_an_err_when_the_request_ends_first() {
     let (res, _) = handle(&gw, req).await;
     let _ = read(res).await;
     gw.idle().await;
-    let task = lock(&taps).pop().unwrap();
+    let task = taps.lock().pop().unwrap();
     let got = tokio::time::timeout(std::time::Duration::from_secs(2), task)
         .await
         .unwrap()
@@ -135,7 +136,7 @@ impl Plugin for Collect {
         let got = got
             .into_iter()
             .map(|x| x.map(|i| i.0).map_err(|e| faults::code(&e).to_string()));
-        lock(&self.0).extend(got);
+        self.0.lock().extend(got);
         Ok(None)
     }
 }
@@ -154,7 +155,7 @@ async fn values_decoded_before_a_decoder_err_are_kept() {
     let _ = read(res).await;
     gw.idle().await;
     let want = frames(&[Ok("ok"), Ok("before-bad"), Err("bad_request")]);
-    assert_eq!(*lock(&got), want, "the plugin's inputs");
+    assert_eq!(*got.lock(), want, "the plugin's inputs");
 
     // and a call sent after a plugin that did not read them
     let seen = Seen::default();
@@ -194,7 +195,7 @@ fn reads_then_refuses_first(bodies: Arc<Mutex<Vec<Frames>>>) -> Dialer {
         async move {
             let frames = c.body.map(|f| f.map_err(|e| faults::code(&e).to_string()));
             let frames: Frames = frames.collect().await;
-            lock(&bodies).push(frames);
+            bodies.lock().push(frames);
             match n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
                 0 => Ok(answer(503, chunks(vec![]))),
                 _ => Ok(answer(200, chunks(vec!["a", "DONE"]))),
@@ -240,7 +241,7 @@ async fn a_retry_after_every_input_was_read_is_not_a_clean_empty_upload() {
     drop(tx);
     let (res, _end) = handle(&gw, req).await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), read(res)).await;
-    let bodies = lock(&bodies).clone();
+    let bodies = bodies.lock().clone();
     assert_eq!(bodies[0], frames(&[Ok("x"), Ok("y"), Ok("<END>")]));
     assert_eq!(bodies[1], frames(&[Err("internal")]));
 }

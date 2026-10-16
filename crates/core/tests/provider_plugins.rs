@@ -7,7 +7,8 @@
 mod edge;
 mod faults;
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use edge::*;
 use respan_gateway_core::futures::FutureExt;
@@ -20,17 +21,21 @@ struct Named(&'static str, Arc<Mutex<Vec<String>>>);
 #[async_trait]
 impl Plugin for Named {
     async fn on_client(&self, _: &mut ClientContext) -> Result<Option<Response>> {
-        lock(&self.1).push(format!("{} client", self.0));
+        self.1.lock().push(format!("{} client", self.0));
         Ok(None)
     }
 
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
-        lock(&self.1).push(format!("{} provider {}", self.0, px.provider()));
+        self.1
+            .lock()
+            .push(format!("{} provider {}", self.0, px.provider()));
         Ok(())
     }
 
     async fn on_provider_end(&self, px: &ProviderContext, _: &Result<()>) {
-        lock(&self.1).push(format!("{} end {}", self.0, px.provider()));
+        self.1
+            .lock()
+            .push(format!("{} end {}", self.0, px.provider()));
     }
 }
 
@@ -57,7 +62,7 @@ async fn a_providers_plugin_runs_after_the_gateways_on_its_calls_alone() {
     assert_eq!(code(&end.await), "ok");
     gw.idle().await;
     assert_eq!(
-        *lock(&seen),
+        *seen.lock(),
         [
             "plugin client",
             "plugin provider a",
@@ -74,7 +79,7 @@ async fn a_providers_plugin_runs_after_the_gateways_on_its_calls_alone() {
     assert_eq!(code(&end.await), "ok");
     gw.idle().await;
     assert_eq!(
-        *lock(&seen),
+        *seen.lock(),
         ["plugin client", "plugin provider b", "plugin end b"]
     );
 }

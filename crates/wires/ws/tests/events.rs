@@ -211,7 +211,7 @@ async fn a_filter_can_edit_what_the_provider_reads() {
 #[derive(Clone, Default)]
 struct Turns {
     seen: Arc<AtomicUsize>,
-    settled: Arc<std::sync::Mutex<Vec<usize>>>,
+    settled: Arc<parking_lot::Mutex<Vec<usize>>>,
 }
 
 #[async_trait]
@@ -227,10 +227,7 @@ impl Plugin for Turns {
     }
 
     async fn on_provider_end(&self, _px: &ProviderContext, _end: &Result<(), Fault>) {
-        let mut settled = self
-            .settled
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut settled = self.settled.lock();
         settled.push(self.seen.load(Ordering::SeqCst));
     }
 }
@@ -250,14 +247,14 @@ async fn a_provider_edge_plugin_counts_turns() {
     }
     assert_eq!(turns.seen.load(Ordering::SeqCst), 3);
     // Not settled while the session lasts.
-    assert!(turns.settled.lock().unwrap().is_empty());
+    assert!(turns.settled.lock().is_empty());
     close(&mut ws, 1000, "").await;
     assert!(matches!(
         hear(&mut ws).await,
         Heard::Closed(_) | Heard::Broken
     ));
     idle(&server.gateway).await;
-    assert_eq!(*turns.settled.lock().unwrap(), [3]);
+    assert_eq!(*turns.settled.lock(), [3]);
     assert_eq!(code(&ends.only()), "ok");
     assert_eq!(codes(calls.all()), ["ok"]);
 }

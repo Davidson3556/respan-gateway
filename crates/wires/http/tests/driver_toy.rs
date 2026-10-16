@@ -8,8 +8,9 @@
 #[path = "../../../../tests/support/http.rs"]
 mod http_support;
 use http_support::{LIMIT, serve, serve_live};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -261,10 +262,6 @@ fn text(bytes: &Bytes) -> String {
     String::from_utf8_lossy(bytes).to_string()
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// A body as text frames, or the failure code it broke with.
 type Seen_ = Vec<Result<String, String>>;
 
@@ -298,7 +295,7 @@ impl Seen {
                 let read = tokio::spawn(async move {
                     while let Some(f) = body.next().await {
                         let f = f.map(|b| text(&b)).map_err(|e| e.code().to_string());
-                        lock(&seen.frames).push(f);
+                        seen.frames.lock().push(f);
                     }
                     seen.done.send_replace(true);
                 });
@@ -315,7 +312,7 @@ impl Seen {
     /// finish, on the delivery's word, before the reader took the last frame.
     async fn frames(&self) -> Seen_ {
         let _ = self.done.subscribe().wait_for(|done| *done).await;
-        lock(&self.frames).clone()
+        self.frames.lock().clone()
     }
 }
 
@@ -820,7 +817,7 @@ async fn provider_saw(plugin: impl respan_gateway_core::Plugin) -> Vec<String> {
                     .into_iter()
                     .map(|b| text(&b.unwrap()))
                     .collect::<String>();
-                lock(&seen).push(body);
+                seen.lock().push(body);
                 Ok(answer(200, chunks(vec!["a", "DONE"])))
             }
             .boxed()
@@ -840,7 +837,7 @@ async fn provider_saw(plugin: impl respan_gateway_core::Plugin) -> Vec<String> {
         .plugin(plugin);
     let (resp, _) = open(&gw, chunks(vec!["client question"]), false).await;
     let _ = read(resp).await;
-    lock(&seen).clone()
+    seen.lock().clone()
 }
 
 /// A call sends its inputs as the plugins' filters left them, and a call
@@ -1056,7 +1053,7 @@ async fn response_opening_does_not_finish_an_outstanding_transport_write() {
             async move { completion.await.unwrap_or_else(|_| Err(Fault::abandoned())) }.boxed();
         let completion = Arc::new(Mutex::new(Some(completion)));
         let transport = fnt(move |_| {
-            let completion = lock(&completion).take().unwrap();
+            let completion = completion.lock().take().unwrap();
             async move {
                 let mut response = answer(200, chunks(vec!["a", "DONE"]));
                 response.1 = Some(completion);
@@ -1138,7 +1135,7 @@ async fn transport_factory_is_lazy_and_keeps_attempt_extensions_separate() {
     let transport = fnt({
         let seen = seen.clone();
         move |call| {
-            lock(&seen).push(
+            seen.lock().push(
                 *call
                     .extensions()
                     .get::<Extensions>()
@@ -1157,7 +1154,7 @@ async fn transport_factory_is_lazy_and_keeps_attempt_extensions_separate() {
     };
     let first = connection(1usize);
     let second = connection(2usize);
-    assert!(lock(&seen).is_empty());
+    assert!(seen.lock().is_empty());
     let drive = |(incoming, outgoing): respan_gateway_core::Connection<Out, In>| async move {
         let writing = deliver(outgoing, EventStream::single(In("q".into()))).unwrap();
         let (opened, written) = future::join(incoming, writing).await;
@@ -1165,7 +1162,7 @@ async fn transport_factory_is_lazy_and_keeps_attempt_extensions_separate() {
         written.unwrap();
     };
     future::join(drive(first), drive(second)).await;
-    let mut seen = lock(&seen).clone();
+    let mut seen = seen.lock().clone();
     seen.sort();
     assert_eq!(seen, [1, 2]);
 }

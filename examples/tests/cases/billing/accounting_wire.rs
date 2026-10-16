@@ -2,8 +2,9 @@
 //! edge contract itself, with no bytes and no heads. The ledger reads
 //! neither, so it settles here by the same rules as over HTTP.
 
+use parking_lot::Mutex;
 use respan_gateway_core::{ErrorCode, Provider};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::accounting::{Accounting, Quote, Tally};
 use crate::ledger::{Amount, MemoryLedger};
@@ -75,7 +76,7 @@ impl Format<Io, Reply, Question> for Pipe {
         let Io::Provider(dialer) = io else {
             return Err(Fault::config("expected provider I/O"));
         };
-        let next = dialer.0.lock().map(|mut s| s.pop()).ok().flatten();
+        let next = dialer.0.lock().pop();
         let (send, receive) = oneshot::channel();
         let incoming = async move { receive.await.map_err(|_| Fault::abandoned()) };
         let outgoing = EventSink::preparing(move |flow: &mut EventStream<Question>| {

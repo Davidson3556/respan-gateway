@@ -8,7 +8,8 @@
 
 mod support;
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
@@ -59,7 +60,7 @@ async fn respan_answering(
                     .to_str()
                     .unwrap_or_default()
                     .to_owned();
-                seen.lock().unwrap().push((auth, body));
+                seen.lock().push((auth, body));
                 let status = axum::http::StatusCode::from_u16(status).unwrap();
                 (status, Json(answer.clone()))
             }
@@ -105,11 +106,11 @@ async fn a_request_is_sent_to_respan_as_a_trace() {
 
     // Posted within a batch's wait.
     let mut waited = Duration::ZERO;
-    while posted.lock().unwrap().is_empty() && waited < Duration::from_secs(10) {
+    while posted.lock().is_empty() && waited < Duration::from_secs(10) {
         tokio::time::sleep(Duration::from_millis(100)).await;
         waited += Duration::from_millis(100);
     }
-    let posted = posted.lock().unwrap().clone();
+    let posted = posted.lock().clone();
     let (auth, body) = posted.first().expect("a trace posted");
     assert_eq!(auth, "Bearer rk-1");
     let resource = &body["resourceSpans"][0];
@@ -256,7 +257,7 @@ async fn the_dashboards_look_at_a_tool_server_is_not_traced() {
     assert_eq!(tools["tools"][0]["name"], "echo", "{tools}");
     // Longer than a batch's wait.
     tokio::time::sleep(Duration::from_secs(3)).await;
-    assert!(posted.lock().unwrap().is_empty());
+    assert!(posted.lock().is_empty());
 }
 
 #[tokio::test]
@@ -283,11 +284,11 @@ async fn a_request_another_plugin_answers_is_traced_too() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let mut waited = Duration::ZERO;
-    while posted.lock().unwrap().is_empty() && waited < Duration::from_secs(10) {
+    while posted.lock().is_empty() && waited < Duration::from_secs(10) {
         tokio::time::sleep(Duration::from_millis(100)).await;
         waited += Duration::from_millis(100);
     }
-    let posted = posted.lock().unwrap().clone();
+    let posted = posted.lock().clone();
     let (_, body) = posted.first().expect("a trace posted");
     let spans = body["resourceSpans"][0]["scopeSpans"][0]["spans"]
         .as_array()

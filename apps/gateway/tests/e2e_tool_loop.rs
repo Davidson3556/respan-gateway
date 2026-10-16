@@ -12,7 +12,8 @@
 mod realtime;
 mod support;
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -54,7 +55,7 @@ impl FakeMcp {
     }
 
     fn requests(&self) -> Vec<(String, Option<String>, Value)> {
-        self.seen.lock().unwrap().clone()
+        self.seen.lock().clone()
     }
 
     /// The JSON-RPC methods it was sent, in order.
@@ -86,7 +87,6 @@ async fn serve(req: Request<Body>, log: Seen) -> Response<Body> {
         .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     log.lock()
-        .unwrap()
         .push((method.clone(), auth.clone(), body.clone()));
     if auth.as_deref() != Some(&format!("Bearer {UPSTREAM_KEY}")) {
         return reply(StatusCode::UNAUTHORIZED, "no key".into());

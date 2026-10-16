@@ -13,6 +13,7 @@ mod support;
 use hooks::Outcomes;
 use http_support::{post, read_whole, serve};
 use mockllm::{Answer as FakeAnswer, FakeOpenAi};
+use parking_lot::Mutex;
 use respan_gateway_conversation::Input;
 use respan_gateway_core::ErrorCode;
 use respan_gateway_core::async_trait;
@@ -33,8 +34,8 @@ use respan_gateway_http::{Decoder, Encoder, Sse, Whole, call::credentials};
 use respan_gateway_http_faults::Status;
 use respan_gateway_passthrough_http as passthrough;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use support::{
     AddProvider, Anywhere, SendFuture, add_provider, openai, providers, unused, with_plugins,
 };
@@ -82,10 +83,7 @@ struct SentCalls(Arc<Mutex<Vec<SentCall>>>);
 
 impl SentCalls {
     fn all(&self) -> Vec<SentCall> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.0.lock().clone()
     }
 }
 
@@ -118,15 +116,11 @@ fn local_with_headers(
         let response = answer(index.fetch_add(1, Ordering::Relaxed), &head);
         Box::pin(async move {
             let body = body.try_collect::<Vec<_>>().await?.concat();
-            calls
-                .0
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(SentCall {
-                    uri: head.uri.to_string(),
-                    headers: head.headers,
-                    body: Bytes::from(body),
-                });
+            calls.0.lock().push(SentCall {
+                uri: head.uri.to_string(),
+                headers: head.headers,
+                body: Bytes::from(body),
+            });
             Ok((response, None))
         }) as SendFuture
     };
@@ -1362,13 +1356,13 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
 
     /// Reads the input.
     #[derive(Clone, Default)]
-    struct Read(std::sync::Arc<std::sync::Mutex<String>>);
+    struct Read(std::sync::Arc<parking_lot::Mutex<String>>);
 
     #[async_trait]
     impl Plugin for Read {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let prompt = cx.input::<Jev>()?.prompt.clone();
-            self.0.lock().map(|mut seen| *seen = prompt).ok();
+            *self.0.lock() = prompt;
             Ok(None)
         }
     }
@@ -1388,7 +1382,7 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
 
     assert_eq!(read_whole(serve(&gw, req).await.0).await.0, StatusCode::OK);
 
-    let seen = read.0.lock().map(|s| s.clone()).unwrap_or_default();
+    let seen = read.0.lock().clone();
     assert_eq!(seen, "arrived");
     // A relay passes the head and the body as they came.
     let sent = sent.all();
@@ -1398,15 +1392,12 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
 
 /// Notes the client's format, then refuses the request.
 #[derive(Clone, Default)]
-struct NoteFormat(Arc<std::sync::Mutex<Vec<String>>>);
+struct NoteFormat(Arc<parking_lot::Mutex<Vec<String>>>);
 
 #[async_trait]
 impl Plugin for NoteFormat {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        self.0
-            .lock()
-            .map(|mut n| n.push(cx.format().to_owned()))
-            .ok();
+        self.0.lock().push(cx.format().to_owned());
         Err(Fault::new("noted")
             .with(ErrorCode("noted".into()))
             .with(Status(StatusCode::FORBIDDEN)))
@@ -1441,7 +1432,7 @@ async fn the_first_format_served_that_accepts_a_request_serves_it() {
         ] {
             statuses.push(read_whole(serve(&gw, req).await.0).await.0.as_u16());
         }
-        let noted = note.0.lock().map(|n| n.clone()).unwrap_or_default();
+        let noted = note.0.lock().clone();
         (noted, statuses)
     };
 
@@ -1666,7 +1657,7 @@ async fn traffic_of_no_kind_is_a_kind_of_its_own() {
     /// Notes whether the request is of anywhere's kind, then of jev's kind
     /// by its input and its output type, then refuses.
     #[derive(Clone, Default)]
-    struct Kinds(Arc<std::sync::Mutex<Vec<(bool, bool, bool)>>>);
+    struct Kinds(Arc<parking_lot::Mutex<Vec<(bool, bool, bool)>>>);
 
     #[async_trait]
     impl Plugin for Kinds {
@@ -1681,7 +1672,7 @@ async fn traffic_of_no_kind_is_a_kind_of_its_own() {
                 cx.is_kind::<Jev>(),
                 cx.is_kind::<Answer>(),
             );
-            self.0.lock().map(|mut k| k.push(kinds)).ok();
+            self.0.lock().push(kinds);
             Err(Fault::new("noted")
                 .with(ErrorCode("noted".into()))
                 .with(Status(StatusCode::FORBIDDEN)))
@@ -1703,7 +1694,7 @@ async fn traffic_of_no_kind_is_a_kind_of_its_own() {
     let _ = read_whole(serve(&gw, to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
 
     assert_eq!(
-        kinds.0.lock().map(|k| k.clone()).ok(),
+        Some(kinds.0.lock().clone()),
         Some(vec![(true, false, false), (false, true, true)])
     );
 }
@@ -1797,7 +1788,7 @@ async fn until_content_returns_a_response_of_no_kind_at_its_first_bytes_or_its_f
 async fn a_translating_encoder_gets_none_of_the_providers_head() {
     /// jev v1, noting the headers its encoder is given.
     #[derive(Clone, Default)]
-    struct Noting(Arc<std::sync::Mutex<Option<http::HeaderMap>>>);
+    struct Noting(Arc<parking_lot::Mutex<Option<http::HeaderMap>>>);
 
     impl Format<ClientIo, Jev, Answer> for Noting {
         fn name(&self) -> &str {
@@ -1813,9 +1804,7 @@ async fn a_translating_encoder_gets_none_of_the_providers_head() {
                 .bind(
                     move |_| V1.inputs(),
                     move |reply| {
-                        seen.lock()
-                            .map(|mut h| *h = Some(reply.head().headers))
-                            .ok();
+                        *seen.lock() = Some(reply.head().headers);
                         V1.outputs(reply)
                     },
                 ))
@@ -1849,13 +1838,7 @@ async fn a_translating_encoder_gets_none_of_the_providers_head() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.ok().as_deref(), Some(&br#"{"output":"hi"}"#[..]));
-    let given = noting
-        .0
-        .lock()
-        .map(|h| h.clone())
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let given = noting.0.lock().clone().unwrap_or_default();
     // It describes the provider's protocol, which is not the client's.
     assert!(given.get("x-jev-trace").is_none());
     assert!(given.get("retry-after").is_none());

@@ -949,7 +949,8 @@ mod tests {
 
     #[test]
     fn a_program_is_found_with_an_extension_of_pathext() {
-        let dir = std::env::temp_dir().join(format!("respan-pathext-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("respan-pathext-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{e}"));
         std::fs::write(dir.join("npx.cmd"), "").unwrap_or_else(|e| panic!("{e}"));
         std::fs::write(dir.join("plain"), "").unwrap_or_else(|e| panic!("{e}"));

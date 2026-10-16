@@ -32,10 +32,11 @@
 //! `cargo run -p respan-gateway-examples --example jobs_background`
 
 use hmac::{Hmac, Mac};
+use parking_lot::Mutex;
 use respan_gateway_core::{ErrorCode, Provider};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 
 use respan_gateway_core::futures::{TryStreamExt, future, stream};
 use respan_gateway_core::{
@@ -186,10 +187,6 @@ fn streams(cx: &ClientContext, body: &Value) -> bool {
         .and_then(|asked| asked.uri().query())
         .unwrap_or_default();
     body["stream"] == true || query.split('&').any(|pair| pair == "stream=true")
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Jobs {
@@ -427,7 +424,7 @@ impl Jobs {
         {
             let cancelled = Bytes::from(json!({"id":id,"status":"cancelled"}).to_string());
             self.finish(id, None, cancelled.clone()).await?;
-            if let Some(run) = lock(&self.0.active).remove(id) {
+            if let Some(run) = self.0.active.lock().remove(id) {
                 run.abort();
             }
             self.deliver_webhooks().await?;
@@ -572,7 +569,7 @@ impl Plugin for Jobs {
                 .ok_or_else(|| Fault::internal("bad job id"))?;
             let output = job.output.clone();
             cx.filter(move |got: &mut passthrough::Output<Rest>| {
-                lock(&output).extend_from_slice(got.0.body());
+                output.lock().extend_from_slice(got.0.body());
                 Ok(())
             })?;
             self.chain(cx, &body).await?;
@@ -596,14 +593,14 @@ impl Plugin for Jobs {
     async fn on_client_end(&self, cx: &ClientContext, end: &Result<(), Fault>) {
         if let Some(job) = cx.extensions().get::<Job>() {
             let body = match end {
-                Ok(()) => lock(&job.output).clone().freeze(),
+                Ok(()) => job.output.lock().clone().freeze(),
                 Err(fault) => Bytes::from(
                     json!({ "id": job.id, "status": "failed", "error": fault.message() })
                         .to_string(),
                 ),
             };
             let _ = self.finish(&job.id, Some(&job.owner), body).await;
-            lock(&self.0.active).remove(&job.id);
+            self.0.active.lock().remove(&job.id);
             let _ = self.deliver_webhooks().await;
         }
     }
@@ -640,7 +637,7 @@ impl ResponsesServer {
             move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
                 let state = state.clone();
                 async move {
-                    let mut state = lock(&state);
+                    let mut state = state.lock();
                     state.requests.push(Recorded {
                         method,
                         uri,
@@ -673,14 +670,15 @@ impl ResponsesServer {
     }
 
     fn answer(&self, status: StatusCode, body: &str) {
-        lock(&self.state)
+        self.state
+            .lock()
             .replies
             .push_back((status, body.to_owned()));
     }
 
     #[cfg(test)]
     fn requests(&self) -> Vec<Recorded> {
-        lock(&self.state).requests.clone()
+        self.state.lock().requests.clone()
     }
 
     fn transport(&self) -> Result<HttpTransport, Fault> {

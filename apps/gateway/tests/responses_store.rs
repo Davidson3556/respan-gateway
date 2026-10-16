@@ -9,7 +9,8 @@
 
 mod support;
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use axum::Json;
 use axum::routing::post;
@@ -27,7 +28,7 @@ async fn fake() -> (String, Arc<Mutex<Vec<Value>>>) {
             let seen = seen.clone();
             async move {
                 let n = {
-                    let mut seen = seen.lock().unwrap();
+                    let mut seen = seen.lock();
                     seen.push(body);
                     seen.len()
                 };
@@ -125,7 +126,7 @@ async fn a_follow_up_is_sent_with_the_conversation_it_names() {
     .await;
     assert_eq!(status, 200);
 
-    let sent = sent.lock().unwrap().clone();
+    let sent = sent.lock().clone();
     // A response's instructions are its own; the turns before, a system item
     // among them, are carried on.
     assert_eq!(
@@ -168,7 +169,7 @@ async fn instructions_in_any_form_are_the_requests_own() {
     assert_eq!(status, 200, "{first}");
     let next = json!({ "model": "m", "input": "two", "previous_response_id": first["id"] });
     assert_eq!(respond(&gw, "ka", next).await.0, 200);
-    let sent = sent.lock().unwrap().clone();
+    let sent = sent.lock().clone();
     assert_eq!(
         said(&sent[1]),
         pairs(&[("user", "one"), ("assistant", "reply-1"), ("user", "two")])
@@ -185,7 +186,7 @@ async fn a_response_unknown_or_unkept_is_refused_before_a_call() {
         json!({ "model": "m", "input": "one", "store": false }),
     )
     .await;
-    let calls = sent.lock().unwrap().len();
+    let calls = sent.lock().len();
     for (key, id) in [("ka", json!("resp_nope")), ("ka", unkept["id"].clone())] {
         let (status, body) = respond(
             &gw,
@@ -197,7 +198,7 @@ async fn a_response_unknown_or_unkept_is_refused_before_a_call() {
         let message = body["error"]["message"].as_str().unwrap_or_default();
         assert!(message.contains("previous_response_id"), "{body}");
     }
-    assert_eq!(sent.lock().unwrap().len(), calls, "no call was made");
+    assert_eq!(sent.lock().len(), calls, "no call was made");
 }
 
 /// A Chat client's turns with OpenAI's Responses, with the plugin on as it

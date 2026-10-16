@@ -90,28 +90,8 @@ pub(super) fn clip(text: &str) -> String {
 
 /// `time` as RFC 3339 in UTC, to the millisecond.
 pub fn rfc3339(time: SystemTime) -> String {
-    let since = time
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = since.as_secs();
-    let (days, rest) = (secs / 86_400, secs % 86_400);
-    // Civil from days, after Howard Hinnant's algorithm.
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60,
-        since.subsec_millis()
-    )
+    let time = chrono::DateTime::<chrono::Utc>::from(time);
+    time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 #[cfg(test)]

@@ -4,9 +4,10 @@
 //! (`Tap`).
 #![allow(dead_code, clippy::unwrap_used)]
 
+use parking_lot::Mutex;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
@@ -278,10 +279,6 @@ impl Drop for Live {
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 impl Probe {
     pub async fn start() -> Self {
         Self::with(Behaviour::default()).await
@@ -335,7 +332,7 @@ impl Probe {
     }
 
     pub fn seen(&self) -> Vec<Seen> {
-        lock(&self.seen).clone()
+        self.seen.lock().clone()
     }
 
     /// The texts received, in order.
@@ -346,18 +343,18 @@ impl Probe {
     }
 
     pub fn upgrades(&self) -> Vec<Upgrade> {
-        lock(&self.upgrades).clone()
+        self.upgrades.lock().clone()
     }
 
     /// Tell the `n`th connection (0 is the first) something.
     pub fn tell(&self, n: usize, cmd: Cmd) {
-        let cmds = lock(&self.cmds);
+        let cmds = self.cmds.lock();
         cmds[n].send(cmd).unwrap();
     }
 
     /// Wait for the `n`th connection to be accepted.
     pub async fn connected(&self, n: usize) {
-        eventually("a provider connection", || lock(&self.cmds).len() > n).await;
+        eventually("a provider connection", || self.cmds.lock().len() > n).await;
     }
 }
 
@@ -386,14 +383,14 @@ async fn connection(stream: TcpStream, behaviour: Behaviour, shared: Shared) {
             resp.headers_mut()
                 .insert("sec-websocket-protocol", offered.clone());
         }
-        lock(&upgrades).push(Upgrade { uri, headers });
+        upgrades.lock().push(Upgrade { uri, headers });
         Ok(resp)
     };
     let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, record).await else {
         return;
     };
     let (tx, mut rx) = mpsc::unbounded_channel();
-    lock(&cmds).push(tx);
+    cmds.lock().push(tx);
     if behaviour.drop_at_once {
         return;
     }
@@ -411,7 +408,7 @@ async fn connection(stream: TcpStream, behaviour: Behaviour, shared: Shared) {
         tokio::select! {
             message = ws.next() => match message {
                 Some(Ok(Message::Text(text))) => {
-                    lock(&seen).push(Seen::Text(text.to_string()));
+                    seen.lock().push(Seen::Text(text.to_string()));
                     if behaviour.commands {
                         match text.as_str() {
                             "!drop" => return,
@@ -441,16 +438,16 @@ async fn connection(stream: TcpStream, behaviour: Behaviour, shared: Shared) {
                         return;
                     }
                 }
-                Some(Ok(Message::Binary(bytes))) => lock(&seen).push(Seen::Binary(bytes.to_vec())),
+                Some(Ok(Message::Binary(bytes))) => seen.lock().push(Seen::Binary(bytes.to_vec())),
                 Some(Ok(Message::Close(frame))) => {
-                    lock(&seen).push(Seen::Close(frame.map(|f| u16::from(f.code))));
+                    seen.lock().push(Seen::Close(frame.map(|f| u16::from(f.code))));
                     // The library replies as it is read on.
                     let _ = ws.next().await;
                     return;
                 }
                 Some(Ok(_)) => {}
                 Some(Err(_)) | None => {
-                    lock(&seen).push(Seen::Ended);
+                    seen.lock().push(Seen::Ended);
                     return;
                 }
             },
@@ -522,11 +519,11 @@ impl Tap {
     }
 
     pub fn sent_by_gateway(&self) -> Vec<String> {
-        lock(&self.from_gateway).clone()
+        self.from_gateway.lock().clone()
     }
 
     pub fn sent_by_provider(&self) -> Vec<String> {
-        lock(&self.from_provider).clone()
+        self.from_provider.lock().clone()
     }
 }
 
@@ -540,13 +537,13 @@ async fn tap(
     let taken = request.clone();
     #[allow(clippy::result_large_err)]
     let record = move |req: &Request, resp: Response| {
-        *lock(&taken) = Some((req.uri().to_string(), req.headers().clone()));
+        *taken.lock() = Some((req.uri().to_string(), req.headers().clone()));
         Ok(resp)
     };
     let Ok(mut gateway) = tokio_tungstenite::accept_hdr_async(stream, record).await else {
         return;
     };
-    let (uri, headers) = lock(&request).take().unwrap();
+    let (uri, headers) = request.lock().take().unwrap();
     let mut req = format!("{upstream}{uri}").into_client_request().unwrap();
     for name in ["authorization", "x-goog-api-key"] {
         if let Some(value) = headers.get(name) {
@@ -560,7 +557,7 @@ async fn tap(
         tokio::select! {
             message = gateway.next() => match message {
                 Some(Ok(Message::Text(text))) => {
-                    lock(&from_gateway).push(text.to_string());
+                    from_gateway.lock().push(text.to_string());
                     if provider.send(Message::Text(text)).await.is_err() { return }
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
@@ -571,7 +568,7 @@ async fn tap(
             },
             message = provider.next() => match message {
                 Some(Ok(Message::Text(text))) => {
-                    lock(&from_provider).push(text.to_string());
+                    from_provider.lock().push(text.to_string());
                     if gateway.send(Message::Text(text)).await.is_err() { return }
                 }
                 Some(Ok(Message::Close(frame))) => {

@@ -148,13 +148,9 @@ fn bad(what: &str) -> Fault {
     Fault::bad_request(format!("the multipart body {what}"))
 }
 
-/// A random boundary, which no content holds but by a chance of 2^-128.
-pub(crate) fn random_boundary() -> Result<String, Fault> {
-    let mut bits = [0u8; 16];
-    getrandom::fill(&mut bits)
-        .map_err(|e| Fault::internal("no secure random source").with_source(e))?;
-    let hex: String = bits.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(format!("respan-{hex}"))
+/// A random boundary, which no content holds but by a chance of 2^-122.
+pub(crate) fn random_boundary() -> String {
+    format!("respan-{}", uuid::Uuid::new_v4().simple())
 }
 
 /// Writes a form.

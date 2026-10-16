@@ -7,8 +7,9 @@ mod hooks;
 #[path = "../../../../tests/support/http.rs"]
 mod http_support;
 
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -166,7 +167,7 @@ struct Echo(Arc<Mutex<Vec<String>>>);
 
 impl Echo {
     fn seen(&self) -> Vec<String> {
-        self.0.lock().map(|s| s.clone()).unwrap_or_default()
+        self.0.lock().clone()
     }
 }
 
@@ -174,16 +175,16 @@ impl Echo {
     pub async fn send(&self, call: http::Request<Body>) -> respan_gateway_http::Sent {
         let (head, body) = call.into_parts();
         let seen = self.0.clone();
-        seen.lock().map(|mut s| s.push(head.uri.path().into())).ok();
+        seen.lock().push(head.uri.path().into());
         if let Some(host) = head.headers.get(HOST).and_then(|h| h.to_str().ok()) {
-            seen.lock().map(|mut s| s.push(format!("host={host}"))).ok();
+            seen.lock().push(format!("host={host}"));
         }
         let echoed = body.map(move |frame| {
             let noted = match &frame {
                 Ok(bytes) => String::from_utf8_lossy(bytes).into_owned(),
                 Err(fault) => format!("Err({})", fault.code()),
             };
-            seen.lock().map(|mut s| s.push(noted)).ok();
+            seen.lock().push(noted);
             frame
         });
         let mut resp = respan_gateway_http::http::Response::new(()).into_parts().0;
@@ -226,7 +227,7 @@ impl Plugin for Edit {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let (edit, seen) = (self.0, self.1.clone());
         cx.filter(move |input: &mut In| {
-            seen.lock().map(|mut s| s.push(input.clone())).ok();
+            seen.lock().push(input.clone());
             if let Some((from, to)) = edit.filter(|(from, _)| input.1 == *from) {
                 input.1 = input.1.replace(from, to);
             }
@@ -267,7 +268,7 @@ async fn r5_a_streams_request_codecs_keep_their_state_across_frames() {
     assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
     assert_eq!(read.len(), 3);
     assert_eq!(echo.seen(), ["/msg", "1|a", "2|b", "3|c"]);
-    let seen = edit.1.lock().map(|s| s.clone()).unwrap_or_default();
+    let seen = edit.1.lock().clone();
     let numbered = [(1, "a"), (2, "b"), (3, "c")].map(|(n, t)| In::new(n, t));
     assert_eq!(seen, numbered);
 }
@@ -569,7 +570,7 @@ impl Encoder<Output> for Noting {
             Output::Native(respan_gateway_core::NativeValue { .. }) => "other",
             _ => "event",
         };
-        self.0.lock().map(|mut n| n.push(noted)).ok();
+        self.0.lock().push(noted);
         self.1.encode(reply, out)
     }
 
@@ -624,7 +625,7 @@ async fn r2_an_encoder_writes_its_own_formats_events_as_they_are_and_no_others()
             .unwrap_or_else(|e| panic!("{e}"));
         let (_, _, out) = read_whole(serve(&gw, post("/v1/messages", body)).await.0).await;
         bodies.push(String::from_utf8_lossy(&out.unwrap_or_default()).into_owned());
-        noted.push(noting.0.lock().map(|n| n.clone()).unwrap_or_default());
+        noted.push(noting.0.lock().clone());
     }
     // Its own format's keep-alive is an event of its own, written as it is.
     assert!(noted[0].contains(&"own"), "{:?}", noted[0]);
@@ -716,7 +717,7 @@ async fn a_call_says_whether_it_was_handed_to_its_transport() {
     impl Plugin for Sent {
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
             let before = px.is_sent();
-            self.0.lock().map(|mut s| s.push((before, false))).ok();
+            self.0.lock().push((before, false));
             match self.1 {
                 true => Err(Fault::bad_request("refused by a hook")),
                 false => Ok(()),
@@ -725,10 +726,9 @@ async fn a_call_says_whether_it_was_handed_to_its_transport() {
 
         async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
             let sent = px.is_sent();
-            self.0
-                .lock()
-                .map(|mut s| s.last_mut().map(|last| last.1 = sent))
-                .ok();
+            if let Some(last) = self.0.lock().last_mut() {
+                last.1 = sent;
+            }
         }
     }
 
@@ -764,7 +764,7 @@ async fn a_call_says_whether_it_was_handed_to_its_transport() {
         let gw = chat(transport, vec![Arc::new(plugin.clone())]);
         let _ = read_whole(serve(&gw, post("/v1/chat/completions", CHAT)).await.0).await;
         gw.idle().await;
-        let seen = plugin.0.lock().map(|s| s.clone()).unwrap_or_default();
+        let seen = plugin.0.lock().clone();
         assert_eq!(seen, [(false, sent)], "{case}");
         assert_eq!(
             sent_to_transport.load(Ordering::SeqCst),
@@ -790,7 +790,7 @@ async fn a_call_says_whether_its_response_was_head_only() {
         }
 
         async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
-            self.0.lock().map(|mut s| s.push(px.is_refused())).ok();
+            self.0.lock().push(px.is_refused());
         }
     }
 
@@ -836,7 +836,7 @@ async fn a_call_says_whether_its_response_was_head_only() {
         let gw = chat(transport, vec![Arc::new(plugin.clone())]);
         let _ = read_whole(serve(&gw, post("/v1/chat/completions", CHAT)).await.0).await;
         gw.idle().await;
-        let seen = plugin.0.lock().map(|s| s.clone()).unwrap_or_default();
+        let seen = plugin.0.lock().clone();
         assert_eq!(seen, [head_only], "{case}");
     }
 }

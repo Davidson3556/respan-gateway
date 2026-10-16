@@ -4,9 +4,10 @@
 
 #![allow(dead_code, clippy::unwrap_used)]
 
+use parking_lot::Mutex;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -73,7 +74,7 @@ impl Gateway {
         let printed = stdout.clone();
         tokio::spawn(async move {
             while let Ok(Some(line)) = lines.next_line().await {
-                printed.lock().unwrap().push(line);
+                printed.lock().push(line);
             }
         });
         Self {
@@ -85,7 +86,7 @@ impl Gateway {
 
     /// What it printed on stdout, once some line contains `text`, bounded.
     pub async fn stdout_until(&self, text: &str) -> String {
-        let printed = || self.stdout.lock().unwrap().join("\n");
+        let printed = || self.stdout.lock().join("\n");
         let deadline = tokio::time::Instant::now() + BOUND;
         while !printed().contains(text) {
             let late = tokio::time::Instant::now() > deadline;

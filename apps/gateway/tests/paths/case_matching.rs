@@ -31,9 +31,9 @@ async fn no_case_insensitive_vendor_reads_a_passthrough_call_as_chat() {
             "x-http-method-override: POST\r\n",
         ),
     ] {
-        seen.lock().unwrap().clear();
+        seen.lock().clear();
         let status = send_request(&addr, method, target, extra).await;
-        let got = seen.lock().unwrap().clone();
+        let got = seen.lock().clone();
         for head in &got {
             let line = head.lines().next().unwrap_or_default();
             if line

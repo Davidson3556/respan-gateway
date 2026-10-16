@@ -7,7 +7,8 @@ use respan_gateway_http::http;
 
 use crate::http_support::LIMIT;
 
-use std::sync::{Arc, Mutex, PoisonError};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use respan_gateway_conversation::Usage;
 use respan_gateway_conversation::{Block, Delta, Finish, Input, Output};
@@ -113,10 +114,7 @@ impl Metered {
     /// Each metered call's `provider/model` and usage, in the order their
     /// end hooks ran.
     pub fn by_call(&self) -> Vec<(String, Usage)> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.0.lock().clone()
     }
 
     /// Every metered call's usage, added up.
@@ -139,7 +137,7 @@ impl Plugin for Metered {
         px.extensions_mut().insert(usage.clone());
         px.filter(move |reply: &mut Output| {
             if let Output::Usage(more) = reply {
-                *usage.0.lock().unwrap_or_else(PoisonError::into_inner) += &*more;
+                *usage.0.lock() += &*more;
             }
             Ok(())
         })
@@ -147,13 +145,10 @@ impl Plugin for Metered {
 
     async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
         if let Some(CallUsage(usage)) = px.extensions().get::<CallUsage>() {
-            let usage = *usage.lock().unwrap_or_else(PoisonError::into_inner);
+            let usage = *usage.lock();
             let model = px.input::<Input>().ok().and_then(|c| c.model.clone());
             let call = format!("{}/{}", px.provider(), model.unwrap_or_default());
-            self.0
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push((call, usage));
+            self.0.lock().push((call, usage));
         }
     }
 }

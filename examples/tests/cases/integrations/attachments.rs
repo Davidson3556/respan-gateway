@@ -357,12 +357,8 @@ async fn stored_file_types_and_ids_are_validated_before_conversion() -> Result<(
 
 #[tokio::test]
 async fn cached_text_survives_reopening_and_can_be_deleted_per_tenant() -> Result<(), Fault> {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| Fault::internal("clock"))?
-        .as_nanos();
-    let directory =
-        std::env::temp_dir().join(format!("respan-attachment-{}-{nonce}", std::process::id()));
+    let name = uuid::Uuid::new_v4().simple();
+    let directory = std::env::temp_dir().join(format!("respan-attachment-{name}"));
     std::fs::create_dir(&directory)
         .map_err(|e| Fault::internal("temp directory").with_source(e))?;
     let path = directory.join("cache.sqlite");
@@ -446,17 +442,14 @@ async fn extractor_rejects_invalid_input_and_reports_missing_poppler() {
 #[tokio::test]
 async fn completion_hooks_see_conversion_facts_for_each_attempt() -> Result<(), Fault> {
     #[derive(Clone)]
-    struct Record(Arc<std::sync::Mutex<Vec<(String, usize)>>>);
+    struct Record(Arc<parking_lot::Mutex<Vec<(String, usize)>>>);
     #[async_trait]
     impl Plugin for Record {
         async fn on_provider_end(&self, px: &ProviderContext, _: &Result<(), Fault>) {
-            self.0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((
-                    px.provider().to_owned(),
-                    px.extensions().get::<Converted>().map_or(0, |c| c.0),
-                ));
+            self.0.lock().push((
+                px.provider().to_owned(),
+                px.extensions().get::<Converted>().map_or(0, |c| c.0),
+            ));
         }
     }
     let fixture = Fixture::start().await;
@@ -469,10 +462,7 @@ async fn completion_hooks_see_conversion_facts_for_each_attempt() -> Result<(), 
         gateway(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?.plugin(records.clone());
     assert_eq!(send(&gw, "acme", REQUEST).await, StatusCode::OK);
     gw.idle().await;
-    let records = records
-        .0
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let records = records.0.lock();
     assert!(records.contains(&("text-only".into(), 1)));
     assert!(records.contains(&("reads-pdf".into(), 0)));
     Ok(())

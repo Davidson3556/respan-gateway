@@ -12,7 +12,7 @@ use respan_gateway_realtime::{
 use respan_gateway_ws::CloseCode;
 use serde_json::{Map, Value, json};
 
-use super::{Answering, NAME, Shared, lock, setup};
+use super::{Answering, NAME, Shared, setup};
 use crate::audio::Convert;
 use crate::foreign;
 use crate::json::{self, merge, own, untranslatable_input};
@@ -299,7 +299,7 @@ impl Provider {
         let mut session = Session::default();
         session.turns = Some(Turns::Manual);
         let shared = Shared::default();
-        lock(&shared).applied = Some(session);
+        shared.lock().applied = Some(session);
         let mut provider = Self::new(shared, session::say().0);
         (provider.opened, provider.activity) = (true, true);
         provider
@@ -322,7 +322,7 @@ impl Provider {
             Input::Session(s) if !self.opened => {
                 self.opened = true;
                 out.push(setup::encode(s, refuse)?);
-                lock(&self.shared).applied = Some(s.clone());
+                self.shared.lock().applied = Some(s.clone());
                 return Ok(());
             }
             Input::Session(s) => return self.update(s),
@@ -346,7 +346,7 @@ impl Provider {
                 }
                 return Ok(());
             }
-            Input::ToolResult(result) if lock(&self.shared).withdrawn.contains(&result.id) => {
+            Input::ToolResult(result) if self.shared.lock().withdrawn.contains(&result.id) => {
                 // The provider takes no answer to a call it cancelled, nor
                 // asks for one.
                 self.answered = true;
@@ -422,7 +422,7 @@ impl Provider {
 
     /// Whether the client ends the user's turns, as the setup says.
     fn manual(&self) -> bool {
-        let state = lock(&self.shared);
+        let state = self.shared.lock();
         let turns = state.applied.as_ref().and_then(|s| s.turns.as_ref());
         matches!(turns, Some(Turns::Manual))
     }
@@ -430,7 +430,7 @@ impl Provider {
     /// A later session, which the Live API cannot take: one that changes
     /// nothing is acknowledged, and one that changes anything refused.
     fn update(&mut self, s: &Session) -> Result<(), Fault> {
-        let mut state = lock(&self.shared);
+        let mut state = self.shared.lock();
         let applied = state.applied.get_or_insert_default();
         if let Some(field) = changes(applied, s) {
             let fixed = format!(
@@ -449,7 +449,7 @@ impl Provider {
     /// ends cancelled, and the rest of its turn is dropped. With manual
     /// turns the user's activity begins, which stops it.
     fn cancel(&mut self, manual: bool, out: &mut Vec<Value>) -> Result<(), Fault> {
-        let mut state = lock(&self.shared);
+        let mut state = self.shared.lock();
         if std::mem::take(&mut state.open) {
             state.cancelled = true;
             let done = Output::ResponseDone {
@@ -491,7 +491,7 @@ impl Provider {
 
     fn results(&self, results: &[ToolResult]) -> Result<Value, Fault> {
         let refuse = |what: &str| untranslatable_input(NAME, what);
-        let calls = &lock(&self.shared).calls;
+        let calls = &self.shared.lock().calls;
         let answers = results
             .iter()
             .map(|r| answer_json(r, calls.get(&r.id), refuse));

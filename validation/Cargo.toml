@@ -37,6 +37,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "s
 tokio = { version = "1", features = ["full", "test-util"] }
 
 [dev-dependencies]
+parking_lot = "0.12"
 respan-gateway-http-faults = { path = "../crates/wires/http-faults" }
 respan-gateway-plugin-relay = { path = "../crates/plugins/relay" }
 respan-gateway-http-transport = { path = "../crates/wires/http-transport" }

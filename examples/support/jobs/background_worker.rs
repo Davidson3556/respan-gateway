@@ -101,7 +101,7 @@ impl Jobs {
                 }
             }
         });
-        lock(&self.0.active).insert(active_id, task.abort_handle());
+        self.0.active.lock().insert(active_id, task.abort_handle());
         let _ = start.send(());
         Ok(())
     }

@@ -3,8 +3,9 @@
 
 #![allow(clippy::unwrap_used)]
 
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeAnthropic, FakeGemini, FakeOpenAi};
@@ -46,10 +47,7 @@ impl Fake {
     }
 
     fn answering(self, tool: &str, outcome: Outcome) -> Self {
-        self.answers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push((tool.to_owned(), outcome));
+        self.answers.lock().push((tool.to_owned(), outcome));
         self
     }
 
@@ -59,10 +57,7 @@ impl Fake {
     }
 
     fn calls(&self) -> Vec<(String, Value)> {
-        self.calls
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.calls.lock().clone()
     }
 }
 
@@ -83,13 +78,10 @@ impl Toolbox for Fake {
     async fn call(&self, name: &str, arguments: Value) -> Outcome {
         let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(now, Ordering::SeqCst);
-        self.calls
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push((name.to_owned(), arguments));
+        self.calls.lock().push((name.to_owned(), arguments));
         sleep(self.delay).await;
         self.active.fetch_sub(1, Ordering::SeqCst);
-        let answers = self.answers.lock().unwrap_or_else(PoisonError::into_inner);
+        let answers = self.answers.lock();
         let said = answers.iter().find(|(tool, _)| tool == name);
         said.map_or_else(|| Outcome::ok(format!("{name} ok")), |(_, o)| o.clone())
     }
@@ -131,10 +123,7 @@ struct Meter {
 impl Plugin for Meter {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         if let Some(Step(n)) = px.extensions().get::<Step>() {
-            self.steps
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(*n);
+            self.steps.lock().push(*n);
         }
         if !px.is_kind::<Input>() {
             return Ok(());
@@ -142,7 +131,7 @@ impl Plugin for Meter {
         let total = self.usage.clone();
         px.filter(move |output: &mut Output| {
             if let Output::Usage(usage) = output {
-                *total.lock().unwrap_or_else(PoisonError::into_inner) += *usage;
+                *total.lock() += *usage;
             }
             Ok(())
         })
@@ -206,12 +195,7 @@ impl Rig {
         let reports: Arc<Mutex<Vec<StepReport>>> = Arc::default();
         let sink: Sink = {
             let reports = reports.clone();
-            Arc::new(move |r| {
-                reports
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(r)
-            })
+            Arc::new(move |r| reports.lock().push(r))
         };
         let tool_loop = ToolLoop::new(Offer(fake.clone()))
             .observe(move |_| Some(sink.clone()))
@@ -276,18 +260,11 @@ impl Rig {
     }
 
     fn total(&self) -> Usage {
-        *self
-            .meter
-            .usage
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        *self.meter.usage.lock()
     }
 
     fn reports(&self) -> Vec<StepReport> {
-        self.reports
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.reports.lock().clone()
     }
 }
 
@@ -364,7 +341,7 @@ async fn a_two_step_loop_answers_the_client_once_with_summed_usage() {
     assert_eq!(messages[2]["role"], "tool");
     assert_eq!(messages[2]["tool_call_id"], "call_a");
     assert_eq!(messages[2]["content"], "alpha");
-    assert_eq!(*rig.meter.steps.lock().unwrap(), [1, 2]);
+    assert_eq!(*rig.meter.steps.lock(), [1, 2]);
 
     let reports = rig.reports();
     assert_eq!(reports.len(), 2);

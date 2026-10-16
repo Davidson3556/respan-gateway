@@ -17,8 +17,9 @@
 //! request's trace and sends it, and [`Respan::calls`] after them, which
 //! records each call.
 
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use respan_gateway_conversation::{Assembled, Content, Input, Output, Role};
@@ -98,7 +99,7 @@ impl std::fmt::Debug for Health {
 impl Health {
     /// How it is now.
     pub fn report(&self) -> Report {
-        let last = lock(&self.last).clone();
+        let last = self.last.lock().clone();
         Report {
             sent: self.sent.load(Ordering::Relaxed),
             rejected: self.rejected.load(Ordering::Relaxed),
@@ -123,7 +124,7 @@ impl Health {
         self.sent
             .fetch_add(count - rejected.min(count), Ordering::Relaxed);
         self.rejected.fetch_add(rejected, Ordering::Relaxed);
-        let mut last = lock(&self.last);
+        let mut last = self.last.lock();
         let recovered = std::mem::replace(&mut last.failing, false);
         last.ok_at = Some(SystemTime::now());
         let new = why.filter(|why| last.error.as_ref().is_none_or(|(_, e)| e != why));
@@ -143,7 +144,7 @@ impl Health {
     /// A post of `count` spans that failed, for `why`.
     fn failed(&self, count: u64, why: String) {
         self.failed.fetch_add(count, Ordering::Relaxed);
-        let mut last = lock(&self.last);
+        let mut last = self.last.lock();
         let started = !std::mem::replace(&mut last.failing, true);
         last.error = Some((SystemTime::now(), why.clone()));
         drop(last);
@@ -260,10 +261,6 @@ struct Rpc {
     output: Option<Value>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 #[async_trait]
 impl Plugin for Respan {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
@@ -271,8 +268,8 @@ impl Plugin for Respan {
             return Ok(None);
         }
         let trace = TraceState {
-            trace_id: id(16)?,
-            root_id: id(8)?,
+            trace_id: id(16),
+            root_id: id(8),
             start: SystemTime::now(),
             calls: Vec::new(),
         };
@@ -285,7 +282,7 @@ impl Plugin for Respan {
         let Some(Trace(trace)) = cx.extensions().get::<Trace>() else {
             return;
         };
-        let spans = spans(&lock(trace), cx.format(), end, self.content);
+        let spans = spans(&trace.lock(), cx.format(), end, self.content);
         if self.queue.try_send(spans).is_err() {
             self.health.dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -309,7 +306,7 @@ impl Plugin for Calls {
         };
         let chat = px.is_kind::<Input>();
         let call = Call(Arc::new(Mutex::new(CallState {
-            span_id: id(8)?,
+            span_id: id(8),
             provider: px.provider().to_owned(),
             format: px.format().to_owned(),
             start: SystemTime::now(),
@@ -322,7 +319,7 @@ impl Plugin for Calls {
             said: Assembled::default(),
             rpc: None,
         })));
-        lock(&trace).calls.push(call.clone());
+        trace.lock().calls.push(call.clone());
         px.extensions_mut().insert(call.clone());
         if px.is_kind::<mcp::Input>() {
             return rpc(px, call, self.content);
@@ -332,7 +329,7 @@ impl Plugin for Calls {
         }
         let (asked, content) = (call.clone(), self.content);
         px.filter(move |input: &mut Input| {
-            let mut state = lock(&asked.0);
+            let mut state = asked.0.lock();
             state.model.clone_from(&input.model);
             if content {
                 state.prompt = input.messages.iter().flat_map(messages_of).collect();
@@ -353,7 +350,7 @@ impl Plugin for Calls {
 
     async fn on_provider_end(&self, px: &ProviderContext, end: &Result<()>) {
         if let Some(Call(call)) = px.extensions().get::<Call>() {
-            let mut state = lock(call);
+            let mut state = call.lock();
             state.end = Some(SystemTime::now());
             if let Err(fault) = end {
                 state.error = Some(fault.message().to_owned());
@@ -382,7 +379,7 @@ fn rpc(px: &mut ProviderContext, call: Call, content: bool) -> Result<()> {
             None => params,
         };
         let input = Some(input).filter(|i| content && !i.is_null());
-        lock(&asked.0).rpc = Some(Rpc {
+        asked.0.lock().rpc = Some(Rpc {
             id: request.request_id(),
             method,
             tool,
@@ -392,7 +389,7 @@ fn rpc(px: &mut ProviderContext, call: Call, content: bool) -> Result<()> {
         Ok(())
     })?;
     px.filter(move |output: &mut mcp::Output| {
-        let mut state = lock(&call.0);
+        let mut state = call.0.lock();
         let state = &mut *state;
         let Some(rpc) = state.rpc.as_mut() else {
             return Ok(());
@@ -431,7 +428,7 @@ struct Said(Call);
 impl Filter<Output> for Said {
     fn edit(&mut self, output: Output, out: &mut Vec<Output>) -> Result<()> {
         // What cannot be folded only goes unrecorded.
-        let _ = lock(&self.0.0).said.push(&output);
+        let _ = self.0.0.lock().said.push(&output);
         out.push(output);
         Ok(())
     }
@@ -456,7 +453,7 @@ fn spans(trace: &TraceState, format: &str, end: &Result<()>, content: bool) -> V
         root,
     )];
     for call in &trace.calls {
-        let c = lock(&call.0);
+        let c = call.0.lock();
         let mut attrs = vec![
             attr("gateway.provider", &c.provider),
             attr("gateway.format", &c.format),
@@ -679,11 +676,12 @@ fn reply(said: &Assembled) -> Message {
     }
 }
 
-/// `bytes` random bytes, as hex: a trace's (16) or a span's (8) id.
-fn id(bytes: usize) -> Result<String> {
-    let mut buf = vec![0u8; bytes];
-    getrandom::fill(&mut buf).map_err(|e| Fault::internal(format!("no randomness: {e}")))?;
-    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+/// `bytes` random bytes, at most 16, as hex: a trace's (16) or a span's
+/// (8) id.
+fn id(bytes: usize) -> String {
+    let mut hex = uuid::Uuid::new_v4().simple().to_string();
+    hex.truncate(bytes * 2);
+    hex
 }
 
 /// Posts what is queued, in batches.

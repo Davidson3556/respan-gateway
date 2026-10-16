@@ -23,6 +23,7 @@ rustls-native-certs = "0.8"
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
 [dev-dependencies]
+parking_lot.workspace = true
 respan-gateway-plugin-relay.workspace = true
 respan-gateway-passthrough-http.workspace = true
 axum.workspace = true

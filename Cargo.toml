@@ -71,14 +71,22 @@ http-body = "1"
 http-body-util = "0.1"
 httpdate = "1"
 memchr = "2"
+moka = { version = "0.12", features = ["sync"] }
+parking_lot = "0.12"
 percent-encoding = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "http2"] }
 serde = { version = "1", features = ["derive"] }
+serde_path_to_error = "0.1"
 serde_json = { version = "1", features = ["preserve_order"] }
+bytesize = "2"
+humantime = "2"
+csv = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 toml = { version = "0.8.23", features = ["preserve_order"] }
 tokio = "1"
+uuid = { version = "1", features = ["v4"] }
 url = "2"
+wildmatch = "2"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

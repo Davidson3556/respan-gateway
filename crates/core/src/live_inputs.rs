@@ -1,17 +1,18 @@
 //! A request's live inputs after its head: read once through the input
 //! filters, and given back if no reader read any.
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 use futures::channel::oneshot;
 use futures::stream;
 use futures::{FutureExt, StreamExt};
 
 use crate::fault::{PANICKED, guarded};
-use crate::layers::{Layer, cut, end_layers, locked, on_close, run};
+use crate::layers::{Layer, cut, end_layers, on_close, run};
 use crate::lifecycle::Latch;
 use crate::values::{AnyEvents, Value};
 use crate::{Fault, Result};
@@ -49,8 +50,8 @@ impl Later {
     /// events go, so nothing that outlives it keeps the client's connection;
     /// then those it wraps, so a reader sees the cut here first.
     pub(crate) fn close(&self, end: Result<()>) {
-        let _ = locked(&self.filters).end(end.clone(), &mut None);
-        locked(&self.events).take();
+        let _ = self.filters.lock().end(end.clone(), &mut None);
+        self.events.lock().take();
         if let Some(before) = &self.before {
             before.close(end);
         }
@@ -111,7 +112,7 @@ impl Reading {
             }
             let events = match &mut self.events {
                 Some(events) => events,
-                None => match locked(&self.later.events).take() {
+                None => match self.later.events.lock().take() {
                     Some(events) => self.events.insert(events),
                     None => {
                         // No events: they failed, as when the request's end
@@ -120,7 +121,7 @@ impl Reading {
                         // cannot send again.
                         self.ended = true;
                         let read = self.later.read.load(Ordering::SeqCst);
-                        let fault = match locked(&self.later.filters).outcome() {
+                        let fault = match self.later.filters.lock().outcome() {
                             Some(Err(fault)) => fault,
                             Some(Ok(())) if !read => return None,
                             _ => Fault::internal("another reader took the request's inputs"),
@@ -152,7 +153,7 @@ impl Reading {
     /// they are cut.
     fn filter(&mut self, input: Value) -> Result<()> {
         let layers: Vec<&Layer> = self.layers.iter().collect();
-        if layers.iter().any(|l| locked(l).ended()) {
+        if layers.iter().any(|l| l.lock().ended()) {
             return Err(Fault::abandoned());
         }
         let mut values = input.batch();
@@ -180,10 +181,10 @@ impl Reading {
 /// another, such as a retry, reads every input.
 impl Drop for Reading {
     fn drop(&mut self) {
-        let live = !locked(&self.later.filters).ended();
+        let live = !self.later.filters.lock().ended();
         let read = self.later.read.load(Ordering::SeqCst);
         if let Some(events) = self.events.take().filter(|_| !read && live) {
-            *locked(&self.later.events) = Some(events);
+            *self.later.events.lock() = Some(events);
         }
     }
 }

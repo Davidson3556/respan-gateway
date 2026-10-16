@@ -1,9 +1,10 @@
 //! The response on its way to the client: the selected call's batches through
 //! the client's output stages, and the outgoing flow built from them.
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::future::ready;
 use futures::{FutureExt, StreamExt, stream};
@@ -12,7 +13,7 @@ use crate::call::SharedCall;
 use crate::events::MAX_BATCH;
 use crate::fault::PANICKED;
 use crate::format::AnyFormat;
-use crate::layers::{Layer, cut, end_layers, locked, on_close, run, yield_ready};
+use crate::layers::{Layer, cut, end_layers, on_close, run, yield_ready};
 use crate::lifecycle::EndHooks;
 use crate::response::{Batch, Feed};
 use crate::values::{AnyBatches, Value, Values};
@@ -138,7 +139,7 @@ impl ToClient {
             if AssertUnwindSafe(self.step()).catch_unwind().await.is_err() {
                 let fault = Fault::internal(PANICKED);
                 self.feed.finish(Err(fault.clone()));
-                let _ = locked(&self.layer).end(Err(fault.clone()), &mut None);
+                let _ = self.layer.lock().end(Err(fault.clone()), &mut None);
                 self.ready.push_back(Err(fault));
                 self.done = true;
             }
@@ -199,6 +200,6 @@ impl Drop for ToClient {
                 }
             }
         };
-        locked(&self.discarded).push(batch);
+        self.discarded.lock().push(batch);
     }
 }

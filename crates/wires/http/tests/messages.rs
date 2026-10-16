@@ -84,9 +84,9 @@ async fn a_clients_live_reply_frames_each_message() {
 #[tokio::test]
 async fn a_providers_live_call_frames_each_message() {
     let (tx, called) = oneshot::channel();
-    let tx = std::sync::Mutex::new(Some(tx));
+    let tx = parking_lot::Mutex::new(Some(tx));
     let transport = move |request: http::Request<Body>| {
-        let _ = tx.lock().unwrap().take().unwrap().send(request.into_body());
+        let _ = tx.lock().take().unwrap().send(request.into_body());
         let answer = http::Response::new(Body::stream(stream::pending().boxed()));
         async move { Ok((answer, None)) }.boxed()
     };

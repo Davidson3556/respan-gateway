@@ -14,9 +14,10 @@
 //! extension no client can send, which `DELETE`s each session (an HTTP
 //! server's, or a stdio server's child) through the same providers.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use respan_gateway_conversation::Tool;
@@ -188,7 +189,7 @@ impl Closer {
     pub async fn offered(&self, gateway: &Gateway) -> Vec<String> {
         let list = List::default();
         self.send(gateway, list.clone()).await;
-        let names = list.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let names = list.0.lock();
         names.clone()
     }
 
@@ -230,7 +231,7 @@ impl Plugin for Closing {
         if let Some(List(slot)) = list {
             let servers = Servers::new(self.0.clone(), cx);
             let names = servers.list().await.into_iter().map(|t| t.name);
-            *slot.lock().unwrap_or_else(PoisonError::into_inner) = names.collect();
+            *slot.lock() = names.collect();
         } else if cx.extensions().get::<Close>().is_some() {
             Servers::new(self.0.clone(), cx).close().await;
         } else {
@@ -333,7 +334,7 @@ impl Toolbox for Servers {
     async fn list(&self) -> Vec<Tool> {
         let each = self.shared.servers.iter().map(|s| self.listing(s));
         let all = respan_gateway_core::futures::future::join_all(each).await;
-        let mut names = self.names.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut names = self.names.lock();
         let mut offered = Vec::new();
         for listed in all.into_iter().flatten() {
             if !self
@@ -354,7 +355,7 @@ impl Toolbox for Servers {
 
     async fn call(&self, name: &str, arguments: Value) -> Outcome {
         let known = {
-            let names = self.names.lock().unwrap_or_else(PoisonError::into_inner);
+            let names = self.names.lock();
             names.get(name).cloned()
         };
         let Some((server, tool)) = known else {

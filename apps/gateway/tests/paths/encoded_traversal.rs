@@ -24,9 +24,9 @@ async fn a_chat_request_never_escapes_into_passthrough() {
         "/v1/chat/completions/x%5Cy/..",
         "/v1/chat/completions/x%2F..%2Fy/..",
     ] {
-        seen.lock().unwrap().clear();
+        seen.lock().clear();
         let status = send_post(&addr, sent).await;
-        let got = seen.lock().unwrap().clone();
+        let got = seen.lock().clone();
         if got
             .iter()
             .any(|l| l.starts_with("POST /pt/v1/chat/completions "))

@@ -13,9 +13,10 @@
 //! - [`Placeholders`]: hide values behind `<LABEL_n>` and restore them, a
 //!   placeholder split across deltas included.
 
+use parking_lot::Mutex;
 use respan_gateway_core::ErrorCode;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use respan_gateway_conversation::{Block, Content, Delta, Input, Output, ToolChoice};
 use respan_gateway_core::{Fault, Filter};
@@ -896,7 +897,7 @@ impl Placeholders {
     /// The placeholder of `value`, made on first sight: `<LABEL_n>`, the
     /// `n`th value hidden under `label`, a plain word such as `EMAIL`.
     pub fn hide(&self, label: &str, value: &str) -> String {
-        let mut all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut all = self.0.lock();
         let mine = || all.iter().filter(|h| h.label == label);
         if let Some(h) = mine().find(|h| h.value == value) {
             return h.placeholder.clone();
@@ -913,14 +914,14 @@ impl Placeholders {
 
 impl Rewrite for Placeholders {
     fn pending(&self, text: &str) -> usize {
-        let all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let all = self.0.lock();
         partial_match(text, all.iter().map(|h| h.placeholder.as_str()))
     }
 
     /// Each placeholder replaced once, so a restored value is never read
     /// again.
     fn rewrite(&mut self, text: &str) -> Result<String, Fault> {
-        let all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let all = self.0.lock();
         let (mut out, mut rest) = (String::with_capacity(text.len()), text);
         while let Some(at) = rest.find('<') {
             out.push_str(&rest[..at]);

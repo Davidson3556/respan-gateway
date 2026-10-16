@@ -11,13 +11,14 @@ mod support;
 
 use futures::TryStreamExt;
 use mockllm::{Answer, FakeOpenAi};
+use parking_lot::Mutex;
 use respan_gateway_core::futures;
 use respan_gateway_http::bytes;
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_http_faults::Status;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use hooks::{Calls, Outcomes};
@@ -171,10 +172,7 @@ struct Local {
 struct Sent(Arc<Mutex<Vec<http::Request<bytes::Bytes>>>>);
 impl Sent {
     fn sent(&self) -> Vec<http::Request<bytes::Bytes>> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.0.lock().clone()
     }
 }
 impl Local {
@@ -186,10 +184,7 @@ impl Local {
         }
     }
     fn reply(&self, answer: fixture::Reply) -> &Self {
-        self.replies
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push_back(answer);
+        self.replies.lock().push_back(answer);
         self
     }
     fn transport(&self, headers: HeaderMap) -> SendRequest {
@@ -210,12 +205,10 @@ impl Local {
                 site.sent
                     .0
                     .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
                     .push(http::Request::from_parts(head, bytes));
                 let answer = site
                     .replies
                     .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
                     .pop_front()
                     .ok_or_else(|| Fault::upstream("no scripted provider response"))?;
                 let (mut head, frames) = answer.into_parts();
@@ -398,7 +391,7 @@ struct Transcript(Arc<Mutex<String>>);
 
 impl Transcript {
     fn text(&self) -> String {
-        self.0.lock().map(|t| t.clone()).unwrap_or_default()
+        self.0.lock().clone()
     }
 }
 
@@ -407,7 +400,8 @@ impl Plugin for Transcript {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let text = self.0.clone();
         cx.filter(move |e: &mut Output| {
-            if let (Ok(mut t), Some(event)) = (text.lock(), text_of(e)) {
+            if let Some(event) = text_of(e) {
+                let mut t = text.lock();
                 t.push_str(event);
             }
             Ok(())
@@ -496,7 +490,8 @@ struct Named(&'static str, Arc<Mutex<Vec<String>>>);
 
 impl Named {
     fn note(&self, hook: &str) {
-        if let Ok(mut log) = self.1.lock() {
+        {
+            let mut log = self.1.lock();
             log.push(format!("{} {hook}", self.0));
         }
     }
@@ -601,12 +596,12 @@ type Ended = (String, Result<(), Fault>);
 
 impl Bill {
     fn started(&self) -> Vec<String> {
-        self.started.lock().map(|s| s.clone()).unwrap_or_default()
+        self.started.lock().clone()
     }
 
     /// Each call's end, by call.
     fn ended(&self) -> Vec<Ended> {
-        let mut ended = self.ended.lock().map(|e| e.clone()).unwrap_or_default();
+        let mut ended = self.ended.lock().clone();
         ended.sort_by(|a, b| a.0.cmp(&b.0));
         ended
     }
@@ -620,21 +615,18 @@ fn call_name(px: &ProviderContext) -> String {
 #[async_trait]
 impl Plugin for Bill {
     async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        self.started
-            .lock()
-            .map(|mut s| s.push("client".into()))
-            .ok();
+        self.started.lock().push("client".into());
         Ok(None)
     }
 
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        self.started.lock().map(|mut s| s.push(call_name(px))).ok();
+        self.started.lock().push(call_name(px));
         Ok(())
     }
 
     async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
         let ended = (call_name(px), end.clone());
-        self.ended.lock().map(|mut e| e.push(ended)).ok();
+        self.ended.lock().push(ended);
     }
 }
 
@@ -699,7 +691,7 @@ struct Kept(Arc<Mutex<Option<Response>>>);
 
 impl Kept {
     fn take(&self) -> Option<Response> {
-        self.0.lock().ok().and_then(|mut r| r.take())
+        self.0.lock().take()
     }
 }
 
@@ -709,7 +701,7 @@ struct Ends(Arc<Mutex<Vec<String>>>);
 
 impl Ends {
     fn all(&self) -> Vec<String> {
-        self.0.lock().map(|e| e.clone()).unwrap_or_default()
+        self.0.lock().clone()
     }
 }
 
@@ -718,11 +710,11 @@ impl Plugin for Ends {
     async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
         let end = end.as_ref().err().map_or("ok".to_owned(), fault_code);
         let end = format!("{} {end}", px.provider());
-        self.0.lock().map(|mut e| e.push(end)).ok();
+        self.0.lock().push(end);
     }
 
     async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<(), Fault>) {
-        self.0.lock().map(|mut e| e.push("client".into())).ok();
+        self.0.lock().push("client".into());
     }
 }
 
@@ -888,10 +880,7 @@ impl Plugin for RawPermission {
             .extensions()
             .get::<respan_gateway_http::raw::Relayed>()
             .is_some();
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(granted);
+        self.0.lock().push(granted);
     }
 }
 
@@ -1007,7 +996,7 @@ struct Vault(Mutex<Vec<String>>);
 
 impl Vault {
     fn redact(&self, text: &str) -> String {
-        let mut seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut seen = self.0.lock();
         let words = text.split(' ').map(|w| match w.contains('@') {
             false => w.to_owned(),
             true => {
@@ -1019,7 +1008,7 @@ impl Vault {
     }
 
     fn restore(&self, mut text: String) -> String {
-        let seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let seen = self.0.lock();
         for (i, value) in seen.iter().enumerate() {
             text = text.replace(&format!("<PII_{i}>"), value);
         }

@@ -6,7 +6,7 @@ use futures::future::BoxFuture;
 use crate::events::Single;
 use crate::format::{AnyFormat, Erased, is_input, snapshot};
 use crate::input::Input;
-use crate::layers::{Layer, locked};
+use crate::layers::Layer;
 use crate::lifecycle::{Edge, InFlight, InFlightGuard, Latch};
 use crate::plugin::Filters;
 use crate::values::Value;
@@ -152,8 +152,8 @@ impl Edge for ProviderContext {
     fn close(&mut self, end: &Result<()>) {
         self.ended.close();
         self.settling = Some(InFlight::enter(&self.client.settling));
-        let _ = locked(&self.inputs).end(end.clone(), &mut None);
-        let _ = locked(&self.outputs).end(end.clone(), &mut None);
+        let _ = self.inputs.lock().end(end.clone(), &mut None);
+        let _ = self.outputs.lock().end(end.clone(), &mut None);
     }
 }
 
@@ -198,9 +198,9 @@ impl ProviderContext {
         filter: impl Filter<T>,
     ) -> Result<()> {
         match is_input::<T>(&*self.format)? {
-            false => locked(&self.outputs).add(filter, false),
+            false => self.outputs.lock().add(filter, false),
             // Later inputs follow only a session's head.
-            true if self.live => locked(&self.inputs).add(filter, true),
+            true if self.live => self.inputs.lock().add(filter, true),
             true => self.input.filter::<T>(Filters::of(filter)),
         }
     }

@@ -3,9 +3,8 @@ use respan_gateway_examples::LIMIT;
 use respan_gateway_http::http::StatusCode;
 
 fn database() -> std::path::PathBuf {
-    let mut random = [0u8; 8];
-    getrandom::fill(&mut random).expect("test entropy");
-    std::env::temp_dir().join(format!("respan-jobs-{}.db", hex(&random)))
+    let name = uuid::Uuid::new_v4().simple();
+    std::env::temp_dir().join(format!("respan-jobs-{name}.db"))
 }
 
 fn account() -> [u8; 32] {
@@ -184,7 +183,7 @@ async fn finish_webhooks_retry_from_the_durable_outbox() -> Result<(), Fault> {
         axum::routing::post(move |headers: http::HeaderMap, body: Bytes| {
             let requests = requests.clone();
             async move {
-                let mut seen = lock(&requests);
+                let mut seen = requests.lock();
                 seen.push((
                     headers["idempotency-key"].to_str().expect("key").to_owned(),
                     serde_json::from_slice::<Value>(&body).expect("JSON webhook"),
@@ -224,11 +223,11 @@ async fn finish_webhooks_retry_from_the_durable_outbox() -> Result<(), Fault> {
         send(&gateway, request("POST", "/v1/responses", &body)).await?;
         gateway.idle().await;
     }
-    assert_eq!(lock(&received).len(), 1);
+    assert_eq!(received.lock().len(), 1);
     let jobs = Jobs::open(&path)?;
     jobs.deliver_webhooks().await?;
     jobs.deliver_webhooks().await?;
-    let seen = lock(&received);
+    let seen = received.lock();
     assert_eq!(
         seen.len(),
         2,

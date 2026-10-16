@@ -211,15 +211,10 @@ async fn configured_weights_give_two_turns_then_one() -> Result<(), Fault> {
     Ok(())
 }
 
+/// A database file no other test shares.
 fn database_path() -> std::path::PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "respan-admission-{}-{stamp}.sqlite",
-        std::process::id()
-    ))
+    let name = uuid::Uuid::new_v4().simple();
+    std::env::temp_dir().join(format!("respan-admission-{name}.sqlite"))
 }
 
 fn io(error: std::io::Error) -> Fault {
@@ -504,6 +499,12 @@ async fn canceling_during_enqueue_removes_a_ticket_inserted_later() -> Result<()
         .acquire(0, "next", Instant::now() + Duration::from_secs(5))
         .await?
         .ok_or_else(|| Fault::internal("canceled enqueue consumed capacity"))?;
+    // The canceled ticket, if its insert landed after `next` took the slot,
+    // is still removed: nothing waits, and nothing is free.
+    let settled = Instant::now() + Duration::from_secs(5);
+    while slots.counts().await? != (0, 0) && Instant::now() < settled {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(slots.counts().await?, (0, 0));
     next.release().await?;
     drop(slots);

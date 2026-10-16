@@ -41,12 +41,6 @@ pub(crate) fn guarded<R>(f: impl FnOnce() -> Result<R, Fault>) -> Result<R, Faul
         .unwrap_or_else(|_| Err(Fault::internal(PANICKED)))
 }
 
-/// `mutex`'s guard, poisoned or not: every value behind one stays whole
-/// between statements, so a panic elsewhere leaves nothing half-written.
-pub(crate) fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// End `encoder` as `end` says, its closing frames in `out`, as
 /// [`Encoder::end`](crate::Encoder::end) promises: if ending well fails, it
 /// ends once more with that failure, to write its error framing. How it

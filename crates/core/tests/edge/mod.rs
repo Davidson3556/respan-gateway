@@ -5,10 +5,11 @@
 //! panics its stream, and one that ends without `DONE` is truncated. The
 //! edges report actual writer completion.
 #![allow(dead_code, clippy::unwrap_used)]
+use parking_lot::{Mutex, MutexGuard};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
 use respan_gateway_core::futures::channel::{mpsc, oneshot};
@@ -49,7 +50,7 @@ pub static FIRED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 pub fn boom(n: usize) {
     if PANIC.load(Ordering::SeqCst) == n {
-        lock(&FIRED).push(n);
+        FIRED.lock().push(n);
         panic!("injected panic {n}");
     }
 }
@@ -876,7 +877,7 @@ impl Seen {
                 let read = tokio::spawn(async move {
                     while let Some(f) = body.next().await {
                         let f = f.map_err(|e| faults::code(&e).to_string());
-                        lock(&seen.frames).push(f);
+                        seen.frames.lock().push(f);
                     }
                     seen.done.store(true, Ordering::SeqCst);
                 });
@@ -890,12 +891,12 @@ impl Seen {
     }
 
     pub fn frames(&self) -> Frames {
-        lock(&self.frames).clone()
+        self.frames.lock().clone()
     }
 
     pub async fn wait_for(&self, n: usize) {
         for _ in 0..500 {
-            if lock(&self.frames).len() >= n {
+            if self.frames.lock().len() >= n {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -924,10 +925,6 @@ pub fn never() -> Text {
     stream::once(async { Ok("a".to_string()) })
         .chain(stream::pending())
         .boxed()
-}
-
-pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// What a client got: the reply's status and frames as text, or the
@@ -976,7 +973,7 @@ impl Log {
 pub struct Rec(pub Arc<Mutex<Log>>);
 impl Rec {
     pub fn log(&self) -> MutexGuard<'_, Log> {
-        lock(&self.0)
+        self.0.lock()
     }
 }
 #[async_trait]
@@ -1179,11 +1176,12 @@ impl<T: Send + 'static> Filter<T> for CountF<T> {
 impl Ends {
     fn f<T: Send + 'static>(&self) -> CountF<T> {
         let c = Arc::new(AtomicUsize::new(0));
-        lock(&self.0).push(c.clone());
+        self.0.lock().push(c.clone());
         CountF(c, std::marker::PhantomData)
     }
     pub fn counts(&self) -> Vec<usize> {
-        lock(&self.0)
+        self.0
+            .lock()
             .iter()
             .map(|c| c.load(Ordering::SeqCst))
             .collect()

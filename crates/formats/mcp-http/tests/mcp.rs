@@ -6,8 +6,9 @@ mod http_support;
 use http_support::{LIMIT, serve};
 use respan_gateway_core::FaultKind;
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use respan_gateway_core::futures::{StreamExt, stream};
@@ -172,17 +173,11 @@ impl ScriptedMcp {
     }
 
     fn reply(&self, response: Reply) {
-        self.replies
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push_back(response);
+        self.replies.lock().push_back(response);
     }
 
     fn sent(&self) -> Vec<http::Request<Bytes>> {
-        self.sent
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.sent.lock().clone()
     }
 
     async fn send(
@@ -198,14 +193,10 @@ impl ScriptedMcp {
             .map_err(|e| Fault::config("bad MCP test URI").with_source(e))?;
         let body = BodyExt::collect(body).await?.to_bytes();
         head.extensions = http::Extensions::new();
-        self.sent
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(http::Request::from_parts(head, body));
+        self.sent.lock().push(http::Request::from_parts(head, body));
         let reply = self
             .replies
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .pop_front()
             .ok_or_else(|| Fault::upstream("no MCP test reply"))?;
         let (mut head, chunks) = reply.into_parts();
@@ -428,9 +419,7 @@ impl Plugin for Resume {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let seen = self.0.clone();
         cx.filter(move |out: &mut Output| {
-            seen.lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(out.event_id.clone());
+            seen.lock().push(out.event_id.clone());
             if out.event_id.as_deref() == Some("2") {
                 out.event_id = Some("2b".into());
             }
@@ -461,7 +450,7 @@ async fn an_sse_event_id_and_name_round_trip_and_a_plugin_may_edit_them() {
         "data: {\"jsonrpc\":\"2.0\",\"method\":\"m\"}\n\n",
     );
     assert_eq!(body, want);
-    let ids = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let ids = seen.lock().clone();
     assert_eq!(ids, [Some("1".into()), Some("2".into()), None]);
 }
 
@@ -744,7 +733,7 @@ impl Plugin for RefusalProbe {
         px: &respan_gateway_core::ProviderContext,
         end: &Result<(), Fault>,
     ) {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).push((
+        self.0.lock().push((
             px.provider().to_owned(),
             px.is_sent(),
             px.is_refused(),
@@ -800,7 +789,7 @@ async fn a_non_success_event_stream_is_refused_with_retry_after_and_can_fall_bac
     );
     assert_eq!(failed.sent().len(), 1);
     assert_eq!(
-        *probe.0.lock().unwrap_or_else(PoisonError::into_inner),
+        *probe.0.lock(),
         [(
             "mcp".to_owned(),
             true,
@@ -849,11 +838,7 @@ async fn a_non_success_event_stream_is_refused_with_retry_after_and_can_fall_bac
     );
     assert!(outcome.is_ok());
     assert_eq!((first.sent().len(), second.sent().len()), (1, 1));
-    let events = probe
-        .0
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
+    let events = probe.0.lock().clone();
     assert!(
         events.contains(&(
             "first".to_owned(),

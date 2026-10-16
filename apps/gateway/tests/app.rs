@@ -6,8 +6,9 @@
 
 mod support;
 
+use parking_lot::Mutex;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::StreamExt;
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
@@ -274,9 +275,7 @@ async fn listing(ids: &'static [&'static str]) -> (String, Arc<Mutex<Vec<String>
     let saw = seen.clone();
     let list = move |headers: axum::http::HeaderMap| {
         let auth = headers.get("authorization").and_then(|v| v.to_str().ok());
-        saw.lock()
-            .unwrap()
-            .push(auth.unwrap_or_default().to_owned());
+        saw.lock().push(auth.unwrap_or_default().to_owned());
         let data: Vec<Value> = ids
             .iter()
             .map(|id| json!({"id": id, "object": "model", "created": 1, "owned_by": "x"}))
@@ -318,14 +317,14 @@ async fn models_are_merged_from_every_provider() {
     assert!(ids.contains(&("llama-x", "openai")), "{ids:?}");
     assert!(ids.iter().all(|(_, owner)| *owner != "down"), "{ids:?}");
     assert_eq!(list["data"][0]["kind"], "chat");
-    assert_eq!(*seen.lock().unwrap(), ["Bearer sk-openai"]);
+    assert_eq!(*seen.lock(), ["Bearer sk-openai"]);
     let asked = &anthropic.requests()[0];
     assert_eq!(asked.header("x-api-key"), Some("sk-ant"));
     assert!(asked.header("anthropic-version").is_some());
 
     // Not kept while a provider fails to list: asked again.
     get_json(&gw, "/v1/models").await;
-    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert_eq!(seen.lock().len(), 2);
 }
 
 #[tokio::test]
@@ -405,7 +404,7 @@ async fn models_are_listed_in_geminis_shape_for_its_sdks() {
     // Without the gateway's key it is refused, like /v1/models.
     let anon = client().get(gw.url("/v1beta/models")).send().await.unwrap();
     assert_eq!(anon.status(), 401);
-    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(seen.lock().len(), 1);
 }
 
 #[tokio::test]
@@ -419,7 +418,7 @@ async fn the_merged_models_win_over_a_served_passthrough() {
     let list = get_json(&gw, "/v1/models").await;
     assert_eq!(list["data"][0]["id"], "gpt-4o", "{list}");
     assert_eq!(list["data"][0]["kind"], "chat", "{list}");
-    assert_eq!(*seen.lock().unwrap(), ["Bearer sk-openai"]);
+    assert_eq!(*seen.lock(), ["Bearer sk-openai"]);
 }
 
 #[tokio::test]
@@ -431,7 +430,7 @@ async fn models_are_kept_a_while_once_every_provider_listed() {
     .await;
     get_json(&gw, "/v1/models").await;
     get_json(&gw, "/v1/models").await;
-    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(seen.lock().len(), 1);
 }
 
 #[tokio::test]

@@ -303,7 +303,7 @@ impl Filters {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
 
     use super::*;
 
@@ -321,7 +321,7 @@ mod tests {
         }
 
         fn end(&mut self, _end: &Result<()>, _out: &mut Vec<String>) -> Result<()> {
-            self.0.lock().map(|mut n| n.push(self.1)).ok();
+            self.0.lock().push(self.1);
             match self.2 {
                 true => Err(Fault::internal(self.1)),
                 false => Ok(()),
@@ -339,7 +339,7 @@ mod tests {
     }
 
     fn read(noted: &Mutex<Vec<&'static str>>) -> Option<Vec<&'static str>> {
-        noted.lock().map(|n| n.clone()).ok()
+        Some(noted.lock().clone())
     }
 
     fn one(s: &str) -> Values {

@@ -1,12 +1,13 @@
 //! Private example store: nested accounts and expiring reservations.
 //! Not durable billing infrastructure; applications own persistence and recovery.
 
+use parking_lot::{Mutex, MutexGuard};
 use respan_gateway_core::ErrorCode;
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use respan_gateway_core::Details;
@@ -143,7 +144,7 @@ impl MemoryLedger {
     /// settlement, as expiry releases what it held, not what the call
     /// spent, until it is forgotten.
     fn books(&self) -> MutexGuard<'_, Books> {
-        let mut books = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut books = self.0.lock();
         let now = Instant::now();
         let Books { accounts, holds } = &mut *books;
         for hold in holds.values_mut().filter(|h| h.expires <= now) {

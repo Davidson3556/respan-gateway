@@ -1,9 +1,10 @@
 //! A bounded encoded-byte handoff. Events never enter this bridge: the HTTP
 //! sinks encode each item themselves, and transports pull the resulting frames.
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
@@ -11,7 +12,7 @@ use futures::channel::oneshot;
 use futures::{FutureExt, Stream, StreamExt};
 use respan_gateway_core::Fault;
 
-use super::{end_encoder, guarded, locked};
+use super::{end_encoder, guarded};
 use crate::{Completion, Encoder, Frames};
 
 #[derive(Default)]
@@ -123,7 +124,7 @@ impl<T: 'static> Writer<T> {
         cx: &mut Context<'_>,
         requested: bool,
     ) -> Poll<Result<(), Fault>> {
-        let mut state = locked(&self.state);
+        let mut state = self.state.lock();
         if let Some(Err(fault)) = &state.delivered {
             return Poll::Ready(Err(fault.clone()));
         }
@@ -139,7 +140,7 @@ impl<T: 'static> Writer<T> {
     }
 
     pub(crate) fn send(&self, bytes: Bytes) {
-        let mut state = locked(&self.state);
+        let mut state = self.state.lock();
         state.frames.push_back(bytes);
         if let Some(waker) = state.reader.take() {
             waker.wake();
@@ -147,7 +148,7 @@ impl<T: 'static> Writer<T> {
     }
 
     pub(crate) fn end(&self, end: Result<(), Fault>, abort: Option<Fault>) {
-        let mut state = locked(&self.state);
+        let mut state = self.state.lock();
         state.end = Some(end);
         state.abort = abort;
         state.drained();
@@ -157,7 +158,7 @@ impl<T: 'static> Writer<T> {
     }
 
     pub(crate) fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        let mut state = locked(&self.state);
+        let mut state = self.state.lock();
         match state.delivered.clone() {
             Some(end) => Poll::Ready(end),
             None => {
@@ -170,7 +171,7 @@ impl<T: 'static> Writer<T> {
 
 impl<T> Drop for Writer<T> {
     fn drop(&mut self) {
-        let mut state = locked(&self.state);
+        let mut state = self.state.lock();
         if state.end.is_none() {
             let fault = Fault::abandoned();
             state.end = Some(Err(fault.clone()));
@@ -188,7 +189,7 @@ impl Stream for Pipe {
     type Item = Result<Bytes, Fault>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut state = locked(&self.0);
+        let mut state = self.0.lock();
         if let Some(bytes) = state.frames.pop_front() {
             if state.frames.is_empty() {
                 state.drained();
@@ -217,7 +218,7 @@ impl Stream for Pipe {
 
 impl Drop for Pipe {
     fn drop(&mut self) {
-        let mut state = locked(&self.0);
+        let mut state = self.0.lock();
         state.acknowledge(Err(Fault::abandoned()));
     }
 }

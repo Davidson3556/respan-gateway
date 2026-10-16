@@ -12,9 +12,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+parking_lot.workspace = true
+uuid.workspace = true
 respan-gateway-sse.workspace = true
 respan-gateway-http-faults.workspace = true
-getrandom = { workspace = true, features = ["std"] }
 respan-gateway-core.workspace = true
 respan-gateway-http.workspace = true
 respan-gateway-mcp.workspace = true

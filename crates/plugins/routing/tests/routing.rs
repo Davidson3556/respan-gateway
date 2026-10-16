@@ -1,7 +1,8 @@
 //! The router's promises, against a mock provider.
 
+use parking_lot::Mutex;
 use respan_gateway_conversation::Input;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation_http::openai::OpenAiChat;
@@ -75,9 +76,7 @@ impl Fakes {
             let http = http.clone();
             let sent = sent.clone();
             async move {
-                sent.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(label.to_owned());
+                sent.lock().push(label.to_owned());
                 http.send(call).await
             }
             .boxed()
@@ -85,10 +84,7 @@ impl Fakes {
     }
 
     fn sent(&self) -> Vec<String> {
-        self.sent
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.sent.lock().clone()
     }
 }
 
@@ -173,9 +169,7 @@ async fn routing_reads_and_writes_a_model_named_outside_the_input() {
     let written = Arc::new(Mutex::new(Vec::new()));
     let seen = written.clone();
     let model = Model::new(head, move |cx, model| {
-        seen.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(model.clone());
+        seen.lock().push(model.clone());
         cx.filter(move |input: &mut Input| {
             input.set_model(model.clone());
             Ok(())
@@ -224,10 +218,7 @@ async fn routing_reads_and_writes_a_model_named_outside_the_input() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ended(outcome.await), Ok(()));
     assert_eq!(mock.a.requests()[0].body["model"], "gpt-4o");
-    assert_eq!(
-        *written.lock().unwrap_or_else(PoisonError::into_inner),
-        ["gpt-4o"]
-    );
+    assert_eq!(*written.lock(), ["gpt-4o"]);
 }
 
 #[tokio::test]

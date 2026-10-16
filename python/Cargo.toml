@@ -22,6 +22,7 @@ doctest = false
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+parking_lot.workspace = true
 respan-gateway = { path = "../apps/gateway" }
 axum.workspace = true
 bytes.workspace = true

@@ -1,7 +1,8 @@
 //! SQLite transactions shared by the persistent examples.
 
+use parking_lot::Mutex;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use respan_gateway_core::{Fault, Result};
@@ -105,9 +106,7 @@ impl Database {
     ) -> Result<T> {
         let database = self.0.clone();
         tokio::task::spawn_blocking(move || {
-            let mut connection = database
-                .lock()
-                .map_err(|_| Fault::internal("store lock poisoned"))?;
+            let mut connection = database.lock();
             let transaction = loop {
                 match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
                     Err(rusqlite::Error::SqliteFailure(error, _))
@@ -135,20 +134,13 @@ mod tests {
 
     fn startup_path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "respan-startup-store-{}-{}.db",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
+            "respan-startup-store-{}.db",
+            uuid::Uuid::new_v4().simple()
         ))
     }
 
     fn assert_configured(database: &Database) -> Result<()> {
-        let connection = database
-            .0
-            .lock()
-            .map_err(|_| Fault::internal("store lock poisoned"))?;
+        let connection = database.0.lock();
         let mode: String = connection
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .map_err(sql)?;
@@ -246,12 +238,8 @@ mod tests {
     #[tokio::test]
     async fn new_databases_are_private_and_existing_permissions_are_preserved() -> Result<()> {
         let path = std::env::temp_dir().join(format!(
-            "respan-private-store-{}-{}.db",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
+            "respan-private-store-{}.db",
+            uuid::Uuid::new_v4().simple()
         ));
         let io = |error| Fault::internal("store permission test failed").with_source(error);
         let database = Database::open(&path)?;

@@ -20,11 +20,12 @@ use respan_gateway_core::{ErrorCode, NativeFields, Provider};
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
+use parking_lot::Mutex;
 use respan_gateway_realtime::{Input, Output, Session, Status, Turns};
 use respan_gateway_realtime_ws::GeminiLive;
 use respan_gateway_ws::{CloseCode, WsTransport};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 #[derive(Clone)]
 struct Sessions {
     ledger: MemoryLedger,
@@ -82,7 +83,7 @@ struct Turn {
 /// record. A response that calls tools goes on, in the same turn, once they
 /// answer.
 fn said(turn: &Mutex<Turn>, event: &Output) -> Option<(Option<i64>, Value)> {
-    let mut turn = budget::lock(turn);
+    let mut turn = turn.lock();
     match event {
         Output::Usage(used) => {
             let tokens = used.tokens.input_tokens + used.tokens.output_tokens;

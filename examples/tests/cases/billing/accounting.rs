@@ -1,9 +1,10 @@
 //! `Accounting` in a gateway: never overspend, settle exactly once, refuse
 //! what has no bound, and release what a cancelled hook held.
 
+use parking_lot::Mutex;
 use respan_gateway_core::Provider;
 use respan_gateway_examples::LIMIT;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::http_support;
@@ -152,19 +153,13 @@ impl Ledger for Noted {
         amount: Amount,
         ttl: Duration,
     ) -> Result<(), Fault> {
-        self.reserved
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(*id);
+        self.reserved.lock().push(*id);
         self.inner.reserve(id, accounts, amount, ttl).await
     }
 
     async fn settle(&self, id: &HoldId, spent: Amount) -> Result<(), Fault> {
         let settled = &self.settled;
-        settled
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push((*id, spent));
+        settled.lock().push((*id, spent));
         self.inner.settle(id, spent).await
     }
 }
@@ -185,11 +180,7 @@ impl Ledger for FailedSettlement {
     }
 
     async fn settle(&self, id: &HoldId, spent: Amount) -> Result<(), Fault> {
-        self.0
-            .settled
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push((*id, spent));
+        self.0.settled.lock().push((*id, spent));
         Err(Fault::internal("settlement storage unavailable"))
     }
 }
@@ -204,16 +195,8 @@ async fn failed_settlement_is_invoked_once_and_expiry_does_not_recover_the_charg
     let (status, body) = send(&gw, ask(false)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_ok());
-    let reserved = ledger
-        .reserved
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
-    let settled = ledger
-        .settled
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
+    let reserved = ledger.reserved.lock().clone();
+    let settled = ledger.settled.lock().clone();
     assert_eq!(reserved.len(), 1);
     assert_eq!(settled, [(reserved[0], 40)]);
     assert_eq!(ledger.inner.available("key"), 900);
@@ -224,14 +207,7 @@ async fn failed_settlement_is_invoked_once_and_expiry_does_not_recover_the_charg
     gw.idle().await;
     assert_eq!(ledger.inner.available("key"), 1_000);
     assert_eq!(ledger.inner.spent("key"), 0);
-    assert_eq!(
-        ledger
-            .settled
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len(),
-        1
-    );
+    assert_eq!(ledger.settled.lock().len(), 1);
 }
 
 /// Settled once, for `charged`, whether the call succeeded, failed or was
@@ -292,12 +268,8 @@ async fn every_call_settles_exactly_once() {
             drop(resp); // the client left
         }
         gw.idle().await;
-        let reserved = ledger
-            .reserved
-            .lock()
-            .map(|r| r.clone())
-            .unwrap_or_default();
-        let settled = ledger.settled.lock().map(|s| s.clone()).unwrap_or_default();
+        let reserved = ledger.reserved.lock().clone();
+        let settled = ledger.settled.lock().clone();
         assert_eq!(reserved.len(), 1, "{case}");
         assert_eq!(settled, [(reserved[0], charged)], "{case}");
         assert_eq!(ledger.inner.available("key"), 1000 - charged, "{case}");

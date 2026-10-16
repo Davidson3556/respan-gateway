@@ -440,14 +440,8 @@ mod tests {
     }
 
     /// What a probe's sink took, faults as messages.
-    fn took(items: &std::sync::Mutex<Vec<Result<u8>>>) -> Vec<std::result::Result<u8, String>> {
-        items
-            .lock()
-            .expect("items")
-            .iter()
-            .cloned()
-            .map(says)
-            .collect()
+    fn took(items: &parking_lot::Mutex<Vec<Result<u8>>>) -> Vec<std::result::Result<u8, String>> {
+        items.lock().iter().cloned().map(says).collect()
     }
 
     #[test]
@@ -566,7 +560,7 @@ mod tests {
 
     #[derive(Default)]
     struct Probe {
-        items: Arc<std::sync::Mutex<Vec<Result<u8>>>>,
+        items: Arc<parking_lot::Mutex<Vec<Result<u8>>>>,
         flushes: Arc<AtomicUsize>,
         ready: Option<BoxFuture<'static, Result<()>>>,
         close: Option<BoxFuture<'static, Result<()>>>,
@@ -582,7 +576,7 @@ mod tests {
             Poll::Ready(Ok(()))
         }
         fn start_send(self: Pin<&mut Self>, item: Result<u8>) -> Result<()> {
-            self.items.lock().expect("items").push(item);
+            self.items.lock().push(item);
             Ok(())
         }
         fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<()>> {
@@ -717,7 +711,7 @@ mod tests {
             EventSink::new(probe),
         );
         assert!(hot.as_mut().now_or_never().is_none());
-        assert_eq!(items.lock().expect("items").len(), 128);
+        assert_eq!(items.lock().len(), 128);
     }
 
     #[tokio::test]

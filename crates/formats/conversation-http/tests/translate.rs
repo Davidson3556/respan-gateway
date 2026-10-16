@@ -1,9 +1,10 @@
 //! A client in one format reaching a provider in another.
 
+use parking_lot::Mutex;
 use respan_gateway_core::futures;
 use respan_gateway_http::bytes;
 use respan_gateway_http::http;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use http::{HeaderValue, StatusCode};
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi, Request};
@@ -247,11 +248,7 @@ fn one_response(reply: http::Response<Vec<Result<bytes::Bytes, Fault>>>) -> Send
     sender(move |_call| {
         let reply = reply.clone();
         async move {
-            let response = reply
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take()
-                .expect("one response per provider call");
+            let response = reply.lock().take().expect("one response per provider call");
             let (head, chunks) = response.into_parts();
             Ok((
                 http::Response::from_parts(head, Body::stream(futures::stream::iter(chunks))),
@@ -335,10 +332,7 @@ impl Marks<SendRequest> {
             .extensions()
             .get::<respan_gateway_core::Extensions>()
             .is_some_and(|e| e.get::<respan_gateway_http::raw::Relayed>().is_some());
-        self.1
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(relayed);
+        self.1.lock().push(relayed);
         (self.0)(call).await
     }
 }
@@ -648,7 +642,7 @@ struct CallEnds(Arc<Mutex<Vec<Result<(), Fault>>>>);
 #[async_trait]
 impl Plugin for CallEnds {
     async fn on_provider_end(&self, _px: &ProviderContext, end: &Result<(), Fault>) {
-        self.0.lock().map(|mut all| all.push(end.clone())).ok();
+        self.0.lock().push(end.clone());
     }
 }
 

@@ -7,7 +7,7 @@ use respan_gateway_realtime::{
 use respan_gateway_ws::CloseCode;
 use serde_json::{Value, json};
 
-use super::{Answering, Shared, input, lock, output};
+use super::{Answering, Shared, input, output};
 use crate::session;
 
 fn inputs(messages: &[Value]) -> Result<Vec<Input>, Fault> {
@@ -113,7 +113,7 @@ fn every_client_message_is_written_back_as_it_came() {
     );
     let applied = Shared::default();
     assert_eq!(sent(&applied, &events).expect("written"), messages);
-    let Some(session) = lock(&applied).applied.clone() else {
+    let Some(session) = applied.lock().applied.clone() else {
         panic!("no setup")
     };
     assert_eq!(session.model.as_deref(), Some("gemini-live"));

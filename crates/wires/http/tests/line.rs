@@ -3,10 +3,11 @@
 //! no usage: [`Meter`], registered last, sums what lines report through a
 //! provider-edge filter, so these tests show what such a filter sees.
 
+use parking_lot::Mutex;
 use respan_gateway_conversation::Input;
 use respan_gateway_core::{ErrorCode, Provider};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -233,13 +234,13 @@ type SendFuture = futures::future::BoxFuture<'static, respan_gateway_http::Sent>
 
 impl Script {
     fn then(self, status: StatusCode, frames: Vec<&'static str>) -> Self {
-        lock(&self.0).push_back((status, frames));
+        self.0.lock().push_back((status, frames));
         self
     }
 
     fn into_sender(self) -> impl Clone + Fn(http::Request<Body>) -> SendFuture {
         move |_call| {
-            let (status, frames) = lock(&self.0).pop_front().expect("scripted");
+            let (status, frames) = self.0.lock().pop_front().expect("scripted");
             let frames = frames
                 .into_iter()
                 .map(|f| Ok(Bytes::from_static(f.as_bytes())));
@@ -264,25 +265,21 @@ struct Log(
 
 type Shared<T> = Arc<Mutex<Vec<T>>>;
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 impl Log {
     fn note(&self, s: impl Into<String>) {
-        lock(&self.0).push(s.into());
+        self.0.lock().push(s.into());
     }
     fn notes(&self) -> Vec<String> {
-        lock(&self.0).clone()
+        self.0.lock().clone()
     }
     fn calls(&self) -> Vec<Result<(), Fault>> {
-        lock(&self.1).clone()
+        self.1.lock().clone()
     }
     fn clients(&self) -> Vec<Result<(), Fault>> {
-        lock(&self.2).clone()
+        self.2.lock().clone()
     }
     fn metered(&self) -> Vec<Usage> {
-        lock(&self.3).clone()
+        self.3.lock().clone()
     }
 }
 
@@ -304,15 +301,15 @@ impl Plugin for Meter {
         let usage = LineUsage::default();
         px.extensions_mut().insert(usage.clone());
         px.filter(move |o: &mut LOut| {
-            *lock(&usage.0) += &o.1;
+            *usage.0.lock() += &o.1;
             Ok(())
         })
     }
 
     async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
         if let Some(LineUsage(usage)) = px.extensions().get::<LineUsage>() {
-            let usage = *lock(usage);
-            lock(&self.0.3).push(usage);
+            let usage = *usage.lock();
+            self.0.3.lock().push(usage);
         }
     }
 }
@@ -320,10 +317,10 @@ impl Plugin for Meter {
 #[async_trait]
 impl Plugin for Log {
     async fn on_provider_end(&self, _px: &ProviderContext, end: &Result<(), Fault>) {
-        lock(&self.1).push(end.clone());
+        self.1.lock().push(end.clone());
     }
     async fn on_client_end(&self, _cx: &ClientContext, end: &Result<(), Fault>) {
-        lock(&self.2).push(end.clone());
+        self.2.lock().push(end.clone());
     }
 }
 
@@ -691,7 +688,7 @@ async fn y3_an_opened_quiet_stream_sends_its_head_at_once() {
     #[async_trait]
     impl Plugin for Quiet {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let outputs = lock(&self.0).take().expect("one request");
+            let outputs = self.0.lock().take().expect("one request");
             Ok(Some(Response::stream(outputs)))
         }
     }
@@ -1310,7 +1307,7 @@ struct Paths(Shared<String>);
 
 impl Paths {
     pub async fn send(&self, call: http::Request<Body>) -> respan_gateway_http::Sent {
-        lock(&self.0).push(call.uri().path().to_owned());
+        self.0.lock().push(call.uri().path().to_owned());
         let body = futures::stream::iter([Ok(Bytes::from_static(b"i:ok\ne\n"))]);
         Ok((http::Response::new(Body::stream(body)), None))
     }
@@ -1370,7 +1367,7 @@ async fn k9_8_a_format_writes_the_model_into_the_calls_path() {
     assert_eq!(status, StatusCode::OK);
     let (status, _) = run(&pathed(&paths, Some("m2")), line_req("m1")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(lock(&paths.0).clone(), ["/models/m1", "/models/m2"]);
+    assert_eq!(paths.0.lock().clone(), ["/models/m1", "/models/m2"]);
 }
 
 // Client content the provider's format cannot say is a bad request, a 400,
@@ -1409,7 +1406,7 @@ async fn v9_1_untranslatable_content_is_a_bad_request_edited_or_not() {
         .unwrap_or_else(|e| panic!("{e}"));
     let (status, _) = run(&gw, line_req("untranslatable")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(lock(&paths.0).is_empty());
+    assert!(paths.0.lock().is_empty());
 }
 
 fn upgrading(frames: Vec<Result<&'static str, Fault>>) -> http::Request<Body> {
@@ -1597,7 +1594,7 @@ impl respan_gateway_core::Format<respan_gateway_http::ProviderIo, LOut, LIn> for
         let seen = self.0.clone();
         Ok(io.with_refusal(line_refused).bind(
             move |head: &mut RequestHead, input: Option<&LIn>| {
-                lock(&seen).push(input.is_some());
+                seen.lock().push(input.is_some());
                 line_call(head, input)
             },
             line_outputs,
@@ -1642,7 +1639,7 @@ async fn r10_6_first_is_always_a_value() {
         assert_eq!(status, StatusCode::OK);
     }
     // Read only, or filtered even to what it was: a value.
-    assert_eq!(lock(&seen).clone(), [true, true, true]);
+    assert_eq!(seen.lock().clone(), [true, true, true]);
 }
 
 // Usage before content does not send the head, so a success that then fails
@@ -1734,7 +1731,8 @@ impl respan_gateway_core::Format<respan_gateway_http::ProviderIo, LOut, LIn> for
         Ok(io.with_refusal(line_refused).bind(
             move |head: &mut RequestHead, input: Option<&LIn>| {
                 let first = input.map(|first| first.0.clone());
-                lock(&seen).push((first.is_some(), first.unwrap_or_default()));
+                seen.lock()
+                    .push((first.is_some(), first.unwrap_or_default()));
                 line_call(head, input)
             },
             line_outputs,
@@ -1772,7 +1770,7 @@ async fn r11_first_is_the_changed_input() {
         .unwrap_or_else(|e| panic!("{e}"));
     let (status, _) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(lock(&seen).clone(), [(true, "m2".to_owned())]);
+    assert_eq!(seen.lock().clone(), [(true, "m2".to_owned())]);
 }
 
 /// Adds a provider filter that panics on every output.

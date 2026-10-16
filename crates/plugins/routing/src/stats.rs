@@ -2,8 +2,8 @@
 //! the calls it routed, so it needs no request log to pick the fastest or
 //! to pass over one that keeps failing.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// How much a new sample weighs in the moving averages.
@@ -51,7 +51,7 @@ impl Stats {
     /// Records a call to `model` of `provider` that opened after `head`, if
     /// it did, and `failed` or not.
     pub fn record(&self, provider: &str, model: &str, head: Option<Duration>, failed: bool) {
-        let mut stats = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stats = self.0.lock();
         let now = Instant::now();
         let stat = stats
             .entry((provider.to_owned(), model.to_owned()))
@@ -88,7 +88,7 @@ impl Stats {
 
     /// The record of `model` of `provider`, if it was called.
     pub fn seen(&self, provider: &str, model: &str) -> Option<Seen> {
-        let stats = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let stats = self.0.lock();
         let stat = stats.get(&(provider.to_owned(), model.to_owned()))?;
         let cooling =
             stat.streak >= STREAK && stat.last_failure.is_some_and(|at| at.elapsed() < COOLING);
@@ -103,7 +103,7 @@ impl Stats {
 
     /// Its latency, if recent enough to rank it by.
     pub(crate) fn fresh_latency(&self, provider: &str, model: &str) -> Option<f64> {
-        let stats = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let stats = self.0.lock();
         let stat = stats.get(&(provider.to_owned(), model.to_owned()))?;
         let (ms, at) = stat.latency?;
         (at.elapsed() < FRESH).then_some(ms)
@@ -147,7 +147,7 @@ mod tests {
         stats.record("a", "m", Some(Duration::from_millis(100)), false);
         let long_ago = Instant::now().checked_sub(FRESH + Duration::from_secs(1));
         if let Some(at) = long_ago {
-            let mut all = stats.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut all = stats.0.lock();
             all.values_mut().for_each(|s| s.latency = Some((100.0, at)));
         }
         stats.record("a", "m", None, true);

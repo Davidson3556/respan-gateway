@@ -91,7 +91,7 @@ async fn a_switch_of_protocols_is_an_upstream_fault() {
     );
 }
 
-type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+type Seen = std::sync::Arc<parking_lot::Mutex<Vec<String>>>;
 
 /// A local server that answers every request with `answer` and keeps what
 /// it was sent, lowercased.
@@ -108,7 +108,7 @@ async fn serving(answer: String) -> (std::net::SocketAddr, Seen) {
             let mut buf = [0; 4096];
             let n = socket.read(&mut buf).await.unwrap_or(0);
             let request = String::from_utf8_lossy(&buf[..n]).to_lowercase();
-            kept.lock().unwrap().push(request);
+            kept.lock().push(request);
             let _ = socket.write_all(answer.as_bytes()).await;
         }
     });
@@ -143,8 +143,8 @@ async fn a_followed_redirect_to_another_origin_leaves_the_key_behind() {
     let transport = keyed(api).follow_redirects(|_| true);
     let (resp, _) = transport.send(get()).await.unwrap();
     assert_eq!(resp.status(), http::StatusCode::OK);
-    assert!(asked.lock().unwrap()[0].contains("x-goog-api-key: secret-key"));
-    let stored = stored.lock().unwrap();
+    assert!(asked.lock()[0].contains("x-goog-api-key: secret-key"));
+    let stored = stored.lock();
     assert_eq!(stored.len(), 1);
     assert!(stored[0].starts_with("get /file?sig=1 "), "{}", stored[0]);
     assert!(!stored[0].contains("secret-key"), "{}", stored[0]);
@@ -158,7 +158,7 @@ async fn a_redirect_within_the_origin_keeps_the_key() {
     let (resp, _) = transport.send(get()).await.unwrap();
     // It redirects to itself, so it stops at the limit.
     assert_eq!(resp.status(), http::StatusCode::FOUND);
-    let asked = asked.lock().unwrap();
+    let asked = asked.lock();
     assert!(asked.len() > 1);
     let key = "x-goog-api-key: secret-key";
     assert!(asked.iter().all(|request| request.contains(key)));
@@ -173,5 +173,5 @@ async fn a_redirect_not_allowed_is_the_clients_to_follow() {
         let (resp, _) = transport.send(get()).await.unwrap();
         assert_eq!(resp.status(), http::StatusCode::FOUND);
     }
-    assert!(stored.lock().unwrap().is_empty());
+    assert!(stored.lock().is_empty());
 }

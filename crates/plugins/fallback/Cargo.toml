@@ -17,6 +17,7 @@ respan-gateway-core.workspace = true
 tokio = { workspace = true, features = ["time", "macros"] }
 
 [dev-dependencies]
+parking_lot.workspace = true
 respan-gateway-conversation.workspace = true
 respan-gateway-conversation-http.workspace = true
 respan-gateway-http.workspace = true

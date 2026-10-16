@@ -5,9 +5,10 @@
 mod edge;
 mod faults;
 
+use parking_lot::Mutex;
 use respan_gateway_core::Fault;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use edge::*;
@@ -97,14 +98,14 @@ struct Steal(Arc<Mutex<Option<Response>>>);
 #[async_trait]
 impl Plugin for Steal {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-        let taken = lock(&self.0).take();
+        let taken = self.0.lock().take();
         match taken {
             Some(resp) => Ok(Some(resp)),
             None => {
                 let mut resp = cx.call("a").await?;
                 resp.buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
                     .await?;
-                *lock(&self.0) = Some(resp);
+                *self.0.lock() = Some(resp);
                 Err(Fault::not_found("stash"))
             }
         }
@@ -141,7 +142,7 @@ impl Plugin for TwoCalls {
 fn noting(seen: &Arc<Mutex<Vec<bool>>>) -> Dialer {
     let record = seen.clone();
     fnt(move |c| {
-        lock(&record).push(c.relayed);
+        record.lock().push(c.relayed);
         async { Ok(ok_resp(vec!["a", "DONE"])) }.boxed()
     })
 }
@@ -158,7 +159,7 @@ async fn original_and_explicit_input_both_use_typed_values() {
         .plugin(TwoCalls);
     let (res, _) = handle(&gw, req(vec!["q"])).await;
     let _ = read(res).await;
-    assert_eq!(*lock(&seen), [false, false]);
+    assert_eq!(*seen.lock(), [false, false]);
 }
 
 /// A job that outlives its request reaches the gateway through the

@@ -1,11 +1,12 @@
 //! Shared example bookkeeping: one reservation per in-flight turn, no protocol knowledge.
 use crate::ledger::{Amount, HoldId, Ledger, MemoryLedger};
+use parking_lot::Mutex;
 use respan_gateway_core::ErrorCode;
 use respan_gateway_core::Fault;
 use respan_gateway_ws::CloseCode;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub const OUTPUT: Amount = 1_024;
@@ -14,10 +15,6 @@ pub const OUTPUT: Amount = 1_024;
 #[cfg(test)]
 pub const QUOTE: Amount = 128_000 + OUTPUT;
 pub const SESSION_MAX: Duration = Duration::from_secs(1_800);
-
-pub fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
-    value.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 pub struct Budget {
     pub ledger: MemoryLedger,
@@ -44,12 +41,12 @@ impl Budget {
         })
     }
     pub fn active(&self, lane: &str) -> bool {
-        lock(&self.active).contains_key(lane)
+        self.active.lock().contains_key(lane)
     }
     pub async fn begin(&self, lane: &str) -> Result<(), Fault> {
         let hold = HoldId::new();
         {
-            let mut active = lock(&self.active);
+            let mut active = self.active.lock();
             if active.contains_key(lane) {
                 return Err(Fault::new("this lane already has a turn")
                     .with(ErrorCode("turn_busy".into()))
@@ -66,7 +63,7 @@ impl Budget {
             )
             .await
             .map_err(|f| f.with(CloseCode(1008)))?;
-        if let Some((_, sent)) = lock(&self.active).get_mut(lane) {
+        if let Some((_, sent)) = self.active.lock().get_mut(lane) {
             *sent = true;
         }
         Ok(())
@@ -77,21 +74,22 @@ impl Budget {
         usage: Option<Amount>,
         record: Value,
     ) -> Result<(), Fault> {
-        let hold = lock(&self.active).get(lane).copied();
+        let hold = self.active.lock().get(lane).copied();
         let Some((hold, _)) = hold else { return Ok(()) };
         self.ledger
             .settle(&hold, usage.unwrap_or(self.quote))
             .await?;
-        lock(&self.active).remove(lane);
-        lock(&self.turns).push(record);
+        self.active.lock().remove(lane);
+        self.turns.lock().push(record);
         Ok(())
     }
     pub async fn end(&self) {
-        let active = std::mem::take(&mut *lock(&self.active));
+        let active = std::mem::take(&mut *self.active.lock());
         for (lane, (hold, sent)) in active {
             let amount = if sent { self.quote } else { 0 };
             let _ = self.ledger.settle(&hold, amount).await;
-            lock(&self.turns)
+            self.turns
+                .lock()
                 .push(serde_json::json!({"lane":lane,"status":"cut","charged":amount}));
         }
     }

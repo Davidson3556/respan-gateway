@@ -562,12 +562,12 @@ async fn raw_provider(raw: Raw, wants: u64) -> std::net::SocketAddr {
                             if event["type"] == "session.update" {
                                 let cap = event["session"]["max_output_tokens"].as_u64();
                                 session_cap = cap.unwrap_or(session_cap);
-                                lock(&raw.sessions).push(event);
+                                raw.sessions.lock().push(event);
                                 let ack = json!({ "type": "session.updated" }).to_string();
                                 let _ = socket.send(Message::Text(ack.into())).await;
                                 continue;
                             }
-                            lock(&raw.read).push(event.clone());
+                            raw.read.lock().push(event.clone());
                             let cap = event["response"]["max_output_tokens"].as_u64();
                             let cap = cap.unwrap_or(u64::MAX).min(session_cap);
                             let tokens = match event["type"].as_str() {
@@ -634,7 +634,9 @@ async fn turns_that_would_say_more_than_the_cap_cannot_overdraw_the_wallet() {
     assert_eq!(wallets.spent("sk-demo"), 3 * TURN);
     let min = sampler.finish().await;
     assert!(min >= 0, "went negative: {min}");
-    let asked: Vec<_> = lock(&raw.read)
+    let asked: Vec<_> = raw
+        .read
+        .lock()
         .iter()
         .map(|e| e["response"].clone())
         .collect();
@@ -660,12 +662,14 @@ async fn a_response_create_asks_for_at_most_the_cap() {
     }
     close(&mut ws).await;
     gw.idle().await;
-    let asked: Vec<_> = lock(&raw.read)
+    let asked: Vec<_> = raw
+        .read
+        .lock()
         .iter()
         .map(|e| e["response"]["max_output_tokens"].clone())
         .collect();
     assert_eq!(asked, [json!(200), json!(TURN), json!(TURN), json!(TURN)]);
-    let all = lock(&raw.read);
+    let all = raw.read.lock();
     assert_eq!(all[0]["response"]["instructions"], "brief");
 }
 
@@ -686,7 +690,7 @@ async fn a_turn_holds_what_the_session_has_said_plus_the_cap() {
         Some((1008, "insufficient_funds".into()))
     );
     gw.idle().await;
-    assert_eq!(lock(&raw.read).len(), 2, "the second turn never reached it");
+    assert_eq!(raw.read.lock().len(), 2, "the second turn never reached it");
     assert_eq!(wallets.spent("sk-demo"), 5);
 }
 
@@ -909,7 +913,7 @@ impl Plugin for EndAt {
             .as_ref()
             .err()
             .map_or("ok".into(), |f| f.code().to_owned());
-        lock(&self.0).push((std::time::Instant::now(), code));
+        self.0.lock().push((std::time::Instant::now(), code));
     }
 }
 
@@ -953,7 +957,7 @@ async fn l5_a_client_that_leaves_during_a_wrap_ends_its_session_then() -> Result
     let left = std::time::Instant::now();
     drop(ws);
     gw.idle().await;
-    let ended = lock(&at.0).clone();
+    let ended = at.0.lock().clone();
     let after = ended
         .first()
         .map(|(t, c)| (t.duration_since(left).as_millis(), c.clone()));
@@ -1017,7 +1021,7 @@ async fn front(
 
 /// The `max_output_tokens` of each `session.update` a raw provider read.
 fn session_caps(raw: &Raw) -> Vec<Value> {
-    let sessions = lock(&raw.sessions);
+    let sessions = raw.sessions.lock();
     let caps = sessions
         .iter()
         .map(|e| e["session"]["max_output_tokens"].clone());
@@ -1111,7 +1115,8 @@ async fn a_tool_output_is_held_like_text() {
     assert_eq!(refused, Some((1008, "insufficient_funds".into())));
     gw.idle().await;
     assert!(
-        lock(&raw.read)
+        raw.read
+            .lock()
             .iter()
             .all(|e| e["type"] != "response.create")
     );
@@ -1270,7 +1275,7 @@ async fn l6_leave_during_a_wrap(
     let left = std::time::Instant::now();
     drop(ws);
     gw.idle().await;
-    let ended = lock(&at.0).clone();
+    let ended = at.0.lock().clone();
     let after = ended
         .first()
         .map(|(t, c)| (t.duration_since(left).as_millis(), c.clone()));
@@ -1316,7 +1321,8 @@ async fn a_tool_definition_is_held_like_text() {
     );
     gw.idle().await;
     assert!(
-        lock(&raw.read)
+        raw.read
+            .lock()
             .iter()
             .all(|e| e["type"] != "response.create")
     );

@@ -11,8 +11,9 @@
 //!
 //! `batch_split.rs` builds on this kind (it includes this file as a module).
 
+use parking_lot::Mutex;
 use respan_gateway_core::Provider;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation::Usage;
@@ -242,7 +243,7 @@ impl Plugin for Metered {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         let total = self.0.clone();
         px.filter(move |e: &mut Embeddings| {
-            *total.lock().unwrap_or_else(PoisonError::into_inner) += &e.usage;
+            *total.lock() += &e.usage;
             Ok(())
         })
     }
@@ -274,7 +275,7 @@ async fn embed(body: &'static str) -> Result<(Bytes, StatusCode, Bytes, Usage), 
     let requests = openai.requests();
     assert_eq!(requests.len(), 1, "one provider embedding request");
     let sent = requests[0].raw.clone();
-    let usage = *metered.0.lock().unwrap_or_else(PoisonError::into_inner);
+    let usage = *metered.0.lock();
     Ok((sent, status, answered?, usage))
 }
 

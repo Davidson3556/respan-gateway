@@ -10,9 +10,9 @@ async fn check(vendor: &str, paths: &[(&str, &str)]) -> Vec<String> {
     let addr = gw.base.trim_start_matches("http://").to_owned();
     let mut report = Vec::new();
     for (method, path) in paths {
-        seen.lock().unwrap().clear();
+        seen.lock().clear();
         let status = send_proxy_request(&addr, method, path).await;
-        let got = seen.lock().unwrap().clone();
+        let got = seen.lock().clone();
         let upstream = got
             .first()
             .cloned()

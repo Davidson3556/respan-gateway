@@ -117,7 +117,7 @@ async fn credentials_beta_headers_and_unknown_fields_round_trip() -> Result<(), 
         assert!(says_all(got, sent), "{got} vs {sent}");
     }
     assert!(got.contains(&serde_json::json!({ "type": "brand_new_event", "x": 1 })));
-    let requests = sent.lock().unwrap_or_else(PoisonError::into_inner);
+    let requests = sent.lock();
     assert_eq!(requests.len(), 1);
     let (uri, headers, body) = &requests[0];
     assert_eq!(
@@ -152,6 +152,6 @@ async fn a_provider_error_reaches_the_client_as_the_provider_wrote_it() -> Resul
     let gw = gateway(fixture(status, error, sent.clone()))?;
     let (status, _, body) = read_whole(serve(&gw, request()).await.0).await;
     assert_eq!((status.as_u16(), body?), (529, error.into()));
-    assert_eq!(sent.lock().unwrap_or_else(PoisonError::into_inner).len(), 1);
+    assert_eq!(sent.lock().len(), 1);
     Ok(())
 }

@@ -92,7 +92,7 @@ async fn cancellation_finishes_hooks_filters_and_delivery_once() {
 }
 
 /// A call kept by a spawned task ends with its request, however far it got.
-type Tasks = std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<Result<()>>>>>;
+type Tasks = std::sync::Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<Result<()>>>>>;
 struct Spawner(Tasks);
 #[async_trait]
 impl Plugin for Spawner {
@@ -105,7 +105,7 @@ impl Plugin for Spawner {
             }
             Ok(())
         });
-        lock(&self.0).push(task);
+        self.0.lock().push(task);
         tokio::task::yield_now().await;
         let z = futures::stream::iter([Ok::<_, Fault>(Out("z".into()))]);
         Ok(Some(Response::stream(z)))
@@ -139,7 +139,7 @@ async fn spawned_calls_end_with_their_request() {
         tokio::time::timeout(Duration::from_secs(2), gw.idle())
             .await
             .unwrap_or_else(|_| panic!("idle hung at {i}"));
-        let tasks: Vec<_> = lock(&tasks).drain(..).collect();
+        let tasks: Vec<_> = tasks.lock().drain(..).collect();
         for task in tasks {
             let ended = tokio::time::timeout(Duration::from_secs(2), task).await;
             let ended = ended
@@ -161,15 +161,15 @@ async fn spawned_calls_end_with_their_request() {
 }
 
 /// Provider end hooks, even slow ones, finish before the client's.
-struct Ordered(std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>);
+struct Ordered(std::sync::Arc<parking_lot::Mutex<Vec<&'static str>>>);
 #[async_trait]
 impl Plugin for Ordered {
     async fn on_client_end(&self, _: &ClientContext, _: &Result<()>) {
-        lock(&self.0).push("client_end");
+        self.0.lock().push("client_end");
     }
     async fn on_provider_end(&self, _: &ProviderContext, _: &Result<()>) {
         tokio::time::sleep(Duration::from_millis(20)).await;
-        lock(&self.0).push("provider_end");
+        self.0.lock().push("provider_end");
     }
 }
 
@@ -197,7 +197,7 @@ async fn provider_end_hooks_precede_the_clients() {
         }
         drop(body);
         gw.idle().await;
-        let log = lock(&log).clone();
+        let log = log.lock().clone();
         // a plugin that answers first leaves this one's client hook unrun
         let first_client = log
             .iter()

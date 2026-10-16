@@ -1,8 +1,9 @@
+use parking_lot::Mutex;
 use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::task::{Poll, Waker};
 
 use futures::channel::oneshot;
@@ -11,7 +12,7 @@ use futures::{FutureExt, StreamExt, stream};
 
 use crate::fault::{PANICKED, guarded};
 use crate::input::Input;
-use crate::layers::{cut, locked};
+use crate::layers::cut;
 use crate::lifecycle::{EndHooks, Latch};
 use crate::live_inputs::{Later, inputs};
 use crate::provider::Provider;
@@ -101,7 +102,7 @@ impl Future for Call {
             }
             call.sent = Some(slot);
         }
-        let mut slot = locked(call.sent.as_ref().expect("set above"));
+        let mut slot = (call.sent.as_ref().expect("set above")).lock();
         let Some(sending) = &mut slot.sending else {
             return Poll::Ready(Err(Fault::abandoned()));
         };
@@ -308,7 +309,7 @@ trait Open: Send + Sync {
 /// Dropped, its end hooks run abandoned; whoever awaits it wakes.
 impl Open for Mutex<CallSlot> {
     fn abandon(&self) {
-        let mut slot = locked(self);
+        let mut slot = self.lock();
         let (sending, waker) = (slot.sending.take(), slot.waker.take());
         drop(slot);
         drop(sending);
@@ -320,7 +321,7 @@ impl Open for Mutex<CallSlot> {
 
 impl Open for Mutex<CallEdge> {
     fn abandon(&self) {
-        locked(self).finish(Err(Fault::abandoned()));
+        self.lock().finish(Err(Fault::abandoned()));
     }
 }
 
@@ -337,7 +338,7 @@ impl Default for OpenCalls {
 impl OpenCalls {
     /// Whether `call` is one of this request's.
     pub(crate) fn holds(&self, call: &SharedCall) -> bool {
-        let calls = locked(&self.0);
+        let calls = self.0.lock();
         let call = Arc::as_ptr(call);
         calls
             .iter()
@@ -347,7 +348,7 @@ impl OpenCalls {
 
     /// Add `call`; `false` once the request has ended.
     fn add<T: Open + 'static>(&self, call: &Arc<T>) -> bool {
-        let Some(calls) = &mut *locked(&self.0) else {
+        let Some(calls) = &mut *self.0.lock() else {
             return false;
         };
         calls.retain(|c| c.strong_count() > 0);
@@ -357,7 +358,7 @@ impl OpenCalls {
 
     /// End every call [`Abandoned`](crate::FaultKind::Abandoned).
     pub(crate) fn abandon(&self) {
-        let calls = locked(&self.0).take().unwrap_or_default();
+        let calls = self.0.lock().take().unwrap_or_default();
         for call in calls.iter().filter_map(Weak::upgrade) {
             call.abandon();
         }

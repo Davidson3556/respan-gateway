@@ -8,7 +8,8 @@
 
 mod support;
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -69,7 +70,7 @@ impl Fake {
     }
 
     fn sent(&self) -> Vec<Sent> {
-        self.seen.lock().unwrap().clone()
+        self.seen.lock().clone()
     }
 
     /// The methods of the JSON-RPC requests it was sent.
@@ -125,13 +126,13 @@ async fn serve(State(shape): State<Shape>, req: Request<Body>) -> Response<Body>
         .await
         .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    shape.seen.lock().unwrap().push(Sent {
+    shape.seen.lock().push(Sent {
         method: method.clone(),
         session,
         authorization: authorization.clone(),
         body: body.clone(),
     });
-    let wants = shape.wants.lock().unwrap().clone();
+    let wants = shape.wants.lock().clone();
     if let Some(token) = wants
         && authorization != Some(format!("Bearer {token}"))
     {
@@ -281,7 +282,7 @@ impl Tokens {
     }
 
     fn forms(&self) -> Vec<Vec<(String, String)>> {
-        self.forms.lock().unwrap().clone()
+        self.forms.lock().clone()
     }
 }
 
@@ -294,7 +295,7 @@ fn field<'a>(form: &'a [(String, String)], name: &str) -> Option<&'a str> {
 async fn issue(State(issuer): State<Issuer>, body: String) -> Response<Body> {
     let form: Vec<(String, String)> = url_form(&body);
     let n = {
-        let mut forms = issuer.forms.lock().unwrap();
+        let mut forms = issuer.forms.lock();
         forms.push(form.clone());
         forms.len()
     };
@@ -875,7 +876,7 @@ async fn client_credentials_get_a_token_and_a_refusal_gets_a_new_one() {
     );
 
     // The server stops taking it: one 401, a new token, the call goes on.
-    *up.wants.lock().unwrap() = Some("tok-2".into());
+    *up.wants.lock() = Some("tok-2".into());
     let (status, text) = one(3, "s-beta", "tools/list", json!({})).await;
     assert_eq!(status, 200, "{text}");
     assert!(text.contains("echo"));
@@ -884,13 +885,13 @@ async fn client_credentials_get_a_token_and_a_refusal_gets_a_new_one() {
     assert_eq!(last.authorization.as_deref(), Some("Bearer tok-2"));
 
     // A server that refuses the new token too is not asked again for ever.
-    *up.wants.lock().unwrap() = Some("never".into());
+    *up.wants.lock() = Some("never".into());
     let (status, _) = one(4, "s-beta", "tools/list", json!({})).await;
     assert_eq!(status, 401);
     assert_eq!(tokens.forms().len(), 3);
 
     // Neither the secret nor a token is in what the gateway printed.
-    let printed = gw.stdout.lock().unwrap().join("\n");
+    let printed = gw.stdout.lock().join("\n");
     for secret in ["s3cret", "tok-1", "tok-2", "tok-3"] {
         assert!(!printed.contains(secret), "{printed}");
     }
@@ -935,7 +936,7 @@ async fn a_refresh_token_is_used_and_its_rotation_kept() {
     assert_eq!(field(&forms[0], "client_secret"), Some("from-env"));
 
     // The next token is asked for with the refresh token the last one gave.
-    *up.wants.lock().unwrap() = Some("tok-2".into());
+    *up.wants.lock() = Some("tok-2".into());
     assert_eq!(post(2).await, 200);
     let forms = tokens.forms();
     assert_eq!(forms.len(), 2);

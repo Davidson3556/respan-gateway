@@ -1,6 +1,7 @@
 //! Private helpers for formats integration tests.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use respan_gateway_core::Connection;
 use respan_gateway_core::Format;
@@ -78,7 +79,7 @@ pub struct Metered(Arc<Mutex<Usage>>);
 
 impl Metered {
     pub fn total(&self) -> Usage {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        *self.0.lock()
     }
 }
 
@@ -91,7 +92,7 @@ impl Plugin for Metered {
         let usage = self.0.clone();
         px.filter(move |reply: &mut Output| {
             if let Output::Usage(more) = reply {
-                *usage.lock().unwrap_or_else(PoisonError::into_inner) += &*more;
+                *usage.lock() += &*more;
             }
             Ok(())
         })

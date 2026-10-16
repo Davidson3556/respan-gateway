@@ -4,9 +4,10 @@
 mod faults;
 
 use faults::{says, says_all};
+use parking_lot::Mutex;
 use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::future::BoxFuture;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use respan_gateway_core::futures::Sink;
 use respan_gateway_core::futures::channel::oneshot;
@@ -91,8 +92,8 @@ impl Format<Io, Output, Input> for Protocol {
         let Io::Provider(dialer) = io else {
             return Err(Fault::config("expected provider I/O"));
         };
-        let delivery = dialer.writing.lock().unwrap().take().unwrap();
-        let incoming = dialer.incoming.lock().unwrap().take().unwrap();
+        let delivery = dialer.writing.lock().take().unwrap();
+        let incoming = dialer.incoming.lock().take().unwrap();
         let outgoing = EventSink::new(Completion(delivery));
         Ok((futures::future::ready(Ok(incoming)).boxed(), outgoing))
     }
@@ -109,12 +110,12 @@ struct Record {
 impl Record {
     /// The ends the provider saw, faults as messages.
     fn provider_ends(&self) -> Vec<Result<(), String>> {
-        says_all(self.provider.lock().unwrap().iter().cloned())
+        says_all(self.provider.lock().iter().cloned())
     }
 
     /// The ends the client saw, faults as messages.
     fn client_ends(&self) -> Vec<Result<(), String>> {
-        says_all(self.client.lock().unwrap().iter().cloned())
+        says_all(self.client.lock().iter().cloned())
     }
 }
 
@@ -131,12 +132,12 @@ impl Plugin for Record {
     }
 
     async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
-        self.provider.lock().unwrap().push(end.clone());
-        self.sent.lock().unwrap().push(px.is_sent());
+        self.provider.lock().push(end.clone());
+        self.sent.lock().push(px.is_sent());
     }
 
     async fn on_client_end(&self, _: &ClientContext, end: &Result<(), Fault>) {
-        self.client.lock().unwrap().push(end.clone());
+        self.client.lock().push(end.clone());
     }
 }
 
@@ -237,7 +238,7 @@ impl Plugin for RefusalHeld {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let mut response = cx.call("provider").await?;
         assert!(
-            self.0.lock().unwrap().is_canceled(),
+            self.0.lock().is_canceled(),
             "a refused opening must release pending upload while response is held"
         );
         assert!(response.until_end().await.is_err());
@@ -382,7 +383,7 @@ impl Format<Io, Output, Input> for ReadyProtocol {
     }
 
     fn bind(&self, _: Io) -> Result<Connection<Output, Input>, Fault> {
-        let delivery = self.delivery.lock().unwrap().take().unwrap();
+        let delivery = self.delivery.lock().take().unwrap();
         let prepare = self.prepare.clone();
         let submitted = self.submitted.clone();
         Ok((
@@ -434,6 +435,6 @@ async fn synchronous_preparation_controls_sent_status_while_delivery_progresses(
         assert_eq!(says(handled.await), says(preparation.clone()));
         gw.idle().await;
         assert_eq!(submitted.load(Ordering::SeqCst), preparation.is_ok());
-        assert_eq!(*record.sent.lock().unwrap(), [preparation.is_ok()]);
+        assert_eq!(*record.sent.lock(), [preparation.is_ok()]);
     }
 }

@@ -48,7 +48,8 @@ async fn plugins_see_the_request_and_change_its_model() {
         }
 
         async fn on_client_end(&self, cx: &ClientContext, _end: &Result<(), Fault>) {
-            if let Ok(mut seen) = self.0.lock() {
+            {
+                let mut seen = self.0.lock();
                 *seen = cx.extensions().get::<Seen>().map(|s| s.0);
             }
         }
@@ -63,7 +64,7 @@ async fn plugins_see_the_request_and_change_its_model() {
         serde_json::from_slice(h.sites.sent.sent()[0].body()).unwrap_or_default();
     assert_eq!(sent["model"], "gpt-small");
     assert_eq!(says(h.log.only()), Ok(()));
-    assert_eq!(redirect.0.lock().map(|s| *s).ok().flatten(), Some("hi"));
+    assert_eq!(*redirect.0.lock(), Some("hi"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -76,7 +77,7 @@ async fn end_hooks_run_on_the_requests_runtime_wherever_its_response_is_read() {
     impl Plugin for OnRuntime {
         async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<(), Fault>) {
             let on = tokio::runtime::Handle::try_current().is_ok();
-            self.0.lock().map(|mut s| *s = Some(on)).ok();
+            *self.0.lock() = Some(on);
         }
     }
 
@@ -96,7 +97,7 @@ async fn end_hooks_run_on_the_requests_runtime_wherever_its_response_is_read() {
     let _ = read.join();
     gw.idle().await;
 
-    assert_eq!(noted.0.lock().map(|s| *s).ok().flatten(), Some(true));
+    assert_eq!(*noted.0.lock(), Some(true));
 }
 
 #[tokio::test]
@@ -130,7 +131,8 @@ async fn a_plugin_knows_which_format_the_client_speaks() {
     #[async_trait]
     impl Plugin for Seen {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            if let Ok(mut seen) = self.0.lock() {
+            {
+                let mut seen = self.0.lock();
                 seen.push(cx.format().to_owned());
             }
             Ok(None)
@@ -153,7 +155,7 @@ async fn a_plugin_knows_which_format_the_client_speaks() {
     }
 
     assert_eq!(
-        seen.lock().map(|s| s.clone()).ok(),
+        Some(seen.lock().clone()),
         Some(vec![
             "openai-chat".to_owned(),
             "anthropic-messages".to_owned()
@@ -419,7 +421,7 @@ async fn a_calls_request_is_as_it_was_when_the_call_was_made() {
         async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
             let model = px.client().input::<Input>().ok();
             let model = model.and_then(|c| c.model.clone());
-            self.0.lock().map(|mut s| s.extend(model)).ok();
+            self.0.lock().extend(model);
         }
     }
 
@@ -429,7 +431,7 @@ async fn a_calls_request_is_as_it_was_when_the_call_was_made() {
     h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
 
     assert_eq!(h.text(unary_chat()).await.0, StatusCode::OK);
-    let mut seen = twice.0.lock().map(|s| s.clone()).unwrap_or_default();
+    let mut seen = twice.0.lock().clone();
     seen.sort();
     assert_eq!(seen, ["a", "b"]);
 }
@@ -530,7 +532,7 @@ async fn a_response_goes_only_to_the_request_whose_call_it_answers() {
             match asked.is_some_and(|a| a.headers().contains_key("x-keep")) {
                 true => {
                     let resp = cx.call("backup").await?;
-                    *self.0.0.lock().map_err(|_| Fault::internal("poisoned"))? = Some(resp);
+                    *self.0.0.lock() = Some(resp);
                     Ok(None)
                 }
                 _ => Ok(self.0.take()),

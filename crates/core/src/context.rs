@@ -1,6 +1,7 @@
+use parking_lot::Mutex;
 use std::any::Any;
 use std::future::ready;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use futures::{Stream, StreamExt, stream};
@@ -10,7 +11,7 @@ use crate::call::OpenCalls;
 use crate::format::{AnyFormat, is_input};
 use crate::gateway::Registry;
 use crate::input::Input;
-use crate::layers::{Layer, locked};
+use crate::layers::Layer;
 use crate::lifecycle::{Edge, InFlight, Latch};
 use crate::live_inputs::{Later, inputs};
 use crate::plugin::Filters;
@@ -111,10 +112,10 @@ impl Edge for ClientContext {
         self.ended.close();
         self.open.abandon();
         let Some(stages) = &self.stages else { return };
-        let stages = locked(stages);
+        let stages = stages.lock();
         let wrapped = stages.wrapped.iter().rev().map(|w| &w.1);
         for layer in std::iter::once(&stages.latest).chain(wrapped) {
-            let _ = locked(layer).end(end.clone(), &mut None);
+            let _ = layer.lock().end(end.clone(), &mut None);
         }
     }
 }
@@ -152,7 +153,7 @@ impl ClientContext {
         let stages = self.stages.as_mut().ok_or_else(|| {
             Fault::internal("a call's copy of the request has no response stages")
         })?;
-        Ok(stages.get_mut().unwrap_or_else(|e| e.into_inner()))
+        Ok(stages.get_mut())
     }
 
     /// The name of the client's format.
@@ -274,9 +275,9 @@ impl ClientContext {
         filter: impl Filter<T>,
     ) -> Result<()> {
         match is_input::<T>(&*self.format)? {
-            false => locked(&self.stages()?.latest).add(filter, false),
+            false => (self.stages()?.latest).lock().add(filter, false),
             true if !self.input.is_live() => self.input.filter::<T>(Filters::of(filter)),
-            true => locked(&self.later.filters).add(filter, true),
+            true => self.later.filters.lock().add(filter, true),
         }
     }
 

@@ -1,17 +1,15 @@
 //! End-hook records for public-API lifecycle tests.
 
+use parking_lot::Mutex;
 use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, async_trait};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
 pub struct Outcomes(Arc<Mutex<Vec<Result<(), Fault>>>>);
 
 impl Outcomes {
     pub fn all(&self) -> Vec<Result<(), Fault>> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.0.lock().clone()
     }
 
     pub fn only(&self) -> Result<(), Fault> {
@@ -24,10 +22,7 @@ impl Outcomes {
 #[async_trait]
 impl Plugin for Outcomes {
     async fn on_client_end(&self, _cx: &ClientContext, end: &Result<(), Fault>) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(end.clone());
+        self.0.lock().push(end.clone());
     }
 }
 
@@ -36,19 +31,13 @@ pub struct Calls(Arc<Mutex<Vec<Result<(), Fault>>>>);
 
 impl Calls {
     pub fn all(&self) -> Vec<Result<(), Fault>> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.0.lock().clone()
     }
 }
 
 #[async_trait]
 impl Plugin for Calls {
     async fn on_provider_end(&self, _px: &ProviderContext, end: &Result<(), Fault>) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(end.clone());
+        self.0.lock().push(end.clone());
     }
 }

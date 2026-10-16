@@ -2,11 +2,10 @@
 //! with a server, and what ends them when a reload retires the build.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use indexmap::IndexMap;
 use respan_gateway_core::futures::stream;
 use respan_gateway_core::{
     ClientContext, Extensions, Fault, Gateway, Plugin, Response, async_trait,
@@ -26,7 +25,10 @@ pub(super) struct Inner {
     /// The servers, in the order lists show them.
     pub(super) servers: Vec<String>,
     pub(super) filter: ToolFilter,
-    pub(super) sessions: Mutex<IndexMap<String, Arc<Session>>>,
+    /// The client sessions, each kept until idle for [`IDLE`](super::IDLE),
+    /// at most [`SESSIONS`](super::SESSIONS), the least recently used
+    /// dropped first.
+    pub(super) sessions: moka::sync::Cache<String, Arc<Session>>,
     /// The next JSON-RPC id of the gateway's own requests.
     pub(super) next_id: AtomicU64,
 }
@@ -36,7 +38,6 @@ pub(super) struct Session {
     /// The session with each server: none until opened, and again once the
     /// server lost it.
     pub(super) upstream: HashMap<String, tokio::sync::Mutex<Option<Opened>>>,
-    pub(super) touched: Mutex<Instant>,
 }
 
 /// A session with a server.
@@ -45,10 +46,6 @@ pub(super) struct Opened {
     pub(super) id: Option<String>,
     pub(super) protocol: String,
     pub(super) capabilities: Value,
-}
-
-pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Session {
@@ -66,14 +63,6 @@ impl Session {
             }
         }
     }
-}
-
-/// A session id: 128 random bits as hex, visible ASCII as MCP requires.
-pub(super) fn session_id() -> Result<String, Fault> {
-    let mut bits = [0u8; 16];
-    getrandom::fill(&mut bits)
-        .map_err(|e| Fault::internal("no secure random source").with_source(e))?;
-    Ok(bits.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Marks the request that ends a retired aggregate's sessions.

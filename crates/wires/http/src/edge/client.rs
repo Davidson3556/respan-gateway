@@ -1,7 +1,7 @@
 //! Client input and its one response handoff.
 
 use super::writer::Writer;
-use super::{PANICKED, Written, guarded, locked};
+use super::{PANICKED, Written, guarded};
 use crate::codec::{self, decode_one};
 use crate::rules::{bodiless, error_head, outgoing, plain_response, strip_hops};
 use crate::{
@@ -18,12 +18,13 @@ use http::header::CONTENT_LENGTH;
 use http::request::Parts as RequestHead;
 use http::response::Parts as ResponseHead;
 use http_body_util::BodyExt;
+use parking_lot::Mutex;
 use respan_gateway_core::Gateway;
 use respan_gateway_core::{Connection, ErrorCode, EventSink, EventStream, Extensions, Fault};
 use respan_gateway_http_faults::Status;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 
 type ErrorWriter = dyn Fn(&Fault, &http::Request<Bytes>, &mut ResponseHead) -> Bytes + Send + Sync;
@@ -253,14 +254,14 @@ impl ClientIo {
                 None => {
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| encode(reply))) {
                         Ok(Ok(sink)) => {
-                            if locked(&slot).unread {
+                            if slot.lock().unread {
                                 events.stop();
                             }
                             sink
                         }
                         failed => {
                             events.stop();
-                            locked(&slot).staged.take();
+                            slot.lock().staged.take();
                             match failed.ok().and_then(Result::err) {
                                 Some(fault) => fallback.refusal(fault),
                                 // A panicking format may have left its error
@@ -271,7 +272,7 @@ impl ClientIo {
                     }
                 }
             };
-            locked(&slot).commit();
+            slot.lock().commit();
             Ok(sink)
         });
         (incoming, outgoing)
@@ -344,7 +345,7 @@ impl Reply {
     /// The sink of `head` and `encoder`, started.
     fn client<T: 'static>(self, head: ResponseHead, encoder: Box<dyn Encoder<T>>) -> Client<T> {
         if bodiless(self.request.method(), head.status) {
-            locked(&self.slot).unread = true;
+            self.slot.lock().unread = true;
             let mut client = Client::new(self, head, None);
             client.writer.end(Ok(()), None);
             client.open();
@@ -398,7 +399,7 @@ impl<T: 'static> Client<T> {
     fn open(&mut self) {
         if let Some((head, frames, completion)) = self.unopened.take() {
             let response = http::Response::from_parts(head, Body::stream(frames));
-            locked(&self.reply.slot).publish((response, completion));
+            self.reply.slot.lock().publish((response, completion));
         }
     }
     /// Send `frames`, but an empty chunk of a body, which is nothing (a live
@@ -418,7 +419,7 @@ impl<T: 'static> Client<T> {
         let mut response = plain_response(&fault);
         response.extensions_mut().insert(Unwritten);
         if let Some((_, _, completion)) = self.unopened.take() {
-            locked(&self.reply.slot).publish((response, completion));
+            self.reply.slot.lock().publish((response, completion));
         }
     }
     /// Write `fault` as the response: an explicit [`RawReply`] as it came,
@@ -470,7 +471,7 @@ impl<T: 'static> Client<T> {
 }
 impl<T> Drop for Client<T> {
     fn drop(&mut self) {
-        let mut slot = locked(&self.reply.slot);
+        let mut slot = self.reply.slot.lock();
         if self.unopened.is_some() && slot.committed && slot.sender.is_some() {
             let fault = Fault::abandoned();
             let end = futures::future::ready(Err(fault.clone())).boxed();
@@ -481,7 +482,7 @@ impl<T> Drop for Client<T> {
 impl<T: 'static> Sink<Result<T, Fault>> for Client<T> {
     type Error = Fault;
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        if let Some(fault) = locked(&self.reply.slot).failed.clone() {
+        if let Some(fault) = self.reply.slot.lock().failed.clone() {
             return Poll::Ready(Err(fault));
         }
         match self.writer.is_open() {
@@ -508,7 +509,7 @@ impl<T: 'static> Sink<Result<T, Fault>> for Client<T> {
             ready!(self.writer.poll_ready(cx, false))?;
             self.finish(Ok(()));
         }
-        if let Some(fault) = locked(&self.reply.slot).failed.clone() {
+        if let Some(fault) = self.reply.slot.lock().failed.clone() {
             return Poll::Ready(Err(fault));
         }
         self.writer.poll_close(cx)

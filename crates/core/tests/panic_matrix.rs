@@ -52,7 +52,7 @@ async fn a_panic_anywhere_still_ends_everything_once() {
                             };
                             let body = match n == 29 {
                                 true => stream::once(async {
-                                    lock(&FIRED).push(29);
+                                    FIRED.lock().push(29);
                                     panic!("p29");
                                     #[allow(unreachable_code)]
                                     Ok::<String, Fault>(String::new())
@@ -129,7 +129,7 @@ async fn a_panic_anywhere_still_ends_everything_once() {
     }
     PANIC.store(0, Ordering::SeqCst);
     let _ = std::panic::take_hook();
-    let fired = lock(&FIRED).clone();
+    let fired = FIRED.lock().clone();
     let idle: Vec<_> = POINTS
         .iter()
         .filter(|p| **p != 0 && !fired.contains(p))

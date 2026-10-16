@@ -35,10 +35,11 @@
 //!
 //! `cargo run -p respan-gateway-examples --example attachments`
 
+use parking_lot::Mutex;
 use respan_gateway_core::{ErrorCode, Provider};
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use base64::Engine;
@@ -519,17 +520,11 @@ impl FileServer {
                     .and_then(|value| value.to_str().ok())
                     .unwrap_or_default()
                     .to_owned();
-                seen.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push((path, auth));
-                let (status, body) = queue
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .pop_front()
-                    .unwrap_or((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        b"unscripted file request".to_vec(),
-                    ));
+                seen.lock().push((path, auth));
+                let (status, body) = queue.lock().pop_front().unwrap_or((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    b"unscripted file request".to_vec(),
+                ));
                 (status, [("content-type", "application/json")], body)
             }
         };
@@ -549,18 +544,12 @@ impl FileServer {
 
     #[cfg(test)]
     fn answer(&self, status: StatusCode, body: impl Into<Vec<u8>>) {
-        self.answers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push_back((status, body.into()));
+        self.answers.lock().push_back((status, body.into()));
     }
 
     #[cfg(test)]
     fn requests(&self) -> Vec<(String, String)> {
-        self.requests
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.requests.lock().clone()
     }
 }
 

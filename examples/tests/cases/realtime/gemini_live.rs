@@ -68,7 +68,7 @@ async fn setup_audio_tools_and_resumption_pass_while_turns_are_metered() {
     next(&mut live).await.unwrap();
     close(&mut live).await;
     assert_eq!(observed.ledger.spent("demo"), 46);
-    let sent = live.received.lock().unwrap();
+    let sent = live.received.lock();
     assert_eq!(
         sent[0]["setup"]["generationConfig"]["maxOutputTokens"],
         OUTPUT
@@ -105,7 +105,7 @@ async fn interruptions_and_separate_usage_finish_once() {
     }
     close(&mut live).await;
     assert_eq!(observed.ledger.spent("demo"), 11);
-    assert_eq!(budget::lock(&observed.completed).len(), 1);
+    assert_eq!(observed.completed.lock().len(), 1);
 }
 #[tokio::test]
 async fn unreserved_audio_and_unaffordable_turns_are_refused() {
@@ -128,7 +128,7 @@ async fn unreserved_audio_and_unaffordable_turns_are_refused() {
         send(&mut live, event).await;
         assert!(next(&mut live).await.is_none());
         close(&mut live).await;
-        assert_eq!(live.received.lock().unwrap().len(), 1, "the setup alone");
+        assert_eq!(live.received.lock().len(), 1, "the setup alone");
         assert_eq!(observed.ledger.spent("demo"), 0);
     }
 }
@@ -155,7 +155,7 @@ async fn going_away_passes_unchanged_and_a_cut_turn_charges_its_reservation() {
     assert_eq!(notice["future"], "preserved");
     close(&mut live).await;
     assert_eq!(observed.ledger.spent("demo"), budget::QUOTE);
-    assert_eq!(budget::lock(&observed.completed)[0]["status"], "cut");
+    assert_eq!(observed.completed.lock()[0]["status"], "cut");
 }
 
 #[tokio::test]
@@ -170,7 +170,7 @@ async fn setup_cannot_switch_to_a_model_outside_its_quote() {
     send(&mut live, json!({"setup":{"model":"models/unquoted"}})).await;
     assert!(next(&mut live).await.is_none());
     close(&mut live).await;
-    assert!(live.received.lock().unwrap().is_empty());
+    assert!(live.received.lock().is_empty());
 }
 
 #[tokio::test]
@@ -191,7 +191,7 @@ async fn malformed_setup_configuration_is_refused_without_panicking() {
         send(&mut live, json!({"setup":setup})).await;
         assert!(next(&mut live).await.is_none());
         close(&mut live).await;
-        assert!(live.received.lock().unwrap().is_empty());
+        assert!(live.received.lock().is_empty());
     }
 }
 
@@ -213,6 +213,6 @@ async fn a_tool_response_without_an_active_turn_reserves_before_generation() {
     .await;
     assert!(next(&mut live).await.is_none());
     close(&mut live).await;
-    assert_eq!(live.received.lock().unwrap().len(), 1, "the setup alone");
+    assert_eq!(live.received.lock().len(), 1, "the setup alone");
     assert_eq!(observed.ledger.spent("demo"), 0);
 }

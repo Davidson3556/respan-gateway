@@ -16,6 +16,7 @@
 //! `RESPAN_ANTHROPIC_UPSTREAM=http://127.0.0.1:PORT` to use a local provider
 //! instead of the default Anthropic upstream.
 
+use parking_lot::Mutex;
 use respan_gateway_conversation::Input;
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_core::{Fault, Gateway, Provider, futures::TryStreamExt};
@@ -23,7 +24,7 @@ use respan_gateway_examples::LIMIT;
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_serve::router;
@@ -56,11 +57,8 @@ fn fixture(
                 for chunk in chunks {
                     bytes.extend_from_slice(&chunk);
                 }
-                sent.lock().unwrap_or_else(PoisonError::into_inner).push((
-                    head.uri,
-                    head.headers,
-                    Bytes::from(bytes),
-                ));
+                sent.lock()
+                    .push((head.uri, head.headers, Bytes::from(bytes)));
                 let content_type = if status.is_success() {
                     "text/event-stream"
                 } else {
@@ -130,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sent = Sent::default();
     let gw = gateway(fixture(StatusCode::OK, STREAM.concat(), sent.clone()))?;
     let (status, _, body) = read_whole(serve(&gw, request()).await.0).await;
-    let requests = sent.lock().unwrap_or_else(PoisonError::into_inner);
+    let requests = sent.lock();
     let (uri, headers, _) = &requests[0];
     println!("provider got: {uri} {headers:?}");
     println!(

@@ -43,9 +43,9 @@ async fn no_front_end_reads_a_passthrough_call_as_chat() {
         "/v1/chat/completions;x%2F..",
         "/v1/chat/completions;x%2Fy",
     ] {
-        seen.lock().unwrap().clear();
+        seen.lock().clear();
         let status = send_post(&addr, sent).await;
-        let got = seen.lock().unwrap().clone();
+        let got = seen.lock().clone();
         if !status.contains(" 404 ") {
             wrong.push(format!("sent {sent}: {status}, not a 404"));
         }

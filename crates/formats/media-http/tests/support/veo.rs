@@ -5,9 +5,10 @@
 //! Google's schema, and serves a video at the URI its operation names, or
 //! redirects there to storage, as the Gemini API may.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body as Original;
@@ -49,10 +50,6 @@ struct State {
     operations: Mutex<HashMap<String, (String, u32)>>,
 }
 
-fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 impl Veo {
     /// A fake that serves a video where its operation says.
     pub async fn start() -> Veo {
@@ -89,7 +86,7 @@ impl Veo {
 
     /// The calls it took, in order.
     pub fn seen(&self) -> Vec<Call> {
-        locked(&self.seen).clone()
+        self.seen.lock().clone()
     }
 
     fn http(&self) -> HttpTransport {
@@ -154,7 +151,7 @@ async fn answer(request: http::Request<Original>, state: &State) -> http::Respon
             Err(_) => return invalid("Invalid JSON payload received."),
         },
     };
-    locked(&state.seen).push(Call {
+    state.seen.lock().push(Call {
         method: head.method.to_string(),
         path: path.clone(),
         query: head.uri.query().map(str::to_owned),
@@ -290,7 +287,7 @@ fn create(model: &str, body: &Value, state: &State) -> http::Response<Original> 
             "The number value for `durationSeconds` is out of bound. Please provide a value between 4 and 8, inclusive.",
         );
     }
-    let mut operations = locked(&state.operations);
+    let mut operations = state.operations.lock();
     let name = format!("models/{model}/operations/op{}", operations.len() + 1);
     operations.insert(name.clone(), (prompt.to_owned(), 0));
     json_answer(json!({"name": name}))
@@ -299,7 +296,7 @@ fn create(model: &str, body: &Value, state: &State) -> http::Response<Original> 
 /// An operation, done from its second poll: with a video, an error, or, for
 /// a prompt the filters take, neither.
 fn poll(name: &str, state: &State) -> http::Response<Original> {
-    let mut operations = locked(&state.operations);
+    let mut operations = state.operations.lock();
     let Some((prompt, polls)) = operations.get_mut(name) else {
         return error(StatusCode::NOT_FOUND, "Operation not found.");
     };

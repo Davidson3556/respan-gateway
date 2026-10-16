@@ -8,8 +8,9 @@
 //!
 //! `cargo run -p respan-gateway-examples --example fallback`
 
+use parking_lot::Mutex;
 use respan_gateway_examples::LIMIT;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
@@ -78,7 +79,7 @@ impl Plugin for Log {
         let model = chat.and_then(|c| c.model.as_deref()).unwrap_or("-");
         let line = format!("{} {model} #{index} {role:?} {end}", px.provider());
         println!("  attempt {line}");
-        let mut lines = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut lines = self.0.lock();
         lines.push(line);
     }
 }
@@ -161,7 +162,7 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
     let body = String::from_utf8_lossy(&body?).into_owned();
     let last = body.trim_end().lines().last().unwrap_or_default();
     println!("  client: {status}, last event: {last}");
-    let mut attempts = log.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let mut attempts = log.0.lock().clone();
     attempts.sort();
     let counts = [
         openai.requests().len(),

@@ -26,9 +26,9 @@ async fn no_decode_then_reparse_reader_reads_a_passthrough_call_as_chat() {
         "/v1/chat/completions%23",
         "/v1/chat/completions%23frag",
     ] {
-        seen.lock().unwrap().clear();
+        seen.lock().clear();
         let status = send_request(&addr, "POST", target, "").await;
-        for head in seen.lock().unwrap().iter() {
+        for head in seen.lock().iter() {
             let line = head.lines().next().unwrap_or_default();
             if line
                 .split(' ')
@@ -68,9 +68,9 @@ async fn passthrough_forwards_case_sensitive_paths_byte_for_byte() {
         ),
         ("GET", "/v1/Models/GPT-4o"),
     ] {
-        seen.lock().unwrap().clear();
+        seen.lock().clear();
         let status = send_request(&addr, method, target, "").await;
-        let got = seen.lock().unwrap().clone();
+        let got = seen.lock().clone();
         let lines: Vec<String> = got
             .iter()
             .map(|h| h.lines().next().unwrap_or_default().to_owned())
@@ -108,12 +108,12 @@ async fn a_path_outside_the_allowed_set_is_refused_before_the_vendor() {
         "/v1/a%3Fb",
         "/v1/a%23b",
     ] {
-        seen.lock().unwrap().clear();
+        seen.lock().clear();
         let status = send_request(&addr, "GET", target, "").await;
-        if !status.contains(" 404 ") || !seen.lock().unwrap().is_empty() {
+        if !status.contains(" 404 ") || !seen.lock().is_empty() {
             wrong.push(format!(
                 "GET {target}: {status}, vendor got {:?}",
-                seen.lock().unwrap()
+                seen.lock()
             ));
         }
     }

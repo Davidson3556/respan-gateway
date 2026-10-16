@@ -4,8 +4,9 @@
 //! or a reference it does not take, content not ready, a body on a `GET`),
 //! and serves content in chunks.
 
+use parking_lot::Mutex;
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body as Original;
@@ -66,10 +67,7 @@ impl Videos {
 
     /// The calls it took, in order.
     pub fn seen(&self) -> Vec<Seen> {
-        self.seen
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.seen.lock().clone()
     }
 
     /// A transport to it, with its key.
@@ -97,10 +95,6 @@ pub const THUMBNAIL: &[u8] = b"RIFF\0\0\0\0WEBPVP8 thumbnail";
 fn not_found(id: &str) -> http::Response<Original> {
     let message = format!("Video with id '{id}' not found.");
     error(StatusCode::NOT_FOUND, &message, None, "not_found")
-}
-
-fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 async fn answer(request: http::Request<Original>, state: &State) -> http::Response<Original> {
@@ -140,7 +134,7 @@ async fn answer(request: http::Request<Original>, state: &State) -> http::Respon
     call.path = head.uri.path().to_owned();
     call.query = head.uri.query().map(str::to_owned);
     call.content_type = content_type;
-    locked(&state.seen).push(call.clone());
+    state.seen.lock().push(call.clone());
     let query = |key: &str| {
         let pairs = head.uri.query().unwrap_or_default().split('&');
         pairs
@@ -165,7 +159,7 @@ async fn answer(request: http::Request<Original>, state: &State) -> http::Respon
 }
 
 fn new_job(state: &State, model: &str, seconds: &str, size: &str) -> Value {
-    let mut jobs = locked(&state.jobs);
+    let mut jobs = state.jobs.lock();
     let job = json!({
         "id": format!("video_{:032x}", jobs.len() + 1),
         "object": "video",
@@ -221,7 +215,7 @@ fn create(call: &Seen, state: &State) -> http::Response<Original> {
 
 /// The job `id`, finished once polled.
 fn retrieve(id: &str, state: &State) -> http::Response<Original> {
-    let mut jobs = locked(&state.jobs);
+    let mut jobs = state.jobs.lock();
     let Some(job) = jobs.iter_mut().find(|j| j["id"] == id) else {
         return not_found(id);
     };
@@ -233,7 +227,7 @@ fn retrieve(id: &str, state: &State) -> http::Response<Original> {
 }
 
 fn delete(id: &str, state: &State) -> http::Response<Original> {
-    let mut jobs = locked(&state.jobs);
+    let mut jobs = state.jobs.lock();
     let Some(at) = jobs.iter().position(|j| j["id"] == id) else {
         return not_found(id);
     };
@@ -250,7 +244,7 @@ fn list(
     limit: Option<String>,
     order: Option<String>,
 ) -> http::Response<Original> {
-    let mut jobs = locked(&state.jobs).clone();
+    let mut jobs = state.jobs.lock().clone();
     match order.as_deref() {
         None | Some("desc") => jobs.reverse(),
         Some("asc") => {}
@@ -278,7 +272,7 @@ fn list(
 }
 
 fn content(id: &str, variant: Option<String>, state: &State) -> http::Response<Original> {
-    let jobs = locked(&state.jobs);
+    let jobs = state.jobs.lock();
     let Some(job) = jobs.iter().find(|j| j["id"] == id) else {
         return not_found(id);
     };
@@ -311,7 +305,7 @@ fn remix(id: &str, call: &Seen, state: &State) -> http::Response<Original> {
     if string(call, "prompt").is_none() {
         return missing("prompt");
     }
-    let source = locked(&state.jobs).iter().find(|j| j["id"] == id).cloned();
+    let source = state.jobs.lock().iter().find(|j| j["id"] == id).cloned();
     let Some(source) = source else {
         return not_found(id);
     };
@@ -321,7 +315,7 @@ fn remix(id: &str, call: &Seen, state: &State) -> http::Response<Original> {
     let field = |key: &str| source[key].as_str().unwrap_or_default().to_owned();
     let mut job = new_job(state, &field("model"), &field("seconds"), &field("size"));
     job["remixed_from_video_id"] = id.into();
-    if let Some(stored) = locked(&state.jobs).last_mut() {
+    if let Some(stored) = state.jobs.lock().last_mut() {
         *stored = job.clone();
     }
     json_answer(job, &state.rules)

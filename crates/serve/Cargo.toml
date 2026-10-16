@@ -21,6 +21,7 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 
 [dev-dependencies]
+parking_lot.workspace = true
 respan-gateway-http-faults.workspace = true
 respan-gateway-plugin-relay.workspace = true
 respan-gateway-passthrough-http.workspace = true

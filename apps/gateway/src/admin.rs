@@ -1,8 +1,7 @@
 //! The web UI under `/ui/`, and the admin API it reads under `/ui/api/`.
 
-use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Json;
@@ -65,7 +64,8 @@ pub struct Admin {
     /// The gateway, which the tools of a server are asked through.
     gateway: Gateway,
     /// Each server's tools as last asked, for a minute.
-    tools: Mutex<HashMap<String, (Instant, Value)>>,
+    /// Each MCP server's tools as last listed, for a minute.
+    tools: moka::sync::Cache<String, Value>,
     /// How sending traces to Respan goes, if its plugin is on.
     respan: Option<Arc<respan_gateway_plugin_respan::Health>>,
 }
@@ -154,7 +154,9 @@ impl Admin {
                 Some((servers, ToolFilter::new(a.allow.clone(), a.deny.clone())))
             }),
             gateway,
-            tools: Mutex::default(),
+            tools: moka::sync::Cache::builder()
+                .time_to_live(Duration::from_secs(60))
+                .build(),
             respan: None,
         }
     }
@@ -203,10 +205,7 @@ fn reloaded_json(
     process: &Process,
     reloaded: &crate::app::Reloaded,
 ) -> serde_json::Map<String, Value> {
-    let at = *process
-        .reloaded_at
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let at = *process.reloaded_at.lock();
     let Value::Object(map) = json!({
         "reloaded_at": at.map(rfc3339),
         "restart_required": reloaded.restart_required,
@@ -262,10 +261,7 @@ async fn reload(State(admin): State<Arc<Admin>>) -> Response {
 async fn overview(State(admin): State<Arc<Admin>>) -> Json<Value> {
     let (source, path) = admin.source_and_path();
     let process = &admin.process;
-    let reloaded_at = *process
-        .reloaded_at
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let reloaded_at = *process.reloaded_at.lock();
     Json(json!({
         "version": crate::VERSION,
         "listen": process.listen.get().map(ToString::to_string),
@@ -385,12 +381,10 @@ async fn mcp_tools(
         let message = format!("no MCP server named '{name}'");
         return auth::error(StatusCode::NOT_FOUND, "not_found_error", &message);
     }
-    let fresh = |(at, _): &&(Instant, Value)| at.elapsed() < Duration::from_secs(60);
-    if q.refresh != Some(true) {
-        let tools = admin.tools.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, listed)) = tools.get(&name).filter(fresh) {
-            return Json(listed.clone()).into_response();
-        }
+    if q.refresh != Some(true)
+        && let Some(listed) = admin.tools.get(&name)
+    {
+        return Json(listed).into_response();
     }
     let started = Instant::now();
     let asked = tokio::time::timeout(
@@ -427,8 +421,7 @@ async fn mcp_tools(
         "took_ms": started.elapsed().as_millis() as u64,
         "asked_at": rfc3339(std::time::SystemTime::now()),
     });
-    let mut cache = admin.tools.lock().unwrap_or_else(|e| e.into_inner());
-    cache.insert(name, (Instant::now(), listed.clone()));
+    admin.tools.insert(name, listed.clone());
     Json(listed).into_response()
 }
 

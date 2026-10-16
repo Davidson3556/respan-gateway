@@ -1,8 +1,9 @@
 //! A gateway between a realtime client and a strict fake, and a client of
 //! it that keeps what it said and heard.
 
+use parking_lot::Mutex;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
@@ -31,11 +32,11 @@ pub struct Seen {
 
 impl Seen {
     pub fn inputs(&self) -> Vec<Input> {
-        self.inputs.lock().unwrap().clone()
+        self.inputs.lock().clone()
     }
 
     pub fn outputs(&self) -> Vec<Output> {
-        self.outputs.lock().unwrap().clone()
+        self.outputs.lock().clone()
     }
 }
 
@@ -44,12 +45,12 @@ impl Plugin for Seen {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let inputs = self.inputs.clone();
         cx.filter(move |e: &mut Input| {
-            inputs.lock().unwrap().push(e.clone());
+            inputs.lock().push(e.clone());
             Ok(())
         })?;
         let outputs = self.outputs.clone();
         cx.filter(move |e: &mut Output| {
-            outputs.lock().unwrap().push(e.clone());
+            outputs.lock().push(e.clone());
             Ok(())
         })?;
         Ok(None)

@@ -27,14 +27,13 @@
 //!
 //! `cargo run -p respan-gateway-examples --example jobs`
 
+use parking_lot::Mutex;
 use respan_gateway_core::ErrorCode;
 use respan_gateway_examples::LIMIT;
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::collections::HashMap;
-#[cfg(test)]
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 
 use mockllm::FakeOpenAi;
 use respan_gateway_conversation::{Input, Output};
@@ -58,20 +57,9 @@ use tokio::time::Instant;
 mod persistent;
 use persistent::Sqlite;
 
-fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// Hashes of the tenant's credential and of the conversation, around the
 /// idempotency key. SHA-256 is stable across process restarts.
 type Key = (String, String, String);
-
-#[cfg(test)]
-fn hash(value: impl Hash) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
 
 fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -141,7 +129,7 @@ impl Store for Memory {
     async fn claim(&self, key: &Key) -> Result<Claim, Fault> {
         loop {
             let mut result = {
-                let mut all = locked(&self.0);
+                let mut all = self.0.lock();
                 match all.get(key) {
                     Some(running) => running.subscribe(),
                     None => {
@@ -158,7 +146,7 @@ impl Store for Memory {
     }
 
     async fn finish(&self, key: &Key, _owner: u64, result: Option<Replies>) -> Result<(), Fault> {
-        let mut all = locked(&self.0);
+        let mut all = self.0.lock();
         if let Some(done) = result {
             if let Some(run) = all.get(key) {
                 run.send_replace(Some(done));
@@ -345,7 +333,7 @@ impl<S: Store> Plugin for Idempotent<S> {
             });
         }
         cx.filter(move |reply: &mut Output| {
-            locked(&sent).push(reply.clone());
+            sent.lock().push(reply.clone());
             Ok(())
         })?;
         Ok(None)
@@ -359,8 +347,8 @@ impl<S: Store> Plugin for Idempotent<S> {
             .deadline
             .as_ref()
             .is_none_or(|deadline| *deadline.borrow() > Instant::now());
-        let result = (end.is_ok() && live).then(|| locked(&running.sent).clone().into());
-        locked(&running.stop).take();
+        let result = (end.is_ok() && live).then(|| running.sent.lock().clone().into());
+        running.stop.lock().take();
         let _ = self.0.finish(&running.key, running.owner, result).await;
     }
 }

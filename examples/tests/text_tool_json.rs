@@ -241,7 +241,7 @@ fn a_streamed_piece_that_parses_is_edited_as_text() {
 }
 
 /// Remembers every text it is asked to rewrite.
-struct Record(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+struct Record(std::sync::Arc<parking_lot::Mutex<Vec<String>>>);
 
 impl Rewrite for Record {
     fn pending(&self, _text: &str) -> usize {
@@ -249,10 +249,7 @@ impl Rewrite for Record {
     }
 
     fn rewrite(&mut self, text: &str) -> Result<String, Fault> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(text.to_owned());
+        self.0.lock().push(text.to_owned());
         Ok(text.to_owned())
     }
 }
@@ -267,9 +264,7 @@ fn a_tool_calls_numbers_are_read() {
         whole,
     );
     assert!(out.is_ok());
-    let seen = seen
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let seen = seen.lock();
     assert!(seen.iter().any(|t| t == "4111111111111111"), "{seen:?}");
 }
 

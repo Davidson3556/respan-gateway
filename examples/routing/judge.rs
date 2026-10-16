@@ -10,8 +10,9 @@
 //!
 //! `cargo run -p respan-gateway-examples --example judge`
 
+use parking_lot::{Mutex, MutexGuard};
 use respan_gateway_core::ErrorCode;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation::{Assembled, Input, Message, Output, Role};
@@ -99,7 +100,7 @@ impl Plugin for Egress {
 
 impl Egress {
     fn seen(&self) -> MutexGuard<'_, Vec<String>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0.lock()
     }
 }
 

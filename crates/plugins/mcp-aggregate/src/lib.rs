@@ -48,8 +48,8 @@ mod run;
 mod session;
 mod upstream;
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use respan_gateway_core::futures::stream::BoxStream;
@@ -71,7 +71,7 @@ const SEP: &str = "__";
 /// The scheme of a resource's URI under a server's.
 const SCHEME: &str = "mcp://";
 /// The most client sessions held at once.
-const SESSIONS: usize = 1024;
+const SESSIONS: u64 = 1024;
 /// How long a session no client uses is kept.
 const IDLE: Duration = Duration::from_secs(30 * 60);
 /// The protocol versions the aggregate answers with, newest first.
@@ -96,7 +96,11 @@ impl Aggregate {
         Self(Arc::new(Inner {
             servers,
             filter,
-            sessions: Mutex::default(),
+            sessions: moka::sync::Cache::builder()
+                .time_to_idle(IDLE)
+                .max_capacity(SESSIONS)
+                .eviction_policy(moka::policy::EvictionPolicy::lru())
+                .build(),
             next_id: AtomicU64::new(1),
         }))
     }

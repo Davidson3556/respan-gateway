@@ -479,11 +479,7 @@ async fn the_relay_grants_raw_errors_only_within_one_format() {
     let _ = read_whole(serve(&other, unary_chat()).await.0).await;
     other.idle().await;
 
-    let seen = seen
-        .0
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
+    let seen = seen.0.lock().clone();
     assert_eq!(seen, [true, false]);
 }
 

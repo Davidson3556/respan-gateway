@@ -34,9 +34,10 @@ use respan_gateway_passthrough_http as passthrough;
 #[path = "../../tests/support/http.rs"]
 mod http_support;
 use http_support::{read_whole, serve};
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 /// `GET /v1/models`, relayed unread by one provider, merged by the plugin.
 #[derive(Clone)]
@@ -170,18 +171,15 @@ impl LocalModels {
                         .and_then(|h| h.to_str().ok())
                         .unwrap_or_default()
                         .to_owned();
-                    requests
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push((req.method().to_string(), req.uri().path().to_owned(), key));
-                    let (status, body) = queue
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .pop_front()
-                        .unwrap_or((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "no scripted answer".into(),
-                        ));
+                    requests.lock().push((
+                        req.method().to_string(),
+                        req.uri().path().to_owned(),
+                        key,
+                    ));
+                    let (status, body) = queue.lock().pop_front().unwrap_or((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "no scripted answer".into(),
+                    ));
                     (status, [("content-type", "application/json")], body)
                 }
             }),
@@ -198,18 +196,12 @@ impl LocalModels {
     }
 
     fn answer(&self, answer: (StatusCode, String)) {
-        self.answers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push_back(answer);
+        self.answers.lock().push_back(answer);
     }
 
     #[cfg(test)]
     fn requests(&self) -> Vec<(String, String, String)> {
-        self.seen
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.seen.lock().clone()
     }
 }
 

@@ -20,6 +20,7 @@ name = "respan-gateway"
 path = "src/main.rs"
 
 [dependencies]
+parking_lot.workspace = true
 base64.workspace = true
 form_urlencoded.workspace = true
 respan-gateway-http-faults.workspace = true
@@ -44,6 +45,12 @@ respan-gateway-plugin-respan.workspace = true
 respan-gateway-plugin-mcp-aggregate.workspace = true
 respan-gateway-plugin-pricing.workspace = true
 respan-gateway-sdk.workspace = true
+chrono.workspace = true
+csv.workspace = true
+moka.workspace = true
+bytesize.workspace = true
+humantime.workspace = true
+serde_path_to_error.workspace = true
 respan-gateway-plugin-responses.workspace = true
 respan-gateway-vendors.workspace = true
 respan-gateway-realtime.workspace = true
@@ -64,6 +71,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sig
 tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
+uuid.workspace = true
 percent-encoding.workspace = true
 futures.workspace = true
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }

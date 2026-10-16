@@ -771,7 +771,7 @@ async fn a_calls_own_filter_is_each_copys_own() {
             let (seen, mut count) = (self.0.clone(), 0);
             px.filter(move |_: &mut Output| {
                 count += 1;
-                seen.lock().map(|mut s| s.push(count)).ok();
+                seen.lock().push(count);
                 Ok(())
             })
         }
@@ -785,7 +785,7 @@ async fn a_calls_own_filter_is_each_copys_own() {
         .reply(fixture::sse(STREAM));
     let _ = h.send(chat()).await;
 
-    let seen = reader.0.lock().map(|s| s.clone()).unwrap_or_default();
+    let seen = reader.0.lock().clone();
     let (first, second) = seen.split_at(seen.len() / 2);
     assert!(!first.is_empty() && first == second, "{seen:?}");
     assert_eq!(first[0], 1);

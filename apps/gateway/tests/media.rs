@@ -6,7 +6,8 @@
 
 #![allow(clippy::unwrap_used)]
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::Request;
@@ -75,7 +76,7 @@ impl Fake {
     }
 
     fn seen(&self) -> Vec<Seen> {
-        self.state.lock().unwrap().seen.clone()
+        self.state.lock().seen.clone()
     }
 
     fn last(&self) -> Seen {
@@ -90,7 +91,7 @@ impl Fake {
             headers: head.headers,
             body: to_bytes(body, 1 << 20).await.unwrap(),
         };
-        self.state.lock().unwrap().seen.push(seen.clone());
+        self.state.lock().seen.push(seen.clone());
         if seen.key().is_none() {
             return error(StatusCode::UNAUTHORIZED, "no key");
         }
@@ -149,13 +150,13 @@ impl Fake {
                 if !asked["prompt"].is_string() {
                     return error(StatusCode::BAD_REQUEST, "prompt is required");
                 }
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock();
                 let id = format!("video_{}", state.videos.len() + 1);
                 state.videos.push(id.clone());
                 axum::Json(job(&id, "queued")).into_response()
             }
             (method, ["v1", "videos", id, rest @ ..]) => {
-                let made = self.state.lock().unwrap().videos.iter().any(|v| v == id);
+                let made = self.state.lock().videos.iter().any(|v| v == id);
                 match (made, method, rest) {
                     (false, ..) => error(StatusCode::NOT_FOUND, "no such video"),
                     (true, &Method::GET, []) => axum::Json(job(id, "completed")).into_response(),

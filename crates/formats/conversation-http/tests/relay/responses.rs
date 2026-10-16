@@ -79,7 +79,7 @@ async fn plugins_run_in_registration_order_on_both_edges() {
         .iter()
         .flat_map(|hook| order.iter().map(move |name| format!("{name} {hook}")))
         .collect();
-    assert_eq!(log.lock().map(|l| l.clone()).ok(), Some(expected));
+    assert_eq!(Some(log.lock().clone()), Some(expected));
     // An earlier plugin's filter wraps a later one's.
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
     assert!(body.contains(r#""content":"d(b(a(c(hi))))""#), "{body}");

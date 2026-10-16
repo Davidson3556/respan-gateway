@@ -1,7 +1,8 @@
 //! Reloading: the state that outlives a config, and the swap to a new one.
 
+use parking_lot::{Mutex, RwLock};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use respan_gateway_core::Gateway;
@@ -86,13 +87,13 @@ pub(super) struct Shared {
 
 impl Shared {
     pub(super) fn current(&self) -> Arc<Built> {
-        let current = self.current.read().unwrap_or_else(|e| e.into_inner());
+        let current = self.current.read();
         current.clone()
     }
 
     /// Every gateway that may have work open: the current and the retired.
     pub(super) fn gateways(&self) -> Vec<Gateway> {
-        let retired = self.retired.lock().unwrap_or_else(|e| e.into_inner());
+        let retired = self.retired.lock();
         let mut all = vec![self.current().gateway.clone()];
         all.extend(retired.iter().cloned());
         all
@@ -100,7 +101,7 @@ impl Shared {
 
     pub(super) fn reload(&self) -> Result<Reloaded, ReloadError> {
         let loader = self.loader.get().ok_or(ReloadError::Unavailable)?;
-        let _one_at_a_time = self.reloading.lock().unwrap_or_else(|e| e.into_inner());
+        let _one_at_a_time = self.reloading.lock();
         let log = self.current().config.log;
         let done = loader().map_err(ReloadError::Invalid).and_then(|config| {
             let built = Built::new(config, &self.process).map_err(ReloadError::Invalid)?;
@@ -152,11 +153,11 @@ impl Shared {
         process.log.configure(&built.config);
         let built = Arc::new(built);
         let previous = {
-            let mut current = self.current.write().unwrap_or_else(|e| e.into_inner());
+            let mut current = self.current.write();
             std::mem::replace(&mut *current, built)
         };
         {
-            let mut retired = self.retired.lock().unwrap_or_else(|e| e.into_inner());
+            let mut retired = self.retired.lock();
             retired.retain(|g| g.idle().now_or_never().is_none());
             retired.push(previous.gateway.clone());
         }
@@ -177,10 +178,7 @@ impl Shared {
                 });
             }
         }
-        *process
-            .reloaded_at
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(SystemTime::now());
+        *process.reloaded_at.lock() = Some(SystemTime::now());
         Ok(Reloaded { restart_required })
     }
 }

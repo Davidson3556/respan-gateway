@@ -348,7 +348,7 @@ async fn a_translated_redirect_is_a_bad_gateway() {
     let body: Value = serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
     assert_eq!(body["error"]["code"], "upstream", "{body}");
     // The call ends with the refusal, which carries the provider's answer.
-    let ends = ends.0.lock().map(|all| all.clone()).unwrap_or_default();
+    let ends = ends.0.lock().clone();
     assert!(matches!(&ends[..], [o] if o.as_ref().is_err_and(|f| fault_code(f) == "upstream")));
     let answer = ends[0].as_ref().err();
     let answer = answer.and_then(|f| {

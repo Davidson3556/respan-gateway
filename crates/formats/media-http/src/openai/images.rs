@@ -182,7 +182,7 @@ fn post(
         post_to(head, EDITS, "application/json")?;
         return Ok(sends(json_bytes(&linked_edit(input, stream)?)?));
     }
-    let mut form = Writer::with_boundary(multipart::random_boundary()?);
+    let mut form = Writer::with_boundary(multipart::random_boundary());
     post_to(head, EDITS, &form.content_type())?;
     for (name, value) in &fields(input, stream)? {
         write_field(&mut form, name, value);

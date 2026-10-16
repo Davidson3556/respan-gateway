@@ -4,8 +4,6 @@
 //! ([`StdioTransport`]), of the kind's `Input` and `Output`. Output is
 //! encoded in the framing requested by the client.
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
-
 use respan_gateway_mcp::{Message, RpcCode};
 use serde_json::Value;
 
@@ -20,10 +18,6 @@ pub use streamable::{FORMAT, SESSION, StreamableHttp};
 
 /// JSON-RPC 2.0 (5.1): "Invalid JSON was received by the server".
 const PARSE_ERROR: RpcCode = RpcCode(-32700);
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// Messages as JSON: an array if `batch` or not exactly one, else the one
 /// message.

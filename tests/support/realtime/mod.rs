@@ -12,11 +12,12 @@
 pub mod gemini;
 pub mod openai;
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
@@ -117,10 +118,6 @@ struct Shared {
     changed: Notify,
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// A running fake: its sessions are served one after another, and the
 /// test's commands go to the one open.
 pub struct Fake {
@@ -144,7 +141,7 @@ impl Fake {
 
     /// The next response says `turn`; one with none queued says nothing.
     pub fn answer(&self, turn: Turn) {
-        lock(&self.shared.turns).push_back(turn);
+        self.shared.turns.lock().push_back(turn);
     }
 
     /// The provider hears the user begin to speak.
@@ -168,7 +165,7 @@ impl Fake {
         let wait = async {
             loop {
                 let changed = self.shared.changed.notified();
-                let frames = lock(&self.shared.received).clone();
+                let frames = self.shared.received.lock().clone();
                 if frames.len() >= n {
                     return frames;
                 }
@@ -179,19 +176,19 @@ impl Fake {
             Ok(frames) => frames,
             Err(_) => panic!(
                 "the fake read {:?}, not {n} frames",
-                lock(&self.shared.received)
+                self.shared.received.lock()
             ),
         }
     }
 
     /// Every frame it wrote.
     pub fn sent(&self) -> Vec<Value> {
-        lock(&self.shared.sent).clone()
+        self.shared.sent.lock().clone()
     }
 
     /// Every upgrade it read, refused ones too.
     pub fn handshakes(&self) -> Vec<Handshake> {
-        lock(&self.shared.handshakes).clone()
+        self.shared.handshakes.lock().clone()
     }
 }
 
@@ -221,7 +218,7 @@ async fn serve(prefix: &str, check: Check, run: Run) -> Fake {
                     let v = String::from_utf8_lossy(v.as_bytes()).into_owned();
                     (n.as_str().to_owned(), v)
                 });
-                lock(&recorded.handshakes).push(Handshake {
+                recorded.handshakes.lock().push(Handshake {
                     uri: request.uri().to_string(),
                     headers: headers.collect(),
                 });
@@ -291,7 +288,7 @@ impl Connection {
         };
         let value = serde_json::from_slice(&raw)
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&raw).into_owned()));
-        lock(&self.shared.received).push(value.clone());
+        self.shared.received.lock().push(value.clone());
         self.shared.changed.notify_waiters();
         Event::Frame(value)
     }
@@ -299,7 +296,7 @@ impl Connection {
     /// Write `value`, in a binary frame if `binary`.
     async fn send(&mut self, value: Value, binary: bool) {
         let text = value.to_string();
-        lock(&self.shared.sent).push(value);
+        self.shared.sent.lock().push(value);
         let message = match binary {
             true => Message::Binary(Bytes::from(text)),
             false => Message::Text(Utf8Bytes::from(text)),
@@ -319,7 +316,7 @@ impl Connection {
 
     /// The upgrade that opened it.
     fn handshake(&self) -> Handshake {
-        let handshakes = lock(&self.shared.handshakes);
+        let handshakes = self.shared.handshakes.lock();
         handshakes.last().cloned().expect("a session's handshake")
     }
 
@@ -331,12 +328,14 @@ impl Connection {
 
     /// The turn the next response says.
     fn turn(&self) -> Turn {
-        lock(&self.shared.turns).pop_front().unwrap_or_default()
+        self.shared.turns.lock().pop_front().unwrap_or_default()
     }
 
     /// What the user said, as the next response's turn has it.
     fn heard(&self) -> Option<String> {
-        lock(&self.shared.turns)
+        self.shared
+            .turns
+            .lock()
             .front()
             .and_then(|t| t.heard.clone())
     }

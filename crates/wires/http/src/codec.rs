@@ -3,9 +3,9 @@
 //! binding drives them. A closure is either; [`Sse`] and [`Whole`] frame
 //! what another reads, and [`All`] what another writes.
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::Mutex;
 use std::task::{Context, Poll, ready};
 
 use bytes::{Bytes, BytesMut};
@@ -276,7 +276,7 @@ where
 {
     let decoder = Mutex::new(Some(decoder));
     EventStream::lazy(move || {
-        let taken = crate::edge::locked(&decoder).take();
+        let taken = decoder.lock().take();
         let mut decoder = taken.ok_or_else(|| Fault::internal("a whole input read twice"))?;
         let mut out = Vec::new();
         decoder.start(&mut out)?;

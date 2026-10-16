@@ -12,10 +12,7 @@ struct Seen(Arc<Mutex<Vec<bool>>>);
 impl Plugin for Seen {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let credential = cx.extensions().get::<Credential>().is_some();
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(credential);
+        self.0.lock().push(credential);
         Ok(None)
     }
 }
@@ -76,10 +73,7 @@ async fn a_background_job_outlives_its_client_and_is_polled_later() -> Result<()
     let sent = west.requests();
     assert_eq!(sent.len(), 1, "a poll is answered from the store");
     assert_eq!(sent[0].headers["authorization"], "Bearer tenant-key");
-    assert_eq!(
-        *seen.0.lock().unwrap_or_else(PoisonError::into_inner),
-        [true]
-    );
+    assert_eq!(*seen.0.lock(), [true]);
     Ok(())
 }
 

@@ -64,7 +64,7 @@ async fn a_call_not_allowed_never_reaches_the_client_and_the_model_hears_why() {
         })
         .collect();
     assert_eq!(text, "I cannot do that.");
-    let sent = live.received.lock().unwrap();
+    let sent = live.received.lock();
     let tools = &sent[0]["setup"]["tools"][0]["functionDeclarations"];
     assert_eq!(
         *tools,

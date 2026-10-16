@@ -190,12 +190,12 @@ pub struct Config {
     /// The most bytes of a client's request, and of a provider's answer
     /// held at once, past which the request fails 413 or the answer 502; a
     /// number of bytes or a size such as `32MiB`; 32 MiB if unset.
-    #[serde(default, deserialize_with = "body_limit")]
+    #[serde(default, deserialize_with = "size")]
     pub body_limit: Option<usize>,
     /// The largest WebSocket message of a session, from the client or the
     /// provider, past which the session ends (close 1009); a number of
     /// bytes or a size such as `16MiB`; 16 MiB if unset.
-    #[serde(default, deserialize_with = "ws_message_limit")]
+    #[serde(default, deserialize_with = "size")]
     pub ws_message_limit: Option<usize>,
     /// Models declared by `provider/model`, each a card (`pricing`,
     /// `display_name`, `context_window`, `capabilities`, ...) laid over what
@@ -209,7 +209,7 @@ pub struct Config {
     /// How long open responses and end hooks get, together, after a stop
     /// signal, before they are cut: seconds, or a duration such as `30s`,
     /// `2m` or `500ms`; 30 s if unset.
-    #[serde(default, deserialize_with = "shutdown_grace")]
+    #[serde(default, deserialize_with = "span")]
     pub shutdown_grace: Option<Duration>,
     /// Client keys, literal or `env:NAME`, each alone or as
     /// `{ name, key }`. When set, every request needs one; it is consumed
@@ -396,7 +396,7 @@ pub struct ResponsesConfig {
     pub enabled: bool,
     /// How long what is kept is kept after it was last read; an hour if
     /// unset.
-    #[serde(default, deserialize_with = "responses_keep")]
+    #[serde(default, deserialize_with = "span")]
     pub keep: Option<Duration>,
 }
 
@@ -407,10 +407,6 @@ impl Default for ResponsesConfig {
             keep: None,
         }
     }
-}
-
-fn responses_keep<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "plugins: responses: keep")
 }
 
 /// Routing: which provider each request goes to.
@@ -456,16 +452,16 @@ pub struct RouteConfig {
     pub fallback: Option<bool>,
     /// Races the candidates instead, each started this long after the one
     /// before, such as `200ms`; off if unset.
-    #[serde(default, deserialize_with = "route_hedge")]
+    #[serde(default, deserialize_with = "span")]
     pub hedge: Option<Duration>,
     /// Tries per candidate, retries included; 1 if unset.
     pub tries: Option<u32>,
     /// The first wait before a retry, doubled after each; 250 ms if unset.
-    #[serde(default, deserialize_with = "route_backoff")]
+    #[serde(default, deserialize_with = "span")]
     pub backoff: Option<Duration>,
     /// The longest wait before a retry; a `Retry-After` longer than it means
     /// no retry. 10 s if unset.
-    #[serde(default, deserialize_with = "route_max_backoff")]
+    #[serde(default, deserialize_with = "span")]
     pub max_backoff: Option<Duration>,
     /// How far an answer is read before it counts as a success.
     #[serde(default)]
@@ -570,7 +566,7 @@ pub struct RequestLogConfig {
     /// The size at which that file moves to `<file>.1` (replacing the one
     /// there) and a new one starts; a number of bytes or a size such as
     /// `64MiB`; 64 MiB if unset.
-    #[serde(default, deserialize_with = "request_log_file_max")]
+    #[serde(default, deserialize_with = "size")]
     pub file_max: Option<usize>,
 }
 
@@ -609,23 +605,23 @@ pub struct ToolLoopConfig {
     /// The most calls to the model for one request; 8 if unset.
     pub max_steps: Option<u32>,
     /// The wall-clock limit of one request's loop; 5 minutes if unset.
-    #[serde(default, deserialize_with = "tool_loop_timeout")]
+    #[serde(default, deserialize_with = "span")]
     pub timeout: Option<Duration>,
     /// The limit of one tool call; 60 s if unset.
-    #[serde(default, deserialize_with = "tool_loop_tool_timeout")]
+    #[serde(default, deserialize_with = "span")]
     pub tool_timeout: Option<Duration>,
     /// How long a server's tool list is kept; 5 minutes if unset.
-    #[serde(default, deserialize_with = "tool_loop_tool_list_ttl")]
+    #[serde(default, deserialize_with = "span")]
     pub tool_list_ttl: Option<Duration>,
     /// The most tool calls of one step that run at once; 4 if unset.
     pub parallel: Option<usize>,
     /// The most bytes of one tool's answer the model sees; 64 KiB if unset.
     /// A tool's output is untrusted input to the model.
-    #[serde(default, deserialize_with = "tool_loop_max_result")]
+    #[serde(default, deserialize_with = "size")]
     pub max_result: Option<usize>,
     /// The most bytes of tool answers the model sees in one request, over
     /// all its steps; 256 KiB if unset.
-    #[serde(default, deserialize_with = "tool_loop_max_results")]
+    #[serde(default, deserialize_with = "size")]
     pub max_results: Option<usize>,
 }
 
@@ -664,7 +660,19 @@ impl Config {
     /// A configuration from TOML text. Errors omit source excerpts, which may
     /// contain credentials, while retaining the line and column.
     pub fn parse(text: &str) -> Result<Config, Error> {
-        toml::from_str(text).map_err(|e| Error::new(toml_error(text, &e)))
+        let read = serde_path_to_error::deserialize(toml::Deserializer::new(text));
+        read.map_err(|e| {
+            let path = e.path().to_string();
+            let said = toml_error(text, e.inner());
+            // A message that names its key already, as most of this
+            // module's do, is not named twice.
+            let top = path.split(['.', '[']).next().unwrap_or_default();
+            match path.as_str() {
+                "." => Error::new(said),
+                _ if said.starts_with(top) => Error::new(said),
+                _ => Error::new(format!("{path}: {said}")),
+            }
+        })
     }
 
     /// Structured configuration for language bindings, with secret-safe errors.
@@ -855,50 +863,35 @@ fn listen_address<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SocketAddr>,
         .map_err(|e| serde::de::Error::custom(format!("listen: {e}")))
 }
 
-/// A number of bytes, or a size such as `32MiB`, `512 KB` or `1GiB`, of
-/// the config key `key`; at least one byte.
-fn byte_size<'de, D: Deserializer<'de>>(d: D, key: &str) -> Result<Option<usize>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Size {
-        Bytes(usize),
-        Text(String),
-    }
-    let bytes = match Option::<Size>::deserialize(d)? {
-        None => return Ok(None),
-        Some(Size::Bytes(bytes)) => bytes,
-        Some(Size::Text(text)) => {
-            parse_size(&text).map_err(|e| serde::de::Error::custom(format!("{key}: {e}")))?
-        }
+/// A number of bytes, or a size such as `32MiB`, `512 KB` or `1GiB`
+/// ([`bytesize`]); at least one byte.
+fn size<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+    let Some(text) = Option::<Number>::deserialize(d)? else {
+        return Ok(None);
     };
-    match bytes {
-        0 => Err(serde::de::Error::custom(format!("{key}: must be above 0"))),
-        bytes => Ok(Some(bytes)),
+    let bytes = match text {
+        Number::Count(bytes) => bytes,
+        Number::Text(text) => text
+            .trim()
+            .parse::<bytesize::ByteSize>()
+            .map(|size| size.as_u64())
+            .map_err(|_| {
+                serde::de::Error::custom(format!("'{text}' is not a size such as 32MiB"))
+            })?,
+    };
+    match usize::try_from(bytes) {
+        Ok(0) => Err(serde::de::Error::custom("a size must be above 0")),
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(_) => Err(serde::de::Error::custom("a size this large cannot be held")),
     }
 }
 
-fn body_limit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    byte_size(d, "body_limit")
-}
-
-fn ws_message_limit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    byte_size(d, "ws_message_limit")
-}
-
-fn request_log_file_max<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    byte_size(d, "plugins: request_log: file_max")
-}
-
-fn route_backoff<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "routes: backoff")
-}
-
-fn route_max_backoff<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "routes: max_backoff")
-}
-
-fn route_hedge<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "routes: hedge")
+/// A count, or text that says one with a unit.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Number {
+    Count(u64),
+    Text(String),
 }
 
 /// Each declared model, its id and provider those its key names.
@@ -942,94 +935,25 @@ fn request_log_history<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>,
     }
 }
 
-/// A number of seconds, or a duration such as `30s`, `2m`, `1h` or `500ms`,
-/// of the config key `key`.
-fn span<'de, D: Deserializer<'de>>(d: D, key: &str) -> Result<Option<Duration>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Span {
-        Seconds(u64),
-        Text(String),
-    }
-    Ok(match Option::<Span>::deserialize(d)? {
+/// A number of seconds, or a duration such as `30s`, `2m`, `1h` or `500ms`
+/// ([`humantime`]).
+fn span<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    Ok(match Option::<Number>::deserialize(d)? {
         None => None,
-        Some(Span::Seconds(s)) => Some(Duration::from_secs(s)),
-        Some(Span::Text(text)) => Some(
-            parse_duration(&text).map_err(|e| serde::de::Error::custom(format!("{key}: {e}")))?,
-        ),
+        Some(Number::Count(seconds)) => Some(Duration::from_secs(seconds)),
+        Some(Number::Text(text)) => Some(parse_duration(&text).map_err(serde::de::Error::custom)?),
     })
 }
 
-fn shutdown_grace<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "shutdown_grace")
-}
-
-fn tool_loop_timeout<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "plugins: tool_loop: timeout")
-}
-
-fn tool_loop_tool_timeout<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "plugins: tool_loop: tool_timeout")
-}
-
-fn tool_loop_tool_list_ttl<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-    span(d, "plugins: tool_loop: tool_list_ttl")
-}
-
-fn tool_loop_max_result<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    byte_size(d, "plugins: tool_loop: max_result")
-}
-
-fn tool_loop_max_results<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
-    byte_size(d, "plugins: tool_loop: max_results")
-}
-
-/// The time `text` says: a number and a unit (`ms`, `s`, `m`, `h`),
-/// seconds if none.
+/// The time `text` says, as [`humantime`] reads it (`30s`, `2m`, `1h 30m`),
+/// or a number of seconds.
 pub fn parse_duration(text: &str) -> Result<Duration, String> {
     let text = text.trim();
-    let split = text
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(text.len());
-    let (number, unit) = text.split_at(split);
-    let millis: u64 = match unit.trim().to_ascii_lowercase().as_str() {
-        "ms" => 1,
-        "" | "s" => 1_000,
-        "m" => 60_000,
-        "h" => 3_600_000,
-        _ => return Err(format!("'{text}' is not a duration such as 30s or 2m")),
-    };
-    number
-        .parse::<u64>()
-        .ok()
-        .and_then(|n| n.checked_mul(millis))
-        .map(Duration::from_millis)
-        .ok_or_else(|| format!("'{text}' is not a duration such as 30s or 2m"))
-}
-
-/// The bytes `text` says: a number and a unit (`B`, `KB`, `MB`, `GB` as
-/// powers of 1000, `KiB`, `MiB`, `GiB` as powers of 1024), case-blind.
-pub fn parse_size(text: &str) -> Result<usize, String> {
-    let text = text.trim();
-    let split = text
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(text.len());
-    let (number, unit) = text.split_at(split);
-    let factor: usize = match unit.trim().to_ascii_lowercase().as_str() {
-        "" | "b" => 1,
-        "kb" => 1_000,
-        "mb" => 1_000_000,
-        "gb" => 1_000_000_000,
-        "kib" => 1 << 10,
-        "mib" => 1 << 20,
-        "gib" => 1 << 30,
-        _ => return Err(format!("'{text}' is not a size such as 32MiB or 33554432")),
-    };
-    number
-        .parse::<usize>()
-        .ok()
-        .and_then(|n| n.checked_mul(factor))
-        .ok_or_else(|| format!("'{text}' is not a size such as 32MiB or 33554432"))
+    match text.parse::<u64>() {
+        Ok(seconds) => Ok(Duration::from_secs(seconds)),
+        Err(_) => humantime::parse_duration(text)
+            .map_err(|_| format!("'{text}' is not a duration such as 30s or 2m")),
+    }
 }
 
 #[cfg(test)]
@@ -1232,7 +1156,7 @@ vendor = "anthropic"
         );
         for (text, key) in [
             ("shutdown_grace = \"soon\"\n", "shutdown_grace"),
-            ("shutdown_grace = \"5 days\"\n", "shutdown_grace"),
+            ("shutdown_grace = \"5 parsecs\"\n", "shutdown_grace"),
             ("plugins = { request_log = { history = 0 } }\n", "history"),
             (
                 "plugins = { request_log = { history = \"many\" } }\n",
@@ -1240,7 +1164,7 @@ vendor = "anthropic"
             ),
             (
                 "[routes.x]\nto = \"p\"\nbackoff = \"soon\"\n",
-                "routes: backoff",
+                "routes.x.backoff",
             ),
             ("ws_message_limit = 0\n", "ws_message_limit"),
             ("ws_message_limit = \"big\"\n", "ws_message_limit"),

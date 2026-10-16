@@ -33,9 +33,9 @@ async fn no_spelling_of_the_chat_path_reaches_the_vendor_chat_endpoint_through_p
         "/v1/chat/completions%3F",
         "/v1/chat/completions%23",
     ] {
-        seen.lock().unwrap().clear();
+        seen.lock().clear();
         let status = send_post(&addr, target).await;
-        let got = seen.lock().unwrap().clone();
+        let got = seen.lock().clone();
         table.push(format!("{target:40} -> {status:30} vendor {got:?}"));
         if got
             .iter()
@@ -68,9 +68,9 @@ async fn passthrough_forwards_the_matched_segments() {
         ("/v1/a%2Bb%2F=", "/pt/v1/a%2Bb%2F="),
         ("/v1//files/?a=../b;c", "/pt/v1/files?a=../b;c"),
     ] {
-        seen.lock().unwrap().clear();
+        seen.lock().clear();
         send_post(&addr, sent).await;
-        let got = seen.lock().unwrap().clone();
+        let got = seen.lock().clone();
         assert_eq!(got, [format!("POST {forwarded} HTTP/1.1")], "sent {sent}");
     }
     for sent in [
@@ -84,9 +84,9 @@ async fn passthrough_forwards_the_matched_segments() {
         "/v1/x%5Cy",
         "/v1/100%25",
     ] {
-        seen.lock().unwrap().clear();
+        seen.lock().clear();
         let status = send_post(&addr, sent).await;
         assert!(status.contains(" 404 "), "sent {sent}: {status}");
-        assert!(seen.lock().unwrap().is_empty(), "sent {sent}");
+        assert!(seen.lock().is_empty(), "sent {sent}");
     }
 }

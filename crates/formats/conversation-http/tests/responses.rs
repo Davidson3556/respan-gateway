@@ -2,10 +2,11 @@
 //! translated to and from the other conversation formats, against the strict
 //! fakes of OpenAI and Anthropic.
 
+use parking_lot::Mutex;
 use respan_gateway_core::futures;
 use respan_gateway_http::bytes;
 use respan_gateway_http::http;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use http::{HeaderValue, StatusCode};
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
@@ -255,11 +256,8 @@ fn local(status: StatusCode, kind: &'static str, chunks: Vec<String>) -> SendReq
     sender(move |_call| {
         let reply = reply.clone();
         async move {
-            let (status, kind, chunks) = reply
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take()
-                .expect("one response per provider call");
+            let (status, kind, chunks) =
+                reply.lock().take().expect("one response per provider call");
             let chunks: Vec<Result<bytes::Bytes, Fault>> = chunks
                 .into_iter()
                 .map(|c| Ok(bytes::Bytes::from(c)))

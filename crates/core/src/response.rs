@@ -10,7 +10,7 @@ use crate::Fault;
 use crate::call::{CallEdge, SharedCall};
 use crate::events::MAX_BATCH;
 use crate::fault::PANICKED;
-use crate::layers::{cut, locked, on_close, run, yield_ready};
+use crate::layers::{cut, on_close, run, yield_ready};
 use crate::values::{AnyEvents, Values, erase, take, view};
 
 /// A response for the client, from a provider or a plugin. Dropped unsent
@@ -65,10 +65,10 @@ impl Ending {
             return;
         };
         let prepared = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            self.finish_outputs(&mut locked(&call), values);
+            self.finish_outputs(&mut call.lock(), values);
         }));
         if let Err(panic) = prepared {
-            locked(&call).finish(Err(Fault::internal(PANICKED)));
+            call.lock().finish(Err(Fault::internal(PANICKED)));
             std::panic::resume_unwind(panic);
         }
         self.call = Some(call);
@@ -81,12 +81,12 @@ impl Ending {
             return Ok(());
         };
         let settled = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            let mut edge = locked(&call);
+            let mut edge = call.lock();
             self.finish_outputs(&mut edge, values);
             edge.finish(self.outcome.clone());
         }));
         if settled.is_err() {
-            locked(&call).finish(Err(Fault::internal(PANICKED)));
+            call.lock().finish(Err(Fault::internal(PANICKED)));
         }
         settled
     }
@@ -97,7 +97,7 @@ impl Ending {
             self.outcome = Err(Fault::abandoned());
             return;
         }
-        let mut outputs = locked(&edge.cx().outputs);
+        let mut outputs = (edge.cx().outputs).lock();
         // Buffering may already have finalized these filters. Preserve the
         // stored outcome and never emit their final values a second time.
         if !outputs.ended() {
@@ -144,7 +144,7 @@ impl Batch {
 
     /// Apply provider filters and attach call ownership to the terminal result.
     fn filter_provider_outputs(mut self, call: &SharedCall) -> Self {
-        let mut edge = locked(call);
+        let mut edge = call.lock();
         if edge.is_finished() {
             return Self::ending(Err(Fault::abandoned()));
         }
@@ -463,7 +463,7 @@ impl Feed {
         match read {
             Ok(Ok(batch)) => batch,
             Ok(Err(panic)) | Err(panic) => {
-                locked(call).finish(Err(Fault::internal(PANICKED)));
+                call.lock().finish(Err(Fault::internal(PANICKED)));
                 std::panic::resume_unwind(panic)
             }
         }
@@ -472,7 +472,7 @@ impl Feed {
     /// Its reader stopped with `end`; its call ends so.
     pub(crate) fn finish(&mut self, end: Result<()>) {
         if let Some(call) = self.call() {
-            locked(call).finish(end);
+            call.lock().finish(end);
         }
     }
 }

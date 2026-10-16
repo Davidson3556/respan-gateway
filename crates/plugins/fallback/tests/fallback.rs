@@ -1,9 +1,10 @@
 //! The attempt helpers' promises (retry, fallback, races), against a mock provider.
 
+use parking_lot::Mutex;
 use respan_gateway_conversation::{Block, Finish, Input, Output};
 use respan_gateway_core::FaultKind;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeOpenAi};
@@ -134,10 +135,7 @@ type Entry = (String, u32, Role, String);
 
 impl Record {
     fn all(&self) -> Vec<Entry> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.0.lock().clone()
     }
 }
 
@@ -149,10 +147,7 @@ impl Plugin for Record {
         };
         let end = end.as_ref().err().map_or("ok", |f| f.code()).to_owned();
         let entry = (px.provider().to_owned(), a.index(), a.role(), end);
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(entry);
+        self.0.lock().push(entry);
     }
 }
 
@@ -294,9 +289,7 @@ impl Fakes {
             let http = http.clone();
             let sent = sent.clone();
             async move {
-                sent.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(label.to_owned());
+                sent.lock().push(label.to_owned());
                 http.send(call).await
             }
             .boxed()
@@ -304,10 +297,7 @@ impl Fakes {
     }
 
     fn sent(&self) -> Vec<String> {
-        self.sent
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.sent.lock().clone()
     }
 }
 
@@ -688,9 +678,7 @@ async fn a_false_classifier_suppresses_preopening_upstream_retries_but_allows_fa
         retries(3),
         Until::Head,
         Arc::new(move |fault, opened| {
-            seen.lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push((fault.code().to_owned(), opened));
+            seen.lock().push((fault.code().to_owned(), opened));
             false
         }),
     ))
@@ -700,10 +688,7 @@ async fn a_false_classifier_suppresses_preopening_upstream_retries_but_allows_fa
     assert_eq!((status, ended(end)), (StatusCode::OK, Ok(())));
     assert!(body.contains("Hello"));
     assert_eq!(h.sent_to(), ["b.test"]);
-    assert_eq!(
-        *observed.lock().unwrap_or_else(PoisonError::into_inner),
-        [("upstream".to_owned(), false)]
-    );
+    assert_eq!(*observed.lock(), [("upstream".to_owned(), false)]);
     let attempts = h.record.all();
     assert_eq!(attempts.len(), 2, "no second refused attempt: {attempts:?}");
     assert_eq!(attempts[0].0, "refused");
@@ -723,9 +708,7 @@ async fn classifier_sees_opened_content_and_late_terminal_failures() {
             retries(3),
             until,
             Arc::new(move |fault, opened| {
-                seen.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push((fault.code().to_owned(), opened));
+                seen.lock().push((fault.code().to_owned(), opened));
                 false
             }),
         ))
@@ -735,10 +718,7 @@ async fn classifier_sees_opened_content_and_late_terminal_failures() {
         assert_eq!((status, ended(end)), (StatusCode::OK, Ok(())));
         assert!(body.contains("Hello"));
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
-        assert_eq!(
-            *observed.lock().unwrap_or_else(PoisonError::into_inner),
-            [("upstream".to_owned(), true)]
-        );
+        assert_eq!(*observed.lock(), [("upstream".to_owned(), true)]);
     }
 }
 
@@ -793,9 +773,7 @@ async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
         retries(2),
         Until::content(Output::is_content),
         Arc::new(move |fault, opened| {
-            seen.lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push((fault.code().to_owned(), opened));
+            seen.lock().push((fault.code().to_owned(), opened));
             fault
                 .get::<ErrorCode>()
                 .is_some_and(|c| c.0 == "model_busy")
@@ -817,10 +795,7 @@ async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
     assert!(String::from_utf8_lossy(&body.expect("response body")).contains("Local answer"));
     assert_eq!(ended(outcome.await), Ok(()));
     assert_eq!(invocations.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        *observed.lock().unwrap_or_else(PoisonError::into_inner),
-        [("model_busy".to_owned(), false)]
-    );
+    assert_eq!(*observed.lock(), [("model_busy".to_owned(), false)]);
 }
 
 #[tokio::test]
@@ -1071,9 +1046,7 @@ async fn until_head_asks_the_classifier_about_a_refusal() {
         retries(3),
         Until::Head,
         Arc::new(move |_, opened| {
-            log.lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(opened);
+            log.lock().push(opened);
             false
         }),
     ))
@@ -1085,7 +1058,7 @@ async fn until_head_asks_the_classifier_about_a_refusal() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(h.sent_to(), ["a.test", "b.test"]);
-    assert_eq!(*seen.lock().unwrap_or_else(PoisonError::into_inner), [true]);
+    assert_eq!(*seen.lock(), [true]);
 }
 
 #[tokio::test]

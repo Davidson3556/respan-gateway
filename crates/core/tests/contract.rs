@@ -6,7 +6,8 @@
 mod edge;
 mod faults;
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 use edge::*;
@@ -248,7 +249,7 @@ impl Plugin for Meter {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
         let seen = self.0.clone();
         px.filter(move |o: &mut Out| {
-            lock(&seen).push(o.0.clone());
+            seen.lock().push(o.0.clone());
             Ok(())
         })
     }
@@ -269,13 +270,13 @@ async fn outputs_ready_together_are_one_batch() {
         let seen = Arc::default();
         let body = Mutex::new(Some(body));
         let t = fnt(move |_| {
-            let body = lock(&body).take().unwrap();
+            let body = body.lock().take().unwrap();
             async move { Ok(answer(200, body)) }.boxed()
         });
         let gw = gateway_of(&Rec::default(), t).plugin(Meter(Arc::clone(&seen)));
         let (res, _) = handle(&gw, req(vec!["q"])).await;
         assert_eq!(read(res).await, Ok((400, "ERR bad_request".into())));
         gw.idle().await;
-        assert_eq!(*lock(&seen), want);
+        assert_eq!(*seen.lock(), want);
     }
 }

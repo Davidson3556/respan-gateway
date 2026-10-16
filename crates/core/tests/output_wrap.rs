@@ -6,8 +6,9 @@
 mod edge;
 mod faults;
 
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use edge::*;
@@ -25,12 +26,12 @@ impl Plugin for Meter {
         struct F(Arc<Mutex<Vec<String>>>);
         impl Filter<Out> for F {
             fn edit(&mut self, v: Out, o: &mut Vec<Out>) -> Result<()> {
-                lock(&self.0).push(format!("saw {}", v.0));
+                self.0.lock().push(format!("saw {}", v.0));
                 o.push(v);
                 Ok(())
             }
             fn end(&mut self, e: &Result<()>, _: &mut Vec<Out>) -> Result<()> {
-                lock(&self.0).push(format!("end {}", code(e)));
+                self.0.lock().push(format!("end {}", code(e)));
                 Ok(())
             }
         }
@@ -97,11 +98,13 @@ async fn an_output_wrap_that_ends_early_ends_the_call_once() {
     assert_eq!(code(&end.await), "ok");
     settle(&gw).await;
     assert_eq!(ends(&rec), (1, 1, 1, 1));
-    let ended = lock(&meter.0)
+    let ended = meter
+        .0
+        .lock()
         .iter()
         .filter(|s| s.starts_with("end"))
         .count();
-    assert_eq!(ended, 1, "{:?}", lock(&meter.0));
+    assert_eq!(ended, 1, "{:?}", meter.0.lock());
     // Cut cleanly, its outputs dropped unread: no one waits for the rest.
     assert_eq!(rec.log().prov_codes(), ["abandoned"]);
 }
@@ -122,7 +125,7 @@ async fn an_output_wrap_that_never_polls_its_source_ends_the_call_once() {
     settle(&gw).await;
     assert_eq!(ends(&rec), (1, 1, 1, 1));
     assert_eq!(rec.log().prov_codes(), ["abandoned"]);
-    assert_eq!(*lock(&meter.0), ["end abandoned"]);
+    assert_eq!(*meter.0.lock(), ["end abandoned"]);
 }
 
 /// An output wrap whose stream panics after its first item.
@@ -151,7 +154,7 @@ async fn an_output_wrap_that_panics_mid_stream_ends_everything_once() {
     assert_eq!(ends(&rec), (1, 1, 1, 1));
     // The reply's failure ends its call.
     assert_eq!(rec.log().prov_codes(), ["internal"]);
-    assert_eq!(*lock(&meter.0), ["saw a", "saw b", "end internal"]);
+    assert_eq!(*meter.0.lock(), ["saw a", "saw b", "end internal"]);
 }
 
 /// An output wrap that swallows the provider's failure and then yields
@@ -252,7 +255,7 @@ async fn a_retry_after_part_of_a_wrapped_session_was_read() {
                 if let Some(f) = body.next().await {
                     got.push(f.map_err(|e| faults::code(&e).to_string()));
                 }
-                lock(&b).push(got);
+                b.lock().push(got);
                 return Ok(answer(503, chunks(vec![])));
             }
             let b2 = b.clone();
@@ -260,7 +263,7 @@ async fn a_retry_after_part_of_a_wrapped_session_was_read() {
                 while let Some(f) = body.next().await {
                     got.push(f.map_err(|e| faults::code(&e).to_string()));
                 }
-                lock(&b2).push(got);
+                b2.lock().push(got);
             });
             Ok(answer(200, never()))
         }
@@ -279,7 +282,7 @@ async fn a_retry_after_part_of_a_wrapped_session_was_read() {
     let got = tokio::time::timeout(Duration::from_secs(2), read(res)).await;
     assert_eq!(got.unwrap(), Ok((200, "a;ERR internal".into())));
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let bodies = lock(&bodies).clone();
+    let bodies = bodies.lock().clone();
     assert_eq!(bodies, [vec![Ok("X".into())], vec![Err("internal".into())]]);
     drop(tx);
 }

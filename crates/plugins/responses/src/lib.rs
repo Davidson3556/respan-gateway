@@ -22,7 +22,8 @@
 
 mod store;
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use parking_lot::{Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::Duration;
 
 use respan_gateway_conversation::{Assembled, Content, Input, Message, Output, Role};
@@ -119,7 +120,7 @@ struct Request {
 
 impl Pending {
     fn lock(&self) -> MutexGuard<'_, Shared> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0.lock()
     }
 }
 
@@ -281,7 +282,7 @@ impl Filter<Output> for Keep {
         if let Output::Start(start) = &mut output {
             let shared = self.pending.lock();
             if !shared.openai && shared.request.as_ref().is_some_and(|r| r.store) {
-                let id = new_id()?;
+                let id = new_id();
                 start.id.clone_from(&id);
                 self.id = Some(id);
             }
@@ -359,10 +360,7 @@ impl Filter<Output> for KeepReasoning {
     }
 }
 
-/// A response id of the gateway's: `resp_` and 24 random hex digits.
-fn new_id() -> Result<String> {
-    let mut bytes = [0u8; 12];
-    getrandom::fill(&mut bytes).map_err(|e| Fault::internal(format!("no randomness: {e}")))?;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(format!("resp_{hex}"))
+/// A response id of the gateway's: `resp_` and a random UUID's hex.
+fn new_id() -> String {
+    format!("resp_{}", uuid::Uuid::new_v4().simple())
 }

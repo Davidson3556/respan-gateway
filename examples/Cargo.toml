@@ -15,6 +15,8 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+uuid.workspace = true
+parking_lot.workspace = true
 respan-gateway-http-faults.workspace = true
 respan-gateway-passthrough-http.workspace = true
 respan-gateway-realtime.workspace = true

@@ -251,24 +251,9 @@ fn random() -> u64 {
 }
 
 /// Whether `name` matches `pattern`, whose `*` stands for any run of
-/// characters.
+/// characters and `?` for any one.
 pub fn glob(pattern: &str, name: &str) -> bool {
-    let mut parts = pattern.split('*');
-    let first = parts.next().unwrap_or_default();
-    let Some(mut rest) = name.strip_prefix(first) else {
-        return false;
-    };
-    let parts: Vec<&str> = parts.collect();
-    let Some((last, middle)) = parts.split_last() else {
-        return rest.is_empty();
-    };
-    for part in middle {
-        match rest.find(part) {
-            Some(at) => rest = &rest[at + part.len()..],
-            None => return false,
-        }
-    }
-    rest.len() >= last.len() && rest.ends_with(last)
+    wildmatch::WildMatch::new(pattern).matches(name)
 }
 
 #[cfg(test)]

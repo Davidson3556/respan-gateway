@@ -3,8 +3,9 @@
 //! `Err(abandoned)`, never a clean end. Live inputs ([`crate::live_inputs`])
 //! and the response to the client ([`crate::client_output`]) run on it.
 
+use parking_lot::Mutex;
 use std::future::ready;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream};
@@ -14,20 +15,14 @@ use crate::lifecycle::Latch;
 use crate::plugin::Filters;
 use crate::values::Values;
 use crate::{Fault, Result};
+
 /// One stage's filters of one direction, shared by whoever runs or ends it.
 pub(crate) type Layer = Arc<Mutex<Filters>>;
-
-/// Lock `m`, even if poisoned: what it guards stays consistent.
-pub(crate) fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// Run `values` through `layers` in order, until the first failure; `values`
 /// keeps what passed before it.
 pub(crate) fn run(layers: &[&Layer], values: &mut Values) -> Result<()> {
-    layers
-        .iter()
-        .try_for_each(|layer| locked(layer).run(values))
+    layers.iter().try_for_each(|layer| layer.lock().run(values))
 }
 
 /// End each of `layers` once, in order, with `end`: what one keeps back
@@ -39,9 +34,9 @@ pub(crate) fn end_layers(
     tail: &mut Option<Values>,
 ) -> Result<()> {
     for (i, layer) in layers.iter().enumerate() {
-        end = locked(layer).end(end, tail);
+        end = layer.lock().end(end, tail);
         if let (Some(values), Some(next)) = (tail.as_mut(), layers.get(i + 1))
-            && let Err(fault) = locked(next).run(values)
+            && let Err(fault) = next.lock().run(values)
         {
             *tail = None;
             end = Err(fault);

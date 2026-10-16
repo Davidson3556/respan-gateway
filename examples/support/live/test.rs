@@ -1,8 +1,9 @@
 #![allow(dead_code, clippy::unwrap_used)]
 use futures::{SinkExt, StreamExt};
+use parking_lot::Mutex;
 use respan_gateway_core::Gateway;
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 pub type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -35,7 +36,7 @@ pub async fn start(
             match message {
                 Message::Text(text) => {
                     let event: Value = serde_json::from_str(&text).unwrap();
-                    read.lock().unwrap().push(event.clone());
+                    read.lock().push(event.clone());
                     for reply in script(event) {
                         if socket
                             .send(Message::Text(reply.to_string().into()))

@@ -199,12 +199,12 @@ duration_ms,ttfb_ms,stream,input_tokens,output_tokens,cost_usd,error";
 /// One record as a CSV row, with [`CSV_HEADER`]'s columns.
 pub fn csv_row(r: &RequestRecord) -> String {
     let n = |v: Option<u64>| v.map(|v| v.to_string()).unwrap_or_default();
-    let text = |v: Option<&str>| csv_cell(v.unwrap_or_default());
+    let text = |v: Option<&str>| no_formula(v.unwrap_or_default());
     let cells = [
-        csv_cell(&r.id),
-        csv_cell(&r.started_at),
-        csv_cell(&r.method),
-        csv_cell(&r.path),
+        no_formula(&r.id),
+        no_formula(&r.started_at),
+        no_formula(&r.method),
+        no_formula(&r.path),
         text(r.format.as_deref()),
         text(r.kind.as_deref()),
         text(r.model.as_deref()),
@@ -219,20 +219,25 @@ pub fn csv_row(r: &RequestRecord) -> String {
         r.cost_usd.map(|c| c.to_string()).unwrap_or_default(),
         text(r.error.as_deref()),
     ];
-    cells.join(",")
+    csv_line(&cells)
 }
 
-/// A CSV cell, quoted if needed; a leading `=`, `+`, `-` or `@` is
-/// neutralized so a spreadsheet never reads client text as a formula.
-fn csv_cell(text: &str) -> String {
-    let guarded = match text.chars().next() {
+/// `cells` as one CSV line, each quoted if it needs to be.
+fn csv_line(cells: &[String]) -> String {
+    let mut line = csv::WriterBuilder::new().from_writer(Vec::new());
+    let _ = line.write_record(cells);
+    let line = line.into_inner().unwrap_or_default();
+    String::from_utf8_lossy(&line)
+        .trim_end_matches(['\r', '\n'])
+        .to_owned()
+}
+
+/// `text` with a leading `=`, `+`, `-` or `@` neutralized, so a spreadsheet
+/// never reads client text as a formula.
+fn no_formula(text: &str) -> String {
+    match text.chars().next() {
         Some('=' | '+' | '-' | '@' | '\t' | '\r') => format!("'{text}"),
         _ => text.to_owned(),
-    };
-    if guarded.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", guarded.replace('"', "\"\""))
-    } else {
-        guarded
     }
 }
 
@@ -243,8 +248,7 @@ mod tests {
 
     #[test]
     fn cells_are_quoted_and_cannot_be_formulas() {
-        assert_eq!(csv_cell("plain"), "plain");
-        assert_eq!(csv_cell("a,\"b\""), "\"a,\"\"b\"\"\"");
-        assert_eq!(csv_cell("=1+1"), "'=1+1");
+        let cells = ["plain", "a,\"b\"", "=1+1"].map(no_formula);
+        assert_eq!(csv_line(&cells), "plain,\"a,\"\"b\"\"\",'=1+1");
     }
 }

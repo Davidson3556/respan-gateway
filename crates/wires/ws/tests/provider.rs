@@ -1,11 +1,12 @@
 //! The provider edge of a session ([`WsTransport`]) against real sockets,
 //! through a gateway relaying a JSON event format.
 
+use parking_lot::Mutex;
 use respan_gateway_core::FaultKind;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use respan_gateway_core::futures::{SinkExt, Stream, StreamExt, stream};
@@ -140,10 +141,7 @@ struct Ended(Arc<Mutex<Vec<EndRecord>>>);
 #[async_trait]
 impl Plugin for Ended {
     async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
-        self.0
-            .lock()
-            .expect("record end")
-            .push((px.is_refused(), end.clone()));
+        self.0.lock().push((px.is_refused(), end.clone()));
     }
 }
 
@@ -204,7 +202,7 @@ async fn session_through(
         .await
         .expect("finish refused call");
     gateway.idle().await;
-    let mut records = ended.0.lock().expect("recorded provider end").clone();
+    let mut records = ended.0.lock().clone();
     assert_eq!(records.len(), 1);
     let response = http::Response::from_parts(head, bytes);
     (response, records.remove(0), dropped)

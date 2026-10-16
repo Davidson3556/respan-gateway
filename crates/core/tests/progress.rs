@@ -229,10 +229,10 @@ async fn failed_delivery_preparation_does_not_drain_provider() {
 
 #[derive(Clone, Default)]
 struct Observe {
-    outputs: Arc<std::sync::Mutex<Vec<usize>>>,
+    outputs: Arc<parking_lot::Mutex<Vec<usize>>>,
     filtered: Arc<AtomicUsize>,
-    provider_ends: Arc<std::sync::Mutex<Vec<Result<()>>>>,
-    observed_end: Arc<std::sync::Mutex<Option<Result<()>>>>,
+    provider_ends: Arc<parking_lot::Mutex<Vec<Result<()>>>>,
+    observed_end: Arc<parking_lot::Mutex<Option<Result<()>>>>,
 }
 #[async_trait]
 impl Plugin for Observe {
@@ -247,17 +247,17 @@ impl Plugin for Observe {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let mut response = cx.call("p").await?;
         let end = response.until_end().await;
-        *self.observed_end.lock().unwrap() = Some(end);
+        *self.observed_end.lock() = Some(end);
         let mut outputs = response.outputs::<Output>();
         while let Some(output) = outputs.next().await {
             if let Ok(output) = output {
-                self.outputs.lock().unwrap().push(output.0);
+                self.outputs.lock().push(output.0);
             }
         }
         Ok(Some(Response::stream(stream::empty::<Result<Output>>())))
     }
     async fn on_provider_end(&self, _: &respan_gateway_core::ProviderContext, end: &Result<()>) {
-        self.provider_ends.lock().unwrap().push(end.clone());
+        self.provider_ends.lock().push(end.clone());
     }
 }
 #[tokio::test]
@@ -277,26 +277,20 @@ async fn batch_boundaries_preserve_order_filtering_and_the_final_outcome() {
             .plugin(observe.clone());
         gateway.handle(Io, Extensions::new()).await.unwrap();
         gateway.idle().await;
-        assert_eq!(
-            *observe.outputs.lock().unwrap(),
-            (1..=10_000).collect::<Vec<_>>()
-        );
+        assert_eq!(*observe.outputs.lock(), (1..=10_000).collect::<Vec<_>>());
         assert_eq!(observe.filtered.load(Ordering::SeqCst), 10_000);
         let expected = if fail {
             Err(faults::truncated().message().to_owned())
         } else {
             Ok(())
         };
-        let observed = observe.observed_end.lock().unwrap().clone();
+        let observed = observe.observed_end.lock().clone();
         assert_eq!(observed.map(says), Some(expected.clone()));
-        assert_eq!(
-            says_all(observe.provider_ends.lock().unwrap().clone()),
-            [expected]
-        );
+        assert_eq!(says_all(observe.provider_ends.lock().clone()), [expected]);
     }
 }
 
-struct CancelHold(Arc<std::sync::Mutex<Vec<usize>>>);
+struct CancelHold(Arc<parking_lot::Mutex<Vec<usize>>>);
 
 #[async_trait]
 impl Plugin for CancelHold {
@@ -306,14 +300,14 @@ impl Plugin for CancelHold {
         assert!(hold.as_mut().now_or_never().is_none());
         drop(hold);
         let values = response.outputs::<Output>().collect::<Vec<_>>().await;
-        *self.0.lock().unwrap() = values.into_iter().map(|v| v.unwrap().0).collect();
+        *self.0.lock() = values.into_iter().map(|v| v.unwrap().0).collect();
         Ok(Some(Response::stream(stream::empty::<Result<Output>>())))
     }
 }
 
 #[tokio::test]
 async fn cancelling_borrowed_hold_replays_the_full_provider_batch() {
-    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let reads = Arc::new(AtomicUsize::new(0));
     let gw = Gateway::new()
         .client::<Input, Output, _>(Protocol(reads.clone(), false))
@@ -327,7 +321,7 @@ async fn cancelling_borrowed_hold_replays_the_full_provider_batch() {
         .plugin(CancelHold(seen.clone()));
     gw.handle(Io, Extensions::new()).await.unwrap();
     gw.idle().await;
-    assert_eq!(*seen.lock().unwrap(), (0..10_000).collect::<Vec<_>>());
+    assert_eq!(*seen.lock(), (0..10_000).collect::<Vec<_>>());
 }
 
 struct Suppress;
@@ -475,11 +469,11 @@ async fn cancelling_opening_drops_both_halves_and_releases_idle() {
     assert_eq!(Arc::strong_count(&held), 1);
     assert_eq!(gateway.idle().now_or_never(), Some(()));
 }
-struct Release(std::sync::Mutex<Option<oneshot::Sender<()>>>);
+struct Release(parking_lot::Mutex<Option<oneshot::Sender<()>>>);
 #[async_trait]
 impl Plugin for Release {
     async fn on_client(&self, _: &mut ClientContext) -> Result<Option<Response>> {
-        self.0.lock().unwrap().take().unwrap().send(()).unwrap();
+        self.0.lock().take().unwrap().send(()).unwrap();
         Ok(Some(Response::stream(stream::empty::<Result<Output>>())))
     }
 }
@@ -493,7 +487,7 @@ async fn receiving_can_open_before_delivery_completes() {
     let gateway = Gateway::new()
         .client(Custom)
         .unwrap()
-        .plugin(Release(std::sync::Mutex::new(Some(send))));
+        .plugin(Release(parking_lot::Mutex::new(Some(send))));
     let handled = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         gateway.handle((opening, deliver), Extensions::new()),
@@ -533,7 +527,7 @@ async fn a_completed_opening_is_released_before_delivery() {
     gateway.idle().await;
 }
 
-struct FailAtBoundary(Arc<std::sync::Mutex<Vec<Result<()>>>>);
+struct FailAtBoundary(Arc<parking_lot::Mutex<Vec<Result<()>>>>);
 #[async_trait]
 impl Plugin for FailAtBoundary {
     async fn on_provider(&self, px: &mut respan_gateway_core::ProviderContext) -> Result<()> {
@@ -546,12 +540,12 @@ impl Plugin for FailAtBoundary {
         })
     }
     async fn on_provider_end(&self, _: &respan_gateway_core::ProviderContext, end: &Result<()>) {
-        self.0.lock().unwrap().push(end.clone());
+        self.0.lock().push(end.clone());
     }
 }
 #[tokio::test]
 async fn delivery_failure_keeps_precedence_over_a_full_batch_filter_failure() {
-    let ends = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ends = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let read = Arc::new(AtomicUsize::new(0));
     let gateway = Gateway::new()
         .client(RejectDelivery)
@@ -568,7 +562,7 @@ async fn delivery_failure_keeps_precedence_over_a_full_batch_filter_failure() {
     let expected = Err("cannot prepare delivery".to_owned());
     assert_eq!(says(gateway.handle(Io, Extensions::new()).await), expected);
     gateway.idle().await;
-    assert_eq!(says_all(ends.lock().unwrap().clone()), [expected]);
+    assert_eq!(says_all(ends.lock().clone()), [expected]);
 }
 
 struct BufferBeforeDelivery;
@@ -586,7 +580,7 @@ impl Plugin for BufferBeforeDelivery {
 
 #[tokio::test]
 async fn a_buffered_filter_result_does_not_override_delivery_failure() {
-    let ends = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ends = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let gateway = Gateway::new()
         .client(RejectDelivery)
         .unwrap()
@@ -601,5 +595,5 @@ async fn a_buffered_filter_result_does_not_override_delivery_failure() {
     let expected = Err("cannot prepare delivery".to_owned());
     assert_eq!(says(gateway.handle(Io, Extensions::new()).await), expected);
     gateway.idle().await;
-    assert_eq!(says_all(ends.lock().unwrap().clone()), [expected]);
+    assert_eq!(says_all(ends.lock().clone()), [expected]);
 }

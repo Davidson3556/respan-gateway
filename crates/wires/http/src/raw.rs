@@ -5,9 +5,10 @@
 
 use bytes::Bytes;
 use http::{Request, Response, response::Parts};
+use parking_lot::Mutex;
 use respan_gateway_core::Fault;
 use std::any::Any;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 /// The client's request as it came, without its
 /// [`Credential`](crate::Credential): its head, with the bytes of a whole
@@ -111,12 +112,12 @@ pub(crate) struct ClientHead(Arc<Mutex<Option<Parts>>>);
 impl ClientHead {
     /// The head chosen, if any.
     pub(crate) fn get(&self) -> Option<Parts> {
-        crate::edge::locked(&self.0).clone()
+        self.0.lock().clone()
     }
 
     /// Choose `head`.
     pub(crate) fn set(&self, head: Parts) {
-        *crate::edge::locked(&self.0) = Some(head);
+        *self.0.lock() = Some(head);
     }
 }
 

@@ -6,8 +6,9 @@ use http_support::LIMIT;
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
+use parking_lot::Mutex;
 use respan_gateway_conversation::{Input, Output};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
@@ -211,7 +212,7 @@ async fn an_upgrade_the_server_does_not_switch_is_ignored() {
             use respan_gateway_http::http_body_util::BodyExt;
             let (head, body) = call.into_parts();
             let body = body.collect().await?.to_bytes();
-            self.0.lock().map(|mut n| n.push((head.headers, body))).ok();
+            self.0.lock().push((head.headers, body));
             let unary = r#"{"id":"c","choices":[{"message":{"content":"hi"}}]}"#;
             let mut resp = http::Response::new(Body::full(unary));
             let json = http::HeaderValue::from_static("application/json");
@@ -246,7 +247,7 @@ async fn an_upgrade_the_server_does_not_switch_is_ignored() {
         .unwrap_or_else(|e| match e {});
 
     assert_eq!(resp.status(), 200);
-    let noted = note.0.lock().map(|n| n.clone()).unwrap_or_default();
+    let noted = note.0.lock().clone();
     let [(headers, body)] = &noted[..] else {
         panic!("{} calls", noted.len());
     };
@@ -526,7 +527,7 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
     #[async_trait]
     impl Plugin for Log {
         async fn on_client_end(&self, _cx: &ClientContext, end: &Result<(), Fault>) {
-            self.0.lock().map(|mut l| l.push(end.clone())).ok();
+            self.0.lock().push(end.clone());
         }
     }
 
@@ -559,7 +560,7 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
     assert!(resp.bytes().await.unwrap_or_default().is_empty());
     gateway.idle().await;
 
-    let all = log.0.lock().map(|l| l.clone()).unwrap_or_default();
+    let all = log.0.lock().clone();
     assert_eq!(all.len(), 1);
     assert!(all[0].is_ok());
 }
@@ -697,10 +698,7 @@ impl Plugin for L6Ends {
             .err()
             .map_or("ok", respan_gateway_core::Fault::code)
             .to_owned();
-        self.0
-            .lock()
-            .map(|mut l| l.push(format!("request {code}")))
-            .ok();
+        self.0.lock().push(format!("request {code}"));
     }
     async fn on_provider_end(
         &self,
@@ -712,10 +710,7 @@ impl Plugin for L6Ends {
             .err()
             .map_or("ok", respan_gateway_core::Fault::code)
             .to_owned();
-        self.0
-            .lock()
-            .map(|mut l| l.push(format!("call {code}")))
-            .ok();
+        self.0.lock().push(format!("call {code}"));
     }
 }
 
@@ -790,7 +785,7 @@ async fn l6_bodiless(with_304: bool) {
     tokio::time::timeout(std::time::Duration::from_secs(10), gateway.idle())
         .await
         .expect("bodiless requests must settle without polling their response bodies");
-    let all = ends.0.lock().map(|l| l.clone()).unwrap_or_default();
+    let all = ends.0.lock().clone();
     let bad: Vec<_> = all.iter().filter(|e| !e.ends_with(" ok")).collect();
     assert_eq!(all.len(), 600);
     assert!(

@@ -9,7 +9,8 @@ mod hooks;
 mod http_support;
 use hooks::Calls;
 use http_support::{LIMIT, post, serve, serve_live, streamed};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -246,15 +247,15 @@ struct Echo {
 
 impl Echo {
     fn calls(&self) -> usize {
-        self.heads.lock().map(|h| h.len()).unwrap_or_default()
+        self.heads.lock().len()
     }
 
     fn heads(&self) -> Vec<http::HeaderMap> {
-        self.heads.lock().map(|h| h.clone()).unwrap_or_default()
+        self.heads.lock().clone()
     }
 
     fn frames(&self) -> Vec<String> {
-        let frames = self.frames.lock().map(|f| f.clone()).unwrap_or_default();
+        let frames = self.frames.lock().clone();
         frames
             .iter()
             .map(|f| String::from_utf8_lossy(f).into_owned())
@@ -266,17 +267,14 @@ impl Echo {
     pub async fn send(&self, call: http::Request<Body>) -> WireResult {
         let whole = call.body().full_bytes().is_some();
         let (head, body) = call.into_parts();
-        self.heads
-            .lock()
-            .map(|mut h| h.push(head.headers.clone()))
-            .ok();
+        self.heads.lock().push(head.headers.clone());
         let seen = self.frames.clone();
         // A whole call is one frame; empty, it carries no data, as an
         // empty HTTP body has no data frame.
         let body =
             body.try_filter(move |frame| futures::future::ready(!whole || !frame.is_empty()));
         let echoed = body.map_ok(move |frame| {
-            seen.lock().map(|mut s| s.push(frame.clone())).ok();
+            seen.lock().push(frame.clone());
             let v: Value = serde_json::from_slice(&frame).unwrap_or_default();
             Bytes::from(json!({ "heard": v["say"] }).to_string())
         });
@@ -518,7 +516,7 @@ async fn an_input_filter_edits_the_input_that_came_with_the_head_at_once() {
     impl Plugin for Seen {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let say = cx.input::<Say>()?.clone();
-            self.0.lock().map(|mut s| *s = Some(say)).ok();
+            *self.0.lock() = Some(say);
             Ok(None)
         }
     }
@@ -529,7 +527,7 @@ async fn an_input_filter_edits_the_input_that_came_with_the_head_at_once() {
     let (resp, _) = serve(&gw, post("/v1/talk", r#"{"say":"my secret","id":1}"#)).await;
     let frames = frames(resp).await;
 
-    let seen = seen.0.lock().map(|s| s.clone()).ok().flatten();
+    let seen = seen.0.lock().clone();
     let mut kept = Say::new("my ***");
     kept.1.insert("id".into(), 1.into());
     assert_eq!(seen, Some(kept));
@@ -556,7 +554,7 @@ async fn a_whole_request_carries_one_input_even_empty_and_an_upgrading_head_none
                 true => 0,
                 false => cx.take_inputs::<Say>().count().await,
             };
-            self.0.lock().map(|mut s| s.push((input, count))).ok();
+            self.0.lock().push((input, count));
             Ok(None)
         }
     }
@@ -582,7 +580,7 @@ async fn a_whole_request_carries_one_input_even_empty_and_an_upgrading_head_none
         "{}: a streaming request's inputs come after its head, to filters and take_inputs",
         "internal"
     );
-    let noted = quiet.0.lock().map(|s| s.clone()).unwrap_or_default();
+    let noted = quiet.0.lock().clone();
     assert_eq!(noted, [(r#"Say("")"#.to_owned(), 1), (none, 0)]);
     assert_eq!(echo.frames(), [r#"{"say":""}"#]);
     assert_eq!((echo.calls(), calls.all().len()), (2, 2));
@@ -707,7 +705,7 @@ impl Early {
         tokio::spawn(async move {
             while let Some(Ok(data)) = body.next().await {
                 let s = String::from_utf8_lossy(&data).into_owned();
-                seen.lock().map(|mut v| v.push(s)).ok();
+                seen.lock().push(s);
             }
         });
         let empty = futures::stream::empty::<Result<Bytes, Fault>>();
@@ -737,11 +735,11 @@ struct Notes(Arc<Mutex<Vec<String>>>);
 
 impl Notes {
     fn note(&self, note: impl Into<String>) {
-        self.0.lock().map(|mut n| n.push(note.into())).ok();
+        self.0.lock().push(note.into());
     }
 
     fn all(&self) -> Vec<String> {
-        self.0.lock().map(|n| n.clone()).unwrap_or_default()
+        self.0.lock().clone()
     }
 }
 
@@ -794,7 +792,7 @@ async fn inputs_are_cut_at_the_requests_end_and_a_calls_input_filters_end_with_i
     let _ = send.unbounded_send(Bytes::from_static(br#"{"say":"my secret"}"#));
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    assert!(early.0.lock().map(|v| v.is_empty()).unwrap_or_default());
+    assert!(early.0.lock().is_empty());
     assert_eq!(redact.0.all(), ["input filter ended"]);
 }
 
@@ -1306,7 +1304,7 @@ async fn a_pending_call_left_unpolled_still_ends_with_its_request() {
                 }
                 tokio::task::yield_now().await;
             }
-            self.1.lock().map(|mut v| v.push(call)).ok();
+            self.1.lock().push(call);
             Ok(Some(Response::stream(futures::stream::empty::<
                 Result<Heard, Fault>,
             >())))
@@ -1368,7 +1366,7 @@ async fn a_call_kept_past_its_request_does_not_keep_the_clients_body() {
     #[async_trait]
     impl Plugin for Stash {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            self.0.lock().map(|mut v| v.push(cx.call("echo"))).ok();
+            self.0.lock().push(cx.call("echo"));
             Ok(Some(Response::stream(futures::stream::empty::<
                 Result<Heard, Fault>,
             >())))
@@ -1779,7 +1777,7 @@ async fn r8_an_input_filter_added_after_the_inputs_ended_ends_at_once() {
 
         fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Say>) -> Result<(), Fault> {
             let noted = format!("ended {}", end.is_ok());
-            self.0.lock().map(|mut n| n.push(noted)).ok();
+            self.0.lock().push(noted);
             Ok(())
         }
     }
@@ -1790,10 +1788,7 @@ async fn r8_an_input_filter_added_after_the_inputs_ended_ends_at_once() {
             let read = cx.take_inputs::<Say>().count().await;
             let added = cx.filter(Ends(self.0.clone()));
             let code = added.err().map(|f| f.code().to_owned());
-            self.0
-                .lock()
-                .map(|mut n| n.push(format!("{read} {code:?}")))
-                .ok();
+            self.0.lock().push(format!("{read} {code:?}"));
             Ok(Some(Response::stream(futures::stream::empty::<
                 Result<Heard, Fault>,
             >())))
@@ -1809,7 +1804,7 @@ async fn r8_an_input_filter_added_after_the_inputs_ended_ends_at_once() {
     let (resp, _) = serve_live(&gw, req).await;
     drop(frames(resp).await);
     gw.idle().await;
-    let noted = noted.lock().map(|n| n.clone()).unwrap_or_default();
+    let noted = noted.lock().clone();
     assert_eq!(noted, ["ended true", "1 None"]);
 }
 

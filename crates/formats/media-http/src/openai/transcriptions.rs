@@ -133,7 +133,7 @@ fn post(
     };
     let audio = bytes_of(&input.audio)
         .ok_or_else(|| Fault::bad_request("audio at a URL cannot be sent as a file"))?;
-    let mut form = Writer::with_boundary(multipart::random_boundary()?);
+    let mut form = Writer::with_boundary(multipart::random_boundary());
     post_to(head, path, &form.content_type())?;
     let name = file_name(&input.audio, "audio");
     form.file("file", &name, &input.audio.mime_type, audio);

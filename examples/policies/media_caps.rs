@@ -15,8 +15,9 @@
 //!
 //! `cargo run -p respan-gateway-examples --example media_caps`
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation::MediaSource;
@@ -51,12 +52,12 @@ struct Meter(Arc<Mutex<HashMap<String, Used>>>);
 
 impl Meter {
     fn used(&self, key: &str) -> Used {
-        let all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let all = self.0.lock();
         all.get(key).copied().unwrap_or_default()
     }
 
     fn add(&self, key: &str, add: impl FnOnce(&mut Used)) {
-        let mut all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut all = self.0.lock();
         add(all.entry(key.to_owned()).or_default());
     }
 }

@@ -11,7 +11,7 @@ async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
 
     impl Returns {
         fn note(&self, what: &'static str) {
-            self.0.lock().map(|mut v| v.push(what)).ok();
+            self.0.lock().push(what);
         }
     }
 
@@ -59,7 +59,7 @@ async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
     let said = gist(&body);
     assert_eq!(said.text(), "hi");
     assert_eq!(said.usage.input_tokens, 4);
-    let order = returns.0.lock().map(|v| v.clone()).unwrap_or_default();
+    let order = returns.0.lock().clone();
     assert_eq!(order, ["filter ended", "returned", "call ended"]);
     assert_eq!(ends.all(), ["openai ok", "client"]);
 }
@@ -163,7 +163,7 @@ async fn a_call_is_a_copy_sent_until_the_request_ends() {
             let call = cx.call("openai");
             let copy = call.clone();
             let _ = call.await?;
-            self.0.lock().map(|mut k| *k = Some(copy.clone())).ok();
+            *self.0.lock() = Some(copy.clone());
             Ok(Some(copy.await?))
         }
     }
@@ -177,7 +177,7 @@ async fn a_call_is_a_copy_sent_until_the_request_ends() {
     assert_eq!(h.text(unary_chat()).await.0, StatusCode::OK);
     assert_eq!(h.sites.sent.sent().len(), 2);
 
-    let late = keep.0.lock().ok().and_then(|mut k| k.take());
+    let late = keep.0.lock().take();
     let late = late.unwrap_or_else(|| panic!("no call kept"));
     let refused = late.await.err().map(|f| fault_code(&f));
     assert_eq!(refused.as_deref(), Some("internal"));
@@ -261,7 +261,7 @@ async fn outputs_yields_values_that_are_no_content_such_as_a_keep_alive() {
                 Output::Usage(u) => (false, Some(u.input_tokens)),
                 r => (r.is_content(), None),
             });
-            self.0.lock().map(|mut n| n.extend(noted)).ok();
+            self.0.lock().extend(noted);
             let said = read.into_iter().filter(Output::is_content).map(Ok);
             Ok(Some(Response::stream(futures::stream::iter(said))))
         }
@@ -275,7 +275,7 @@ async fn outputs_yields_values_that_are_no_content_such_as_a_keep_alive() {
     h.sites.openai.reply(fixture::sse(&stream));
 
     assert_eq!(h.send(chat()).await.0, StatusCode::OK);
-    let noted = reads.0.lock().map(|n| n.clone()).unwrap_or_default();
+    let noted = reads.0.lock().clone();
     assert_eq!(noted.first(), Some(&(false, None)), "{noted:?}");
     // Usage is shown, though it is no content.
     assert!(noted.contains(&(false, Some(5))), "{noted:?}");
@@ -388,7 +388,7 @@ async fn until_end_says_how_a_response_ended_and_changes_nothing() {
                 .err()
                 .map_or("ok".to_owned(), fault_code)
                 .to_owned();
-            self.0.lock().map(|mut e| e.push(seen)).ok();
+            self.0.lock().push(seen);
             Ok(Some(resp))
         }
     }
@@ -417,7 +417,7 @@ async fn until_end_says_how_a_response_ended_and_changes_nothing() {
         h.sites.openai.reply(reply());
         let read = text(h.send(chat()).await);
 
-        let seen_ends = seen_ends.lock().map(|e| e.clone()).unwrap_or_default();
+        let seen_ends = seen_ends.lock().clone();
         assert_eq!(seen_ends, [seen]);
         // Asking settled nothing: the call ends as its end is sent, as it came.
         assert_eq!(read, relayed);

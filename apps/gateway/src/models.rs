@@ -4,7 +4,8 @@
 //! same list in Gemini's shape, for Gemini SDKs; a request to `/v1/models`
 //! with `anthropic-version` gets Anthropic's shape.
 
-use std::sync::{Arc, Mutex, Weak};
+use parking_lot::Mutex;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use axum::Json;
@@ -164,8 +165,8 @@ impl Models {
         })
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(Instant, Value)>> {
-        self.cached.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> parking_lot::MutexGuard<'_, Option<(Instant, Value)>> {
+        self.cached.lock()
     }
 
     /// One provider's models, or why it gave none; `None` if it lists none.

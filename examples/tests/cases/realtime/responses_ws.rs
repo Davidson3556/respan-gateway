@@ -73,7 +73,7 @@ async fn production_shutdown_closes_active_socket_and_settles_before_exit() {
         .unwrap()
         .unwrap();
     assert_eq!(observed.ledger.spent("demo"), budget::QUOTE);
-    assert_eq!(budget::lock(&observed.completed)[0]["status"], "cut");
+    assert_eq!(observed.completed.lock()[0]["status"], "cut");
     tokio::time::timeout(Duration::from_secs(3), scripted)
         .await
         .unwrap()
@@ -105,7 +105,7 @@ async fn an_unrelated_error_does_not_release_the_running_turn() {
     }
     close(&mut live).await;
     assert_eq!(observed.ledger.spent("demo"), 37);
-    assert_eq!(budget::lock(&observed.completed).len(), 1);
+    assert_eq!(observed.completed.lock().len(), 1);
 }
 #[tokio::test]
 async fn continuations_keep_ids_and_cap_each_turn_while_metering_lanes() {
@@ -122,11 +122,11 @@ async fn continuations_keep_ids_and_cap_each_turn_while_metering_lanes() {
         assert_eq!(out["future"]["kept"], true);
     }
     close(&mut live).await;
-    let sent = live.received.lock().unwrap();
+    let sent = live.received.lock();
     assert_eq!(sent[2]["previous_response_id"], "r1");
     assert!(sent.iter().all(|e| e["max_output_tokens"] == OUTPUT));
     assert_eq!(observed.ledger.spent("demo"), 51);
-    assert_eq!(budget::lock(&observed.completed).len(), 3);
+    assert_eq!(observed.completed.lock().len(), 3);
 }
 #[tokio::test]
 async fn failed_and_cancelled_turns_settle_usage_without_replaying() {
@@ -150,7 +150,7 @@ async fn failed_and_cancelled_turns_settle_usage_without_replaying() {
         next(&mut live).await.unwrap();
     }
     close(&mut live).await;
-    assert_eq!(live.received.lock().unwrap().len(), 2);
+    assert_eq!(live.received.lock().len(), 2);
     assert_eq!(observed.ledger.spent("demo"), 18);
 }
 #[tokio::test]
@@ -167,7 +167,7 @@ async fn budget_refusal_never_reaches_provider_and_a_cut_turn_keeps_its_charge()
         send(&mut live, json!({"type":"response.create","input":"x"})).await;
         assert_eq!(next(&mut live).await.is_some(), sent);
         close(&mut live).await;
-        assert_eq!(!live.received.lock().unwrap().is_empty(), sent);
+        assert_eq!(!live.received.lock().is_empty(), sent);
         assert_eq!(
             observed.ledger.spent("demo"),
             if sent { budget::QUOTE } else { 0 }
@@ -198,12 +198,12 @@ async fn concurrent_lanes_finish_in_reverse_order_and_warmup_has_no_charge() {
     next(&mut live).await.unwrap();
     assert_eq!(observed.ledger.spent("demo"), 11);
     assert_eq!(
-        budget::lock(&observed.completed).len(),
+        observed.completed.lock().len(),
         2,
         "records visible while socket stays open"
     );
     close(&mut live).await;
-    assert_eq!(budget::lock(&observed.completed)[0]["lane"], "b");
+    assert_eq!(observed.completed.lock()[0]["lane"], "b");
 }
 
 #[tokio::test]
@@ -222,7 +222,7 @@ async fn model_switches_are_rejected_before_admission() {
     .await;
     assert!(next(&mut live).await.is_none());
     close(&mut live).await;
-    assert!(live.received.lock().unwrap().is_empty());
+    assert!(live.received.lock().is_empty());
 }
 
 #[tokio::test]

@@ -3,8 +3,9 @@
 
 mod faults;
 
+use parking_lot::Mutex;
 use std::cell::Cell;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::channel::oneshot;
@@ -51,7 +52,7 @@ fn client(io: Io) -> Result<Connection<Input, Output>, Fault> {
         Ok(futures::sink::unfold(
             trace,
             move |trace, output: Result<Output, Fault>| async move {
-                trace.received.lock().unwrap().push(output?.0);
+                trace.received.lock().push(output?.0);
                 Ok::<_, Fault>(trace)
             },
         ))
@@ -76,7 +77,7 @@ fn provider(io: Io) -> Result<Connection<Output, Input>, Fault> {
             .transpose()?
             .ok_or_else(|| faults::bad_request("one input"))?
             .0;
-        trace.sent.lock().unwrap().push((attempt, value));
+        trace.sent.lock().push((attempt, value));
         Ok(futures::sink::unfold(
             Some(answer),
             move |mut answer, input: Result<Input, Fault>| async move {
@@ -146,7 +147,7 @@ impl Format<Second, Output, Input> for Messages {
 }
 
 fn attempt(trace: &Arc<Trace>, extensions: Extensions, fail_first: bool) -> Io {
-    let mut factories = trace.factories.lock().unwrap();
+    let mut factories = trace.factories.lock();
     let attempt = factories.len() + 1;
     factories.push((attempt, extensions.get::<FromHook>().is_some()));
     Io::Provider {
@@ -191,7 +192,7 @@ impl Plugin for Hooks {
         Ok(())
     }
     async fn on_provider_end(&self, px: &ProviderContext, _: &Result<(), Fault>) {
-        self.trace.ended.lock().unwrap().push(px.is_sent());
+        self.trace.ended.lock().push(px.is_sent());
     }
 }
 
@@ -231,9 +232,9 @@ async fn same_format_sends_plain_typed_input_across_different_transports() {
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, 7)]);
-    assert_eq!(*trace.received.lock().unwrap(), [7]);
-    assert_eq!(*trace.factories.lock().unwrap(), [(1, true)]);
+    assert_eq!(*trace.sent.lock(), [(1, 7)]);
+    assert_eq!(*trace.received.lock(), [7]);
+    assert_eq!(*trace.factories.lock(), [(1, true)]);
 
     // The first registered transport does not consume an incompatible
     // value while matching; the second implementation receives it intact.
@@ -242,8 +243,8 @@ async fn same_format_sends_plain_typed_input_across_different_transports() {
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, 7), (2, 7)]);
-    assert_eq!(*trace.received.lock().unwrap(), [7, 7]);
+    assert_eq!(*trace.sent.lock(), [(1, 7), (2, 7)]);
+    assert_eq!(*trace.received.lock(), [7, 7]);
 }
 
 #[tokio::test]
@@ -272,8 +273,8 @@ async fn same_transport_sends_filtered_typed_input() {
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, 8)]);
-    assert_eq!(*trace.received.lock().unwrap(), [8]);
+    assert_eq!(*trace.sent.lock(), [(1, 8)]);
+    assert_eq!(*trace.received.lock(), [8]);
 }
 
 #[tokio::test]
@@ -302,8 +303,8 @@ async fn own_input_reaches_a_provider_on_the_same_transport() {
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, 9)]);
-    assert_eq!(*trace.received.lock().unwrap(), [9]);
+    assert_eq!(*trace.sent.lock(), [(1, 9)]);
+    assert_eq!(*trace.received.lock(), [9]);
 }
 
 #[tokio::test]
@@ -332,9 +333,9 @@ async fn retries_create_distinct_transports_after_each_attempts_hooks() {
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.factories.lock().unwrap(), [(1, true), (2, true)]);
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, 7), (2, 7)]);
-    assert_eq!(*trace.received.lock().unwrap(), [7]);
+    assert_eq!(*trace.factories.lock(), [(1, true), (2, true)]);
+    assert_eq!(*trace.sent.lock(), [(1, 7), (2, 7)]);
+    assert_eq!(*trace.received.lock(), [7]);
 }
 
 #[tokio::test]
@@ -365,8 +366,8 @@ async fn rejected_provider_hook_does_not_create_a_transport() {
             .is_err()
     );
     gateway.idle().await;
-    assert!(trace.factories.lock().unwrap().is_empty());
-    assert_eq!(*trace.ended.lock().unwrap(), [false]);
+    assert!(trace.factories.lock().is_empty());
+    assert_eq!(*trace.ended.lock(), [false]);
 }
 
 #[tokio::test]
@@ -391,7 +392,7 @@ async fn a_panicking_transport_factory_is_an_unsent_internal_failure() {
         .unwrap_err();
     assert_eq!(faults::code(&fault), "internal");
     gateway.idle().await;
-    assert_eq!(*trace.ended.lock().unwrap(), [false]);
+    assert_eq!(*trace.ended.lock(), [false]);
 }
 
 #[test]

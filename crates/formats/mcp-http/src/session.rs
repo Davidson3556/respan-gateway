@@ -1,7 +1,8 @@
 //! One MCP server's child process: its stdin, and where its messages go.
 
+use parking_lot::Mutex;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use respan_gateway_core::Fault;
@@ -19,7 +20,6 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
-use crate::lock;
 use crate::stdio::{empty, late};
 
 /// How long a child has to exit once its stdin is closed, and again once
@@ -154,7 +154,7 @@ impl Session {
                         // Not JSON-RPC, such as a stray log line or one
                         // over the limit: not a message.
                         Ok(Some(line)) => if let Ok(message) = serde_json::from_slice(&line) {
-                            route(&mut lock(&reader), message);
+                            route(&mut reader.lock(), message);
                         },
                         _ => break,
                     },
@@ -166,7 +166,7 @@ impl Session {
                     },
                     _ = &mut gone => break,
                     () = until(due) => {
-                        let mut routes = lock(&reader);
+                        let mut routes = reader.lock();
                         routes.posts.retain(|p| !p.tx.is_closed());
                         let now = Instant::now();
                         let open = !routes.posts.is_empty() || routes.listening();
@@ -192,12 +192,12 @@ impl Session {
 
     /// Notes a request, which keeps it from idling.
     pub(crate) fn touch(&self) {
-        lock(&self.routes).touched = Instant::now();
+        self.routes.lock().touched = Instant::now();
     }
 
     /// The server's own stream of messages, or `None` if it is open.
     pub(crate) fn listen(&self) -> Option<http::Response<Body>> {
-        let mut routes = lock(&self.routes);
+        let mut routes = self.routes.lock();
         if routes.listening() {
             return None;
         }
@@ -239,7 +239,7 @@ impl Session {
         // Registered before writing, so no answer is missed; none if
         // nothing asks.
         let number = {
-            let mut routes = lock(&self.routes);
+            let mut routes = self.routes.lock();
             for post in &mut routes.posts {
                 post.ids.retain(|id| !dropped.contains(&id));
             }
@@ -283,7 +283,7 @@ impl Session {
             let (Some(routes), Some(stdin)) = (routes.upgrade(), stdin.upgrade()) else {
                 return;
             };
-            let mut all = lock(&routes);
+            let mut all = routes.lock();
             let Some(i) = all.posts.iter().position(|p| p.number == number) else {
                 return;
             };

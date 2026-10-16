@@ -12,7 +12,8 @@ pub mod store;
 /// JSON APIs take (Anthropic's Messages API).
 pub const LIMIT: usize = 32 << 20;
 
-use std::sync::{Arc, Mutex, PoisonError};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use respan_gateway_conversation::Usage;
 use respan_gateway_conversation::{Input, Output};
@@ -26,7 +27,7 @@ pub struct CallUsage(Arc<Mutex<Usage>>);
 impl CallUsage {
     /// The usage summed so far.
     pub fn get(&self) -> Usage {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        *self.0.lock()
     }
 
     /// The usage of the call `px`, if [`meter`] ran for it; read it in
@@ -55,7 +56,7 @@ pub fn meter(px: &mut ProviderContext) -> Result<(), Fault> {
     px.extensions_mut().insert(usage.clone());
     px.filter(move |reply: &mut Output| {
         if let Output::Usage(reported) = reply {
-            *usage.0.lock().unwrap_or_else(PoisonError::into_inner) += &*reported;
+            *usage.0.lock() += &*reported;
         }
         Ok(())
     })
@@ -69,7 +70,7 @@ pub struct Meter(Arc<Mutex<Usage>>);
 impl Meter {
     /// The usage of every call that ended, added up.
     pub fn usage(&self) -> Usage {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        *self.0.lock()
     }
 }
 
@@ -81,7 +82,7 @@ impl Plugin for Meter {
 
     async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
         if let Some(usage) = CallUsage::of(px) {
-            *self.0.lock().unwrap_or_else(PoisonError::into_inner) += &usage;
+            *self.0.lock() += &usage;
         }
     }
 }

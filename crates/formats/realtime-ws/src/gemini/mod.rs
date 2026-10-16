@@ -6,11 +6,12 @@ mod setup;
 #[cfg(test)]
 mod tests;
 
+use parking_lot::Mutex;
 use respan_gateway_core::Provider;
 use respan_gateway_http::{Connect, KeyIn, Reach, Upstream};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
@@ -73,10 +74,6 @@ struct State {
 }
 
 type Shared = Arc<Mutex<State>>;
-
-fn lock(shared: &Shared) -> MutexGuard<'_, State> {
-    shared.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// Whether a client is being answered: its writer says, its reader reads.
 type Answering = Arc<AtomicBool>;

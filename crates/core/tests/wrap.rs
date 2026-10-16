@@ -8,8 +8,9 @@
 mod edge;
 mod faults;
 
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use edge::*;
@@ -33,12 +34,15 @@ impl Body {
         let body = self.clone();
         fnt(move |c| {
             let body = body.clone();
-            lock(&body.relayed).push(c.relayed);
+            body.relayed.lock().push(c.relayed);
             tokio::spawn(async move {
                 let mut frames = c.body;
                 for _ in 0..read {
                     match frames.next().await {
-                        Some(f) => lock(&body.frames).push(f.map_err(|e| faults::code(&e).into())),
+                        Some(f) => body
+                            .frames
+                            .lock()
+                            .push(f.map_err(|e| faults::code(&e).into())),
                         None => break,
                     }
                 }
@@ -53,22 +57,22 @@ impl Body {
 
     async fn wait_for(&self, n: usize) {
         for _ in 0..500 {
-            if lock(&self.frames).len() >= n {
+            if self.frames.lock().len() >= n {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("the body never had {n} frames: {:?}", lock(&self.frames));
+        panic!("the body never had {n} frames: {:?}", self.frames.lock());
     }
 
     async fn finished(&self) -> Frames {
         for _ in 0..500 {
             if self.done.load(Ordering::SeqCst) > 0 {
-                return lock(&self.frames).clone();
+                return self.frames.lock().clone();
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("the body never ended: {:?}", lock(&self.frames));
+        panic!("the body never ended: {:?}", self.frames.lock());
     }
 }
 
@@ -205,7 +209,7 @@ async fn a_flagged_input_is_refused_and_ends_the_call_with_that_fault() {
     assert_eq!(frames, [Ok("a".into()), Err("bad_request".into())]);
     // `b` was never checked, and the call still relays.
     assert_eq!(checked.load(Ordering::SeqCst), 2);
-    assert_eq!(*lock(&body.relayed), [false]);
+    assert_eq!(*body.relayed.lock(), [false]);
     gw.idle().await;
     // The classifier's calls ended ok; the vendor's with the refusal.
     let prov = rec.log().prov_codes();
@@ -476,7 +480,7 @@ async fn a_fallback_gets_the_wrapped_inputs_the_refused_call_never_read() {
     let (_frame, _reply) = first(res).await;
     let texts = ["X", "Y", "<END>"].map(|t| Ok(t.to_string()));
     assert_eq!(body.finished().await, texts);
-    assert_eq!(*lock(&body.relayed), [false]);
+    assert_eq!(*body.relayed.lock(), [false]);
 }
 
 /// A provider that reads the whole call body, records it, and refuses the
@@ -488,7 +492,7 @@ fn reads_then_refuses_first(bodies: Arc<Mutex<Vec<Frames>>>) -> Dialer {
         async move {
             let frames = c.body.map(|f| f.map_err(|e| faults::code(&e).to_string()));
             let frames: Frames = frames.collect().await;
-            lock(&bodies).push(frames);
+            bodies.lock().push(frames);
             match n.fetch_add(1, Ordering::SeqCst) {
                 0 => Ok(answer(503, chunks(vec![]))),
                 _ => Ok(answer(200, chunks(vec!["a", "DONE"]))),
@@ -535,7 +539,7 @@ async fn a_retry_after_every_wrapped_input_was_read_is_not_a_clean_empty_upload(
     drop(tx);
     let (res, _end) = handle(&gw, req).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), read(res)).await;
-    let bodies = lock(&bodies).clone();
+    let bodies = bodies.lock().clone();
     assert_eq!(bodies[0], ["x", "y", "<END>"].map(|t| Ok(t.to_string())));
     assert_eq!(bodies[1], [Err("internal".to_string())]);
 }
@@ -577,7 +581,7 @@ async fn a_gate_and_a_deadline_compose_and_the_relay_is_kept() {
     assert!(started.elapsed() >= Duration::from_millis(90));
     assert_eq!(code(&end.await), "ok");
     assert_eq!(body.finished().await[0], Ok("a".into()));
-    assert_eq!(*lock(&body.relayed), [false]);
+    assert_eq!(*body.relayed.lock(), [false]);
     assert_eq!(checked.load(Ordering::SeqCst), 1);
     drop(tx);
     gw.idle().await;

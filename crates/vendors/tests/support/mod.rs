@@ -7,7 +7,8 @@
 #[path = "../../../../tests/support/http.rs"]
 mod http_support;
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use respan_gateway_conversation::{Input, Output};
 use respan_gateway_conversation_http::anthropic::AnthropicMessages;
@@ -67,7 +68,7 @@ impl Vendor {
             async move {
                 let bytes = request.into_body().collect().await?.to_bytes();
                 let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-                seen.lock().expect("sent").push(json);
+                seen.lock().push(json);
                 let answer = http::Response::builder()
                     .header(CONTENT_TYPE, content_type)
                     .body(Body::full(body))
@@ -111,7 +112,7 @@ impl Vendor {
 
     /// The requests the provider was sent.
     pub fn sent(&self) -> Vec<Value> {
-        self.sent.lock().expect("sent").clone()
+        self.sent.lock().clone()
     }
 
     async fn send(&self, path: &str, request: Value) -> String {

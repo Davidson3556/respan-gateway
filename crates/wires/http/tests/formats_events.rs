@@ -10,8 +10,9 @@ mod http_support;
 #[path = "formats_support/mod.rs"]
 mod support;
 
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 use hooks::{Calls, Outcomes};
 use http_support::{LIMIT, post, read_whole, serve};
@@ -85,9 +86,7 @@ fn local(
         let sent = sent.clone();
         Box::pin(async move {
             let body = call.into_body().try_collect::<Vec<_>>().await?.concat();
-            sent.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(Bytes::from(body));
+            sent.lock().push(Bytes::from(body));
             let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
             head.status = status;
             head.headers
@@ -126,10 +125,7 @@ async fn a_passthrough_of_no_kind_relays_an_event_stream_byte_for_byte() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.ok(), Some(Bytes::from(stream.concat())));
-    assert_eq!(
-        sent.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
-        &[Bytes::from_static(b"anything")]
-    );
+    assert_eq!(sent.lock().as_slice(), &[Bytes::from_static(b"anything")]);
     assert!(log.only().is_ok());
 }
 
@@ -168,12 +164,12 @@ struct Seen(Arc<Mutex<Vec<Output>>>);
 impl Seen {
     /// How many were no content.
     fn silent(&self) -> usize {
-        let seen = self.0.lock().map(|s| s.clone()).unwrap_or_default();
+        let seen = self.0.lock().clone();
         seen.iter().filter(|r| !r.is_content()).count()
     }
 
     fn all(&self) -> usize {
-        self.0.lock().map(|s| s.len()).unwrap_or_default()
+        self.0.lock().len()
     }
 }
 
@@ -182,7 +178,7 @@ impl Plugin for Seen {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let seen = self.0.clone();
         cx.filter(move |r: &mut Output| {
-            seen.lock().map(|mut s| s.push(r.clone())).ok();
+            seen.lock().push(r.clone());
             Ok(())
         })?;
         Ok(None)
@@ -334,7 +330,7 @@ async fn a_request_no_plugin_reads_is_decoded_for_encoding() {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(format.0.load(Ordering::Relaxed), decoded);
-        let sent = sent.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = sent.lock();
         let [sent] = sent.as_slice() else {
             panic!("{sent:?}");
         };
@@ -439,7 +435,7 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
     impl Plugin for Bills {
         async fn on_client_end(&self, cx: &ClientContext, _end: &Result<(), Fault>) {
             if let Some(CachedUsage(cached)) = cx.extensions().get() {
-                *self.0.lock().unwrap_or_else(|e| e.into_inner()) = *cached;
+                *self.0.lock() = *cached;
             }
         }
     }
@@ -460,7 +456,7 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
         serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
     assert_eq!(body["usage"]["prompt_tokens"], 7);
     assert!(meter.total().is_empty());
-    let billed = bills.0.lock().map(|u| u.input_tokens).ok();
+    let billed = Some(bills.0.lock().input_tokens);
     assert_eq!(billed, Some(3));
 }
 

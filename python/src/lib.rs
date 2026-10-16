@@ -4,9 +4,10 @@
 //! and the command line run on one shared tokio runtime. Every call that
 //! waits releases the GIL.
 
+use parking_lot::Mutex;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::Router;
@@ -560,7 +561,7 @@ struct Server {
 
 impl Server {
     fn signal(&self) {
-        if let Some(stop) = self.stop.lock().ok().and_then(|mut s| s.take()) {
+        if let Some(stop) = self.stop.lock().take() {
             let _ = stop.send(());
         }
     }
@@ -571,7 +572,7 @@ impl Server {
     /// Stops accepting, lets open responses finish (up to 30 s) and returns.
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
         self.signal();
-        let task = self.task.lock().ok().and_then(|mut t| t.take());
+        let task = self.task.lock().take();
         let Some(task) = task else { return Ok(()) };
         py.detach(|| runtime().block_on(task))
             .map_err(gateway_error)?
@@ -582,7 +583,7 @@ impl Server {
     /// thread once the server has ended.
     fn stop_async(&self, done: Py<PyAny>) -> Pending {
         self.signal();
-        let task = self.task.lock().ok().and_then(|mut t| t.take());
+        let task = self.task.lock().take();
         start(
             async move {
                 let Some(task) = task else { return Ok(()) };

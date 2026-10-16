@@ -43,21 +43,7 @@ impl ToolScope {
 
 /// Whether `text` matches `pattern`, in which `*` stands for any characters.
 fn glob(pattern: &str, text: &str) -> bool {
-    let Some((first, rest)) = pattern.split_once('*') else {
-        return pattern == text;
-    };
-    let Some(mut left) = text.strip_prefix(first) else {
-        return false;
-    };
-    let parts: Vec<&str> = rest.split('*').collect();
-    let (last, middle) = parts.split_last().unwrap_or((&"", &[]));
-    for part in middle {
-        match left.find(part) {
-            Some(at) => left = &left[at + part.len()..],
-            None => return false,
-        }
-    }
-    left.ends_with(last)
+    wildmatch::WildMatch::new(pattern).matches(text)
 }
 
 #[cfg(test)]

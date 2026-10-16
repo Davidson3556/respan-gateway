@@ -15,3 +15,6 @@ workspace = true
 respan-gateway-vendor-kit.workspace = true
 respan-gateway-vendors-green.workspace = true
 respan-gateway-vendors-yellow.workspace = true
+
+[dev-dependencies]
+parking_lot.workspace = true

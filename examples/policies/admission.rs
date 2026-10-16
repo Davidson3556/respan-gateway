@@ -21,13 +21,14 @@
 //!
 //! `cargo run -p respan-gateway-examples --example admission`
 
+use parking_lot::Mutex;
 use respan_gateway_conversation::{Input, Output};
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::futures::{future::BoxFuture, stream::BoxStream};
 use respan_gateway_core::{ErrorCode, Provider, RetryAfter};
 use respan_gateway_examples::LIMIT;
 use respan_gateway_examples::admission::{Slot, Slots};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use mockllm::{Answer, FakeOpenAi};
@@ -53,7 +54,6 @@ impl Held {
     fn lost(&self) -> BoxFuture<'static, ()> {
         self.0
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .map(|slot| slot.lost().boxed())
             .unwrap_or_else(|| std::future::ready(()).boxed())
@@ -184,7 +184,7 @@ impl Plugin for Admission {
 
     async fn on_client_end(&self, cx: &ClientContext, _end: &Result<(), Fault>) {
         if let Some(Held(slot)) = cx.extensions().get::<Held>() {
-            let slot = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+            let slot = slot.lock().take();
             if let Some(slot) = slot {
                 let _ = slot.release().await;
             }

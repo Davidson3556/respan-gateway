@@ -4,11 +4,12 @@
 //! would: messages under the success statuses, the session in its header,
 //! and every failure as a [`Fault`], which the client's format writes.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use respan_gateway_core::futures::TryStreamExt;
@@ -21,7 +22,7 @@ use respan_gateway_mcp::Message;
 use tokio::process::Command;
 
 use crate::session::{Limits, Session};
-use crate::{PARSE_ERROR, SESSION, lock, read};
+use crate::{PARSE_ERROR, SESSION, read};
 use respan_gateway_mcp::RpcCode;
 
 /// Sessions by id; `None` while starting.
@@ -179,7 +180,7 @@ impl StdioTransport {
             };
         };
         let key = id.to_str().unwrap_or_default().to_owned();
-        let Some(session) = lock(&self.sessions).get(&key).cloned().flatten() else {
+        let Some(session) = self.sessions.lock().get(&key).cloned().flatten() else {
             return Err(no_session());
         };
         session.touch();
@@ -190,7 +191,7 @@ impl StdioTransport {
                 own(Fault::new(open), "busy", -32004, StatusCode::CONFLICT)
             })?,
             Method::DELETE => {
-                lock(&self.sessions).remove(&key);
+                self.sessions.lock().remove(&key);
                 empty(StatusCode::NO_CONTENT)
             }
             _ => return Err(Fault::bad_request("not an MCP method")),
@@ -204,10 +205,11 @@ impl StdioTransport {
         if !messages.iter().any(|m| m.method() == Some("initialize")) {
             return Err(no_session_named());
         }
-        let key = session_id()?;
+        // A random UUID's hex: visible ASCII, as MCP requires of a session id.
+        let key = uuid::Uuid::new_v4().simple().to_string();
         {
             // Its place is held while the child starts, outside the lock.
-            let mut sessions = lock(&self.sessions);
+            let mut sessions = self.sessions.lock();
             if sessions.len() >= self.max_total {
                 let full = Fault::new("too many sessions");
                 let status = StatusCode::SERVICE_UNAVAILABLE;
@@ -218,7 +220,7 @@ impl StdioTransport {
         let (all, forgotten) = (Arc::downgrade(&self.sessions), key.clone());
         let forget = move || {
             if let Some(all) = all.upgrade() {
-                lock(&all).remove(&forgotten);
+                all.lock().remove(&forgotten);
             }
         };
         let mut command = Command::new(&self.program);
@@ -243,7 +245,7 @@ impl StdioTransport {
         }
         let started = Session::start(&mut command, self.limits, forget.clone());
         let session = {
-            let mut sessions = lock(&self.sessions);
+            let mut sessions = self.sessions.lock();
             match (started, sessions.get_mut(&key)) {
                 (Ok(session), Some(slot)) => slot.insert(Arc::new(session)).clone(),
                 (Err(fault), _) => {
@@ -275,15 +277,6 @@ impl<F: FnOnce()> Drop for OnDrop<F> {
             f();
         }
     }
-}
-
-/// A new session's id: 128 random bits as 32 hex digits, which are visible
-/// ASCII, as MCP requires of a session id.
-fn session_id() -> Result<String, Fault> {
-    let mut bits = [0u8; 16];
-    getrandom::fill(&mut bits)
-        .map_err(|e| Fault::internal("no secure random source").with_source(e))?;
-    Ok(bits.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// The messages a `POST` carries; `Err` with a parse error if none.

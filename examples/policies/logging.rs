@@ -19,8 +19,9 @@
 //!
 //! `cargo run -p respan-gateway-examples --example logging`
 
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 
 use mockllm::FakeOpenAi;
 use respan_gateway_conversation::Usage;
@@ -71,10 +72,7 @@ struct Memory(Arc<Mutex<Vec<Record>>>);
 #[async_trait]
 impl Sink for Memory {
     async fn write(&self, record: Record) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(record);
+        self.0.lock().push(record);
     }
 }
 
@@ -132,9 +130,7 @@ impl<S: Sink> Plugin for Log<S> {
                 ..
             } = reply
             {
-                into.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push_str(text);
+                into.lock().push_str(text);
             }
             Ok(())
         })?;
@@ -163,7 +159,7 @@ impl<S: Sink> Plugin for Log<S> {
             let chat = cx.input::<Input>().ok();
             let text = |c: &Input| c.messages.iter().map(Message::text).collect::<Vec<_>>();
             record.prompt = chat.map(|c| text(c).join("\n"));
-            let completion = captured.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let completion = captured.0.lock();
             record.completion = Some(completion.clone());
         }
         self.sink.write(record).await;
@@ -229,7 +225,7 @@ async fn run(fake: &FakeOpenAi) -> Result<Vec<Record>, Fault> {
         read_whole(serve(&gw, req).await.0).await.2?;
         gw.idle().await;
     }
-    let records = memory.0.lock().unwrap_or_else(PoisonError::into_inner);
+    let records = memory.0.lock();
     Ok(records.clone())
 }
 

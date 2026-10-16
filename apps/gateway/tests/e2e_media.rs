@@ -13,7 +13,8 @@
 
 mod support;
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use axum::body::{Bytes, to_bytes};
 use axum::extract::Request;
@@ -79,7 +80,7 @@ impl Fake {
     }
 
     fn seen(&self) -> Vec<Seen> {
-        self.state.lock().unwrap().seen.clone()
+        self.state.lock().seen.clone()
     }
 
     async fn answer(&self, req: Request) -> Response {
@@ -92,7 +93,7 @@ impl Fake {
             head.headers.clone(),
             body.clone(),
         );
-        self.state.lock().unwrap().seen.push(seen);
+        self.state.lock().seen.push(seen);
         if head.headers.get("authorization").map(|v| v.as_bytes()) != Some(b"Bearer sk-media") {
             return error(StatusCode::UNAUTHORIZED, "wrong key");
         }
@@ -144,13 +145,13 @@ impl Fake {
                 if !asked["prompt"].is_string() {
                     return error(StatusCode::BAD_REQUEST, "prompt is required");
                 }
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock();
                 let id = format!("video_{}", state.videos.len() + 1);
                 state.videos.push((id.clone(), 0));
                 axum::Json(job(&id, "queued")).into_response()
             }
             (method, ["v1", "videos", id, rest @ ..]) => {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock();
                 let Some((_, asked)) = state.videos.iter_mut().find(|(v, _)| v == id) else {
                     return error(StatusCode::NOT_FOUND, "no such video");
                 };

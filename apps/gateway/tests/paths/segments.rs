@@ -24,9 +24,9 @@ async fn passthrough_keeps_a_vendors_path_segments() {
         "/v1/projects/p/locations/l/publishers/anthropic/models/claude@2024:rawPredict",
         "/v1/files/file-AbC123%2B%2F==",
     ] {
-        seen.lock().unwrap().clear();
+        seen.lock().clear();
         send_post(&addr, sent).await;
-        let got = seen.lock().unwrap().clone();
+        let got = seen.lock().clone();
         let want = format!("POST /pt{sent} HTTP/1.1");
         if got != [want.clone()] {
             wrong.push(format!("sent {sent}\n   vendor got {got:?}"));

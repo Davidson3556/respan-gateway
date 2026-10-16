@@ -1,7 +1,8 @@
 //! Local wire fixtures shared by the gateway path suites.
 #![allow(clippy::unwrap_used)]
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -60,7 +61,7 @@ async fn record(body: &'static str, lines_only: bool) -> (String, Arc<Mutex<Vec<
                     }
                 }
                 let head = String::from_utf8_lossy(&got).into_owned();
-                s.lock().unwrap().push(if lines_only {
+                s.lock().push(if lines_only {
                     head.lines().next().unwrap_or_default().to_owned()
                 } else {
                     head

@@ -16,8 +16,9 @@
 //! left out with the call: any object that names one of the runner's tools,
 //! or carries the id of one of its calls, is.
 
+use parking_lot::Mutex;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 
 use respan_gateway_core::futures::channel::mpsc;
 use respan_gateway_core::futures::future::ready;
@@ -71,10 +72,6 @@ struct State {
     unseen: bool,
 }
 
-fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
-    state.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// Runs the loop over the live session of `cx`, offering `offered`.
 pub(super) fn run(
     cx: &mut ClientContext,
@@ -104,7 +101,7 @@ pub(super) fn run(
         let client = inputs.map(move |input| {
             let mut input = input?;
             if let Input::Session(session) = &mut input {
-                offer(&mut lock(&offering), session);
+                offer(&mut offering.lock(), session);
             }
             Ok(Some(input))
         });
@@ -122,7 +119,7 @@ pub(super) fn run(
     cx.wrap(move |outputs: EventStream<Output>| {
         outputs.flat_map(move |output| {
             stream::iter(match output {
-                Ok(output) => shown(&mut lock(&state), &jobs, output)
+                Ok(output) => shown(&mut state.lock(), &jobs, output)
                     .into_iter()
                     .map(Ok)
                     .collect(),
@@ -259,7 +256,7 @@ async fn answer(
     };
     let deadline = Instant::now() + limits.tool_timeout;
     let mut results = run_tools(&toolbox, limits, deadline, vec![(id, name, arguments)]).await;
-    let mut state = lock(&state);
+    let mut state = state.lock();
     spend(&mut state.budget, &mut results);
     let mut sent = Vec::new();
     for (id, outcome, _) in results {

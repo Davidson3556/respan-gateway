@@ -1,7 +1,8 @@
 //! Suffix matching and additional vendor endpoint paths.
 #![allow(clippy::unwrap_used)]
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use crate::path_support::{CHAT_REPLY, record_heads, send_request};
 use crate::support::Gateway;
@@ -18,11 +19,10 @@ async fn vendor_saw(
     method: &str,
     target: &str,
 ) -> (String, Vec<String>) {
-    seen.lock().unwrap().clear();
+    seen.lock().clear();
     let status = send_request(addr, method, target, "").await;
     let lines = seen
         .lock()
-        .unwrap()
         .iter()
         .map(|h| h.lines().next().unwrap_or_default().to_owned())
         .collect();

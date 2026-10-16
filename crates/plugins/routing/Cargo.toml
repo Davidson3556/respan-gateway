@@ -12,6 +12,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+wildmatch.workspace = true
+parking_lot.workspace = true
 respan-gateway-core.workspace = true
 respan-gateway-sdk.workspace = true
 respan-gateway-plugin-fallback.workspace = true

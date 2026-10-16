@@ -62,7 +62,8 @@ async fn typesafe_lists_its_models_by_name() {
 
 #[tokio::test]
 async fn respan_lists_its_catalog_a_page_at_a_time_sent_no_key() {
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
     let asked = Arc::new(Mutex::new(Vec::new()));
     let seen = asked.clone();
     let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
@@ -75,7 +76,6 @@ async fn respan_lists_its_catalog_a_page_at_a_time_sent_no_key() {
                 .to_owned();
             let keyed = req.headers().contains_key("authorization");
             seen.lock()
-                .unwrap_or_else(|e| e.into_inner())
                 .push((at.clone(), keyed));
             let page = match at.as_str() {
                 "/api/gateway-models/list?page=1&page_size=1000" => json!({"models": [
@@ -158,7 +158,7 @@ async fn respan_lists_its_catalog_a_page_at_a_time_sent_no_key() {
         Some("openai-responses")
     );
     assert_eq!(ids(models), ["gpt-6-luna", "span-02", "gemini-x"]);
-    let asked = asked.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let asked = asked.lock().clone();
     assert_eq!(asked.len(), 2, "{asked:?}");
     assert!(asked.iter().all(|(_, keyed)| !keyed), "{asked:?}");
 }

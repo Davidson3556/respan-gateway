@@ -13,7 +13,8 @@
 //!
 //! Not built: realtime WebSocket sessions and per-turn billing (use case 7).
 
-use std::sync::{Arc, Mutex, PoisonError};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use respan_gateway_core::futures::stream;
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Provider, Response, async_trait};
@@ -132,7 +133,7 @@ impl McpServer {
                         .unwrap_or_default();
                     let body: Value = serde_json::from_slice(&raw).unwrap_or_default();
                     let method = body["method"].as_str().unwrap_or_default();
-                    requests.lock().unwrap_or_else(PoisonError::into_inner).push((body.clone(), session.clone()));
+                    requests.lock().push((body.clone(), session.clone()));
                     if method == "notifications/initialized" && session.as_deref() == Some("s1") && body.get("id").is_none() {
                         return (StatusCode::ACCEPTED, [("content-type", "application/json"), ("mcp-session-id", "s1")], String::new());
                     }
@@ -160,10 +161,7 @@ impl McpServer {
 
     #[cfg(test)]
     fn requests(&self) -> Vec<(Value, Option<String>)> {
-        self.seen
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.seen.lock().clone()
     }
 }
 

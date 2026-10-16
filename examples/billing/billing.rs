@@ -15,8 +15,9 @@
 //!
 //! `cargo run -p respan-gateway-examples --example billing`
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation::Input;
@@ -71,20 +72,14 @@ struct Memory(Arc<Mutex<Vec<Row>>>);
 
 impl Memory {
     fn rows(&self) -> Vec<Row> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.0.lock().clone()
     }
 }
 
 #[async_trait]
 impl UsageStore for Memory {
     async fn record(&self, row: Row) -> Result<(), Fault> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(row);
+        self.0.lock().push(row);
         Ok(())
     }
 }

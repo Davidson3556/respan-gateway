@@ -181,16 +181,16 @@ async fn a_call_kept_past_its_request_cannot_call() {
     impl Plugin for Late {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let call = cx.call("openai");
-            self.0.lock().map(|mut kept| *kept = Some(call)).ok();
+            *self.0.lock() = Some(call);
             Ok(None)
         }
 
         async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<(), Fault>) {
-            let Some(call) = self.0.lock().ok().and_then(|mut kept| kept.take()) else {
+            let Some(call) = self.0.lock().take() else {
                 return;
             };
             let err = call.await.err().map(|f| f.message().to_owned());
-            self.1.lock().map(|mut seen| *seen = err).ok();
+            *self.1.lock() = err;
         }
     }
 
@@ -200,7 +200,7 @@ async fn a_call_kept_past_its_request_cannot_call() {
     let _ = h.send(chat()).await;
     h.gw.idle().await;
 
-    let err = late.1.lock().map(|e| e.clone()).ok().flatten();
+    let err = late.1.lock().clone();
     assert_eq!(
         err.as_deref(),
         Some("providers can be called until the request ends")
@@ -540,12 +540,12 @@ async fn extensions_set_in_on_provider_reach_that_calls_end_only() {
 
         async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
             let held = px.extensions().get::<Reservation>().map(|r| r.0);
-            self.0.lock().map(|mut s| s.push(held)).ok();
+            self.0.lock().push(held);
         }
 
         async fn on_client_end(&self, cx: &ClientContext, _end: &Result<(), Fault>) {
             let held = cx.extensions().get::<Reservation>().map(|r| r.0);
-            self.0.lock().map(|mut s| s.push(held)).ok();
+            self.0.lock().push(held);
         }
     }
 
@@ -555,7 +555,7 @@ async fn extensions_set_in_on_provider_reach_that_calls_end_only() {
 
     assert_eq!(h.text(unary_chat()).await.0, StatusCode::OK);
 
-    let mut seen = reserve.0.lock().map(|s| s.clone()).unwrap_or_default();
+    let mut seen = reserve.0.lock().clone();
     seen.sort();
     assert_eq!(seen, [None, Some("r1")]);
 }
@@ -592,11 +592,11 @@ async fn every_calls_provider_end_runs_before_the_clients_end() {
     impl Plugin for Order {
         async fn on_provider_end(&self, _px: &ProviderContext, _end: &Result<(), Fault>) {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            self.0.lock().map(|mut o| o.push("provider")).ok();
+            self.0.lock().push("provider");
         }
 
         async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<(), Fault>) {
-            self.0.lock().map(|mut o| o.push("client")).ok();
+            self.0.lock().push("client");
         }
     }
 
@@ -620,7 +620,7 @@ async fn every_calls_provider_end_runs_before_the_clients_end() {
     h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
 
     assert_eq!(h.text(unary_chat()).await.0, StatusCode::OK);
-    let order = order.0.lock().map(|o| o.clone()).unwrap_or_default();
+    let order = order.0.lock().clone();
     assert_eq!(order, ["provider", "provider", "client"]);
 }
 
@@ -663,7 +663,7 @@ async fn a_response_kept_past_its_request_ends_abandoned_and_reads_so() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let (first, loser) = (cx.call("openai"), cx.call("backup"));
             let (first, loser) = futures::join!(first, loser);
-            *self.0.0.lock().map_err(|_| Fault::internal("poisoned"))? = Some(loser?);
+            *self.0.0.lock() = Some(loser?);
             first.map(Some)
         }
     }
@@ -738,7 +738,7 @@ async fn a_reader_waiting_on_a_kept_response_wakes_as_its_request_closes() {
                     .outputs::<Output>()
                     .try_collect::<Vec<_>>(),
             );
-            *self.0.lock().map_err(|_| Fault::internal("poisoned"))? = Some(reading);
+            *self.0.lock() = Some(reading);
             Ok(None)
         }
     }
@@ -757,7 +757,7 @@ async fn a_reader_waiting_on_a_kept_response_wakes_as_its_request_closes() {
     sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
 
     let (status, _, _) = read_whole(serve(&gw, post(CHAT, UNARY_REQ)).await.0).await;
-    let reading = reader.lock().ok().and_then(|mut r| r.take()).expect("read");
+    let reading = reader.lock().take().expect("read");
     let read = tokio::time::timeout(Duration::from_secs(5), reading).await;
     gw.idle().await;
 
@@ -795,7 +795,7 @@ async fn filters_of_a_call_abandoned_at_close_get_their_end() {
 
         fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
             let end = end.as_ref().err().map_or("ok".to_owned(), fault_code);
-            self.0.lock().map(|mut n| n.push(end.to_owned())).ok();
+            self.0.lock().push(end.to_owned());
             Ok(())
         }
     }
@@ -819,7 +819,7 @@ async fn filters_of_a_call_abandoned_at_close_get_their_end() {
     h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
 
     assert_eq!(closes(&h, unary_chat()).await, StatusCode::OK);
-    let noted = note.0.lock().map(|n| n.clone()).unwrap_or_default();
+    let noted = note.0.lock().clone();
     assert_eq!(noted, ["abandoned"]);
 }
 
@@ -1083,7 +1083,7 @@ async fn a_client_leaving_mid_stream_ends_the_call_and_its_filters() {
 
         fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
             let end = code(end).to_owned();
-            self.0.lock().map(|mut n| n.push(end)).ok();
+            self.0.lock().push(end);
             Ok(())
         }
     }
@@ -1110,7 +1110,7 @@ async fn a_client_leaving_mid_stream_ends_the_call_and_its_filters() {
     drop(body);
     h.gw.idle().await;
 
-    let noted = note.0.lock().map(|n| n.clone()).unwrap_or_default();
+    let noted = note.0.lock().clone();
     assert_eq!(noted, ["abandoned"]);
     assert_eq!(ends.all(), ["openai abandoned", "client"]);
 }
@@ -1160,7 +1160,7 @@ async fn a_dropped_response_runs_its_provider_filters_end() {
 
         fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
             let end = format!("{} {}", self.1, code(end));
-            self.0.0.lock().map(|mut e| e.push(end)).ok();
+            self.0.0.lock().push(end);
             Ok(())
         }
     }
@@ -1193,7 +1193,7 @@ async fn a_dropped_response_runs_its_provider_filters_end() {
 
     let _ = h.body(chat()).await;
 
-    let got = ends.0.lock().map(|e| e.clone()).unwrap_or_default();
+    let got = ends.0.lock().clone();
     assert_eq!(got, ["openai abandoned", "backup ok"]);
 }
 
@@ -1307,7 +1307,7 @@ async fn a_refusal_before_the_head_ends_a_plugins_response_filters() {
                 .err()
                 .map_or("ok".to_owned(), fault_code)
                 .to_owned();
-            self.0.lock().map(|mut e| e.push(end)).ok();
+            self.0.lock().push(end);
             Ok(())
         }
     }
@@ -1333,7 +1333,7 @@ async fn a_refusal_before_the_head_ends_a_plugins_response_filters() {
     let (status, _, _) = h.send(chat()).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    let ends = ends.0.lock().map(|e| e.clone()).unwrap_or_default();
+    let ends = ends.0.lock().clone();
     assert_eq!(ends, ["internal"]);
 }
 

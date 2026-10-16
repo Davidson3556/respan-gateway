@@ -81,10 +81,7 @@ async fn only_a_relay_is_marked_and_carries_the_clients_key() {
     }
     gw.idle().await;
 
-    assert_eq!(
-        *marks.lock().unwrap_or_else(|e| e.into_inner()),
-        [false, false]
-    );
+    assert_eq!(*marks.lock(), [false, false]);
     let openai = openai_fake.requests();
     let anthropic = anthropic_fake.requests();
     assert_eq!((openai.len(), anthropic.len()), (1, 1));

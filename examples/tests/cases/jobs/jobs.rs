@@ -6,9 +6,8 @@ use respan_gateway_http::http_body_util::BodyExt;
 #[tokio::test]
 async fn a_completed_result_survives_reopening_the_database() -> Result<(), Fault> {
     let path = std::env::temp_dir().join(format!(
-        "respan-idempotency-{}-{}.db",
-        std::process::id(),
-        hash(std::time::SystemTime::now())
+        "respan-idempotency-{}.db",
+        uuid::Uuid::new_v4().simple()
     ));
     let mock = FakeOpenAi::start().await;
     mock.answer(provider_support::sse(STREAM));
@@ -54,7 +53,9 @@ async fn a_duplicate_waits_for_the_run_in_flight_and_the_provider_is_called_once
         async move { send(&gw, keyed(ACME, "op-1", BODY)).await }
     });
     let waiting = || {
-        locked(&store.0)
+        store
+            .0
+            .lock()
             .values()
             .map(|w| w.receiver_count())
             .sum::<usize>()
@@ -152,7 +153,7 @@ async fn a_zero_retention_request_stores_nothing() -> Result<(), Fault> {
         req.extensions_mut().insert(values);
         assert!(whole(&send(&gw, req).await?));
     }
-    assert!(locked(&store.0).is_empty(), "nothing stored");
+    assert!(store.0.lock().is_empty(), "nothing stored");
     assert_eq!(mock.requests().len(), 2, "so each request runs");
     Ok(())
 }
@@ -200,9 +201,8 @@ async fn a_lost_lease_cancels_provider_opening_and_retries_with_the_same_upstrea
         }
     }
     let path = std::env::temp_dir().join(format!(
-        "respan-jobs-lease-{}-{}.db",
-        std::process::id(),
-        hash(std::time::SystemTime::now())
+        "respan-jobs-lease-{}.db",
+        uuid::Uuid::new_v4().simple()
     ));
     let store = Arc::new(Sqlite::with_lease(&path, Duration::from_millis(600))?);
     let mock = FakeOpenAi::start().await;
@@ -221,7 +221,8 @@ async fn a_lost_lease_cancels_provider_opening_and_retries_with_the_same_upstrea
                 transport.clone(),
             );
             async move {
-                locked(&keys).push(call.headers().get("idempotency-key").cloned());
+                keys.lock()
+                    .push(call.headers().get("idempotency-key").cloned());
                 if calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     let _dropped = Dropped(dropped);
                     let _call = call;
@@ -279,7 +280,7 @@ async fn a_lost_lease_cancels_provider_opening_and_retries_with_the_same_upstrea
         .map_err(|error| Fault::internal("blocker failed").with_source(error))??;
     gw.idle().await;
     assert!(whole(&send(&gw, keyed(ACME, "lease", BODY)).await?));
-    let keys = locked(&keys);
+    let keys = keys.lock();
     assert_eq!(keys.len(), 2);
     assert!(keys[0].is_some());
     assert_eq!(
@@ -300,9 +301,8 @@ async fn a_lost_lease_cancels_provider_opening_and_retries_with_the_same_upstrea
 async fn an_expired_claim_cannot_renew_or_publish_a_result() -> Result<(), Fault> {
     use std::time::Duration;
     let path = std::env::temp_dir().join(format!(
-        "respan-jobs-expired-{}-{}.db",
-        std::process::id(),
-        hash(std::time::SystemTime::now())
+        "respan-jobs-expired-{}.db",
+        uuid::Uuid::new_v4().simple()
     ));
     let store = Sqlite::with_lease(&path, Duration::from_millis(300))?;
     let key = ("tenant".into(), "key".into(), "body".into());

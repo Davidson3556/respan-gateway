@@ -27,7 +27,7 @@ struct Sessions {
     ledger: MemoryLedger,
     model: String,
     input_limit: i64,
-    completed: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    completed: Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
 }
 #[async_trait]
 impl Plugin for Sessions {

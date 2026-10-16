@@ -191,7 +191,8 @@ async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
         }
 
         fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
-            if let (Ok(()), Ok(mut entry)) = (end, self.2.lock()) {
+            if end.is_ok() {
+                let mut entry = self.2.lock();
                 *entry = Some((std::mem::take(&mut self.0), self.1));
             }
             Ok(())
@@ -214,7 +215,7 @@ async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
 
     let _ = h.send(chat()).await;
 
-    let kept = entry.lock().ok().and_then(|e| e.clone());
+    let kept = entry.lock().clone();
     assert_eq!(kept, Some(("Hello world".to_owned(), 2)));
 }
 
@@ -390,7 +391,7 @@ async fn a_call_read_in_on_client_is_metered_like_the_targets() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let read = cx.call("openai").await?;
             let fault = read.outputs::<Output>().try_collect::<Vec<_>>().await.err();
-            self.0.lock().map(|mut f| *f = fault).ok();
+            *self.0.lock() = fault;
             Ok(None)
         }
     }
@@ -402,7 +403,7 @@ async fn a_call_read_in_on_client_is_metered_like_the_targets() {
 
     assert_eq!(h.text(unary_chat()).await.0, StatusCode::OK);
 
-    let fault = read.0.lock().ok().and_then(|mut f| f.take());
+    let fault = read.0.lock().take();
     assert!(fault.is_none());
     let calls = metered(&h);
     let calls: Vec<_> = calls.iter().map(|(c, n)| (c.as_str(), *n)).collect();
@@ -487,7 +488,7 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
     impl Encoder<Output> for Tallying {
         fn encode(&mut self, reply: &Output, out: &mut Vec<bytes::Bytes>) -> Result<(), Fault> {
             if let Output::Usage(usage) = reply {
-                self.0.lock().map(|mut t| *t += usage).ok();
+                *self.0.lock() += usage;
             }
             self.1.encode(reply, out)
         }
@@ -520,7 +521,7 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
 
     assert_eq!(code(&calls.all()[0]), "cap");
     assert_eq!(input_tokens(&meter.total()), 4);
-    assert!(tally.0.lock().map(|t| t.is_empty()).unwrap_or_default());
+    assert!(tally.0.lock().is_empty());
 }
 
 // A usage edit is written as the reply says on both paths, relayed or

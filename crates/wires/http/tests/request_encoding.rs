@@ -79,7 +79,7 @@ impl h::Decoder<u8> for LateFailure {
 }
 
 /// Where a transport keeps the request it was sent.
-type Sent = Arc<std::sync::Mutex<Option<Request<Body>>>>;
+type Sent = Arc<parking_lot::Mutex<Option<Request<Body>>>>;
 
 /// An outgoing binding encoding with `encoder`, its transport keeping the
 /// request it is sent and never answering.
@@ -88,7 +88,7 @@ fn dial<T: Clone + Send + Sync + 'static>(encoder: Box<dyn Encoder<T>>) -> (Sent
     let kept = sent.clone();
     let send = h::connect(
         move |request| {
-            *kept.lock().expect("unpoisoned") = Some(request);
+            *kept.lock() = Some(request);
             future::pending::<Result<(Response<Body>, Option<h::Completion>), Fault>>()
         },
         LIMIT,
@@ -102,10 +102,7 @@ fn dial<T: Clone + Send + Sync + 'static>(encoder: Box<dyn Encoder<T>>) -> (Sent
 /// The request `sink` sends, once its delivery starts.
 fn sent<T: 'static>(sent: &Sent, sink: &mut EventSink<T>) -> Request<Body> {
     let _ = sink.flush().now_or_never();
-    sent.lock()
-        .expect("unpoisoned")
-        .take()
-        .expect("a sent request")
+    sent.lock().take().expect("a sent request")
 }
 
 #[tokio::test]
@@ -359,14 +356,10 @@ async fn a_live_body_failure_survives_a_successful_transport() {
 #[tokio::test]
 async fn authoritative_completion_releases_an_unconsumed_encoded_frame() {
     let (finish, finished) = futures::channel::oneshot::channel::<()>();
-    let finished = Arc::new(std::sync::Mutex::new(Some(finished)));
+    let finished = Arc::new(parking_lot::Mutex::new(Some(finished)));
     let send = h::connect(
         move |mut request| {
-            let finished = finished
-                .lock()
-                .expect("expected value")
-                .take()
-                .expect("expected value");
+            let finished = finished.lock().take().expect("expected value");
             async move {
                 assert!(request.body_mut().next().now_or_never().is_none());
                 let response = Response::new(Body::stream(stream::poll_fn(move |_| {

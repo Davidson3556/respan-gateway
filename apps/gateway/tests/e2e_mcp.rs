@@ -12,7 +12,8 @@
 
 mod support;
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -56,7 +57,7 @@ impl FakeMcp {
     }
 
     fn requests(&self) -> Vec<Sent> {
-        self.seen.lock().unwrap().clone()
+        self.seen.lock().clone()
     }
 
     /// The value of header `name` on every request, in order.
@@ -97,7 +98,6 @@ async fn fake(req: Request<Body>, log: Seen, wants_key: bool) -> Response<Body> 
         .unwrap();
     let body = String::from_utf8_lossy(&bytes).into_owned();
     log.lock()
-        .unwrap()
         .push((method.clone(), headers.clone(), body.clone()));
     let header = |name: &str| {
         headers

@@ -2,8 +2,7 @@
 //! client's session.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::Arc;
 
 use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::futures::stream::{self, select_all};
@@ -15,8 +14,8 @@ use respan_gateway_mcp::{Input, Message, Output, RpcCode};
 use serde_json::{Value, json};
 
 use super::rewrite::{by_name, by_uri, merge_capabilities, reply, told};
-use super::session::{Inner, Opened, Session, lock, session_id};
-use super::{IDLE, Outputs, SESSIONS, VERSIONS, message};
+use super::session::{Inner, Opened, Session};
+use super::{Outputs, VERSIONS, message};
 use respan_gateway_plugin_tool_loop::ToolScope;
 
 type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
@@ -70,22 +69,13 @@ impl Run {
     pub(super) fn session(&self, input: &Input) -> Result<Arc<Session>, Fault> {
         let missing = || Fault::bad_request("the Mcp-Session-Id header is required");
         let id = input.session.as_deref().ok_or_else(missing)?;
-        let mut sessions = lock(&self.inner.sessions);
-        let found = sessions.get(id);
-        let Some(session) = found else {
+        let Some(session) = self.inner.sessions.get(id) else {
             let fault = Fault::new("no such session");
             let fault = fault
                 .with(ErrorCode("no_session".into()))
                 .with(RpcCode(-32003));
             return Err(fault.with(Status(StatusCode::NOT_FOUND)));
         };
-        *lock(&session.touched) = Instant::now();
-        let session = session.clone();
-        // Most recently used last, so the oldest goes first.
-        if let Some(at) = sessions.get_index_of(id) {
-            let last = sessions.len() - 1;
-            sessions.move_index(at, last);
-        }
         Ok(session)
     }
 
@@ -104,7 +94,6 @@ impl Run {
             upstream: (self.inner.servers.iter())
                 .map(|s| (s.clone(), tokio::sync::Mutex::new(None)))
                 .collect(),
-            touched: Mutex::new(Instant::now()),
         });
         let opening = self
             .inner
@@ -126,15 +115,9 @@ impl Run {
                 "no mcp server answered `initialize`{why}"
             )));
         }
-        let name = session_id()?;
-        {
-            let mut sessions = lock(&self.inner.sessions);
-            sessions.retain(|_, s| lock(&s.touched).elapsed() < IDLE);
-            if sessions.len() >= SESSIONS {
-                sessions.shift_remove_index(0);
-            }
-            sessions.insert(name.clone(), session);
-        }
+        // A random UUID's hex: visible ASCII, as MCP requires of a session id.
+        let name = uuid::Uuid::new_v4().simple().to_string();
+        self.inner.sessions.insert(name.clone(), session);
         let result = json!({
             "protocolVersion": version,
             "capabilities": merge_capabilities(&capabilities),
@@ -149,7 +132,7 @@ impl Run {
     pub(super) async fn end(self, input: Input) -> Result<Outputs, Fault> {
         let session = self.session(&input)?;
         let name = input.session.unwrap_or_default();
-        lock(&self.inner.sessions).shift_remove(&name);
+        self.inner.sessions.invalidate(&name);
         self.hang_up(&session).await;
         Ok(stream::empty().boxed())
     }
@@ -181,10 +164,8 @@ impl Run {
 
     /// Ends every client's session, and the servers' with them.
     pub(super) async fn end_all(&self) {
-        let all: Vec<Arc<Session>> = lock(&self.inner.sessions)
-            .drain(..)
-            .map(|(_, session)| session)
-            .collect();
+        let all: Vec<Arc<Session>> = self.inner.sessions.iter().map(|(_, s)| s).collect();
+        self.inner.sessions.invalidate_all();
         join_all(all.iter().map(|session| self.hang_up(session))).await;
     }
 

@@ -3,7 +3,8 @@
 //! table of scenarios gives the client, sends the providers and ends with.
 #![allow(clippy::unwrap_used)]
 
-use std::sync::{Arc, Mutex, PoisonError};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -71,7 +72,7 @@ fn marking(
 {
     use respan_gateway_core::futures::FutureExt;
     move |request| {
-        lock(&marks).push(
+        marks.lock().push(
             request
                 .extensions()
                 .get::<respan_gateway_core::Extensions>()
@@ -80,10 +81,6 @@ fn marking(
         let at = at.clone();
         async move { at.send(request).await }.boxed()
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Sends Claude models to `anthropic`, others to `openai`.
@@ -108,7 +105,7 @@ struct HeadOnly(Marks);
 #[async_trait]
 impl Plugin for HeadOnly {
     async fn on_provider_end(&self, px: &ProviderContext, _: &Result<(), Fault>) {
-        lock(&self.0).push(px.is_refused());
+        self.0.lock().push(px.is_refused());
     }
 }
 
@@ -428,8 +425,8 @@ async fn each_scenario_gives_what_it_should() {
         let body = got.body.unwrap_or_default();
         assert!(body.contains(want.body), "{name}: {body}");
         assert_eq!(h.ends(), want.ends, "{name}");
-        assert_eq!(*lock(&h.head_only.0), want.head_only, "{name}");
-        assert_eq!(*lock(&h.marks), want.relayed, "{name}");
+        assert_eq!(*h.head_only.0.lock(), want.head_only, "{name}");
+        assert_eq!(*h.marks.lock(), want.relayed, "{name}");
     }
 }
 
@@ -499,7 +496,7 @@ async fn a_refusal_is_relayed_as_it_came() {
     h.mock.reply(OPENAI, json(StatusCode::BAD_REQUEST, BAD));
     let got = h.send(post_keyed(CHAT, UNARY_REQ)).await;
     assert_eq!((got.status, got.body), (400, Ok(BAD.to_owned())));
-    assert_eq!(*lock(&h.head_only.0), [true], "refused at its head");
+    assert_eq!(*h.head_only.0.lock(), [true], "refused at its head");
 }
 
 #[tokio::test]
@@ -532,7 +529,7 @@ async fn a_relay_is_a_call_to_a_provider_of_the_clients_format_alone() {
     h.mock.reply(OPENAI, json(StatusCode::OK, OPENAI_WHOLE));
     let _ = h.send(post_keyed(CHAT, UNARY_REQ)).await;
     let _ = h.send(post_keyed(MESSAGES, ANTHROPIC_REQ)).await;
-    assert_eq!(*lock(&h.marks), [true, false], "relayed, then translated");
+    assert_eq!(*h.marks.lock(), [true, false], "relayed, then translated");
 }
 
 /// A provider that refuses with a 429 whose body comes after a while, as
@@ -595,7 +592,7 @@ async fn a_slow_refusal_is_refused() {
         Some(&b"7"[..])
     );
     assert_eq!(body.unwrap(), RATE_LIMITED.as_bytes());
-    assert_eq!(*lock(&head_only.0), [true]);
+    assert_eq!(*head_only.0.lock(), [true]);
 }
 
 /// A provider that refuses 503 with a body past the error-body cap (2 MiB
@@ -649,7 +646,7 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
             .map(|e| e.map_err(|f| f.code().to_owned()))
             .collect();
         assert_eq!(
-            (status.as_u16(), lock(&head_only.0).clone()),
+            (status.as_u16(), head_only.0.lock().clone()),
             (503, vec![true]),
             "body {body:?}, ends {ends:?}"
         );

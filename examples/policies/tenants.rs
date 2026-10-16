@@ -12,10 +12,11 @@
 //!
 //! `cargo run -p respan-gateway-examples --example tenants`
 
+use parking_lot::RwLock;
 use respan_gateway_conversation::Input;
 use respan_gateway_core::ErrorCode;
 use std::collections::HashMap;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::Arc;
 
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation_http::openai::OpenAiChat;
@@ -49,7 +50,7 @@ impl Tenants {
     /// Apply an edit from the control plane; `false` if it is older than
     /// the version held.
     fn upsert(&self, key: &str, tenant: Tenant) -> bool {
-        let mut all = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        let mut all = self.0.write();
         if all
             .get(key)
             .is_some_and(|held| held.version >= tenant.version)
@@ -61,11 +62,7 @@ impl Tenants {
     }
 
     fn get(&self, key: &str) -> Option<Arc<Tenant>> {
-        self.0
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(key)
-            .cloned()
+        self.0.read().get(key).cloned()
     }
 }
 

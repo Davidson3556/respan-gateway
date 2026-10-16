@@ -301,7 +301,7 @@ fn create_body(create: &Create) -> Result<(Bytes, String), Fault> {
             "an input_reference by URL cannot be sent: OpenAI takes the image's bytes",
         ));
     };
-    let mut form = Writer::with_boundary(multipart::random_boundary()?);
+    let mut form = Writer::with_boundary(multipart::random_boundary());
     let content_type = form.content_type();
     for (name, value) in &v {
         write_field(&mut form, name, value);
