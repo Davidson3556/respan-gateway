@@ -18,7 +18,6 @@ function why(e: Explained): string {
     case "rule": return `route ${e.by.name}`;
     case "named": return "provider/ prefix";
     case "listed": return "the provider's model list";
-    case "claim": return `vendor's model name ${e.by.prefix}*`;
     case "default": return "the kind's default";
     default: return "";
   }
@@ -30,11 +29,10 @@ const MODES = {
   hedge: "raced, the first to answer wins",
 };
 
-/** Models worth trying: the routes' names, then a vendor's name or two. */
+/** Models worth trying: the routes' names. */
 function examples(routes: Routes): string[] {
   const named = routes.rules.map((r) => (r.glob ? r.name.replace(/\*/g, "x") : r.name));
-  const claimed = routes.claims.slice(0, 2).map((c) => `${c.prefix}-x`);
-  return [...new Set([...named, ...claimed])].slice(0, 5);
+  return [...new Set(named)].slice(0, 5);
 }
 
 export function RouteTester({ routes, kinds }: {

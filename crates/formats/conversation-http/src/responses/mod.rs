@@ -16,9 +16,8 @@
 //! A call whose client speaks another format, which can name no response,
 //! asks to store nothing (`store: false`) and for its reasoning encrypted
 //! (`include: ["reasoning.encrypted_content"]`), as that reasoning, kept
-//! native to its block, is the only way it reaches a later call. A call
-//! given [`EarlierReasoning`] puts back the reasoning an assistant's tool
-//! calls in its history came of, which their client could not carry.
+//! native to its block, is the only way it reaches a later call (the
+//! gateway's `plugins.responses` puts it back).
 //!
 //! What the kind has no form for stays native to this format and is refused
 //! in translation: `previous_response_id` and `conversation` (another
@@ -78,11 +77,8 @@ use crate::schema::{
     Asked, INERT, NativeFieldsExt, Schema, UsageFields, count, merge_details, merge_fields,
     native_fields, unsupported_fields, unwritable_content, usage_extra,
 };
-use std::borrow::Cow;
-use std::sync::Arc;
 
-use crate::dialect::{Call, Dialect, Dialected};
-use respan_gateway_conversation::{Assembled, Content, Finish, Input, Output, Role, Start, Usage};
+use respan_gateway_conversation::{Assembled, Content, Finish, Input, Output, Start, Usage};
 use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::{ClientIo, Encoder, ProviderIo};
@@ -137,71 +133,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiResponses {
         RESPONSES
     }
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
-        match io.extensions().get::<EarlierReasoning>().cloned() {
-            Some(earlier) => Dialected::new(*self, earlier).bind(io),
-            None => self.bind_provider(io),
-        }
-    }
-}
-
-/// The reasoning an assistant's tool calls came of, by a call's id: what a
-/// call's extension gives a call to Responses whose client speaks another
-/// format, such as Chat Completions, which has no place to carry it back.
-/// The reasoning is this format's own, with what its block was given
-/// (`id`, `encrypted_content`). Another format reads nothing of it.
-#[derive(Clone)]
-pub struct EarlierReasoning(pub Arc<ReasoningOf>);
-
-/// What finds the reasoning a tool call came of, by the call's id.
-pub type ReasoningOf = dyn Fn(&str) -> Option<Vec<Content>> + Send + Sync;
-
-impl std::fmt::Debug for EarlierReasoning {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("EarlierReasoning")
-    }
-}
-
-/// A translated call's history with its earlier reasoning put back: before
-/// the tool calls of each assistant message with none, as the first call's
-/// id finds it.
-impl Dialect for EarlierReasoning {
-    fn input<'a>(&self, input: &'a Input, call: &Call) -> Result<Cow<'a, Input>, Fault> {
-        if !call.translated {
-            return Ok(Cow::Borrowed(input));
-        }
-        let reasons = |m: &respan_gateway_conversation::Message| {
-            m.content
-                .iter()
-                .any(|p| matches!(p, Content::Reasoning { .. }))
-        };
-        let first_call = |m: &respan_gateway_conversation::Message| {
-            m.content
-                .iter()
-                .position(|p| matches!(p, Content::ToolCall { .. }))
-        };
-        let mut found = Vec::new();
-        for (i, message) in input.messages.iter().enumerate() {
-            if message.role != Role::Assistant || reasons(message) {
-                continue;
-            }
-            let Some(at) = first_call(message) else {
-                continue;
-            };
-            let Content::ToolCall { id, .. } = &message.content[at] else {
-                continue;
-            };
-            if let Some(reasoning) = (self.0)(id) {
-                found.push((i, at, reasoning));
-            }
-        }
-        if found.is_empty() {
-            return Ok(Cow::Borrowed(input));
-        }
-        let mut input = input.clone();
-        for (i, at, reasoning) in found {
-            input.messages[i].content.splice(at..at, reasoning);
-        }
-        Ok(Cow::Owned(input))
+        self.bind_provider(io)
     }
 }
 

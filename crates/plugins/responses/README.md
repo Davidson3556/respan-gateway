@@ -14,9 +14,9 @@ provider of the conversation kind cannot keep (`Responses`):
   Completions would refuse it). Such a call stores nothing at OpenAI
   (`store: false`) and asks for its reasoning encrypted, as the
   `openai-responses` format writes it. The reasoning a turn's tool calls
-  came of is kept under each call's id, and the format puts it back before
-  those calls when the client sends them in its next turn
-  (`EarlierReasoning`), as a Chat client has no place to carry it. Without
+  came of is kept under each call's id, and put back before those calls
+  when the client sends them in its next turn to a provider of Responses,
+  as a Chat client has no place to carry it. Without
   it, a reasoning model loses its reasoning between tool calls.
 
 What is kept is reached by its id alone, which none can guess, in a `Store`: `Memory` by default, each turn for `keep`

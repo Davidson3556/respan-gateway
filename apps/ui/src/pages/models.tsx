@@ -129,6 +129,9 @@ function ModelRow({ model: m }: { model: Model }) {
         <span className="flex items-center gap-1.5">
           {!m.route && <ProviderIcon name={m.owned_by} size="sm" />}
           <span className="truncate">{m.owned_by}</span>
+          {m.maker && m.maker !== m.owned_by && (
+            <span className="truncate text-xs text-muted-foreground">by {m.maker}</span>
+          )}
         </span>
       </TableCell>
       <TableCell className="hidden md:table-cell">

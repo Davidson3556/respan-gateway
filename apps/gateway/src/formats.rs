@@ -19,7 +19,7 @@ use respan_gateway_media_http::openai::{
     OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
 };
 use respan_gateway_passthrough_http::Passthrough;
-use respan_gateway_plugin_routing::{Kind, Model};
+use respan_gateway_plugin_routing::Model;
 use respan_gateway_realtime as realtime;
 use respan_gateway_realtime_ws::{
     GeminiLive, OpenAiRealtime, ResponsesWs, SessionModel, requested_model,
@@ -28,82 +28,31 @@ use respan_gateway_realtime_ws::{
 /// The kinds of traffic this binary carries, as the admin API and routing
 /// name them.
 pub mod kind {
-    use respan_gateway_plugin_routing::Kind;
-
-    pub const CHAT: Kind = Kind {
-        label: "chat",
-        translates: true,
-    };
-    pub const REALTIME: Kind = Kind {
-        label: "realtime",
-        translates: true,
-    };
+    pub const CHAT: &str = "chat";
+    pub const REALTIME: &str = "realtime";
     /// Responses over WebSocket: a session of many requests and replies,
     /// which no other format speaks.
-    pub const RESPONSES: Kind = Kind {
-        label: "responses",
-        translates: false,
-    };
-    pub const PASSTHROUGH: Kind = Kind {
-        label: "passthrough",
-        translates: false,
-    };
-    pub const IMAGE: Kind = Kind {
-        label: "image",
-        translates: true,
-    };
-    pub const TRANSCRIPTION: Kind = Kind {
-        label: "transcription",
-        translates: true,
-    };
-    pub const SPEECH: Kind = Kind {
-        label: "speech",
-        translates: true,
-    };
-    pub const VIDEO: Kind = Kind {
-        label: "video",
-        translates: true,
-    };
-    pub const EMBEDDING: Kind = Kind {
-        label: "embedding",
-        translates: true,
-    };
-    pub const DECISION: Kind = Kind {
-        label: "decision",
-        translates: true,
-    };
+    pub const RESPONSES: &str = "responses";
+    pub const PASSTHROUGH: &str = "passthrough";
+    pub const IMAGE: &str = "image";
+    pub const TRANSCRIPTION: &str = "transcription";
+    pub const SPEECH: &str = "speech";
+    pub const VIDEO: &str = "video";
+    pub const EMBEDDING: &str = "embedding";
+    pub const DECISION: &str = "decision";
     /// MCP: tools and resources over streamable HTTP, served by the `mcp`
-    /// section, which no other format translates.
-    pub const MCP: Kind = Kind {
-        label: "mcp",
-        translates: false,
-    };
+    /// section.
+    pub const MCP: &str = "mcp";
     /// The kinds of one request and its answer, whose client formats are
     /// served by default once a provider speaks the kind.
-    pub const ONE_SHOT: [Kind; 6] = [IMAGE, TRANSCRIPTION, SPEECH, VIDEO, EMBEDDING, DECISION];
-
-    /// The kind labelled `label`.
-    pub fn named(label: &str) -> Option<Kind> {
-        let all = [
-            CHAT,
-            REALTIME,
-            RESPONSES,
-            PASSTHROUGH,
-            IMAGE,
-            TRANSCRIPTION,
-            SPEECH,
-            VIDEO,
-            EMBEDDING,
-            DECISION,
-            MCP,
-        ];
-        all.into_iter().find(|k| k.label == label)
-    }
+    pub const ONE_SHOT: [&str; 6] = [IMAGE, TRANSCRIPTION, SPEECH, VIDEO, EMBEDDING, DECISION];
 }
 
 /// The first of `items` of each kind, in order.
-pub fn first_of_each_kind<T>(items: impl IntoIterator<Item = (Kind, T)>) -> Vec<(Kind, T)> {
-    let mut firsts: Vec<(Kind, T)> = Vec::new();
+pub fn first_of_each_kind<T>(
+    items: impl IntoIterator<Item = (&'static str, T)>,
+) -> Vec<(&'static str, T)> {
+    let mut firsts: Vec<(&'static str, T)> = Vec::new();
     for (kind, item) in items {
         if !firsts.iter().any(|(k, _)| *k == kind) {
             firsts.push((kind, item));
@@ -117,7 +66,7 @@ type Serve = dyn Fn(Gateway) -> Result<Gateway, Fault> + Send + Sync;
 /// A format compiled into the binary.
 pub struct KnownFormat {
     pub name: String,
-    pub kind: Kind,
+    pub kind: &'static str,
     /// What its clients send, as `METHOD /path`.
     pub endpoints: Vec<String>,
     pub websocket: bool,
@@ -133,14 +82,14 @@ impl std::fmt::Debug for KnownFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KnownFormat")
             .field("name", &self.name)
-            .field("kind", &self.kind.label)
+            .field("kind", &self.kind)
             .finish_non_exhaustive()
     }
 }
 
 impl KnownFormat {
     /// `format` of `kind`, its clients sending to `endpoints`.
-    pub fn of<F, I, O>(kind: Kind, endpoints: &[&str], format: F) -> Self
+    pub fn of<F, I, O>(kind: &'static str, endpoints: &[&str], format: F) -> Self
     where
         F: Clone + Send + Sync + 'static + Format<ClientIo, I, O> + Format<ProviderIo, O, I>,
         I: Clone + Send + Sync + 'static,
@@ -156,7 +105,7 @@ impl KnownFormat {
     }
 
     /// `format` of `kind`, which only providers speak.
-    pub fn provider_only<F, I, O>(kind: Kind, format: &F) -> Self
+    pub fn provider_only<F, I, O>(kind: &'static str, format: &F) -> Self
     where
         F: Format<ProviderIo, O, I>,
     {
@@ -308,7 +257,7 @@ fn realtime() -> Model {
 
 /// A session `format` of `kind`, its clients sending to its `path`: after
 /// `/v1`, as an SDK adds it to the gateway's base URL, unless `at_origin`.
-fn session<F>(kind: Kind, format: F, path: &str, at_origin: bool) -> KnownFormat
+fn session<F>(kind: &'static str, format: F, path: &str, at_origin: bool) -> KnownFormat
 where
     F: Clone
         + Send

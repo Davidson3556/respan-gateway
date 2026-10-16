@@ -1,8 +1,8 @@
 //! What vendors of Chat Completions share: reasoning as `reasoning_content`,
 //! and fields of a choice that only describe it. Both are native to
 //! `openai-chat`, which keeps them where they appeared; a vendor's
-//! [`Dialect`](respan_gateway_conversation_http::dialect::Dialect) reads
-//! them with these.
+//! [`Dialect`](respan_gateway_conversation_http::dialect::Dialect) writes
+//! the first with [`reasoning_written`] and reads both with [`read`].
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -25,95 +25,57 @@ pub fn reasoning_written(input: &Input) -> Cow<'_, Input> {
     Cow::Owned(input)
 }
 
-/// A response's `reasoning_content` read as reasoning blocks, for a client
-/// of another format; a client of Chat Completions gets the field as it
-/// came.
-pub fn reasoning_read(call: &Call) -> Option<Box<dyn Filter<Output>>> {
-    call.translated
-        .then(|| Box::new(Reasoning::default()) as Box<dyn Filter<Output>>)
-}
-
-/// Fields of a choice that only describe it, such as its provider's own
-/// finish reason, dropped for a client of another format, which would
-/// refuse them; a client of Chat Completions gets them as they came.
-pub fn inert_choice(
+/// What a vendor's Chat Completions answers beyond the spec, read for a
+/// client of another format, which would refuse it: the `inert` fields of a
+/// choice or its message, which only describe it (its own finish reason, a
+/// signature only it reads back), dropped; and, if `reasoning`, its
+/// `reasoning_content` read as reasoning blocks. A client of Chat
+/// Completions gets the answer as it came.
+pub fn read(
     call: &Call,
-    fields: &'static [&'static str],
+    inert: &'static [&'static str],
+    reasoning: bool,
 ) -> Option<Box<dyn Filter<Output>>> {
-    call.translated
-        .then(|| Box::new(Inert(fields)) as Box<dyn Filter<Output>>)
+    call.translated.then(|| {
+        Box::new(Read {
+            inert,
+            reasoning: reasoning.then(Reasoning::default),
+        }) as Box<dyn Filter<Output>>
+    })
 }
 
-/// `first`, then `then`, each if there.
-pub fn both(
-    first: Option<Box<dyn Filter<Output>>>,
-    then: Option<Box<dyn Filter<Output>>>,
-) -> Option<Box<dyn Filter<Output>>> {
-    match (first, then) {
-        (Some(first), Some(then)) => Some(Box::new(Both(first, then))),
-        (first, then) => first.or(then),
-    }
+/// Drops the inert fields of the first choice and its message, then reads
+/// its reasoning, if it does.
+struct Read {
+    inert: &'static [&'static str],
+    reasoning: Option<Reasoning>,
 }
 
-/// Fields of a choice's message that only describe it, such as a
-/// signature its provider alone reads back, dropped for a client of another
-/// format, which would refuse them; a client of Chat Completions gets them
-/// as they came.
-pub fn inert_message(
-    call: &Call,
-    fields: &'static [&'static str],
-) -> Option<Box<dyn Filter<Output>>> {
-    call.translated
-        .then(|| Box::new(InertMessage(fields)) as Box<dyn Filter<Output>>)
-}
-
-/// One filter's events through another.
-struct Both(Box<dyn Filter<Output>>, Box<dyn Filter<Output>>);
-
-impl Filter<Output> for Both {
+impl Filter<Output> for Read {
     fn edit(&mut self, output: Output, out: &mut Vec<Output>) -> Result<()> {
-        let mut first = Vec::new();
-        self.0.edit(output, &mut first)?;
-        first.into_iter().try_for_each(|o| self.1.edit(o, out))
+        let inert = self.inert;
+        let output = first_choice(output, |choice| {
+            let delta = choice.get_mut("delta").and_then(Value::as_object_mut);
+            if let Some(delta) = delta {
+                inert.iter().for_each(|f| _ = delta.shift_remove(*f));
+            }
+            inert.iter().for_each(|f| _ = choice.shift_remove(*f));
+        });
+        match (&mut self.reasoning, output) {
+            (_, None) => Ok(()),
+            (Some(reasoning), Some(output)) => reasoning.edit(output, out),
+            (None, Some(output)) => {
+                out.push(output);
+                Ok(())
+            }
+        }
     }
 
     fn end(&mut self, end: &Result<()>, out: &mut Vec<Output>) -> Result<()> {
-        // The second ends as the first did, if the first failed it.
-        let mut first = Vec::new();
-        let failed = self
-            .0
-            .end(end, &mut first)
-            .and_then(|()| first.into_iter().try_for_each(|o| self.1.edit(o, out)))
-            .err();
-        let end = failed.clone().map_or_else(|| end.clone(), Err);
-        self.1.end(&end, out)?;
-        failed.map_or(Ok(()), Err)
-    }
-}
-
-/// Drops these fields of the first choice.
-struct Inert(&'static [&'static str]);
-
-impl Filter<Output> for Inert {
-    fn edit(&mut self, output: Output, out: &mut Vec<Output>) -> Result<()> {
-        out.extend(first_choice(output, |choice| {
-            self.0.iter().for_each(|f| _ = choice.shift_remove(*f));
-        }));
-        Ok(())
-    }
-}
-
-/// Drops these fields of the first choice's message.
-struct InertMessage(&'static [&'static str]);
-
-impl Filter<Output> for InertMessage {
-    fn edit(&mut self, output: Output, out: &mut Vec<Output>) -> Result<()> {
-        out.extend(first_choice(output, |choice| {
-            if let Some(delta) = choice.get_mut("delta").and_then(Value::as_object_mut) {
-                self.0.iter().for_each(|f| _ = delta.shift_remove(*f));
-            }
-        }));
-        Ok(())
+        match &mut self.reasoning {
+            Some(reasoning) => reasoning.end(end, out),
+            None => Ok(()),
+        }
     }
 }
 

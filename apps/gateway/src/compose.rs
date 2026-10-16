@@ -14,7 +14,7 @@ use crate::auth::Client;
 use crate::config::{Auth, ClientKey, Config, Formats, ProviderConfig};
 use crate::formats::{KnownFormat, kind};
 use crate::vendors;
-use respan_gateway_plugin_routing::{Kind, Routes, Rule, Speaks};
+use respan_gateway_plugin_routing::{Routes, Rule, Speaks};
 use respan_gateway_sdk::{Catalog, Model};
 use respan_gateway_vendors::VendorProvider;
 
@@ -40,7 +40,7 @@ pub struct Upstream {
 /// One format of a provider: the core provider registered for it.
 pub struct Entry {
     pub format: String,
-    pub kind: Kind,
+    pub kind: &'static str,
     /// The core provider's name: the provider's for its first format,
     /// `name:format` for the others.
     pub internal: String,
@@ -140,8 +140,7 @@ fn catalog(upstreams: &[Upstream], config: &Config) -> Result<Arc<Catalog>, Faul
     Ok(Arc::new(catalog))
 }
 
-/// The routes to `upstreams`: by `rules`, then their vendors' claims,
-/// then by default to `default`.
+/// The routes to `upstreams`: by `rules`, then by default to `default`.
 fn routes(upstreams: &[Upstream], rules: Vec<Rule>, default: Option<String>) -> Routes {
     let mut routes = Routes::new();
     for u in upstreams {
@@ -151,11 +150,10 @@ fn routes(upstreams: &[Upstream], rules: Vec<Rule>, default: Option<String>) -> 
             internal: e.internal.clone(),
         });
         routes = routes.provider(&u.name, speaks.collect());
+        if let Some(format_for) = u.provider.vendor().format_for {
+            routes = routes.format_for(&u.name, format_for);
+        }
     }
-    let claims = upstreams
-        .iter()
-        .flat_map(|u| vendors::claims(u.provider.vendor().id).map(|prefix| (prefix, &u.name)));
-    routes = claims.fold(routes, |routes, (prefix, name)| routes.claim(prefix, name));
     routes = rules.into_iter().fold(routes, Routes::rule);
     match default {
         Some(default) => routes.target(default),
@@ -184,8 +182,8 @@ fn providers(
     Ok((gateway, upstreams))
 }
 
-/// The gateway serving each format of `serve`, in order. A format that
-/// does not translate needs exactly one provider of its own.
+/// The gateway serving each format of `serve`, in order. A session of
+/// Responses or a relay, routed by no model, needs exactly one provider.
 fn serve_formats(
     mut gateway: Gateway,
     serve: &[String],
@@ -202,7 +200,9 @@ fn serve_formats(
     for name in serve {
         let served = format_named(formats, name, "formats")?;
         gateway = served.serve(gateway)?;
-        if served.kind.translates || served.kind == kind::MCP {
+        // A session or a relay is not routed by its model: one provider
+        // speaks it.
+        if !matches!(served.kind, kind::RESPONSES | kind::PASSTHROUGH) {
             continue;
         }
         let speakers: Vec<&str> = upstreams
@@ -251,13 +251,13 @@ pub(crate) fn valid_provider_name(name: &str) -> bool {
 
 /// The formats served when the config names none: OpenAI Chat, Anthropic
 /// Messages, every other chat format some provider speaks, every client
-/// format of a media or realtime kind some provider speaks, and every
-/// format of a kind that does not translate that some provider speaks, but
-/// passthrough, which takes every request.
+/// format of a media or realtime kind some provider speaks, and Responses
+/// over WebSocket if a provider speaks it; not passthrough, which takes
+/// every request.
 fn default_serve(upstreams: &[Upstream], formats: &[KnownFormat]) -> Vec<String> {
     let mut serve = vec!["openai-chat".to_owned(), "anthropic-messages".to_owned()];
     let entries = || upstreams.iter().flat_map(|u| &u.entries);
-    let spoken = |kind: Kind| entries().any(|e| e.kind == kind);
+    let spoken = |kind: &'static str| entries().any(|e| e.kind == kind);
     let translated = formats
         .iter()
         .filter(|f| match f.kind {
@@ -266,7 +266,7 @@ fn default_serve(upstreams: &[Upstream], formats: &[KnownFormat]) -> Vec<String>
             k => (kind::ONE_SHOT.contains(&k) || k == kind::REALTIME) && spoken(k),
         })
         .filter(|f| f.servable());
-    let sessions = entries().filter(|e| !e.kind.translates && e.format != PASSTHROUGH);
+    let sessions = entries().filter(|e| e.kind == kind::RESPONSES);
     let names = translated
         .map(|f| &f.name)
         .chain(sessions.map(|e| &e.format));

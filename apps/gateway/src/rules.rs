@@ -87,8 +87,8 @@ fn rule(
         }
     }
     for kind in &route.when.kinds {
-        if !formats.iter().any(|f| f.kind.label == kind) {
-            let mut kinds: Vec<&str> = formats.iter().map(|f| f.kind.label).collect();
+        if !formats.iter().any(|f| f.kind == kind) {
+            let mut kinds: Vec<&str> = formats.iter().map(|f| f.kind).collect();
             kinds.dedup();
             return Err(format!(
                 "when: kinds: unknown kind '{kind}'; kinds: [{}]",

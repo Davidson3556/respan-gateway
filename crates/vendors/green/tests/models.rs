@@ -7,7 +7,7 @@
 #[path = "../../tests/support/mod.rs"]
 mod support;
 
-use respan_gateway_vendor_kit::{Capability, Modality};
+use respan_gateway_vendor_kit::{Capability, Modality, Model};
 use respan_gateway_vendors_green::{anthropic, respan, typesafe};
 use support::{ids, json, listing};
 
@@ -80,7 +80,7 @@ async fn respan_lists_its_catalog_a_page_at_a_time_sent_no_key() {
             let page = match at.as_str() {
                 "/api/gateway-models/list?page=1&page_size=1000" => json!({"models": [
                     {"model_name": "gpt-6-luna", "display_name": "GPT-6 Luna",
-                     "model_description": "", "max_context_window": 400000,
+                     "provider": {"provider_id": "openai"}, "model_description": "", "max_context_window": 400000,
                      "input_cost": 0.1, "output_cost": 0.5, "cache_hit_input_cost": 0.01,
                      "metadata": {"release_date": "2026-09-01"},
                      "capability": {"function_call": true, "reasoning_support": true,
@@ -91,6 +91,7 @@ async fn respan_lists_its_catalog_a_page_at_a_time_sent_no_key() {
                 "/api/gateway-models/list?page=2&page_size=1000" => json!({"models": [
                     {"model_name": "span-02", "display_name": "Span-02",
                      "input_cost": 0, "output_cost": 0, "capability": {"function_call": false}},
+                    {"model_name": "gemini-x", "provider": {"provider_id": "google_gemini_ai"}},
                 ], "hasNext": false}),
                 _ => json!({}),
             };
@@ -132,7 +133,31 @@ async fn respan_lists_its_catalog_a_page_at_a_time_sent_no_key() {
     );
     // A batch-only model is no model a call names; a free one has no price.
     assert_eq!(models[1].price, None);
-    assert_eq!(ids(models), ["gpt-6-luna", "span-02"]);
+    let makers: Vec<_> = models.iter().map(|m| m.maker.as_deref()).collect();
+    assert_eq!(makers, [Some("openai"), None, Some("google")]);
+    // Its own endpoint serves a maker's models; Chat Completions any, and
+    // one of no maker, as one it does not list.
+    let ask = |format| respan_gateway_vendor_kit::Ask {
+        kind: "chat",
+        format,
+        model: None,
+        client: None,
+    };
+    let format_for = respan::VENDOR.format_for.expect("a format_for");
+    let chat = Some("openai-chat");
+    assert_eq!(format_for(&ask("gemini-generate"), &models[2]), None);
+    assert_eq!(format_for(&ask("anthropic-messages"), &models[2]), chat);
+    assert_eq!(format_for(&ask("anthropic-messages"), &models[1]), chat);
+    assert_eq!(
+        format_for(&ask("anthropic-messages"), &Model::new("x")),
+        chat
+    );
+    // An OpenAI model only Responses serves well goes there from any client.
+    assert_eq!(
+        format_for(&ask("openai-chat"), &models[0]),
+        Some("openai-responses")
+    );
+    assert_eq!(ids(models), ["gpt-6-luna", "span-02", "gemini-x"]);
     let asked = asked.lock().unwrap_or_else(|e| e.into_inner()).clone();
     assert_eq!(asked.len(), 2, "{asked:?}");
     assert!(asked.iter().all(|(_, keyed)| !keyed), "{asked:?}");

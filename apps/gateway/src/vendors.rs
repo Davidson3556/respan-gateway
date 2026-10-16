@@ -60,34 +60,6 @@ fn ollama_base_url(host: &str) -> String {
     }
 }
 
-/// The models routed to a provider of `vendor` by their names alone,
-/// without a `provider/` prefix: what those names start with. Of two
-/// providers that match, the longer start wins.
-pub fn claims(vendor: &str) -> impl Iterator<Item = &'static str> {
-    let claims = match vendor {
-        "openai" => "gpt o1 o3 o4 chatgpt codex dall-e gpt-image whisper-1 tts- text-embedding",
-        "anthropic" => "claude",
-        "gemini" => "gemini imagen veo",
-        "groq" => "whisper-large distil-whisper playai-tts canopylabs/orpheus",
-        "deepseek" => "deepseek",
-        "openrouter" => {
-            "openai/ anthropic/ google/ meta-llama/ mistralai/ qwen/ deepseek/ x-ai/ \
-             moonshotai/ cohere/ nvidia/ microsoft/ amazon/ perplexity/"
-        }
-        "xai" => "grok",
-        "mistral" => "mistral codestral magistral pixtral",
-        "together" => {
-            "meta-llama/ mistralai/ Qwen/ deepseek-ai/ google/ moonshotai/ zai-org/ \
-             black-forest-labs/"
-        }
-        "fireworks" => "accounts/",
-        "typesafe" => "jev systemone",
-        "cloudflare" => "@cf/",
-        _ => "",
-    };
-    claims.split_whitespace()
-}
-
 /// `scheme://host[:port]` of `url`.
 pub fn origin(url: &str) -> &str {
     let after_scheme = url.find("://").map_or(0, |i| i + 3);

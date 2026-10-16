@@ -20,7 +20,7 @@ use crate::auth;
 use crate::compose::Upstream;
 use crate::formats::{first_of_each_kind, kind};
 use crate::requests::rfc3339;
-use respan_gateway_plugin_routing::{Kind, Routes};
+use respan_gateway_plugin_routing::Routes;
 use respan_gateway_vendors::{Model, VendorProvider};
 
 /// How long a provider may take to list its models.
@@ -35,7 +35,7 @@ struct Listing {
     /// Where its models come from.
     source: VendorProvider,
     /// A format of each kind it serves.
-    kinds: Vec<(Kind, String)>,
+    kinds: Vec<(&'static str, String)>,
     /// The models the config declares of it, laid over its list's.
     declared: Vec<Model>,
 }
@@ -158,7 +158,7 @@ impl Models {
                 "id": rule.name,
                 "object": "model",
                 "owned_by": "routes",
-                "kind": kind.label,
+                "kind": kind,
                 "route": { "pick": rule.pick.name(), "to": to },
             })
         })
@@ -226,7 +226,7 @@ impl Models {
         let mut cards: Vec<Model> = models;
         for card in &mut cards {
             card.provider.clone_from(&listing.provider);
-            card.kind = kind_of(&card.id).map(|k| k.label.to_owned());
+            card.kind = kind_of(&card.id).map(|k| k.to_owned());
             if let Some(declared) = listing.declared.iter().find(|d| d.id == card.id) {
                 card.overlay(declared);
             }
@@ -239,12 +239,8 @@ impl Models {
         let models = cards
             .iter()
             .filter_map(|card| {
-                let kind = card
-                    .kind
-                    .as_deref()
-                    .and_then(kind::named)
-                    .or_else(|| kind_of(&card.id))?;
-                let (_, format) = listing.kinds.iter().find(|(k, _)| *k == kind)?;
+                let kind = card.kind.as_deref().or_else(|| kind_of(&card.id))?;
+                let (kind, format) = listing.kinds.iter().find(|(k, _)| *k == kind)?;
                 let mut model = serde_json::to_value(card).ok()?;
                 model["id"] = self.public_id(listing, kind, format, &card.id).into();
                 model["object"] = "model".into();
@@ -254,10 +250,12 @@ impl Models {
         Ok(models)
     }
 
-    fn public_id(&self, listing: &Listing, kind: Kind, format: &str, id: &str) -> String {
+    fn public_id(&self, listing: &Listing, kind: &'static str, format: &str, id: &str) -> String {
         let route = self.routes.route(kind, format, Some(id));
         match route {
-            Some(route) if route.provider == listing.provider && route.model.is_none() => {
+            Some(route)
+                if route.provider == listing.provider && route.model.as_deref() == Some(id) =>
+            {
                 id.to_owned()
             }
             _ => format!("{}/{id}", listing.provider),
@@ -267,7 +265,7 @@ impl Models {
 
 /// What a model does, by its name as vendors spell them; `None` for one the
 /// gateway serves no kind of.
-fn kind_of(id: &str) -> Option<Kind> {
+fn kind_of(id: &str) -> Option<&'static str> {
     let id = id.to_ascii_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| id.contains(w));
     let kind = match () {
@@ -401,7 +399,7 @@ mod tests {
 
     #[test]
     fn a_models_kind_is_read_from_its_name() {
-        let kind = |id| kind_of(id).map(|k| k.label);
+        let kind = kind_of;
         assert_eq!(kind("gpt-4o-mini"), Some("chat"));
         assert_eq!(kind("gpt-image-1"), Some("image"));
         assert_eq!(kind("imagen-4.0-generate-001"), Some("image"));

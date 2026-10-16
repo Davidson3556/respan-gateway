@@ -60,8 +60,8 @@ key = "env:OPENAI_API_KEY"
 # ── Routing and resilience ────────────────────────────────────────────
 # A request's model goes to: a route of that exact name; else `provider/model`
 # (sent `model`); else the first glob route it matches; else the provider
-# whose model list has it; else the vendor that claims its name (`claude-*`
-# to Anthropic); else the kind's default. A route
+# whose model list has it (of several, the first configured); else the
+# kind's default. A route
 # whose candidates don't serve the request's kind, or whose `when` doesn't
 # match, is skipped. Name only configured providers.
 # [plugins.routing]

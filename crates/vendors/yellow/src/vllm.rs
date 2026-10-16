@@ -29,7 +29,6 @@ impl Dialect for Vllm {
     }
 
     fn output(&self, call: &Call) -> Option<Box<dyn Filter<Output>>> {
-        let inert = chat::inert_choice(call, &["stop_reason"]);
-        chat::both(inert, chat::reasoning_read(call))
+        chat::read(call, &["stop_reason"], true)
     }
 }

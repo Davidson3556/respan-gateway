@@ -48,11 +48,6 @@ const routes: Routes = {
       ],
     },
   ],
-  claims: [
-    { prefix: "claude", provider: "anthropic" },
-    { prefix: "gpt", provider: "openai" },
-    { prefix: "o1", provider: "openai" },
-  ],
 };
 
 const explained: Explained = {
@@ -75,7 +70,7 @@ const api = (body: Routes, explain: (path: string) => Explained = () => explaine
   });
 
 describe("RoutesPage", () => {
-  it("shows each route's candidates with price and record, then defaults and vendor names", async () => {
+  it("shows each route's candidates with price and record, then defaults", async () => {
     api(routes);
     renderApp(<RoutesPage />);
     const smart = await screen.findByRole("list", { name: "Candidates of smart" });
@@ -91,13 +86,11 @@ describe("RoutesPage", () => {
     const llama = within(screen.getByRole("list", { name: "Candidates of llama-*" }));
     expect(llama.getByText("as asked")).toBeInTheDocument();
     expect(llama.getByText("{model}-chat")).toBeInTheDocument();
-    expect(screen.getByText("claude*", { selector: "code" })).toBeInTheDocument();
-    expect(screen.getByText("o1*", { selector: "code" })).toBeInTheDocument();
     expect(screen.getByText("/v1/embeddings")).toBeInTheDocument();
   });
 
   it("explains an empty configuration instead of showing blank tables", async () => {
-    api({ serve: [], rules: [], defaults: [], claims: [] });
+    api({ serve: [], rules: [], defaults: [] });
     renderApp(<RoutesPage />);
     expect(await screen.findByText("No routes yet")).toBeInTheDocument();
     expect(document.querySelector("pre")).toHaveTextContent("[routes.smart]");

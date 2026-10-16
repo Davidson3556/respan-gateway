@@ -26,6 +26,7 @@ pub use provider::{Part, VendorProvider};
 pub use respan_gateway_http::{Body, Connect, KeyIn, Reach, Upstream, http};
 pub use respan_gateway_http_faults::built_wrong;
 pub use respan_gateway_http_transport::{HttpTransport, json};
+pub use respan_gateway_sdk::{Ask, FormatFor};
 
 /// A vendor: a template of the providers of it ([`Vendor::provider`]). A
 /// vendor says what it is and the formats it speaks, each at the base URL
@@ -55,6 +56,9 @@ pub struct Vendor {
     /// How it lists a provider's models: as OpenAI does (`GET /models`,
     /// [`models::openai`]) unless it says.
     pub models: ListModels,
+    /// The format a request for a model goes in, if not the usual: the
+    /// client's own, else its first of the kind.
+    pub format_for: Option<FormatFor>,
 }
 
 impl std::fmt::Debug for Vendor {
@@ -74,6 +78,7 @@ impl Vendor {
         key_env: &[],
         formats: &[],
         models: models::openai,
+        format_for: None,
     };
 
     /// Its format `name`, and that format's base URL, if it speaks it.

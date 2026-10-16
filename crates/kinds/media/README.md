@@ -42,7 +42,7 @@ reach the provider that made the job. Nothing in the request says which but
 the id's spelling, so a gateway routes follow-ups by it: OpenAI Videos' ids
 start `video_` (OpenAI's own API was removed on 2026-09-24; a compatible
 provider's), Veo's `veo_`, and one router serves both, reading
-`i.model().or(i.job_id())` with prefixes claimed for `video_` and `veo`. Two deployments of one vendor share a
+`i.model().or(i.job_id())` with glob rules for `video_*` and `veo*`. Two deployments of one vendor share a
 spelling: a gateway that has them keeps which made each job, or wraps the
 ids in its own, signed, naming the deployment, within the vendor's length
 limits (use case 8), and unwraps them before the call.

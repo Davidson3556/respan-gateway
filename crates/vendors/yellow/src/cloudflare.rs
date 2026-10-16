@@ -21,6 +21,7 @@ pub const VENDOR: Vendor = Vendor {
         (&OpenAiEmbeddings, Some(BASE_URL)),
     ],
     models: list_models,
+    ..Vendor::DEFAULT
 };
 
 /// Its models: its account API's search, its OpenAI-compatible base

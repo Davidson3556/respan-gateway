@@ -47,6 +47,7 @@ pub const VENDOR: Vendor = Vendor {
         (&OpenAiEmbeddings, Some(OPENAI_API)),
     ],
     models: list_models,
+    ..Vendor::DEFAULT
 };
 
 /// What a Gemini 3 model accepts as the signature of a function call made
@@ -77,7 +78,7 @@ impl Dialect for Gemini {
     }
 
     fn output(&self, call: &Call) -> Option<Box<dyn Filter<Output>>> {
-        chat::inert_message(call, &["extra_content"])
+        chat::read(call, &["extra_content"], false)
     }
 }
 

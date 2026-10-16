@@ -8,9 +8,8 @@
 //! 3. the candidates of the first glob [`Rule`] that matches, such as
 //!    `llama-*`;
 //! 4. the provider whose model listing names it ([`Catalog::lists`]); of
-//!    several, the one claiming it, else the first added;
-//! 5. the provider claiming the longest prefix of its name, a vendor's own;
-//! 6. the kind's default: the target if it serves the kind, else the first
+//!    several, the first added;
+//! 5. the kind's default: the target if it serves the kind, else the first
 //!    provider that does.
 //!
 //! A rule orders its candidates by its [`Pick`]: as listed, cheapest,
@@ -20,12 +19,15 @@
 //! the rest as fallback, or all raced.
 //!
 //! One provider is one core provider per format it speaks. A request goes
-//! to its provider's core provider of the client's own format, else, for a
-//! kind that translates, its first of the kind.
+//! to its provider's core provider of the format the provider sends its
+//! model in ([`Routes::format_for`]), else of the client's own format, else
+//! its first of the kind: the formats of a kind read and write the same
+//! neutral types, so any of them can answer a client of another.
 
 mod rules;
 mod stats;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use respan_gateway_core::{
@@ -33,27 +35,18 @@ use respan_gateway_core::{
 };
 use respan_gateway_plugin_fallback::{Attempt, first_success, race};
 
-pub use respan_gateway_sdk::Catalog;
+use respan_gateway_sdk::Model as Card;
+pub use respan_gateway_sdk::{Ask, Catalog, FormatFor};
 pub use rules::{Candidate, Pick, Rule, glob};
 pub use stats::{Seen, Stats};
-
-/// What sort of traffic a format carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Kind {
-    /// Its name, such as `chat`.
-    pub label: &'static str,
-    /// Whether a client of one format of the kind may be answered by a
-    /// provider of another; otherwise only by a provider of its own format.
-    pub translates: bool,
-}
 
 /// A format a provider speaks, and its core provider of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Speaks {
     /// The format's name.
     pub format: String,
-    /// The format's kind.
-    pub kind: Kind,
+    /// The format's kind, such as `chat`.
+    pub kind: &'static str,
     /// The core provider registered for it.
     pub internal: String,
 }
@@ -63,10 +56,10 @@ pub struct Speaks {
 pub struct Routes {
     /// Each provider and its formats, in the order added.
     providers: Vec<(String, Vec<Speaks>)>,
+    /// The format a provider sends a request for a model in, if it says.
+    formats_for: HashMap<String, FormatFor>,
     /// The rules, in the order added.
     rules: Vec<Arc<Rule>>,
-    /// The claimed model prefixes, longest first, then in the order added.
-    claims: Vec<(String, String)>,
     target: Option<String>,
     stats: Stats,
     catalog: Arc<Catalog>,
@@ -77,36 +70,20 @@ impl std::fmt::Debug for Routes {
         f.debug_struct("Routes")
             .field("providers", &self.providers)
             .field("rules", &self.rules)
-            .field("claims", &self.claims)
             .field("target", &self.target)
             .finish_non_exhaustive()
     }
 }
 
-/// A request to route.
-#[derive(Debug, Clone, Copy)]
-pub struct Ask<'a> {
-    /// Its kind.
-    pub kind: Kind,
-    /// The client's format.
-    pub format: &'a str,
-    /// The model it asks for, if any.
-    pub model: Option<&'a str>,
-    /// The client key it came with, by name, if any.
-    pub client: Option<&'a str>,
-}
-
 /// Why a request goes where it does.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum By {
-    /// The rule of this name.
-    Rule(String),
+    /// This rule.
+    Rule(Arc<Rule>),
     /// Its model's `provider/` prefix.
     Named,
     /// The provider's model listing.
     Listed,
-    /// A vendor's claim of this prefix.
-    Claim(String),
     /// The kind's default.
     Default,
 }
@@ -119,10 +96,9 @@ pub struct Chosen {
     pub provider: String,
     /// The core provider of the format it is sent in.
     pub internal: String,
-    /// The model to send instead of the one asked for, if any.
+    /// The model it is sent, if any: the one asked for, unless a route or a
+    /// `provider/` prefix says another.
     pub model: Option<String>,
-    /// The model it is sent: that, else the one asked for.
-    pub sends: Option<String>,
 }
 
 /// Where a request goes, in the order to try.
@@ -130,23 +106,10 @@ pub struct Chosen {
 pub struct Planned {
     /// Why.
     pub by: By,
-    /// The rule that routed it, if one did.
-    pub rule: Option<Arc<Rule>>,
     /// The providers to try, in order; never empty.
     pub to: Vec<Chosen>,
     /// The candidates passed over, and why.
     pub passed: Vec<(String, String)>,
-}
-
-/// Where a request goes first.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Route {
-    /// The provider, as added.
-    pub provider: String,
-    /// The core provider of the format it is sent in.
-    pub internal: String,
-    /// The model to send instead, its `provider/` prefix taken off.
-    pub model: Option<String>,
 }
 
 impl Routes {
@@ -161,19 +124,17 @@ impl Routes {
         self
     }
 
-    /// Adds `rule`, after those added before.
-    pub fn rule(mut self, rule: Rule) -> Self {
-        self.rules.push(Arc::new(rule));
+    /// Lets `provider` say which of its formats a request goes in, by the
+    /// request and the card of the model it is sent; a format it does not
+    /// speak of the request's kind is not taken.
+    pub fn format_for(mut self, provider: impl Into<String>, format_for: FormatFor) -> Self {
+        self.formats_for.insert(provider.into(), format_for);
         self
     }
 
-    /// Lets `provider` claim the models starting with `prefix`; the longest
-    /// claim wins.
-    pub fn claim(mut self, prefix: impl Into<String>, provider: impl Into<String>) -> Self {
-        self.claims.push((prefix.into(), provider.into()));
-        // `deepseek-ai/` is Together's, though `deepseek` is DeepSeek's.
-        self.claims
-            .sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
+    /// Adds `rule`, after those added before.
+    pub fn rule(mut self, rule: Rule) -> Self {
+        self.rules.push(Arc::new(rule));
         self
     }
 
@@ -204,26 +165,16 @@ impl Routes {
         &self.rules
     }
 
-    /// The vendors' claims, as `(prefix, provider)`, in the order tried.
-    pub fn claims(&self) -> &[(String, String)] {
-        &self.claims
-    }
-
     /// Where a request of `kind`, from a client of `format`, asking for
     /// `model`, goes first; `None` if no provider serves it.
-    pub fn route(&self, kind: Kind, format: &str, model: Option<&str>) -> Option<Route> {
+    pub fn route(&self, kind: &str, format: &str, model: Option<&str>) -> Option<Chosen> {
         let ask = Ask {
             kind,
             format,
             model,
             client: None,
         };
-        let first = self.plan(&ask)?.to.into_iter().next()?;
-        Some(Route {
-            provider: first.provider,
-            internal: first.internal,
-            model: first.model,
-        })
+        self.plan(&ask)?.to.into_iter().next()
     }
 
     /// Where `ask` goes, in the order to try; `None` if no provider serves it.
@@ -234,16 +185,16 @@ impl Routes {
     }
 
     fn plan_passing(&self, ask: &Ask, passed: &mut Vec<(String, String)>) -> Option<Planned> {
-        let one = |by: By, provider: &str, model: Option<String>| {
-            let internal = self.internal(provider, ask.kind, ask.format)?;
+        let one = |by: By, provider: &str, model: Option<&str>| {
+            let model = model.or(ask.model);
+            let card = model.map(|m| self.card(provider, m));
+            let internal = self.internal(provider, ask, card.as_ref())?;
             Some(Planned {
                 by,
-                rule: None,
                 to: vec![Chosen {
                     provider: provider.to_owned(),
                     internal: internal.to_owned(),
-                    sends: model.clone().or_else(|| ask.model.map(str::to_owned)),
-                    model,
+                    model: model.map(str::to_owned),
                 }],
                 passed: Vec::new(),
             })
@@ -259,7 +210,7 @@ impl Routes {
                 }
             }
             let named = model.split_once('/');
-            let named = named.and_then(|(p, rest)| one(By::Named, p, Some(rest.to_owned())));
+            let named = named.and_then(|(p, rest)| one(By::Named, p, Some(rest)));
             if named.is_some() {
                 return named;
             }
@@ -276,15 +227,6 @@ impl Routes {
             if let Some(planned) = listed.and_then(|p| one(By::Listed, p, None)) {
                 return Some(planned);
             }
-            let claimed = self
-                .claims
-                .iter()
-                .filter(|(prefix, _)| model.starts_with(prefix));
-            for (prefix, provider) in claimed {
-                if let Some(planned) = one(By::Claim(prefix.clone()), provider, None) {
-                    return Some(planned);
-                }
-            }
         }
         self.target
             .iter()
@@ -292,20 +234,20 @@ impl Routes {
             .find_map(|provider| one(By::Default, provider, None))
     }
 
-    /// The provider whose listing names `model` and that serves `ask`'s
-    /// kind; of several, the one claiming it, else the first.
+    /// `provider`'s card of `model`: its list's, else a bare one.
+    fn card(&self, provider: &str, model: &str) -> Card {
+        (self.catalog.get(provider, model)).unwrap_or_else(|| Card::new(model))
+    }
+
+    /// The first provider whose listing names `model` and that serves
+    /// `ask`'s kind.
     fn lister(&self, ask: &Ask, model: &str) -> Option<&str> {
-        let catalog = &self.catalog;
-        let listers: Vec<&str> = (self.providers.iter())
+        (self.providers.iter())
             .map(|(name, _)| name.as_str())
-            .filter(|name| self.internal(name, ask.kind, ask.format).is_some())
-            .filter(|name| catalog.get(name, model).is_some())
-            .collect();
-        let claimant = (self.claims.iter())
-            .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
-            .find(|(_, provider)| listers.contains(&provider.as_str()))
-            .map(|(_, provider)| provider.as_str());
-        claimant.or_else(|| listers.first().copied())
+            .find(|name| {
+                let card = self.catalog.get(name, model);
+                card.is_some_and(|card| self.internal(name, ask, Some(&card)).is_some())
+            })
     }
 
     /// Where `rule` sends `ask`, if it applies and a candidate can take it.
@@ -318,24 +260,19 @@ impl Routes {
         let mut pass = |candidate: String, why: String| {
             passed.push((format!("{} → {candidate}", rule.name), why));
         };
-        if !rule.applies(ask.kind.label, ask.client) {
+        if !rule.applies(ask.kind, ask.client) {
             pass("*".to_owned(), "not for this request".to_owned());
             return None;
         }
         let mut usable = Vec::new();
         for candidate in &rule.to {
-            let Some(internal) = self.internal(&candidate.provider, ask.kind, ask.format) else {
-                pass(
-                    candidate.to_string(),
-                    format!("serves no {}", ask.kind.label),
-                );
+            let model = candidate.model_for(ask.model);
+            let card = model.as_deref().map(|m| self.card(&candidate.provider, m));
+            let Some(internal) = self.internal(&candidate.provider, ask, card.as_ref()) else {
+                pass(candidate.to_string(), format!("serves no {}", ask.kind));
                 continue;
             };
-            let sends = candidate.model_for(ask.model);
-            let known = sends
-                .as_deref()
-                .and_then(|m| self.catalog.get(&candidate.provider, m));
-            let lacks = known.and_then(|m| rule.needs.iter().find(|n| m.lacks(n)).cloned());
+            let lacks = card.and_then(|m| rule.needs.iter().find(|n| m.lacks(n)).cloned());
             if let Some(need) = lacks {
                 pass(candidate.to_string(), format!("lacks {need}"));
                 continue;
@@ -343,13 +280,12 @@ impl Routes {
             let chosen = Chosen {
                 provider: candidate.provider.clone(),
                 internal: internal.to_owned(),
-                model: candidate.model.as_ref().and(sends.clone()),
-                sends,
+                model,
             };
             usable.push((candidate, chosen));
         }
         fn of<'a>((c, chosen): &'a (&Candidate, Chosen)) -> (&'a Candidate, &'a str) {
-            (c, chosen.sends.as_deref().unwrap_or_default())
+            (c, chosen.model.as_deref().unwrap_or_default())
         }
         let ordered = rules::order(rule.pick, usable, of, &self.stats, &self.catalog);
         let mut to: Vec<Chosen> = ordered.into_iter().map(|(_, chosen)| chosen).collect();
@@ -357,44 +293,44 @@ impl Routes {
             to.truncate(1);
         }
         (!to.is_empty()).then(|| Planned {
-            by: By::Rule(rule.name.clone()),
-            rule: Some(rule.clone()),
+            by: By::Rule(rule.clone()),
             to,
             passed: Vec::new(),
         })
     }
 
-    /// The core provider of `provider` that takes a client of `format`:
-    /// one of that format, else, for a kind that translates, its first of
-    /// the kind.
-    fn internal(&self, provider: &str, kind: Kind, format: &str) -> Option<&str> {
+    /// The core provider of `provider` that takes `ask`, sent the model of
+    /// `card`: of the format it says for the model, else of the client's,
+    /// else its first of the kind.
+    fn internal(&self, provider: &str, ask: &Ask, card: Option<&Card>) -> Option<&str> {
         let (_, speaks) = self.providers.iter().find(|(name, _)| name == provider)?;
-        let same = speaks.iter().find(|s| s.format == format);
-        let translated = || speaks.iter().find(|s| kind.translates && s.kind == kind);
-        same.or_else(translated).map(|s| s.internal.as_str())
+        let of_kind = || speaks.iter().filter(|s| s.kind == ask.kind);
+        let said = (self.formats_for.get(provider).zip(card))
+            .and_then(|(format_for, card)| format_for(ask, card))
+            .and_then(|format| of_kind().find(|s| s.format == format));
+        (said.or_else(|| of_kind().find(|s| s.format == ask.format)))
+            .or_else(|| of_kind().next())
+            .map(|s| s.internal.as_str())
     }
 
     /// The default provider of each kind, as `(kind, provider)`.
     pub fn defaults(&self) -> Vec<(&'static str, String)> {
-        let mut kinds: Vec<&Speaks> = Vec::new();
+        let mut firsts: Vec<&Speaks> = Vec::new();
         for speaks in self.providers.iter().flat_map(|(_, speaks)| speaks) {
-            if !kinds.iter().any(|s| s.kind == speaks.kind) {
-                kinds.push(speaks);
+            if firsts.iter().all(|s| s.kind != speaks.kind) {
+                firsts.push(speaks);
             }
         }
-        kinds
-            .into_iter()
-            .filter_map(|s| {
-                let ask = Ask {
-                    kind: s.kind,
-                    format: &s.format,
-                    model: None,
-                    client: None,
-                };
-                let first = self.plan(&ask)?.to.into_iter().next()?;
-                Some((s.kind.label, first.provider))
-            })
-            .collect()
+        let default = |s: &Speaks| {
+            let ask = Ask {
+                kind: s.kind,
+                format: &s.format,
+                model: None,
+                client: None,
+            };
+            Some((s.kind, self.plan(&ask)?.to.swap_remove(0).provider))
+        };
+        firsts.into_iter().filter_map(default).collect()
     }
 }
 
@@ -493,9 +429,9 @@ type Client = dyn Fn(&ClientContext) -> Option<String> + Send + Sync;
 /// ```
 /// use std::sync::Arc;
 /// use respan_gateway_conversation::Input;
-/// use respan_gateway_plugin_routing::{Kind, Model, Routes, Routing, Speaks};
+/// use respan_gateway_plugin_routing::{Model, Routes, Routing, Speaks};
 ///
-/// const CHAT: Kind = Kind { label: "chat", translates: true };
+/// const CHAT: &str = "chat";
 /// let speaks = |format: &str, internal: &str| Speaks {
 ///     format: format.into(),
 ///     kind: CHAT,
@@ -504,16 +440,15 @@ type Client = dyn Fn(&ClientContext) -> Option<String> + Send + Sync;
 /// let routes = Routes::new()
 ///     .provider("openai", vec![speaks("openai-chat", "openai")])
 ///     .provider("anthropic", vec![speaks("anthropic-messages", "anthropic")])
-///     .claim("claude", "anthropic")
 ///     .target("openai");
-/// let route = routes.route(CHAT, "openai-chat", Some("claude-sonnet-4-5"));
+/// let route = routes.route(CHAT, "openai-chat", Some("anthropic/claude-sonnet-4-5"));
 /// assert_eq!(route.map(|r| r.internal).as_deref(), Some("anthropic"));
 /// let routing = Routing::new(Arc::new(routes))
 ///     .format("openai-chat", CHAT, Model::of(Input::model, Input::set_model));
 /// ```
 pub struct Routing {
     routes: Arc<Routes>,
-    formats: std::collections::HashMap<String, (Kind, Model)>,
+    formats: HashMap<String, (&'static str, Model)>,
     default: Option<String>,
     client: Option<Arc<Client>>,
 }
@@ -532,7 +467,7 @@ impl Routing {
     pub fn new(routes: Arc<Routes>) -> Self {
         Self {
             routes,
-            formats: std::collections::HashMap::new(),
+            formats: HashMap::new(),
             default: None,
             client: None,
         }
@@ -546,7 +481,7 @@ impl Routing {
     }
 
     /// Routes the requests of format `name`, of `kind`, by their `model`.
-    pub fn format(mut self, name: impl Into<String>, kind: Kind, model: Model) -> Self {
+    pub fn format(mut self, name: impl Into<String>, kind: &'static str, model: Model) -> Self {
         self.formats.insert(name.into(), (kind, model));
         self
     }
@@ -571,15 +506,14 @@ impl Plugin for Routing {
         let asked = (model.read)(cx)?;
         let client = self.client.as_ref().and_then(|client| client(cx));
         let ask = Ask {
-            kind: *kind,
+            kind,
             format: cx.format(),
             model: asked.as_deref(),
             client: client.as_deref(),
         };
         let Some(mut planned) = self.routes.plan(&ask) else {
             return Err(Fault::not_found(format!(
-                "no provider serves {} requests; add one to the config",
-                kind.label
+                "no provider serves {kind} requests; add one to the config"
             )));
         };
         // A format whose calls cannot each be sent a model of their own
@@ -591,11 +525,12 @@ impl Plugin for Routing {
         if cx.target().is_none() || cx.target() == self.default.as_deref() {
             cx.set_target(first.internal.clone());
             cx.extensions_mut().insert(first.clone());
-            if planned.rule.is_some() {
+            if matches!(planned.by, By::Rule(_)) {
                 cx.extensions_mut().insert(Arc::new(planned));
             }
         }
-        if let Some(sent) = first.model {
+        // A route or a `provider/` prefix sends another name.
+        if let Some(sent) = first.model.filter(|sent| Some(sent) != asked.as_ref()) {
             (model.write)(cx, sent)?;
         }
         Ok(None)
@@ -607,7 +542,7 @@ impl Plugin for Routing {
         };
         let call = self.formats.get(px.client().format());
         let call = call.and_then(|(_, model)| model.call.clone());
-        match (call, chosen.sends) {
+        match (call, chosen.model) {
             (Some(call), Some(sends)) if px.provider() == chosen.internal => call(px, sends),
             _ => Ok(()),
         }
@@ -627,7 +562,7 @@ impl Plugin for Routing {
             return;
         }
         let failed = matches!(kind, Some(FaultKind::Provider | FaultKind::Gateway));
-        let model = chosen.sends.as_deref().unwrap_or_default();
+        let model = chosen.model.as_deref().unwrap_or_default();
         self.routes
             .stats
             .record(&chosen.provider, model, head, failed);
@@ -672,7 +607,7 @@ impl Plugin for Dispatch {
         let Some(planned) = cx.extensions().get::<Arc<Planned>>().cloned() else {
             return Ok(None);
         };
-        let Some(rule) = &planned.rule else {
+        let By::Rule(rule) = &planned.by else {
             return Ok(None);
         };
         if cx.target() != Some(planned.to[0].internal.as_str()) {
@@ -699,20 +634,11 @@ impl Plugin for Dispatch {
 mod tests {
     use super::*;
 
-    const CHAT: Kind = Kind {
-        label: "chat",
-        translates: true,
-    };
-    const REALTIME: Kind = Kind {
-        label: "realtime",
-        translates: false,
-    };
-    const PASSTHROUGH: Kind = Kind {
-        label: "passthrough",
-        translates: false,
-    };
+    const CHAT: &str = "chat";
+    const REALTIME: &str = "realtime";
+    const PASSTHROUGH: &str = "passthrough";
 
-    fn speaks(format: &str, kind: Kind, internal: &str) -> Speaks {
+    fn speaks(format: &str, kind: &'static str, internal: &str) -> Speaks {
         Speaks {
             format: format.into(),
             kind,
@@ -733,9 +659,7 @@ mod tests {
             .provider(
                 "anthropic",
                 vec![speaks("anthropic-messages", CHAT, "anthropic")],
-            )
-            .claim("gpt", "openai")
-            .claim("claude", "anthropic");
+            );
         for (name, to) in rules {
             let to = to.split(',').map(Candidate::parse).collect();
             routes = routes.rule(Rule::new(*name, to));
@@ -771,11 +695,11 @@ mod tests {
         // Not a provider: the whole name is the model.
         let other = to(&routes, "openai-chat", "meta-llama/x");
         assert_eq!(other.0, "groq", "the first provider of the kind");
-        assert_eq!(other.2, None);
+        assert_eq!(other.2.as_deref(), Some("meta-llama/x"));
     }
 
     #[test]
-    fn rules_then_claims_then_the_default() {
+    fn rules_then_the_default() {
         let routes = routes(
             Some("anthropic"),
             &[("gpt-4*", "groq"), ("gpt-4o*", "anthropic")],
@@ -787,8 +711,8 @@ mod tests {
         );
         assert_eq!(
             to(&routes, "anthropic-messages", "gpt-3.5").0,
-            "openai",
-            "a claim"
+            "anthropic",
+            "no rule: the target"
         );
         assert_eq!(
             to(&routes, "openai-chat", "llama").0,
@@ -825,7 +749,7 @@ mod tests {
         assert_eq!(
             to(&routes, "openai-chat", "gpt-4o").0,
             "anthropic",
-            "the glob, before the claim"
+            "the glob"
         );
     }
 
@@ -842,11 +766,11 @@ mod tests {
             client: None,
         };
         let planned = routes.plan(&ask("openai-chat")).expect("planned");
-        assert_eq!(planned.by, By::Rule("smart".into()));
+        assert!(matches!(&planned.by, By::Rule(r) if r.name == "smart"));
         let sends: Vec<_> = planned
             .to
             .iter()
-            .map(|c| (c.provider.as_str(), c.sends.as_deref()))
+            .map(|c| (c.provider.as_str(), c.model.as_deref()))
             .collect();
         assert_eq!(
             sends,
@@ -856,7 +780,11 @@ mod tests {
                 ("openai", Some("smart"))
             ]
         );
-        assert_eq!(planned.to[2].model, None, "sent as asked");
+        assert_eq!(
+            planned.to[2].model.as_deref(),
+            Some("smart"),
+            "sent as asked"
+        );
     }
 
     #[test]
@@ -899,8 +827,8 @@ mod tests {
         };
         let first = |a| routes.plan(&a).expect("planned").to[0].provider.clone();
         assert_eq!(first(ask(Some("ops"))), "groq");
-        assert_eq!(first(ask(Some("dev"))), "openai", "the claim");
-        assert_eq!(first(ask(None)), "openai");
+        assert_eq!(first(ask(Some("dev"))), "groq", "the first provider");
+        assert_eq!(first(ask(None)), "groq");
     }
 
     #[test]
@@ -924,23 +852,48 @@ mod tests {
     }
 
     #[test]
-    fn the_longest_claim_wins() {
-        let routes = Routes::new()
-            .provider("deepseek", vec![speaks("openai-chat", CHAT, "deepseek")])
-            .provider("together", vec![speaks("openai-chat", CHAT, "together")])
-            .claim("deepseek", "deepseek")
-            .claim("deepseek-ai/", "together");
-        assert_eq!(to(&routes, "openai-chat", "deepseek-ai/r1").0, "together");
-        assert_eq!(to(&routes, "openai-chat", "deepseek-chat").0, "deepseek");
-    }
-
-    #[test]
     fn a_client_is_sent_in_its_own_format_else_translated() {
         let routes = routes(Some("anthropic"), &[]);
-        let (_, internal, _) = to(&routes, "anthropic-messages", "gpt-4o");
+        let (_, internal, _) = to(&routes, "anthropic-messages", "openai/gpt-4o");
         assert_eq!(internal, "openai", "OpenAI's first chat format");
         let (_, internal, _) = to(&routes, "openai-chat", "anthropic/claude");
         assert_eq!(internal, "anthropic");
+    }
+
+    #[test]
+    fn a_provider_says_its_format_by_the_models_card() {
+        let messages = speaks("anthropic-messages", CHAT, "agg:anthropic-messages");
+        let routes = Routes::new()
+            .provider("agg", vec![speaks("openai-chat", CHAT, "agg"), messages])
+            .provider("live", vec![speaks("openai-realtime", REALTIME, "live")])
+            // Its Messages serves only Claude; a card it cannot read, as usual.
+            .format_for("agg", |ask, card| {
+                let maker = card.maker.as_deref()?;
+                (ask.format == "anthropic-messages" && maker != "anthropic")
+                    .then_some("openai-chat")
+            })
+            // A format it does not speak of the kind is not taken.
+            .format_for("live", |_, _| Some("openai-chat"));
+        let listing = Catalog::default();
+        let card = |id: &str, maker: &str| {
+            let mut model = respan_gateway_sdk::Model::new(id);
+            model.maker = Some(maker.into());
+            model
+        };
+        listing.set("agg", [card("claude", "anthropic"), card("gpt", "openai")]);
+        let routes = routes.with_catalog(Arc::new(listing));
+        let internal = |format, model| to(&routes, format, model).1;
+        assert_eq!(
+            internal("anthropic-messages", "claude"),
+            "agg:anthropic-messages"
+        );
+        assert_eq!(internal("anthropic-messages", "gpt"), "agg");
+        assert_eq!(internal("openai-chat", "claude"), "agg");
+        assert_eq!(
+            internal("anthropic-messages", "unlisted"),
+            "agg:anthropic-messages"
+        );
+        assert_eq!(internal("openai-realtime", "x"), "live");
     }
 
     #[test]
@@ -948,23 +901,19 @@ mod tests {
         let routes = routes(Some("anthropic"), &[]);
         // Anthropic serves no realtime, so the target is passed over.
         let realtime = to(&routes, "openai-realtime", "anthropic/gpt-realtime");
+        let asked = Some("anthropic/gpt-realtime".to_owned());
         assert_eq!(
             realtime,
-            ("openai".into(), "openai:openai-realtime".into(), None)
+            ("openai".into(), "openai:openai-realtime".into(), asked),
+            "the default, sent the whole name"
         );
         assert_eq!(routes.route(PASSTHROUGH, "passthrough", None), None);
     }
 
     #[test]
-    fn a_session_crosses_formats_only_in_a_kind_that_translates() {
-        const LIVE: Kind = Kind {
-            label: "realtime",
-            translates: true,
-        };
-        const RESPONSES: Kind = Kind {
-            label: "responses",
-            translates: false,
-        };
+    fn a_session_crosses_formats_within_its_kind() {
+        const LIVE: &str = "realtime";
+        const RESPONSES: &str = "responses";
         let openai = vec![
             speaks("openai-realtime", LIVE, "openai:openai-realtime"),
             speaks("responses-ws", RESPONSES, "openai:responses-ws"),
@@ -972,21 +921,19 @@ mod tests {
         let routes = Routes::new()
             .provider("openai", openai)
             .provider("gemini", vec![speaks("gemini-live", LIVE, "gemini")])
-            .claim("gpt", "openai")
-            .claim("gemini", "gemini")
             .target("gemini");
         let internal = |kind, format, model| routes.route(kind, format, model).map(|r| r.internal);
-        let to_openai = internal(LIVE, "gemini-live", Some("gpt-realtime"));
+        let to_openai = internal(LIVE, "gemini-live", Some("openai/gpt-realtime"));
         assert_eq!(to_openai.as_deref(), Some("openai:openai-realtime"));
-        let to_gemini = internal(LIVE, "openai-realtime", Some("gemini-live"));
+        let to_gemini = internal(LIVE, "openai-realtime", Some("gemini/gemini-live"));
         assert_eq!(to_gemini.as_deref(), Some("gemini"));
         assert_eq!(
             internal(LIVE, "gemini-live", None).as_deref(),
             Some("gemini")
         );
-        // Gemini speaks no Responses, so even a model it claims stays with
-        // the provider that does.
-        let responses = internal(RESPONSES, "responses-ws", Some("gemini-live"));
+        // Gemini speaks no Responses, so even a model it is named for stays
+        // with the provider that does.
+        let responses = internal(RESPONSES, "responses-ws", Some("gemini/gemini-live"));
         assert_eq!(responses.as_deref(), Some("openai:responses-ws"));
     }
 
@@ -1003,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn a_listed_model_goes_to_its_lister_and_the_claimant_of_several() {
+    fn a_listed_model_goes_to_its_first_lister() {
         let listing = Catalog::default();
         let list = |ids: &[&str]| {
             ids.iter()
@@ -1021,17 +968,20 @@ mod tests {
             client: None,
         };
         let kimi = routes.plan(&ask("kimi-k2")).expect("planned");
+        assert!(matches!(kimi.by, By::Listed));
+        assert_eq!(kimi.to[0].provider, "groq");
         assert_eq!(
-            (kimi.by, kimi.to[0].provider.as_str()),
-            (By::Listed, "groq")
+            kimi.to[0].model.as_deref(),
+            Some("kimi-k2"),
+            "sent as asked"
         );
-        assert_eq!(kimi.to[0].model, None, "sent as asked");
-        // Both list it; OpenAI claims `gpt`.
-        assert_eq!(to(&routes, "openai-chat", "gpt-oss-120b").0, "openai");
-        // A route comes first; an unlisted name falls to the claims.
+        // Both list it: the first added.
+        assert_eq!(to(&routes, "openai-chat", "gpt-oss-120b").0, "groq");
+        // A route comes first; an unlisted name falls to the default.
         assert_eq!(to(&routes, "openai-chat", "smart").0, "anthropic");
-        let claimed = routes.plan(&ask("gpt-4o")).expect("planned");
-        assert_eq!(claimed.by, By::Claim("gpt".into()));
+        let unlisted = routes.plan(&ask("gpt-4o")).expect("planned");
+        assert!(matches!(unlisted.by, By::Default));
+        assert_eq!(unlisted.to[0].provider, "anthropic");
         // A lister that serves no realtime is passed over.
         let live = Ask {
             kind: REALTIME,
@@ -1039,6 +989,9 @@ mod tests {
             model: Some("kimi-k2"),
             client: None,
         };
-        assert_eq!(routes.plan(&live).expect("planned").by, By::Default);
+        assert!(matches!(
+            routes.plan(&live).expect("planned").by,
+            By::Default
+        ));
     }
 }

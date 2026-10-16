@@ -77,50 +77,33 @@ async fn openai_transcription_model_is_asked_for_beside_gemini_only_fields() {
     assert!(update["setup"].is_null(), "{update}");
 }
 
-/// Whether OpenAI sends a chat of `body` to Responses: what Chat
-/// Completions would refuse.
-fn to_responses(body: Value) -> bool {
-    use respan_gateway_conversation_http::Schema;
-    use respan_gateway_conversation_http::openai::OpenAiChat;
-    let input = OpenAiChat
-        .decode_request(body.to_string().into())
-        .expect("a chat");
-    respan_gateway_vendors_green::openai::chat_refuses(&input)
-}
-
 #[test]
-fn openai_responses_only_takes_tools_with_reasoning_and_its_models() {
-    let tools = json!([{ "type": "function", "function": { "name": "f", "parameters": {} } }]);
-    let chat = |model: &str, extra: Value| {
-        let mut body = json!({ "model": model, "messages": [{ "role": "user", "content": "hi" }] });
-        for (k, v) in extra.as_object().cloned().unwrap_or_default() {
-            body[k] = v;
-        }
-        body
+fn openai_sends_a_chat_to_responses_by_its_model() {
+    use respan_gateway_vendors_green::openai::{VENDOR, responses_only};
+    // From gpt-5.4 Chat Completions refuses their reasoning with function
+    // tools; some only Responses serves.
+    for model in [
+        "gpt-6-luna",
+        "gpt-5.4-mini",
+        "gpt-5.5",
+        "o3-pro",
+        "gpt-5-codex",
+    ] {
+        assert!(responses_only(model), "{model}");
+    }
+    for model in ["gpt-5.2", "gpt-5-mini", "gpt-4.1-mini", "o3", "gpt-4o"] {
+        assert!(!responses_only(model), "{model}");
+    }
+    let ask = |format| respan_gateway_vendor_kit::Ask {
+        kind: "chat",
+        format,
+        model: None,
+        client: None,
     };
-    let both = json!({ "tools": tools, "reasoning_effort": "high" });
-    assert!(to_responses(chat("gpt-6-luna", both)));
-    // From gpt-5.6 they reason unless told not to: tools alone are refused.
-    let alone = json!({ "tools": tools });
-    for model in ["gpt-6-luna", "gpt-5.6-sol", "gpt-6.1-sol"] {
-        assert!(to_responses(chat(model, alone.clone())), "{model}");
-    }
-    for model in ["gpt-5.5", "gpt-5-mini", "gpt-4.1-mini", "o3"] {
-        assert!(!to_responses(chat(model, alone.clone())), "{model}");
-    }
-    let off = json!({ "tools": tools, "reasoning_effort": "none" });
-    assert!(!to_responses(chat("gpt-6-luna", off)), "no reasoning");
-    assert!(to_responses(chat("o3-pro", json!({}))));
-    assert!(to_responses(chat("gpt-5-codex", json!({}))));
-    assert!(!to_responses(chat("gpt-4o", json!({}))));
-    // Fields both have go with it.
-    let shared = json!({ "tools": tools, "reasoning_effort": "high", "store": false,
-        "metadata": { "a": "b" }, "service_tier": "auto", "verbosity": "low",
-        "prompt_cache_key": "k", "max_tokens": 100, "parallel_tool_calls": true });
-    assert!(to_responses(chat("gpt-6-luna", shared)));
-    let n = json!({ "tools": tools, "reasoning_effort": "high", "n": 2 });
-    assert!(
-        !to_responses(chat("gpt-5-mini", n)),
-        "only Chat Completions has n"
+    let format_for = VENDOR.format_for.expect("a format_for");
+    let card = respan_gateway_vendor_kit::Model::new("gpt-6-luna");
+    assert_eq!(
+        format_for(&ask("anthropic-messages"), &card),
+        Some("openai-responses")
     );
 }

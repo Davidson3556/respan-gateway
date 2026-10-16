@@ -18,3 +18,25 @@ mod price;
 pub use catalog::Catalog;
 pub use model::{Capability, Modality, Model, time};
 pub use price::Price;
+
+/// A request to route: what a router knows of it, and a provider's
+/// [`FormatFor`] reads.
+#[derive(Debug, Clone, Copy)]
+pub struct Ask<'a> {
+    /// Its kind, such as `chat`: the formats that read and write the same
+    /// neutral types, so any of them can answer a client of another.
+    pub kind: &'a str,
+    /// The client's format, such as `anthropic-messages`.
+    pub format: &'a str,
+    /// The model it asks for, if any.
+    pub model: Option<&'a str>,
+    /// The client key it came with, by name, if any.
+    pub client: Option<&'a str>,
+}
+
+/// Which of its formats a provider is sent a request in: given the request
+/// and the card of the model sent (a bare one if its list does not have
+/// it), the name of one of its formats; `None` for the usual, the client's
+/// own, else its first of the kind. A vendor whose formats each serve only
+/// some of its models says so with one.
+pub type FormatFor = fn(ask: &Ask, model: &Model) -> Option<&'static str>;

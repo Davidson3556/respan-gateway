@@ -26,6 +26,6 @@ pub struct OpenRouter;
 
 impl Dialect for OpenRouter {
     fn output(&self, call: &Call) -> Option<Box<dyn Filter<Output>>> {
-        chat::inert_choice(call, &["native_finish_reason"])
+        chat::read(call, &["native_finish_reason"], false)
     }
 }

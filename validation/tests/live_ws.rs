@@ -47,7 +47,13 @@ async fn event(ws: &mut Ws) -> Value {
 
 async fn finish(ws: &mut Ws, server: &Server) {
     close(ws, 1000, "").await;
-    assert!(matches!(hear(ws).await, Heard::Closed(_) | Heard::Broken));
+    // A provider may still say something after its last answer, such as
+    // OpenAI's `rate_limits.updated`.
+    let mut heard = hear(ws).await;
+    while let Heard::Text(_) = heard {
+        heard = hear(ws).await;
+    }
+    assert!(matches!(heard, Heard::Closed(_) | Heard::Broken));
     idle(&server.gateway).await;
 }
 

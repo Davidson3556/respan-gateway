@@ -563,12 +563,6 @@ async fn the_admin_api_reports_requests_as_they_happen() {
     let serve = &routes["serve"][0];
     assert_eq!(serve["format"], "openai-chat");
     assert_eq!(serve["endpoints"], json!(["POST /v1/chat/completions"]));
-    assert!(
-        routes["claims"]
-            .as_array()
-            .unwrap()
-            .contains(&json!({"prefix": "gpt", "provider": "openai"}))
-    );
     assert_eq!(
         routes["defaults"][0],
         json!({"kind": "chat", "provider": "openai"})

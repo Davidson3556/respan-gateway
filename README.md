@@ -209,8 +209,7 @@ within 30 s goes last, and a response carries the provider's real model.
 
 Routing order: a route of that exact name; else `name/model` goes to provider
 `name`; else the first glob route (in config order); else the provider whose
-model list has it (of several, the vendor that claims the name); else the
-vendors' prefixes (longest wins), for aliases and unlisted models; else
+model list has it (of several, the first configured); else
 `routing.default`, or the kind's first provider
 ([routing](docs/ARCHITECTURE.md#routing)). A route whose candidates don't serve
 the request's kind, or whose `when` doesn't match, is skipped. `GET

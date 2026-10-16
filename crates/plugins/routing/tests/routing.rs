@@ -13,7 +13,7 @@ use respan_gateway_http::{Body, Completion};
 use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_passthrough_http::Passthrough;
 use respan_gateway_plugin_routing::{
-    Candidate, Dispatch, Kind, Model, Pick, Routes, Routing, Rule, Speaks,
+    Candidate, Dispatch, Model, Pick, Routes, Routing, Rule, Speaks,
 };
 
 /// An end by its message, for comparing: `Fault` has no equality.
@@ -92,10 +92,7 @@ impl Fakes {
     }
 }
 
-const CHAT: Kind = Kind {
-    label: "chat",
-    translates: true,
-};
+const CHAT: &str = "chat";
 
 /// Providers `a` and `b` of OpenAI Chat, `b` the target, and `routes`.
 fn model_gateway(mock: &Fakes, routes: Routes) -> Gateway {
@@ -144,29 +141,6 @@ async fn routed_post(gw: &Gateway, body: &'static str) -> (StatusCode, String) {
     let text = String::from_utf8_lossy(&bytes.expect("response body")).into_owned();
     assert_eq!(ended(outcome.await), Ok(()));
     (status, text)
-}
-
-#[tokio::test]
-async fn routing_takes_the_longest_claim() {
-    const ASK: &str = r#"{"model":"gpt-pro","messages":[{"role":"user","content":"hi"}]}"#;
-    for (first, first_target, second, second_target, selected) in [
-        ("gpt", "a", "gpt-pro", "b", B),
-        ("gpt-pro", "a", "gpt", "b", A),
-    ] {
-        let mock = Fakes::start().await;
-        mock.reply(selected, Answer::text("chosen provider"));
-        let routes = Routes::new()
-            .claim(first, first_target)
-            .claim(second, second_target);
-        let gw = model_gateway(&mock, routes);
-        let (status, answer) = routed_post(&gw, ASK).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(answer.contains("chosen provider"), "{answer}");
-        assert_eq!(
-            mock.sent(),
-            [if selected == A { "a.test" } else { "b.test" }]
-        );
-    }
 }
 
 #[tokio::test]
@@ -262,7 +236,7 @@ async fn routing_sends_unmatched_and_missing_models_to_the_target() {
     const MISSING: &str = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
     let mock = Fakes::start().await;
     mock.reply(B, Answer::text("unmatched default"));
-    let gw = model_gateway(&mock, Routes::new().claim("gpt", "a"));
+    let gw = model_gateway(&mock, Routes::new());
     let (status, answer) = routed_post(&gw, UNMATCHED).await;
     assert_eq!(status, StatusCode::OK);
     assert!(answer.contains("unmatched default"), "{answer}");
@@ -277,7 +251,7 @@ async fn routing_sends_unmatched_and_missing_models_to_the_target() {
 #[tokio::test]
 async fn routing_sends_nothing_of_unreadable_input() {
     let mock = Fakes::start().await;
-    let gw = model_gateway(&mock, Routes::new().claim("gpt", "a"));
+    let gw = model_gateway(&mock, Routes::new());
     let (resp, outcome) = serve(&gw, post("/v1/chat/completions", "not-json")).await;
     let _ = read_whole(resp).await;
     let _ = outcome.await;
@@ -362,8 +336,8 @@ impl Plugin for TargetsB {
     }
 }
 
-/// Providers `a` and `b` of OpenAI Chat and routing that claims `gpt` for
-/// `a`, after a plugin that targets `b` if `earlier`, else over a gateway
+/// Providers `a` and `b` of OpenAI Chat and routing that sends `gpt-4o`
+/// to `a`, after a plugin that targets `b` if `earlier`, else over a gateway
 /// whose default target is `b`.
 fn targeted_gateway(mock: &Fakes, earlier: bool) -> Gateway {
     let speaks = |internal: &str| {
@@ -376,7 +350,7 @@ fn targeted_gateway(mock: &Fakes, earlier: bool) -> Gateway {
     let routes = Routes::new()
         .provider("a", speaks("a"))
         .provider("b", speaks("b"))
-        .claim("gpt", "a");
+        .rule(Rule::new("gpt-4o", vec![Candidate::parse("a")]));
     let mut routing = Routing::new(Arc::new(routes)).format(
         "openai-chat",
         CHAT,

@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 
 use respan_gateway_conversation as conversation;
 use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, async_trait};
-use respan_gateway_plugin_routing::{Kind, Model};
+use respan_gateway_plugin_routing::Model;
 use respan_gateway_plugin_tool_loop::{Sink, StepReport, ToolHop};
 
 use super::count;
@@ -20,7 +20,7 @@ use crate::formats::KnownFormat;
 pub struct Recorder {
     log: Arc<RequestLog>,
     /// Each format's kind, and how its requests name their model.
-    formats: HashMap<String, (Kind, Model)>,
+    formats: HashMap<String, (&'static str, Model)>,
     /// Each core provider's configured name.
     providers: HashMap<String, String>,
 }
@@ -63,7 +63,7 @@ impl Plugin for Recorder {
             let mut record = entry.record();
             record.format = Some(cx.format().to_owned());
             if let Some((kind, model)) = self.formats.get(cx.format()) {
-                record.kind = Some(kind.label.to_owned());
+                record.kind = Some((*kind).to_owned());
                 let model = model.read(cx).map(|m| clip(&m));
                 record.model = model.or(record.model.take());
             }

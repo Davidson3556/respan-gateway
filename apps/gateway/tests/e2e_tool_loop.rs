@@ -779,7 +779,7 @@ fn a_config_error_never_prints_a_secret() {
 }
 
 #[tokio::test]
-async fn tools_the_loop_adds_with_a_reasoning_effort_go_to_openais_responses() {
+async fn tools_the_loop_adds_to_a_newer_openai_model_go_to_its_responses() {
     // OpenAI's Chat Completions refuses function tools with a reasoning
     // effort on its newer models; the tools here are the loop's own.
     let up = FakeMcp::start().await;
@@ -794,7 +794,7 @@ async fn tools_the_loop_adds_with_a_reasoning_effort_go_to_openais_responses() {
     .await;
     openai.answer(Answer::text("done"));
     let mut asked = hello();
-    asked["model"] = json!("gpt-5-mini");
+    asked["model"] = json!("gpt-6-luna");
     asked["reasoning_effort"] = json!("low");
     let (status, answer) = ask(&gw, &[], asked).await;
     assert_eq!(status, 200, "{answer}");
@@ -811,7 +811,7 @@ async fn tools_the_loop_adds_with_a_reasoning_effort_go_to_openais_responses() {
         sent.body
     );
 
-    // Without a reasoning effort, Chat Completions takes them.
+    // An older model's Chat Completions takes them.
     openai.answer(Answer::text("done"));
     let (status, _) = ask(&gw, &[], hello()).await;
     assert_eq!(status, 200);

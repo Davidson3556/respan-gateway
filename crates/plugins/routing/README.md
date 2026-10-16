@@ -1,17 +1,19 @@
 # respan-gateway-plugin-routing
 
 `Routing` targets each request at a provider by `Routes`: providers, each
-one core provider per format it `Speaks`, `Rule`s, claimed model prefixes
-and a default target. Of the providers serving the request's kind, it picks
+one core provider per format it `Speaks`, `Rule`s and a default target. Of the providers serving the request's kind, it picks
 the candidates of a rule named exactly its model, else the provider its
 model names as `provider/model` (sent as `model`), else the candidates of
 the first glob rule (`llama-*`) that matches, else the provider whose listing
-names it (`Catalog::lists`; of several, the claimant), else the longest claim's, else
-the target if it serves the kind, else the first that does; then that
-provider's core provider of the client's format, else, for a `Kind` that
-translates, its first of the kind. A rule that does not apply to the
-request's kind or client, or none of whose candidates serve the kind, is
-skipped. Each format is given its `Kind` and a `Model`, such as
+names it (`Catalog::lists`; of several, the first added), else the target
+if it serves the kind, else the first that does; then that provider's core
+provider of the format it sends the model in (`Routes::format_for`, by the
+request's `Ask` and the model's card), else of the client's format, else
+its first of the kind: the formats of a kind read and write the same
+neutral types, so any of them answers a client of another. A rule that
+does not apply to the request's kind or client, or none of whose
+candidates serve the kind, is skipped. Each format is given its kind, such
+as `"chat"`, and a `Model`, such as
 `Model::of(Input::model, Input::set_model)`, or `Model::new(read, write)`
 for a model named elsewhere, such as a session's handshake; a request of
 another format keeps its target.
@@ -34,10 +36,10 @@ candidates, why as `By`, and those passed over).
 use std::sync::Arc;
 use respan_gateway_conversation::Input;
 use respan_gateway_plugin_routing::{
-    Candidate, Dispatch, Kind, Model, Pick, Routes, Routing, Rule, Speaks,
+    Candidate, Dispatch, Model, Pick, Routes, Routing, Rule, Speaks,
 };
 
-const CHAT: Kind = Kind { label: "chat", translates: true };
+const CHAT: &str = "chat";
 let speaks = |format: &str, internal: &str| Speaks {
     format: format.into(),
     kind: CHAT,
@@ -52,7 +54,6 @@ let routes = Routes::new()
     .provider("openai", vec![speaks("openai-chat", "openai")])
     .provider("anthropic", vec![speaks("anthropic-messages", "anthropic")])
     .rule(smart)
-    .claim("claude", "anthropic")
     .target("openai");
 let routing = Routing::new(Arc::new(routes))
     .format("openai-chat", CHAT, Model::of(Input::model, Input::set_model));

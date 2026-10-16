@@ -124,11 +124,10 @@ describe("RoutesPage", () => {
       "/ui/api/routes": {
         serve: [{ format: "anthropic-messages", kind: "chat", endpoints: ["POST /v1/messages"] }],
         rules: [],
-        claims: [{ prefix: "claude", provider: "anthropic" }],
         defaults: [{ kind: "chat", provider: "anthropic" }],
       },
       "/ui/api/routes/explain": {
-        by: { type: "claim", prefix: "claude" },
+        by: { type: "listed" },
         pick: null,
         mode: "single",
         to: [{ provider: "anthropic", model: "claude-x", price: null, seen: null }],
@@ -137,7 +136,7 @@ describe("RoutesPage", () => {
     });
     renderPage(<RoutesPage />);
     await userEvent.type(await screen.findByLabelText("Model", { exact: true }), "claude-x");
-    expect(await screen.findByText("vendor's model name claude*")).toBeInTheDocument();
+    expect(await screen.findByText("the provider's model list")).toBeInTheDocument();
     expect(screen.getByText("POST")).toBeInTheDocument();
   });
 });

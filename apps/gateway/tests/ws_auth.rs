@@ -81,7 +81,7 @@ async fn a_browser_presents_the_gateway_key_as_a_query_parameter() {
     );
     let gw = gateway(&openai, &gemini).await;
 
-    let live = format!("{LIVE}?model=gemini-live&key=gw-key&alt=json");
+    let live = format!("{LIVE}?model=gemini/gemini-live&key=gw-key&alt=json");
     assert_eq!(upgrade(&gw, &live, "").await, Ok(None));
     let seen = &gemini.handshakes()[0];
     assert_eq!(seen.header("x-goog-api-key"), Some("AIza-provider"));
@@ -92,9 +92,9 @@ async fn a_browser_presents_the_gateway_key_as_a_query_parameter() {
     );
     never_saw_the_key(&gemini);
 
-    let wrong = format!("{LIVE}?model=gemini-live&key=sk-other");
+    let wrong = format!("{LIVE}?model=gemini/gemini-live&key=sk-other");
     assert_eq!(upgrade(&gw, &wrong, "").await, Err(401));
-    let none = format!("{LIVE}?model=gemini-live");
+    let none = format!("{LIVE}?model=gemini/gemini-live");
     assert_eq!(upgrade(&gw, &none, "").await, Err(401));
     assert_eq!(gemini.handshakes().len(), 1);
 

@@ -202,17 +202,6 @@ const routes = {
       ],
     },
   ],
-  // Each vendor's own model names, longest first.
-  claims: [
-    { prefix: "text-embedding", provider: "openai" },
-    { prefix: "deepseek", provider: "deepseek" },
-    { prefix: "whisper", provider: "openai" },
-    { prefix: "claude", provider: "anthropic" },
-    { prefix: "gemini", provider: "gemini" },
-    { prefix: "llama", provider: "groq" },
-    { prefix: "gpt", provider: "openai" },
-    { prefix: "veo", provider: "gemini" },
-  ],
   defaults: [
     { kind: "chat", provider: "openai" },
     ...(NO_REALTIME ? [] : [{ kind: "realtime", provider: "openai" }]),
@@ -258,7 +247,7 @@ const pick = (items) => items[Math.floor(Math.random() * items.length)];
 const between = (lo, hi) => Math.round(lo + Math.random() * (hi - lo));
 const providerFor = (model) =>
   routes.rules.find((r) => r.name === model)?.to[0].provider ??
-  routes.claims.find((c) => model.startsWith(c.prefix))?.provider ??
+  allModels.find((m) => m.id === model)?.owned_by ??
   "openai";
 
 /** Where a request would go, as `/ui/api/routes/explain` says. */
@@ -286,8 +275,8 @@ function explain(model, kind) {
     ({ by, pick: null, mode: "single", to: [{ provider, model: sent, price: null, seen: null }], passed: [] });
   const slash = model.indexOf("/");
   if (slash > 0) return one({ type: "named" }, model.slice(0, slash), model.slice(slash + 1));
-  const claim = routes.claims.find((c) => model.startsWith(c.prefix));
-  if (claim) return one({ type: "claim", prefix: claim.prefix }, claim.provider, model);
+  const listed = allModels.find((m) => m.id === model && m.kind === kind);
+  if (listed) return one({ type: "listed" }, listed.owned_by, model);
   const fallback = routes.defaults.find((d) => d.kind === kind);
   return fallback ? one({ type: "default" }, fallback.provider, model) : { by: null };
 }

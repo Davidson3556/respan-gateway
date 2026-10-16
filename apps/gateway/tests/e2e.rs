@@ -1612,7 +1612,7 @@ async fn realtime_sessions_from_toml_cross_vendors_by_the_model_they_ask_for() {
     .await;
 
     // An OpenAI client asking for a Gemini model is answered by Gemini.
-    let (mut realtime, _) = session(&gw, "/v1/realtime?model=gemini-live", "realtime").await;
+    let (mut realtime, _) = session(&gw, "/v1/realtime?model=gemini/gemini-live", "realtime").await;
     assert_eq!(
         hear(&mut realtime).await.unwrap()["type"],
         "session.created"

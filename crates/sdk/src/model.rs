@@ -24,6 +24,10 @@ pub struct Model {
     /// The kind of requests it serves, such as `chat`, if known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Who made it, such as `anthropic`, if its provider serves others'
+    /// models and says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maker: Option<String>,
     /// When it was made, if it says.
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -98,6 +102,7 @@ impl Model {
             }
         }
         take(&mut self.kind, &over.kind);
+        take(&mut self.maker, &over.maker);
         take(&mut self.created, &over.created);
         take(&mut self.display_name, &over.display_name);
         take(&mut self.description, &over.description);

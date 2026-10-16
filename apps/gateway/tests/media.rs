@@ -452,10 +452,9 @@ async fn a_model_prefix_routes_only_within_the_kinds_its_provider_serves() {
         groq.base, openai.base
     ));
     for (model, to) in [
-        ("whisper-large-v3", &groq),
-        ("whisper-1", &openai),
-        ("gpt-4o-mini-transcribe", &openai),
-        // No vendor claims it: the first provider of the kind.
+        ("groq/whisper-large-v3", &groq),
+        ("openai/whisper-1", &openai),
+        // Unnamed and unlisted: the first provider of the kind.
         ("some-asr", &groq),
     ] {
         let before = to.seen().len();

@@ -18,6 +18,7 @@ pub const VENDOR: Vendor = Vendor {
     key_env: &["ANTHROPIC_API_KEY"],
     formats: &[(&AnthropicMessages, Some(BASE_URL))],
     models: list_models,
+    ..Vendor::DEFAULT
 };
 
 /// Its models: `GET /v1/models`, which needs its API's version.

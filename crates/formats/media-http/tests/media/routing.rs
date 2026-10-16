@@ -6,30 +6,27 @@ use respan_gateway_core::{Gateway, Provider};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_media::{image, speech, transcription};
 use respan_gateway_media_http::openai::{OpenAiImages, OpenAiSpeech, OpenAiTranscriptions};
-use respan_gateway_plugin_routing::{Kind, Model, Routes, Routing, Speaks};
+use respan_gateway_plugin_routing::{Candidate, Model, Routes, Routing, Rule, Speaks};
 use serde_json::json;
 
 use crate::support::{Fake, Form, json_request, send};
 
-/// A kind of `label`, which translates.
-const fn kind(label: &'static str) -> Kind {
-    Kind {
-        label,
-        translates: true,
-    }
-}
+const IMAGE: &str = "image";
+const TRANSCRIPTION: &str = "transcription";
+const SPEECH: &str = "speech";
+const VIDEO: &str = "video";
 
-const IMAGE: Kind = kind("image");
-const TRANSCRIPTION: Kind = kind("transcription");
-const SPEECH: Kind = kind("speech");
-const VIDEO: Kind = kind("video");
-
-fn speaks(format: &str, kind: Kind, internal: &str) -> Speaks {
+fn speaks(format: &str, kind: &'static str, internal: &str) -> Speaks {
     Speaks {
         format: format.into(),
         kind,
         internal: internal.into(),
     }
+}
+
+/// A rule sending the models `glob` matches to provider `other`.
+fn to_other(glob: &str) -> Rule {
+    Rule::new(glob, vec![Candidate::parse("other")])
 }
 
 #[tokio::test]
@@ -49,9 +46,9 @@ async fn routing_sends_each_kind_to_its_models_provider() {
     let routes = Routes::new()
         .provider("main", provider("main"))
         .provider("other", provider("other"))
-        .claim("dall-e", "other")
-        .claim("whisper", "other")
-        .claim("tts", "other")
+        .rule(to_other("dall-e*"))
+        .rule(to_other("whisper*"))
+        .rule(to_other("tts*"))
         .target("main");
     let routing = Routing::new(Arc::new(routes))
         .format(
@@ -167,12 +164,13 @@ async fn a_video_goes_to_its_models_provider_and_a_follow_up_to_its_jobs() {
 
     let (openai, veo) = (Videos::openai().await, Veo::start().await);
     // A job's id says whose it is: OpenAI's start `video_`, Veo's `veo_`.
+    let glob = |name: &str, to: &str| Rule::new(name, vec![Candidate::parse(to)]);
     let routes = Routes::new()
         .provider("openai", vec![speaks(OpenAiVideos::NAME, VIDEO, "openai")])
         .provider("veo", vec![speaks(GeminiVeo::NAME, VIDEO, "veo")])
-        .claim("veo", "veo")
-        .claim("sora", "openai")
-        .claim("video_", "openai");
+        .rule(glob("veo*", "veo"))
+        .rule(glob("sora*", "openai"))
+        .rule(glob("video_*", "openai"));
     let model = Model::of(
         |i: &video::Input| i.model().or(i.job_id()),
         video::Input::set_model,

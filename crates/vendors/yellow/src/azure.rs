@@ -23,7 +23,11 @@ pub struct Azure;
 
 impl Dialect for Azure {
     fn output(&self, call: &Call) -> Option<Box<dyn Filter<Output>>> {
-        chat::inert_choice(call, &["content_filter_results", "content_filter_offsets"])
+        chat::read(
+            call,
+            &["content_filter_results", "content_filter_offsets"],
+            false,
+        )
     }
 
     fn key(&self) -> Option<KeyIn> {

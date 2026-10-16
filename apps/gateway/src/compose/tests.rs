@@ -101,8 +101,8 @@ async fn a_vendor_routes_its_models_with_its_key() {
         anthropic.base_url()
     );
     let gateway = resolve(&text).unwrap_or_else(|e| panic!("gateway: {e}"));
-    request(&gateway, "claude-sonnet-4-5").await;
-    request(&gateway, "gpt-4.1-mini").await;
+    request(&gateway, "anthropic/claude-sonnet-4-5").await;
+    request(&gateway, "openai/gpt-4.1-mini").await;
     assert_eq!(anthropic.requests().len(), 1);
     assert_eq!(anthropic.requests()[0].header("x-api-key"), Some("sk-ant"));
     assert_eq!(openai.requests().len(), 1);
@@ -140,9 +140,10 @@ async fn the_example_config_routes_by_model_both_ways() {
     let text = toml::to_string(&config).expect("example");
     let gateway = resolve(&text).unwrap_or_else(|e| panic!("gateway: {e}"));
 
-    let openai_client = r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}"#;
+    let openai_client =
+        r#"{"model":"anthropic/claude-x","messages":[{"role":"user","content":"hi"}]}"#;
     let anthropic_client =
-        r#"{"model":"gpt-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
+        r#"{"model":"openai/gpt-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
     let to_claude = serve(&gateway, post("/v1/chat/completions", openai_client));
     let (_, _, to_claude) = read_whole(to_claude.await.0).await;
     let to_gpt = serve(&gateway, post("/v1/messages", anthropic_client));
@@ -638,49 +639,29 @@ fn a_provider_name_is_letters_digits_and_a_little_punctuation() {
 }
 
 #[test]
-fn a_vendors_model_name_with_a_slash_goes_to_the_provider_that_serves_it() {
+fn a_listed_model_name_with_a_slash_goes_whole_to_its_lister() {
     let plan = plan(
-        "providers = { openai = { vendor = \"openai\", key = \"sk\" }, deepseek = { vendor = \"deepseek\", key = \"sk\" }, mistral = { vendor = \"mistral\", key = \"sk\" }, together = { vendor = \"together\", key = \"sk\" }, fireworks = { vendor = \"fireworks\", key = \"sk\" }, openrouter = { vendor = \"openrouter\", key = \"sk\" } }\n",
+        "providers = { openai = { vendor = \"openai\", key = \"sk\" }, deepseek = { vendor = \"deepseek\", key = \"sk\" }, together = { vendor = \"together\", key = \"sk\" } }\n",
     )
     .unwrap_or_else(|e| panic!("{e}"));
+    let listed = ["deepseek-ai/DeepSeek-V3", "openai/gpt-oss-120b"];
+    (plan.routes.catalog()).set("together", listed.map(respan_gateway_sdk::Model::new));
     let to = |model: &str| {
         let route = plan.routes.route(kind::CHAT, "openai-chat", Some(model));
-        route.map(|r| (r.provider, r.model))
+        route.map(|r| (r.provider, r.model.unwrap_or_default()))
     };
-    let whole = |provider: &str| Some((provider.to_owned(), None));
-    assert_eq!(
-        to("meta-llama/Llama-3.3-70B-Instruct-Turbo"),
-        whole("together")
-    );
-    assert_eq!(
-        to("deepseek-ai/DeepSeek-V3"),
-        whole("together"),
-        "not deepseek"
-    );
-    assert_eq!(
-        to("mistralai/Mixtral-8x7B"),
-        whole("together"),
-        "not mistral"
-    );
-    assert_eq!(to("deepseek-chat"), whole("deepseek"));
-    assert_eq!(
-        to("accounts/fireworks/models/llama-v3p3-70b-instruct"),
-        whole("fireworks")
-    );
-    assert_eq!(to("anthropic/claude-3.5-sonnet"), whole("openrouter"));
-    assert_eq!(to("qwen/qwen3-32b"), whole("openrouter"));
+    let sent = |provider: &str, model: &str| Some((provider.to_owned(), model.to_owned()));
+    let whole = "deepseek-ai/DeepSeek-V3";
+    assert_eq!(to(whole), sent("together", whole), "not deepseek");
     // A configured provider's name comes first, and is taken off.
-    assert_eq!(
-        to("openai/gpt-4o-mini"),
-        Some(("openai".to_owned(), Some("gpt-4o-mini".to_owned())))
-    );
+    assert_eq!(to("openai/gpt-oss-120b"), sent("openai", "gpt-oss-120b"));
     assert_eq!(
         to("together/openai/gpt-oss-120b"),
-        Some((
-            "together".to_owned(),
-            Some("openai/gpt-oss-120b".to_owned())
-        ))
+        sent("together", "openai/gpt-oss-120b")
     );
+    // Unlisted and naming no provider: the default, sent the whole name.
+    let unlisted = "meta-llama/Llama-3.3-70B";
+    assert_eq!(to(unlisted), sent("openai", unlisted));
 }
 
 /// Two providers `a` and `b`, and `route` for `gpt-x`; `a` answers
@@ -768,55 +749,32 @@ fn bad_routes_and_retired_settings_are_errors() {
 }
 
 #[tokio::test]
-async fn a_vendor_sends_a_chat_its_chat_format_refuses_in_another() {
+async fn a_vendor_sends_a_chat_to_a_model_its_chat_format_refuses_in_another() {
     let text = "providers = { a = { vendor = \"openai\", base_url = \"https://a.test/v1\", key = \"k\" } }\nformats = [\"openai-chat\"]\n";
     let (gateway, a, _) = local(text).await;
-    let chat = |extra: serde_json::Value| {
-        let mut body = serde_json::json!({ "model": "gpt-5-mini", "messages": [{ "role": "user", "content": "hi" }] });
-        body.as_object_mut()
-            .unwrap_or_else(|| unreachable!())
-            .extend(extra.as_object().cloned().unwrap_or_default());
-        body.to_string()
-    };
-    let tool = serde_json::json!([{ "type": "function", "function": { "name": "f", "parameters": { "type": "object" } } }]);
-    for (extra, path) in [
-        (serde_json::json!({ "tools": tool }), "/v1/chat/completions"),
-        (
-            serde_json::json!({ "reasoning_effort": "high" }),
-            "/v1/chat/completions",
-        ),
-        (
-            serde_json::json!({ "tools": tool, "reasoning_effort": "high" }),
-            "/v1/responses",
-        ),
+    // gpt-5.4 and later, and a model only Responses serves, whatever the
+    // chat carries.
+    for (model, path) in [
+        ("gpt-5-mini", "/v1/chat/completions"),
+        ("gpt-6-luna", "/v1/responses"),
+        ("o3-pro", "/v1/responses"),
     ] {
         a.answer(Answer::text("a"));
-        let (response, _) =
-            serve(&gateway, post("/v1/chat/completions", chat(extra.clone()))).await;
+        let body = serde_json::json!({ "model": model, "messages": [{ "role": "user", "content": "hi" }] });
+        let (response, _) = serve(&gateway, post("/v1/chat/completions", body.to_string())).await;
         let (status, _, body) = read_whole(response).await;
         gateway.idle().await;
-        assert_eq!(status, StatusCode::OK, "{extra}: {body:?}");
+        assert_eq!(status, StatusCode::OK, "{model}: {body:?}");
         let v: serde_json::Value =
             serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
         assert_eq!(
             v["object"], "chat.completion",
-            "{extra}: answered in the client's format"
+            "{model}: answered in the client's format"
         );
         assert_eq!(
             a.requests().last().map(|r| r.path.clone()).as_deref(),
             Some(path),
-            "{extra}"
+            "{model}"
         );
     }
-    // A model only Responses serves.
-    a.answer(Answer::text("a"));
-    let body =
-        serde_json::json!({ "model": "o3-pro", "messages": [{ "role": "user", "content": "hi" }] });
-    let (response, _) = serve(&gateway, post("/v1/chat/completions", body.to_string())).await;
-    assert_eq!(read_whole(response).await.0, StatusCode::OK);
-    gateway.idle().await;
-    assert_eq!(
-        a.requests().last().map(|r| r.path.clone()).as_deref(),
-        Some("/v1/responses")
-    );
 }

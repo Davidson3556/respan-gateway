@@ -135,9 +135,9 @@ format of its vendor, as `crates/vendors` says); the application registers one c
 provider per format, runs each vendor's plugin on its providers' calls alone,
 registered last so every other plugin sees the kind's events, and routes
 with the plugins crate's router (see [Routing](#routing)). Each media operation
-(`image`, `transcription`, `speech`, `embedding`, `video`) is a kind that translates
-within itself, and so is `realtime`; Responses over WebSocket is a routing
-kind of its own, `responses`, which does not. A video job's follow-up names no model, so a second plugin
+(`image`, `transcription`, `speech`, `embedding`, `video`) is a kind whose
+formats translate among themselves, and so is `realtime`; Responses over
+WebSocket is a routing kind of its own, `responses`, of one format. A video job's follow-up names no model, so a second plugin
 sends it to the provider that made the job, by its id's spelling (`video_`,
 `veo_`); providers sharing a spelling get ids wrapped in their name on the
 way out, `<provider>~<id>`, unwrapped on the way in. The media crate's
@@ -153,7 +153,7 @@ kind it routes within. `chat` is the conversation kind (all four chat
 formats translate within it); `image`, `transcription`, `speech`,
 `embedding` and `video` are the media kinds; `realtime` is the realtime
 kind; `responses` is Responses over WebSocket, a routing kind of its own
-that relays and does not translate.
+and one format, which relays.
 
 ## Routing
 
@@ -177,11 +177,9 @@ Of the providers serving the request's kind, the router picks:
    in the order added;
 4. else the provider whose model listing names it (`Catalog::lists`, read
    from the listings the binary fetches at start and every ten minutes
-   unless `plugins.routing.listings = false`); of several, the one that
-   claims the name, else the first configured;
-5. else the longest claimed prefix (the binary claims each vendor's
-   usual model names, `vendors::claims`), for aliases and unlisted models;
-6. else the kind's default: the target if it serves the kind, else the
+   unless `plugins.routing.listings = false`); of several, the first
+   configured;
+5. else the kind's default: the target if it serves the kind, else the
    first provider that does.
 
 A rule none of whose candidates serve the kind, or whose clients or kinds
@@ -193,9 +191,13 @@ average and error rate per candidate, recorded in `on_provider_end`); one
 that failed its last 3 calls within 30 s goes last. `Routes::plan` gives the
 `Planned` candidates (each a `Chosen`), why (`By`) and those passed over.
 
-It then targets the first candidate's core provider of the client's own
-format, else, for a kind that translates, its first of the kind, and sends
-it its model. `Dispatch`, registered last, sends a rule-routed request to its
+It then targets the first candidate's core provider of the format the
+provider sends the model in (`Routes::format_for`, a vendor's `format_for`, by
+the request's `Ask` and the card of the model sent: Respan's Anthropic,
+Gemini and Responses endpoints serve only their maker's models), else of the
+client's own format, else its first of the kind (the formats of a kind read
+and write the same neutral types, so any answers a client of another), and
+sends it its model. `Dispatch`, registered last, sends a rule-routed request to its
 candidates as the rule says: in turn with retries (`first_success`), or raced
 (`race`, its `hedge`). A request of a format the router was not given keeps
 its target.

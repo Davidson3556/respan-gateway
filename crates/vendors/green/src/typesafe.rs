@@ -17,6 +17,7 @@ pub const VENDOR: Vendor = Vendor {
     key_env: &["TYPESAFE_API_KEY"],
     formats: &[(&SystemOne, Some(BASE_URL))],
     models: list_models,
+    ..Vendor::DEFAULT
 };
 
 /// Its models: `{"models": [{"name", ..}]}`, each model or alias by the

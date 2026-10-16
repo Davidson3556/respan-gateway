@@ -180,8 +180,6 @@ export interface Routes {
   serve: ServedFormat[];
   defaults: { kind: Kind; provider: string }[];
   rules: RouteRule[];
-  /** Vendors' own model names, by prefix, longest first. */
-  claims: { prefix: string; provider: string }[];
 }
 
 /** Where a request would go now, as the router decides it. */
@@ -191,7 +189,6 @@ export interface Explained {
     | { type: "rule"; name: string }
     | { type: "named" }
     | { type: "listed" }
-    | { type: "claim"; prefix: string }
     | { type: "default" };
   pick?: RoutePick | null;
   mode?: "single" | "fallback" | "hedge";
@@ -269,6 +266,8 @@ export interface Model {
   owned_by: string;
   /** Gateway extension; may be absent. */
   kind?: Kind;
+  /** Who made it, as a provider serving others' models says, such as `anthropic`. */
+  maker?: string;
   /** What its provider's list says of it, where it says; may be absent. */
   display_name?: string;
   description?: string;

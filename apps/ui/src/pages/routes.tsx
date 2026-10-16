@@ -9,7 +9,6 @@ import { TomlCode } from "@/components/toml-code";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useRoutes } from "@/hooks/queries";
-import type { Routes } from "@/lib/api";
 import { describeError } from "@/lib/query-client";
 import { EXAMPLE_ROUTES } from "@/lib/routes";
 
@@ -22,27 +21,6 @@ function Destination({ name }: { name: string }) {
   );
 }
 
-/** Each vendor's model names, by provider. */
-function Claims({ claims }: { claims: Routes["claims"] }) {
-  const byProvider = new Map<string, string[]>();
-  for (const c of claims) byProvider.set(c.provider, [...(byProvider.get(c.provider) ?? []), c.prefix]);
-  if (!byProvider.size) return <p className="p-5 text-sm text-muted-foreground">No vendor model names: name a provider as provider/model.</p>;
-  return (
-    <div className="divide-y">
-      {[...byProvider].map(([provider, prefixes]) => (
-        <div key={provider} className="grid grid-cols-[minmax(0,8rem)_minmax(0,1fr)] items-start gap-4 px-5 py-3">
-          <Destination name={provider} />
-          <div className="flex flex-wrap gap-1.5">
-            {prefixes.map((prefix) => (
-              <code key={prefix} className="rounded bg-muted px-1.5 py-0.5 text-xs" title={`Models starting with ${prefix}`}>{prefix}*</code>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export function RoutesPage() {
   const { data, isPending, error } = useRoutes(true);
   const kinds = data
@@ -52,7 +30,7 @@ export function RoutesPage() {
   return (
     <div className="grid min-w-0 grid-cols-1 gap-6">
       <PageHeader title="Routes"
-        description="Where each model a client asks for goes: your routes first, then a provider/ prefix, then the provider whose model list has it, then each vendor's own model names, then the kind's default." />
+        description="Where each model a client asks for goes: your routes first, then a provider/ prefix, then the provider whose model list has it, then the kind's default." />
       {error && !data ? (
         <div role="alert" className="text-sm text-destructive">
           <p>Couldn't load routes</p>
@@ -81,30 +59,20 @@ export function RoutesPage() {
             )}
           </section>
 
-          <div className="grid min-w-0 gap-5 lg:grid-cols-2">
-            <Card className="min-w-0 gap-0 overflow-hidden py-0">
-              <h2 className="border-b px-5 py-4 text-sm font-semibold">Default destinations</h2>
-              {data.defaults.length ? (
-                <div className="divide-y">
-                  {data.defaults.map((d) => (
-                    <div key={d.kind} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 px-5 py-3">
-                      <span className="text-sm capitalize">{d.kind}</span>
-                      <ArrowRight className="size-4 text-muted-foreground" aria-hidden />
-                      <Destination name={d.provider} />
-                    </div>
-                  ))}
-                </div>
-              ) : <p className="p-5 text-sm text-muted-foreground">No default provider</p>}
-            </Card>
-
-            <Card className="min-w-0 gap-0 overflow-hidden py-0">
-              <div className="flex items-center justify-between border-b px-5 py-4">
-                <h2 className="text-sm font-semibold">Vendor model names</h2>
-                <span className="text-xs text-muted-foreground" title="For a model no provider's list has, such as an alias; and to choose between providers that both list it">For unlisted models · longest match wins</span>
+          <Card className="min-w-0 gap-0 overflow-hidden py-0">
+            <h2 className="border-b px-5 py-4 text-sm font-semibold">Default destinations</h2>
+            {data.defaults.length ? (
+              <div className="divide-y">
+                {data.defaults.map((d) => (
+                  <div key={d.kind} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 px-5 py-3">
+                    <span className="text-sm capitalize">{d.kind}</span>
+                    <ArrowRight className="size-4 text-muted-foreground" aria-hidden />
+                    <Destination name={d.provider} />
+                  </div>
+                ))}
               </div>
-              <Claims claims={data.claims} />
-            </Card>
-          </div>
+            ) : <p className="p-5 text-sm text-muted-foreground">No default provider</p>}
+          </Card>
 
           <details className="group min-w-0 rounded-xl border bg-card">
             <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 text-sm font-semibold [&::-webkit-details-marker]:hidden">

@@ -30,6 +30,6 @@ impl Dialect for DeepSeek {
     }
 
     fn output(&self, call: &Call) -> Option<Box<dyn Filter<Output>>> {
-        chat::reasoning_read(call)
+        chat::read(call, &[], true)
     }
 }

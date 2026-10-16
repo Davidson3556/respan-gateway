@@ -14,8 +14,8 @@
 //!   goes to Responses.** Such a call stores nothing, and its reasoning
 //!   comes encrypted (`openai-responses` asks so); the reasoning an
 //!   assistant's tool calls came of is kept under each call's id, and put
-//!   back before those calls when the client sends them again
-//!   ([`EarlierReasoning`]), as the client cannot. Without it the model
+//!   back before those calls when the client sends them again, as the
+//!   client cannot. Without it the model
 //!   loses its reasoning between tool calls.
 //!
 //! What is kept is reached by its id alone, which none can guess.
@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use respan_gateway_conversation::{Assembled, Content, Input, Message, Output, Role};
 use respan_gateway_conversation_http::Schema;
-use respan_gateway_conversation_http::responses::{EarlierReasoning, OpenAiResponses};
+use respan_gateway_conversation_http::responses::OpenAiResponses;
 use respan_gateway_core::{
     ClientContext, Fault, Filter, Plugin, ProviderContext, Result, async_trait,
 };
@@ -212,18 +212,48 @@ impl Responses {
     /// calls; and the reasoning this call's answer gives before its tool
     /// calls is kept under their ids.
     fn carry_reasoning(&self, px: &mut ProviderContext) -> Result<()> {
-        let store = self.store.clone();
-        let earlier = move |id: &str| {
-            let turn = store.get(&call_key(id))?;
-            let reasoning = turn.messages.into_iter().flat_map(|m| m.content);
-            Some(reasoning.collect())
-        };
-        px.extensions_mut()
-            .insert(EarlierReasoning(Arc::new(earlier)));
+        if px.format() == RESPONSES {
+            let store = self.store.clone();
+            px.filter(move |input: &mut Input| {
+                put_back(input, |id| {
+                    let turn = store.get(&call_key(id))?;
+                    Some(turn.messages.into_iter().flat_map(|m| m.content).collect())
+                });
+                Ok(())
+            })?;
+        }
         px.filter(KeepReasoning {
             store: self.store.clone(),
             said: Assembled::default(),
         })
+    }
+}
+
+/// `input` with the reasoning `earlier` finds for each assistant message
+/// without any put back before its tool calls, by its first call's id.
+fn put_back(input: &mut Input, earlier: impl Fn(&str) -> Option<Vec<Content>>) {
+    for message in &mut input.messages {
+        let reasons = message
+            .content
+            .iter()
+            .any(|p| matches!(p, Content::Reasoning { .. }));
+        if message.role != Role::Assistant || reasons {
+            continue;
+        }
+        let first_call = message
+            .content
+            .iter()
+            .enumerate()
+            .find_map(|(at, p)| match p {
+                Content::ToolCall { id, .. } => Some((at, id)),
+                _ => None,
+            });
+        let Some((at, id)) = first_call else {
+            continue;
+        };
+        if let Some(reasoning) = earlier(id) {
+            message.content.splice(at..at, reasoning);
+        }
     }
 }
 

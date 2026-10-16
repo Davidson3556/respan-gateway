@@ -16,7 +16,6 @@
 use serde_json::Value;
 
 pub mod dialect;
-pub mod either;
 pub mod fields;
 mod schema;
 pub use schema::{Asked, Schema, StreamResponse, merge_details, read_provider_error};

@@ -61,7 +61,6 @@ async fn check_reports_what_the_environment_configures_without_the_key() {
     assert!(report.contains("key     env OPENAI_API_KEY"), "{report}");
     assert!(report.contains("POST /v1/chat/completions"), "{report}");
     assert!(report.contains("chat -> openai"), "{report}");
-    assert!(report.contains("gpt-"), "{report}");
     assert!(
         report.contains("auth       off: no client keys"),
         "{report}"

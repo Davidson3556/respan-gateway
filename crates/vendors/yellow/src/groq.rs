@@ -30,6 +30,8 @@ pub const VENDOR: Vendor = Vendor {
 #[derive(Debug, Clone, Copy)]
 pub struct Groq;
 
+/// For a client of any format, Chat Completions' too: the usage counts for
+/// each.
 impl Dialect for Groq {
     fn output(&self, _: &Call) -> Option<Box<dyn Filter<Output>>> {
         Some(Box::new(XGroqUsage::default()))
