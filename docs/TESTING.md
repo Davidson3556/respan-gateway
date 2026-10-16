@@ -181,11 +181,11 @@ Gemini `generateContent`, Responses, passthrough) and the media kinds
 `real_openai_speech_then_transcription`, `real_gemini_embeddings`,
 `real_gemini_image_generation`). Video has no live test; it is covered
 against fakes. The gateway suite uses `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-`GEMINI_API_KEY` and `TYPESAFE_API_KEY` for its corresponding providers. The
-WebSocket suite uses `OPENAI_API_KEY` and `GEMINI_API_KEY`. Set only the
-credentials needed for the tests you select; individual test names can be
-used as Cargo filters. Provider endpoint/model overrides are documented in
-the test sources.
+`GEMINI_API_KEY`, `RESPAN_API_KEY` and `TYPESAFE_API_KEY` for its
+corresponding providers. The WebSocket suite uses `OPENAI_API_KEY` and
+`GEMINI_API_KEY`. Set only the credentials needed for the tests you select;
+individual test names can be used as Cargo filters. Provider endpoint and model
+overrides are listed in [`validation/README.md`](../validation/README.md).
 
 A vendor these tests cover with a test of its own (`real_<id>_...`) is
 green, in `crates/vendors/green`, and `crates/vendors/green/tests/live.rs`

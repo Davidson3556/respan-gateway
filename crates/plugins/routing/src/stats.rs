@@ -22,12 +22,13 @@ pub struct Stats(Mutex<HashMap<(String, String), Stat>>);
 
 #[derive(Debug, Clone)]
 struct Stat {
-    latency_ms: Option<f64>,
+    /// Its moving average time to a head, in milliseconds, and when it was
+    /// last measured.
+    latency: Option<(f64, Instant)>,
     error_rate: f64,
     calls: u64,
     failures: u64,
     streak: u32,
-    last: Instant,
     last_failure: Option<Instant>,
 }
 
@@ -55,21 +56,20 @@ impl Stats {
         let stat = stats
             .entry((provider.to_owned(), model.to_owned()))
             .or_insert(Stat {
-                latency_ms: None,
+                latency: None,
                 error_rate: 0.0,
                 calls: 0,
                 failures: 0,
                 streak: 0,
-                last: now,
                 last_failure: None,
             });
         if let Some(head) = head {
             let ms = head.as_secs_f64() * 1000.0;
-            let stale = now.duration_since(stat.last) > FRESH;
-            stat.latency_ms = Some(match stat.latency_ms {
-                Some(avg) if !stale => avg + WEIGHT * (ms - avg),
+            let avg = match stat.latency {
+                Some((avg, at)) if now.duration_since(at) <= FRESH => avg + WEIGHT * (ms - avg),
                 _ => ms,
-            });
+            };
+            stat.latency = Some((avg, now));
         }
         let sample = if failed { 1.0 } else { 0.0 };
         stat.error_rate = match stat.calls {
@@ -84,7 +84,6 @@ impl Stats {
         } else {
             stat.streak = 0;
         }
-        stat.last = now;
     }
 
     /// The record of `model` of `provider`, if it was called.
@@ -94,7 +93,7 @@ impl Stats {
         let cooling =
             stat.streak >= STREAK && stat.last_failure.is_some_and(|at| at.elapsed() < COOLING);
         Some(Seen {
-            latency_ms: stat.latency_ms,
+            latency_ms: stat.latency.map(|(ms, _)| ms),
             error_rate: stat.error_rate,
             calls: stat.calls,
             failures: stat.failures,
@@ -106,9 +105,8 @@ impl Stats {
     pub(crate) fn fresh_latency(&self, provider: &str, model: &str) -> Option<f64> {
         let stats = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let stat = stats.get(&(provider.to_owned(), model.to_owned()))?;
-        (stat.last.elapsed() < FRESH)
-            .then_some(stat.latency_ms)
-            .flatten()
+        let (ms, at) = stat.latency?;
+        (at.elapsed() < FRESH).then_some(ms)
     }
 }
 
@@ -139,5 +137,20 @@ mod tests {
         stats.record("a", "m", Some(Duration::from_millis(200)), false);
         assert_eq!(stats.fresh_latency("a", "m"), Some(120.0));
         assert_eq!(stats.fresh_latency("a", "other"), None);
+    }
+
+    /// Regression: any call, a failure that never opened among them, kept
+    /// an old latency fresh.
+    #[test]
+    fn only_a_measured_latency_is_fresh() {
+        let stats = Stats::default();
+        stats.record("a", "m", Some(Duration::from_millis(100)), false);
+        let long_ago = Instant::now().checked_sub(FRESH + Duration::from_secs(1));
+        if let Some(at) = long_ago {
+            let mut all = stats.0.lock().unwrap_or_else(|e| e.into_inner());
+            all.values_mut().for_each(|s| s.latency = Some((100.0, at)));
+        }
+        stats.record("a", "m", None, true);
+        assert_eq!(stats.fresh_latency("a", "m"), None);
     }
 }

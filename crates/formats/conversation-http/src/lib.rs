@@ -10,8 +10,7 @@
 //!
 //! A format is its spec: what a provider sends beyond it is kept native, at
 //! the place it appeared, for a plugin to read (each module says where), or
-//! for a vendor's [`dialect`] of it. [`either`] is one format, or another for
-//! the calls the first refuses.
+//! for a vendor's [`dialect`] of it.
 
 use serde_json::Value;
 
@@ -45,10 +44,14 @@ const FORMATS: [Inertness; 4] = [
     inertness::<GeminiGenerate>(),
 ];
 
-/// Whether `raw`, an event of `format`, changes no answer, as that format
-/// says ([`Schema::is_inert`]).
+/// Whether `raw`, an event of `format`, changes no answer: a block's fields
+/// ([`Output::block_fields`]), or what that format says is inert
+/// ([`Schema::is_inert`]).
+///
+/// [`Output::block_fields`]: respan_gateway_conversation::Output::block_fields
 fn is_inert(format: &str, raw: &Value) -> bool {
-    FORMATS
-        .iter()
-        .any(|(name, inert)| *name == format && inert(raw))
+    respan_gateway_conversation::block_fields(raw).is_some()
+        || FORMATS
+            .iter()
+            .any(|(name, inert)| *name == format && inert(raw))
 }

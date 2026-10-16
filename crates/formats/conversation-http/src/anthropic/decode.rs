@@ -11,7 +11,7 @@ use respan_gateway_sse::event_json;
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
-use super::{ANTHROPIC, BLOCK_FIELDS, extra_usage, finish_of, usage_of};
+use super::{ANTHROPIC, extra_usage, finish_of, usage_of};
 
 /// Decodes events and whole bodies of Anthropic Messages into events, as
 /// the module says.
@@ -121,12 +121,9 @@ impl AnthropicDecoder {
                 out.push(Output::block_start(block, Block::Reasoning));
                 let thinking = b["thinking"].as_str().filter(|t| !t.is_empty());
                 out.extend(thinking.map(|t| Output::reasoning(block, t)));
-                if says(&b["signature"]) {
-                    let delta = json!({ "type": "signature_delta", "signature": b["signature"] });
-                    self.other(
-                        event_of("content_block_delta", block, json!({ "delta": delta })),
-                        out,
-                    );
+                // A stream's start has an empty one; its delta says it.
+                if b["signature"].as_str().is_some_and(|s| !s.is_empty()) {
+                    self.signature(block, &b["signature"], out);
                 }
             }
             _ => self.opaque(block, event, out),
@@ -145,9 +142,14 @@ impl AnthropicDecoder {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         if !rest.is_empty() {
-            let event = json!({ "type": BLOCK_FIELDS, "index": block, "fields": rest });
-            self.other(event, out);
+            out.push(Output::block_fields(self.name.clone(), block, rest));
         }
+    }
+
+    /// Reasoning's `signature`, which its block carries back, as its fields.
+    fn signature(&self, block: u32, signature: &Value, out: &mut Vec<Output>) {
+        let fields = Map::from_iter([("signature".to_owned(), signature.clone())]);
+        out.push(Output::block_fields(self.name.clone(), block, fields));
     }
 
     fn opaque(&mut self, block: u32, event: Value, out: &mut Vec<Output>) {
@@ -213,6 +215,7 @@ impl AnthropicDecoder {
                         out.push(Output::arguments(block, text("partial_json")))
                     }
                     Some("thinking_delta") => out.push(Output::reasoning(block, text("thinking"))),
+                    Some("signature_delta") => self.signature(block, &delta["signature"], out),
                     _ => self.other(v, out),
                 }
             }

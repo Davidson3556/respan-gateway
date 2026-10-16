@@ -5,17 +5,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useLiveMode, type LiveMode } from "@/hooks/use-live-requests";
 import { cn } from "@/lib/utils";
 import { CommandPalette } from "./command-palette";
+import { pageAt } from "./nav";
 import { ThemeToggle } from "./theme-toggle";
-
-const titles: [prefix: string, title: string][] = [
-  ["/requests", "Requests"],
-  ["/playground", "Playground"],
-  ["/providers", "Providers"],
-  ["/models", "Models"],
-  ["/mcp", "MCP"],
-  ["/routes", "Routes"],
-  ["/settings", "Settings"],
-];
 
 const liveCopy: Record<LiveMode, { label: string; hint: string; dot: string }> = {
   live: { label: "Live", hint: "Streaming request events", dot: "bg-success" },
@@ -54,7 +45,7 @@ function LiveIndicator() {
 
 export function SiteHeader() {
   const { pathname } = useLocation();
-  const title = titles.find(([prefix]) => pathname.startsWith(prefix))?.[1] ?? "Overview";
+  const title = pageAt(pathname)?.label ?? "Overview";
   return (
     <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 rounded-t-xl border-b bg-background/80 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/70">
       <SidebarTrigger className="-ml-1" />

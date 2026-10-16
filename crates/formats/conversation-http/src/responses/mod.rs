@@ -49,11 +49,11 @@
 //!   response called a function, and `incomplete` its reason
 //!   (`max_output_tokens` the token limit, `content_filter` a filter, else a
 //!   native reason). `response.failed` and `error` are the stream's failure.
-//! - The item's fields the kind has no place for, such as its `id`, are one
-//!   native `{"type": "item_fields", "block": n, "fields": {..}}` before its
-//!   block opens, and an annotation one `{"type": "annotation", ..}`; the
-//!   usage object's other fields are `{"type": "usage_fields", ..}`. Another
-//!   format drops the first and the last, and refuses annotations.
+//! - The item's fields the kind has no place for, such as its `id`, are its
+//!   [`Output::block_fields`] before its block opens, and an annotation one
+//!   native `{"type": "annotation", ..}`; the usage object's other fields
+//!   are `{"type": "usage_fields", ..}`. Another format drops the block's
+//!   fields and the usage's, and refuses annotations.
 //! - An item the kind has no form for (a built-in tool's call, a refusal)
 //!   is a native of each of its events as they came, or, from a whole body,
 //!   one `response.output_item.done`; any other format refuses it.
@@ -90,8 +90,6 @@ pub use decode::ResponsesDecoder;
 /// The wire format's name ([`Schema::NAME`]).
 const RESPONSES: &str = "openai-responses";
 
-/// The type of the native that carries the fields of an item's block.
-const ITEM_FIELDS: &str = "item_fields";
 /// The type of the native that carries an annotation of a text block.
 const ANNOTATION: &str = "annotation";
 /// The type of the native that carries the usage's other fields.
@@ -104,6 +102,21 @@ const RESPONSE_FIELDS: &str = "response_fields";
 /// `https://api.openai.com/v1`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OpenAiResponses;
+
+impl OpenAiResponses {
+    /// Whether a request `body` has `instructions`, which this format reads
+    /// as its leading system message, as it reads them; reading no more of
+    /// the body than that field.
+    pub fn instructed(body: &[u8]) -> bool {
+        #[derive(serde::Deserialize)]
+        struct Instructions {
+            #[serde(default)]
+            instructions: Value,
+        }
+        serde_json::from_slice::<Instructions>(body)
+            .is_ok_and(|b| crate::schema::says(&b.instructions))
+    }
+}
 
 impl Format<ClientIo, Input, Output> for OpenAiResponses {
     fn name(&self) -> &str {
@@ -287,7 +300,7 @@ impl Schema for OpenAiResponses {
     /// usage, those the response changed, and a reasoning's raw text.
     fn is_inert(raw: &Value) -> bool {
         let kind = raw["type"].as_str().unwrap_or_default();
-        matches!(kind, ITEM_FIELDS | USAGE_FIELDS | RESPONSE_FIELDS)
+        matches!(kind, USAGE_FIELDS | RESPONSE_FIELDS)
             || kind.starts_with("response.reasoning_text.")
     }
 }

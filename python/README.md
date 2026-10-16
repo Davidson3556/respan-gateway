@@ -69,8 +69,8 @@ lists the merged models of every provider as `/v1/models` does, each with its
 
 HTTP error statuses are responses (and the SDKs raise their own exceptions
 for them), never exceptions of this package. A failure to carry out a request
-or start a server is a `GatewayError`; a timeout, `GatewayTimeout` (through
-httpx or an SDK it is the timeout error of that library). An invalid
+or start a server is a `GatewayError`. A timeout is httpx's
+`httpx.ReadTimeout`, which an SDK raises as its own timeout error. An invalid
 configuration is a `ConfigError` (a `ValueError`).
 
 ### What the gateway knows

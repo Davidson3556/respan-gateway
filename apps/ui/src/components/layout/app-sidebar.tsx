@@ -14,7 +14,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { useOverview } from "@/hooks/queries";
-import { build, monitor, settings, type NavItem } from "./nav";
+import { build, monitor, onPage, settings, type NavItem } from "./nav";
 
 function NavMenu({ items }: { items: NavItem[] }) {
   const { pathname } = useLocation();
@@ -25,7 +25,7 @@ function NavMenu({ items }: { items: NavItem[] }) {
         <SidebarMenuItem key={to}>
           <SidebarMenuButton
             asChild
-            isActive={to === "/" ? pathname === "/" : pathname.startsWith(to)}
+            isActive={onPage(to, pathname)}
             tooltip={label}
           >
             <NavLink to={to} end={to === "/"} onClick={() => isMobile && setOpenMobile(false)}>

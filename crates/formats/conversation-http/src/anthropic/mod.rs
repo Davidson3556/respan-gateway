@@ -14,8 +14,10 @@
 //!   whole body's blocks are the same events, one delta each.
 //! - `message_delta`'s `stop_reason` is the [`Output::Finish`]; `usage` of
 //!   `message_start` and `message_delta` are [`Output::Usage`] increments.
-//! - What the kind has no form for is a [`Output::Native`] of this format, as
-//!   the stream event that carries it: `ping`, a `signature_delta`, a block
+//! - A block's fields the kind has no place for, its `signature` (a
+//!   `signature_delta`) among them, are its [`Output::block_fields`].
+//! - What else the kind has no form for is a [`Output::Native`] of this
+//!   format, as the stream event that carries it: `ping`, a block
 //!   of another type (and its deltas and stop), citations, a `stop_sequence`
 //!   (as a `message_delta`), an event of an unknown type. In a whole body a
 //!   block of another type is a `content_block_start` of the whole block.
@@ -34,13 +36,13 @@ mod tests;
 
 use crate::is_inert;
 use crate::schema::{
-    Asked, Names, NativeFieldsExt, Schema, UsageFields, block_fields, check_usage, count,
-    decode_content, decode_message, encode_content, encode_message, merge_details, merge_fields,
-    native_fields, own_fields, says, set, stop_json, unsupported_fields, unwritable_content,
-    usage_extra,
+    Asked, Names, NativeFieldsExt, Schema, UsageFields, check_usage, count, decode_content,
+    decode_message, encode_content, encode_message, merge_details, merge_fields, native_fields,
+    own_fields, says, set, stop_json, unsupported_fields, unwritable_content, usage_extra,
 };
 use respan_gateway_conversation::{
     Assembled, AssembledItem, Block, Content, Finish, Input, Message, Output, Role, Usage,
+    block_fields,
 };
 use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, Fault, Format, NativeValue};
@@ -80,10 +82,6 @@ fn finish_of(reason: &str) -> Finish {
 
 /// This format's name.
 const ANTHROPIC: &str = "anthropic-messages";
-
-/// The type of an [`Output::Native`] that carries the fields of a block's
-/// start: not an event of the wire, but of this format's words.
-const BLOCK_FIELDS: &str = "content_block_fields";
 
 /// Anthropic Messages, named `anthropic-messages`: a `POST` to any path
 /// ending in `/v1/messages`. The provider's base URL leaves out the
@@ -250,10 +248,7 @@ impl Schema for AnthropicMessages {
     /// A ping, or what is kept beside a response: a signature, a stop
     /// sequence, usage fields with no unit, a tool call's fields.
     fn is_inert(raw: &Value) -> bool {
-        matches!(
-            raw["type"].as_str(),
-            Some("ping" | "message_delta" | "content_block_fields")
-        ) || raw["delta"]["type"] == "signature_delta"
+        matches!(raw["type"].as_str(), Some("ping" | "message_delta"))
     }
 
     /// The system prompt becomes a leading system message.
@@ -403,12 +398,16 @@ impl Schema for AnthropicMessages {
                     content.push(block);
                 }
                 AssembledItem::Native(NativeValue { format, value: raw })
-                    if **format == *ANTHROPIC
-                        && block_fields(raw, "index", Some(BLOCK_FIELDS)).is_some() =>
+                    if **format == *ANTHROPIC && block_fields(raw).is_some() =>
                 {
-                    fields.extend(
-                        block_fields(raw, "index", Some(BLOCK_FIELDS)).map(|(b, f)| (b, f.clone())),
-                    );
+                    let Some((block, more)) = block_fields(raw) else {
+                        continue;
+                    };
+                    // A block placed takes them now, as a signature after it.
+                    match at.iter().find(|(b, _)| *b == block) {
+                        Some((_, place)) => merge_fields(&mut content[*place], more),
+                        None => fields.push((block, more.clone())),
+                    }
                 }
                 AssembledItem::Native(NativeValue { format, value: raw })
                     if **format == *ANTHROPIC =>

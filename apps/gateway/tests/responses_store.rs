@@ -152,6 +152,29 @@ async fn a_follow_up_is_sent_with_the_conversation_it_names() {
     assert!(sent.iter().all(|r| r.get("previous_response_id").is_none()));
 }
 
+/// Regression: instructions as a list of parts were taken for the
+/// conversation's own system message, and replayed into the next turn.
+#[tokio::test]
+async fn instructions_in_any_form_are_the_requests_own() {
+    let (base, sent) = fake().await;
+    let gw = gateway(&base).await;
+    let parts = json!([{ "type": "input_text", "text": "Be brief." }]);
+    let (status, first) = respond(
+        &gw,
+        "ka",
+        json!({ "model": "m", "instructions": parts, "input": "one" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{first}");
+    let next = json!({ "model": "m", "input": "two", "previous_response_id": first["id"] });
+    assert_eq!(respond(&gw, "ka", next).await.0, 200);
+    let sent = sent.lock().unwrap().clone();
+    assert_eq!(
+        said(&sent[1]),
+        pairs(&[("user", "one"), ("assistant", "reply-1"), ("user", "two")])
+    );
+}
+
 #[tokio::test]
 async fn a_response_unknown_or_unkept_is_refused_before_a_call() {
     let (base, sent) = fake().await;

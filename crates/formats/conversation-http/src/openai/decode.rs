@@ -87,14 +87,18 @@ struct Call {
     function: Map<String, Value>,
 }
 
-/// The fields of tool call `block` the kind has no place for, as the
-/// [`Output::Native`] that carries them: before the call's block opens.
-fn call_fields(block: u32, entry: &Fields, function: &Fields) -> Option<Value> {
+/// The fields of tool call `block` the kind has no place for, the entry's,
+/// and its function's under `function`, as its [`Output::block_fields`]:
+/// before the call's block opens.
+fn call_fields(block: u32, entry: &Fields, function: &Fields) -> Option<Output> {
     if entry.is_empty() && function.is_empty() {
         return None;
     }
-    let fields = json!({ "block": block, "entry": entry, "function": function });
-    Some(json!({ "call_fields": fields }))
+    let mut fields = entry.clone();
+    if !function.is_empty() {
+        fields.insert("function".into(), Value::Object(function.clone()));
+    }
+    Some(Output::block_fields(OPENAI, block, fields))
 }
 
 impl OpenAiDecoder {
@@ -236,9 +240,7 @@ impl OpenAiDecoder {
             let block = match (call.start, self.open_block(&key)) {
                 (Some((id, name)), None) => {
                     let next = u32::try_from(self.blocks.len()).unwrap_or(u32::MAX);
-                    if let Some(fields) = call_fields(next, &call.entry, &call.function) {
-                        out.push(Output::native(self.name.clone(), fields));
-                    }
+                    out.extend(call_fields(next, &call.entry, &call.function));
                     self.open(key, Block::ToolCall { id, name }, out)
                 }
                 (_, Some(block)) => block,

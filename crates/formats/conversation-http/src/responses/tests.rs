@@ -429,7 +429,7 @@ fn a_stream_decodes_to_the_kinds_events() {
     let rest = [
         Output::native(
             RESPONSES,
-            json!({ "type": ITEM_FIELDS, "block": 0, "fields": { "id": "msg_1" } }),
+            json!({ "type": "block_fields", "block": 0, "fields": { "id": "msg_1" } }),
         ),
         Output::block_start(0, Block::Text),
         Output::text(0, "Hello"),
@@ -496,7 +496,7 @@ fn function_calls_and_reasoning_are_blocks() {
     assert_eq!(all.finish, Some(Finish::ToolUse));
     assert!(out.contains(&Output::native(
         RESPONSES,
-        json!({ "type": ITEM_FIELDS, "block": 0, "fields": { "id": "rs_1" } })
+        json!({ "type": "block_fields", "block": 0, "fields": { "id": "rs_1" } })
     )));
 }
 
@@ -743,7 +743,7 @@ fn a_body_is_written_from_the_events() {
         Output::start("resp_9", "gpt-x"),
         Output::native(
             RESPONSES,
-            json!({ "type": ITEM_FIELDS, "block": 0, "fields": { "id": "msg_real" } }),
+            json!({ "type": "block_fields", "block": 0, "fields": { "id": "msg_real" } }),
         ),
         Output::block_start(0, Block::Text),
         Output::text(0, "Hi"),
@@ -934,4 +934,26 @@ fn chat_fields_responses_has_too_are_written_as_its_own() {
         .decode_request(Bytes::from(n.to_string()))
         .expect("decoded");
     assert!(OpenAiResponses.encode_request(&chat).is_err());
+}
+
+#[test]
+fn instructions_count_as_the_reader_reads_them() {
+    for (body, instructed) in [
+        (r#"{"instructions":"Be brief."}"#, true),
+        (r#"{"instructions":""}"#, true),
+        (
+            r#"{"instructions":[{"type":"input_text","text":"x"}]}"#,
+            true,
+        ),
+        (r#"{"instructions":[]}"#, false),
+        (r#"{"instructions":null}"#, false),
+        (r#"{"input":"hi"}"#, false),
+        ("not json", false),
+    ] {
+        assert_eq!(
+            OpenAiResponses::instructed(body.as_bytes()),
+            instructed,
+            "{body}"
+        );
+    }
 }

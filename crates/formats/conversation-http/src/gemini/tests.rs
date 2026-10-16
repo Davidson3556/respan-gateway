@@ -435,14 +435,14 @@ fn a_function_call_is_a_tool_block_and_stop_with_it_is_a_tool_use() {
     assert!(events.contains(&Output::arguments(1, r#"{"a":1}"#)));
     // The signature is kept for this format, and inert for another.
     let fields = events.iter().find_map(|e| match e {
-        Output::Native(n) if n.value["type"] == "part_fields" => Some(Value::clone(&n.value)),
+        Output::Native(n) if n.value["type"] == "block_fields" => Some(Value::clone(&n.value)),
         _ => None,
     });
     assert_eq!(
         fields,
-        Some(json!({ "type": "part_fields", "block": 1, "fields": { "thoughtSignature": "s" } }))
+        Some(json!({ "type": "block_fields", "block": 1, "fields": { "thoughtSignature": "s" } }))
     );
-    assert!(GeminiGenerate::is_inert(&fields.expect("fields")));
+    assert!(crate::is_inert("openai-chat", &fields.expect("fields")));
 
     assert_eq!(decode_body(&chunk), events);
 }

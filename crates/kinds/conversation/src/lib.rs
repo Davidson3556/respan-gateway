@@ -35,7 +35,7 @@
 
 use respan_gateway_core::Fault;
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
 use respan_gateway_core::{FormatId, NativeFields, NativeValue};
@@ -582,6 +582,21 @@ impl Output {
         Output::Native(NativeValue::new(format, raw))
     }
 
+    /// Fields of block `block` the kind has no place for, as `format` has
+    /// them, such as a signature: a client of `format` gets them back with
+    /// the block, [`Assembled::replay`] keeps them on its part, and another
+    /// format drops them. Read by [`block_fields`].
+    pub fn block_fields(
+        format: impl Into<FormatId>,
+        block: u32,
+        fields: Map<String, Value>,
+    ) -> Self {
+        Self::native(
+            format,
+            json!({ "type": BLOCK_FIELDS, "block": block, "fields": fields }),
+        )
+    }
+
     /// Whether it is content: a start, a block event or a finish. Usage and
     /// [`Output::Native`] are not.
     pub fn is_content(&self) -> bool {
@@ -709,30 +724,20 @@ impl Assembled {
     /// reasoning and tool calls in order, each with the fields its format kept
     /// beside it.
     pub fn replay(&self) -> Vec<Content> {
-        let mut kept: HashMap<u32, (NativeValue, Map<String, Value>)> = HashMap::new();
+        let mut kept: HashMap<u32, NativeFields> = HashMap::new();
         for item in self.items() {
             let AssembledItem::Native(native) = item else {
                 continue;
             };
-            let Some(block) = native_block(&native.value) else {
+            let Some((block, fields)) = block_fields(&native.value) else {
                 continue;
             };
-            let raw = &native.value;
             let entry = kept
                 .entry(block)
-                .or_insert_with(|| (native.clone(), Map::new()));
-            if let Some(fields) = raw["fields"].as_object() {
-                let fields = fields.iter().map(|(k, v)| (k.clone(), v.clone()));
-                entry.1.extend(fields);
-            }
-            if let Some(signature) = raw["delta"]["signature"].as_str() {
-                entry.1.insert("signature".into(), signature.into());
-            }
+                .or_insert_with(|| NativeFields::new(native.format.clone(), Map::new()));
+            entry.fields.extend(fields.clone());
         }
-        let native_of = |block: u32| {
-            let (from, fields) = kept.get(&block)?;
-            Some(NativeFields::new(from.format.clone(), fields.clone())).filter(|n| !n.is_empty())
-        };
+        let native_of = |block: u32| kept.get(&block).filter(|n| !n.is_empty()).cloned();
         let mut parts = Vec::new();
         for item in self.items() {
             match item {
@@ -844,8 +849,21 @@ fn malformed(what: &str) -> Fault {
     Fault::upstream(format!("the response is malformed: {what}"))
 }
 
-/// The block a native event names, by `index` (Anthropic's) or `block` (the
-/// others' natives).
+/// The `type` of an [`Output::block_fields`] native.
+const BLOCK_FIELDS: &str = "block_fields";
+
+/// The block and fields of `raw`, if it is an [`Output::block_fields`]
+/// native's.
+pub fn block_fields(raw: &Value) -> Option<(u32, &Map<String, Value>)> {
+    if raw["type"] != BLOCK_FIELDS {
+        return None;
+    }
+    let block = u32::try_from(raw["block"].as_u64()?).ok()?;
+    Some((block, raw["fields"].as_object()?))
+}
+
+/// The block a native event names, by its `block`, or by `index` as a
+/// format's own block events name it; for a plugin that renumbers blocks.
 pub fn native_block(raw: &Value) -> Option<u32> {
     let named = raw["index"].as_u64().or_else(|| raw["block"].as_u64());
     u32::try_from(named?).ok()

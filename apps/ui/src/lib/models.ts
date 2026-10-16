@@ -1,4 +1,5 @@
 import type { Model } from "@/lib/api";
+import { formatPrice } from "@/lib/format";
 
 /** A model to choose: its ID, the provider that lists it, and what its list says of it, if known. */
 export type Listed = Pick<Model, "id"> &
@@ -21,7 +22,7 @@ export function modelFacts(m: Listed): string {
   }
   if (m.display_name && m.display_name !== m.id) facts.push(m.display_name);
   if (m.context_window) facts.push(`${tokensShort(m.context_window)} ctx`);
-  if (m.pricing) facts.push(`$${+m.pricing.input.toFixed(3)} / $${+m.pricing.output.toFixed(3)} per M`);
+  if (m.pricing) facts.push(formatPrice(m.pricing, " per M"));
   return facts.join(" · ");
 }
 

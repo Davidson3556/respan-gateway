@@ -914,7 +914,13 @@ fn models<'de, D: Deserializer<'de>>(d: D) -> Result<IndexMap<String, Model>, D:
             return Err(bad(&key, "name it as `provider/model`"));
         };
         if let Some(p) = &model.price {
-            let rates = [Some(p.input), Some(p.output), p.cached_input, p.per_second];
+            let rates = [
+                Some(p.input),
+                Some(p.output),
+                p.cached_input,
+                p.cache_write,
+                p.per_second,
+            ];
             if rates.iter().flatten().any(|r| !r.is_finite() || *r < 0.0) {
                 return Err(bad(&key, "a price must be a number of dollars, 0 or more"));
             }

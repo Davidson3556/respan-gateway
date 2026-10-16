@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useExplain } from "@/hooks/queries";
 import type { Explained, Routes } from "@/lib/api";
 import { describeError } from "@/lib/query-client";
-import { formatPrice } from "@/lib/routes";
+import { formatPrice } from "@/lib/format";
 
 const ANY = "any client";
 

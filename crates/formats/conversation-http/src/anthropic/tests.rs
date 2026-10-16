@@ -405,10 +405,9 @@ fn a_whole_response_decodes_into_events_per_block() {
         "usage": { "input_tokens": 2, "output_tokens": 1 },
     });
     let events = decode_body(&v);
-    let signature = json!({ "type": "content_block_delta", "index": 0,
-        "delta": { "type": "signature_delta", "signature": "sig" } });
-    let cited = json!({ "type": "content_block_fields", "index": 3,
-        "fields": { "citations": [{ "type": "char_location" }] } });
+    let fields = |v: Value| v.as_object().cloned().unwrap_or_default();
+    let signature = fields(json!({ "signature": "sig" }));
+    let cited = fields(json!({ "citations": [{ "type": "char_location" }] }));
     let mut totals = Output::usage(Usage {
         input_tokens: 2,
         ..Usage::default()
@@ -423,7 +422,7 @@ fn a_whole_response_decodes_into_events_per_block() {
             totals,
             Output::block_start(0, Block::Reasoning),
             Output::reasoning(0, "hm"),
-            Output::native(ANTHROPIC, signature),
+            Output::block_fields(ANTHROPIC, 0, signature),
             Output::block_end(0),
             Output::block_start(1, Block::Text),
             Output::text(1, "ok"),
@@ -432,7 +431,7 @@ fn a_whole_response_decodes_into_events_per_block() {
             Output::arguments(2, "{\"a\":1}"),
             Output::block_end(2),
             // What the kind has no place for comes before the block opens.
-            Output::native(ANTHROPIC, cited),
+            Output::block_fields(ANTHROPIC, 3, cited),
             Output::block_start(3, Block::Text),
             Output::text(3, "cited"),
             Output::block_end(3),

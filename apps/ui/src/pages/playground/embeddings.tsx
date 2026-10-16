@@ -31,17 +31,20 @@ export function EmbeddingsTab() {
   const embed = useMutation({
     mutationFn: () =>
       call.track({ api: api.api.id, model: choice.model }, async () => {
+        // The texts as sent, which the result shows whatever is typed after.
+        const texts = [a.trim(), b.trim()];
         const res = await postJson<EmbeddingsResponse>("/v1/embeddings", {
           model: choice.model,
-          input: [a.trim(), b.trim()],
+          input: texts,
           encoding_format: "float",
         });
-        return [...res.data].sort((x, y) => x.index - y.index).map((d) => d.embedding);
+        const vectors = [...res.data].sort((x, y) => x.index - y.index).map((d) => d.embedding);
+        return { texts, vectors };
       }),
   });
 
-  const [first, second] = embed.data ?? [];
-  const texts = [a.trim(), b.trim()];
+  const [first, second] = embed.data?.vectors ?? [];
+  const texts = embed.data?.texts ?? [];
   const score = first && second ? cosineSimilarity(first, second) : 0;
 
   return (

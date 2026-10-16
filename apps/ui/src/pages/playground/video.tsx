@@ -209,7 +209,7 @@ export function VideoTab() {
           </div>
         </Card>
       ) : create.isPending ? (
-        <Progress job={{ id: "", status: "queued" }} since={create.submittedAt} prompt={prompt} />
+        <Progress job={{ id: "", status: "queued" }} since={create.submittedAt} prompt={create.variables?.prompt ?? ""} />
       ) : current ? (
         <Progress
           job={current}

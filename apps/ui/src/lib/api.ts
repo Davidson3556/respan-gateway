@@ -146,6 +146,8 @@ export interface Price {
   input: number;
   output: number;
   cached_input?: number;
+  /** Of each input token written to a cache. */
+  cache_write?: number;
   /** Per second of audio, for a model billed by its length. */
   per_second?: number;
 }

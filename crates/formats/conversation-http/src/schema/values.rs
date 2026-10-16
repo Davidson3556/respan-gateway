@@ -120,20 +120,6 @@ pub(crate) fn own_fields(start: Option<&Start>, format: &str) -> Map<String, Val
     start.map(|s| s.native.fields().clone()).unwrap_or_default()
 }
 
-/// The fields a native keeps for a block, and the block: its number is at
-/// `index`, and its `type` is `kind` if that is given.
-pub(crate) fn block_fields<'a>(
-    raw: &'a Value,
-    index: &str,
-    kind: Option<&str>,
-) -> Option<(u32, &'a Map<String, Value>)> {
-    let block = u32::try_from(raw[index].as_u64()?).ok()?;
-    if kind.is_some_and(|kind| raw["type"] != kind) {
-        return None;
-    }
-    Some((block, raw["fields"].as_object()?))
-}
-
 /// Which counts a format's usage object has a field for.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UsageFields {

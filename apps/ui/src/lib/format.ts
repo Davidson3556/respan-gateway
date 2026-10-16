@@ -1,3 +1,5 @@
+import type { Price } from "@/lib/api";
+
 const compact = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
 const whole = new Intl.NumberFormat("en");
 
@@ -76,4 +78,17 @@ export function formatCost(usd: number): string {
   if (usd === 0) return "$0.00";
   if (usd < 0.0001) return "<$0.0001";
   return `$${usd < 1 ? usd.toFixed(4) : usd.toFixed(2)}`;
+}
+
+/**
+ * A price: per million tokens, input / output, such as "$0.15 / $0.6", then
+ * `perMillion` if given; or per minute of audio for a model billed by the
+ * second, "$0.006 / min".
+ */
+export function formatPrice(price: Price | null | undefined, perMillion = ""): string {
+  if (!price) return "—";
+  if (price.per_second != null && !price.input && !price.output) {
+    return `$${+(price.per_second * 60).toFixed(4)} / min`;
+  }
+  return `$${+price.input.toFixed(3)} / $${+price.output.toFixed(3)}${perMillion}`;
 }

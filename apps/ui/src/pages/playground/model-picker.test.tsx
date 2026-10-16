@@ -72,6 +72,8 @@ it("says what a model's list said of it: name, context and price", () => {
   ).toBe("Claude Haiku 5.5 · 1M ctx · $1 / $5 per M");
   expect(modelFacts({ id: "gpt-x", display_name: "gpt-x", context_window: 128_000 })).toBe("128K ctx");
   expect(modelFacts({ id: "plain" })).toBe("");
+  const audio = { input: 0, output: 0, per_second: 0.0001 };
+  expect(modelFacts({ id: "whisper-1", pricing: audio })).toBe("$0.006 / min");
 });
 
 it("says where a route goes", () => {

@@ -14,6 +14,9 @@ pub struct Price {
     /// Of each input token read from a cache; `input` if unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_input: Option<f64>,
+    /// Of each input token written to a cache; `input` if unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
     /// Of each second of audio, as a transcription model may bill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_second: Option<f64>,
@@ -27,6 +30,7 @@ impl Price {
             input,
             output,
             cached_input,
+            cache_write: None,
             per_second: None,
         }
     }

@@ -225,9 +225,11 @@ fn used(usage: &Usage) -> Option<Used> {
 /// What `usage` cost at `price`, in US dollars.
 pub fn charge(price: &Price, usage: &Usage) -> f64 {
     let cached = usage.cached_input_tokens.min(usage.input_tokens);
-    let cached_rate = price.cached_input.unwrap_or(price.input);
-    let dollars = (usage.input_tokens - cached) as f64 * price.input
-        + cached as f64 * cached_rate
+    let written = (usage.cache_write_input_tokens).min(usage.input_tokens - cached);
+    let plain = usage.input_tokens - cached - written;
+    let dollars = plain as f64 * price.input
+        + cached as f64 * price.cached_input.unwrap_or(price.input)
+        + written as f64 * price.cache_write.unwrap_or(price.input)
         + usage.output_tokens as f64 * price.output;
     dollars / 1e6
 }
@@ -282,5 +284,22 @@ mod tests {
             ..price
         };
         assert!((charge(&plain, &usage) - 6.0).abs() < 1e-9);
+    }
+
+    /// Regression: tokens written to a cache, which Anthropic bills above
+    /// the input rate, were charged at it.
+    #[test]
+    fn cache_writes_cost_their_own_rate() {
+        let price = Price {
+            cache_write: Some(2.5),
+            ..Price::new(2.0, 8.0, Some(0.5))
+        };
+        let usage = Usage {
+            cached_input_tokens: 200_000,
+            cache_write_input_tokens: 300_000,
+            ..Usage::new(1_000_000, 0)
+        };
+        let cost = charge(&price, &usage);
+        assert!((cost - (0.5 * 2.0 + 0.2 * 0.5 + 0.3 * 2.5)).abs() < 1e-9);
     }
 }

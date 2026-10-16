@@ -12,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useProviders } from "@/hooks/queries";
 import type { Provider } from "@/lib/api";
 import { formatCount, formatMs, formatPercent } from "@/lib/format";
+import { describeError } from "@/lib/query-client";
 
 const exampleConfig = `[providers.openai]
 vendor = "openai"
@@ -95,7 +96,7 @@ function ProviderCard({ provider: p }: { provider: Provider }) {
 }
 
 export function ProvidersPage() {
-  const { data, isPending } = useProviders();
+  const { data, isPending, error } = useProviders();
   return (
     <div className="grid gap-6">
       <PageHeader
@@ -107,6 +108,14 @@ export function ProvidersPage() {
           {Array.from({ length: 3 }, (_, i) => (
             <Skeleton key={i} className="h-52 rounded-xl" />
           ))}
+        </div>
+      ) : error && !data ? (
+        <div
+          role="alert"
+          className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm"
+        >
+          <p className="font-medium">Couldn't load providers</p>
+          <p className="text-muted-foreground">{describeError(error)}</p>
         </div>
       ) : data?.length ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">

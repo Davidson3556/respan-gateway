@@ -142,6 +142,10 @@ describe("EmbeddingsTab", () => {
       input: ["a cat", "a kitten"],
       encoding_format: "float",
     });
+    // Each vector stays captioned with the text it was made of.
+    await userEvent.type(screen.getByLabelText("Text A"), " on a mat");
+    expect(screen.getByText("a cat", { selector: "p" })).toBeInTheDocument();
+    expect(screen.queryByText("a cat on a mat", { selector: "p" })).not.toBeInTheDocument();
   });
 });
 

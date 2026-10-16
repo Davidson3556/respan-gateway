@@ -59,13 +59,15 @@ function Stats() {
 }
 
 function ProvidersSummary() {
-  const { data, isPending } = useProviders();
+  const { data, isPending, error } = useProviders();
   return (
     <Card className="gap-4">
       <CardHeader className="flex flex-row items-center justify-between">
         <div className="grid gap-1.5">
           <CardTitle className="text-base">Providers</CardTitle>
-          <CardDescription>{data ? `${data.length} configured` : "Loading…"}</CardDescription>
+          <CardDescription>
+            {data ? `${data.length} configured` : error ? `Couldn't load: ${describeError(error)}` : "Loading…"}
+          </CardDescription>
         </div>
         <Button variant="ghost" size="sm" asChild>
           <Link to="/providers">

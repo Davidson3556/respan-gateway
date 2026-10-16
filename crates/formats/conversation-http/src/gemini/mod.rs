@@ -55,7 +55,7 @@
 //!   [`Block::Reasoning`]), a `functionCall` is a [`Block::ToolCall`] whose
 //!   arguments are one delta. A part with fields beyond its content, such as
 //!   a `thoughtSignature`, is a block of its own, and the fields come before
-//!   it in an inert [`Output::Native`] `{"type": "part_fields", ..}`.
+//!   it as its [`Output::block_fields`].
 //! - `finishReason` is the [`Output::Finish`]: `STOP` is a stop, or a
 //!   tool use when the response made calls, `MAX_TOKENS` the token limit, and
 //!   `SAFETY`, `RECITATION`, `BLOCKLIST` and the like are filtered; any other
@@ -354,7 +354,7 @@ impl Schema for GeminiGenerate {
     fn is_inert(raw: &Value) -> bool {
         matches!(
             raw["type"].as_str(),
-            Some("part_fields" | "candidate_fields" | "response_fields" | "usage_fields")
+            Some("candidate_fields" | "response_fields" | "usage_fields")
         )
     }
 
@@ -415,9 +415,9 @@ impl Schema for GeminiGenerate {
                 AssembledItem::Native(NativeValue { format, value: raw })
                     if **format == *GEMINI =>
                 {
-                    match (raw["type"].as_str(), block_fields(raw, "block", None)) {
-                        (Some("part_fields"), Some((block, f))) => fields.push((block, f.clone())),
-                        (Some("part"), _) => parts.push(raw["part"].clone()),
+                    match (block_fields(raw), raw["type"].as_str()) {
+                        (Some((block, f)), _) => fields.push((block, f.clone())),
+                        (None, Some("part")) => parts.push(raw["part"].clone()),
                         _ if body.add(raw) => {}
                         _ => return Err(unwritable_content()),
                     }

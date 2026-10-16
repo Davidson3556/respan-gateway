@@ -86,8 +86,7 @@ impl GeminiDecoder {
         let block = self.next;
         self.next += 1;
         if !fields.is_empty() {
-            let event = json!({ "type": "part_fields", "block": block, "fields": fields });
-            self.other(event, out);
+            out.push(Output::block_fields(GEMINI, block, fields));
         }
         block
     }

@@ -1,8 +1,7 @@
 //! Events as Responses, whole or streamed: the encoders.
 
 use super::{
-    ANNOTATION, ITEM_FIELDS, RESPONSE_FIELDS, RESPONSES, USAGE, USAGE_FIELDS, response_body,
-    status_of,
+    ANNOTATION, RESPONSE_FIELDS, RESPONSES, USAGE, USAGE_FIELDS, response_body, status_of,
 };
 use crate::is_inert;
 use crate::schema::{
@@ -106,7 +105,7 @@ pub(super) fn whole(whole: &Assembled) -> Result<Value, Fault> {
         if **format != *RESPONSES {
             continue;
         }
-        if let Some((block, more)) = block_fields(raw, "block", Some(ITEM_FIELDS)) {
+        if let Some((block, more)) = block_fields(raw) {
             fields.push((block, more.clone()));
         } else if raw["type"] == ANNOTATION {
             let block = raw["block"].as_u64().and_then(|b| u32::try_from(b).ok());
@@ -159,7 +158,8 @@ pub(super) fn whole(whole: &Assembled) -> Result<Value, Fault> {
                     Some("response.output_item.done") => output.push(raw["item"].clone()),
                     // The rest of an item is in its done event, or in a block.
                     Some(t) if t.starts_with("response.") => {}
-                    Some(ITEM_FIELDS | ANNOTATION | USAGE_FIELDS | RESPONSE_FIELDS) => {}
+                    Some(ANNOTATION | USAGE_FIELDS | RESPONSE_FIELDS) => {}
+                    _ if block_fields(raw).is_some() => {}
                     _ => return Err(unwritable_content()),
                 }
             }
@@ -613,7 +613,7 @@ impl Events {
                 self.begin(out);
             }
             Output::Native(NativeValue { format, value: raw }) if **format == *RESPONSES => {
-                if let Some((block, fields)) = block_fields(raw, "block", Some(ITEM_FIELDS)) {
+                if let Some((block, fields)) = block_fields(raw) {
                     // Fields of a block that is open join its item: they are the
                     // done item's.
                     match self.blocks.iter_mut().find(|b| b.block == block) {

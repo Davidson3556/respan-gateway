@@ -26,10 +26,8 @@
 //! fields its format kept beside it, so a signed `thinking` block of
 //! Anthropic or a `thoughtSignature` of Gemini goes back in the assistant
 //! message the next step starts from, and the provider accepts the step. A
-//! block's fields are those of the native events that name it by `index` or
-//! `block` with a `fields` object, and a `signature` delta (Anthropic's
-//! `signature_delta`); a `redacted_thinking` block, which only natives carry,
-//! is replayed whole. Other blocks only natives carry (a provider-run tool's)
+//! block's fields are its [`block_fields`]; a `redacted_thinking`
+//! block, which only natives carry, is replayed whole. Other blocks only natives carry (a provider-run tool's)
 //! are not replayed.
 //!
 //! Native events of a step reach the client as its blocks do. One that names
@@ -38,6 +36,8 @@
 //! provider-run tool's) gets a number of its own. Events about the step as a
 //! whole (`ping`, a stop sequence, response fields) are those of the first
 //! step; the client has no use for those of the steps after.
+//!
+//! [`block_fields`]: respan_gateway_conversation::Output::block_fields
 //!
 //! A tool's failure is the model's to read, not the gateway's: a result with
 //! `is_error` set. Only the provider's failure, a limit, or a malformed reply

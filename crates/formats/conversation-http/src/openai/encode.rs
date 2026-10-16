@@ -4,7 +4,7 @@ use crate::is_inert;
 use crate::schema::{
     Gate, NativeFieldsExt, Schema, check_usage, fits, merge_into, unix_now, unwritable_content,
 };
-use respan_gateway_conversation::{Block, Delta, Finish, Output, Start, Usage};
+use respan_gateway_conversation::{Block, Delta, Finish, Output, Start, Usage, block_fields};
 use respan_gateway_core::{Fault, NativeValue};
 use respan_gateway_http::Encoder;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
@@ -13,20 +13,19 @@ use serde_json::{Map, Value, json};
 
 use super::{FINISH, Fields, OPENAI, OpenAiChat, USAGE, response_of, usage_body, usage_fields};
 
-/// What a [`call_fields`] event says: the block, the entry's fields and the
-/// function's.
-pub(super) fn call_fields_of(raw: &Value) -> Option<(u32, &Fields, &Fields)> {
-    let only = raw.as_object().filter(|o| o.len() == 1)?;
-    let fields = only.get("call_fields")?;
-    let block = u32::try_from(fields["block"].as_u64()?).ok()?;
-    Some((
-        block,
-        fields["entry"].as_object()?,
-        fields["function"].as_object()?,
-    ))
+/// What a tool call's block fields say: the block, the entry's fields and
+/// the function's.
+pub(super) fn call_fields_of(raw: &Value) -> Option<(u32, Fields, Fields)> {
+    let (block, fields) = block_fields(raw)?;
+    let mut entry = fields.clone();
+    let function = match entry.shift_remove("function") {
+        Some(Value::Object(function)) => function,
+        _ => Fields::new(),
+    };
+    Some((block, entry, function))
 }
 
-/// Put the fields of a `call_fields` event into the tool call `call`.
+/// Put a tool call's block fields ([`call_fields_of`]) into the call `call`.
 pub(super) fn merge_call(
     call: &mut Value,
     entry: &Map<String, Value>,

@@ -144,9 +144,10 @@ fn card(m: &Value) -> Option<Model> {
     }
     let cost = |k: &str| m[k].as_f64();
     model.price = match (cost("input_cost"), cost("output_cost")) {
-        (Some(input), Some(output)) if input > 0.0 || output > 0.0 => {
-            Some(Price::new(input, output, cost("cache_hit_input_cost")))
-        }
+        (Some(input), Some(output)) if input > 0.0 || output > 0.0 => Some(Price {
+            cache_write: cost("cache_creation_input_cost"),
+            ..Price::new(input, output, cost("cache_hit_input_cost"))
+        }),
         _ => None,
     };
     Some(model)

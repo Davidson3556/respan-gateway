@@ -3,9 +3,10 @@
 //! Ignored by default: they cost money and need the network. Each makes
 //! one small call and skips, passing, when its key is not set.
 //!
-//! Run: `OPENAI_API_KEY=... ANTHROPIC_API_KEY=... RESPAN_API_KEY=... cargo test --manifest-path validation/Cargo.toml
-//! --test live_providers -- --ignored`. Override the models
-//! with `OPENAI_MODEL` and `ANTHROPIC_MODEL`.
+//! Run: `OPENAI_API_KEY=... ANTHROPIC_API_KEY=... GEMINI_API_KEY=...
+//! RESPAN_API_KEY=... TYPESAFE_API_KEY=... cargo test --manifest-path
+//! validation/Cargo.toml --test live_providers -- --ignored`. The keys,
+//! base URLs and models each reads are listed in `validation/README.md`.
 
 #![allow(clippy::unwrap_used)]
 
@@ -24,6 +25,16 @@ fn openai_config(serve: &str) -> String {
     let base = serde_json::to_string(&base).unwrap();
     format!(
         "providers = {{ p = {{ formats = \"openai-chat\", base_url = {base}, auth = {{ type = \"bearer\", key = \"env:OPENAI_API_KEY\" }} }} }}\nformats = [\"{serve}\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
+    )
+}
+
+/// Anthropic's Messages at `ANTHROPIC_BASE_URL`, else its API, for clients
+/// of OpenAI Chat.
+fn anthropic_config() -> String {
+    let base = model("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
+    let base = serde_json::to_string(&base).unwrap();
+    format!(
+        "providers = {{ p = {{ formats = \"anthropic-messages\", base_url = {base}, auth = {{ type = \"header\", name = \"x-api-key\", key = \"env:ANTHROPIC_API_KEY\" }} }} }}\nformats = [\"openai-chat\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n"
     )
 }
 
@@ -125,9 +136,7 @@ async fn real_anthropic_streamed_tool_call_translates_to_openai() {
     if !has("ANTHROPIC_API_KEY") {
         return;
     }
-    let base =
-        serde_json::to_string(&model("ANTHROPIC_BASE_URL", "https://api.anthropic.com")).unwrap();
-    let gw = Gateway::start(&format!("providers = {{ p = {{ formats = \"anthropic-messages\", base_url = {base}, auth = {{ type = \"header\", name = \"x-api-key\", key = \"env:ANTHROPIC_API_KEY\" }} }} }}\nformats = [\"openai-chat\"]\nplugins = {{ routing = {{ default = \"p\" }} }}\n")).await;
+    let gw = Gateway::start(&anthropic_config()).await;
     let request = serde_json::json!({
         "model":model("ANTHROPIC_MODEL","claude-haiku-4-5"),"max_tokens":256,"stream":true,
         "messages":[{"role":"user","content":"Call echo with text exactly 雪😀."}],
@@ -467,10 +476,7 @@ async fn real_openai_client_to_anthropic_streamed() {
     if !has("ANTHROPIC_API_KEY") {
         return;
     }
-    let gw = Gateway::start(
-        "providers = { anthropic = { formats = \"anthropic-messages\", base_url = \"https://api.anthropic.com\", auth = { type = \"header\", name = \"x-api-key\", key = \"env:ANTHROPIC_API_KEY\" } } }\nformats = [\"openai-chat\"]\nplugins = { routing = { default = \"anthropic\" } }\n",
-    )
-    .await;
+    let gw = Gateway::start(&anthropic_config()).await;
     let request = format!(
         r#"{{"model":"{}","max_tokens":16,"stream":true,"messages":[{{"role":"user","content":"Say ok."}}]}}"#,
         model("ANTHROPIC_MODEL", "claude-haiku-4-5")

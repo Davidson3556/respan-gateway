@@ -137,11 +137,34 @@ class RequestLogConfig(TypedDict, total=False):
     file_max: Union[int, str]  # bytes, or "64MiB": rotated to `<file>.1` at this size
 
 
+class ResponsesConfig(TypedDict, total=False):
+    """Conversation state the gateway keeps, in its memory: Responses translated
+    to another provider's format, and a Chat client's reasoning between tool
+    calls with OpenAI's Responses."""
+
+    enabled: bool  # True if unset
+    keep: Union[int, float, str]  # after it was last read; "1h" if unset
+
+
+class _RespanKey(TypedDict):
+    key: str  # literal, or "env:NAME"
+
+
+class RespanConfig(_RespanKey, total=False):
+    """Each request sent to Respan as a trace."""
+
+    url: str  # the OTLP trace endpoint; Respan's if unset
+    content: bool  # send a model's messages and reply; True if unset
+    service: str  # the service the traces are of; "respan-gateway" if unset
+
+
 class PluginsConfig(TypedDict, total=False):
     """The compiled-in plugins, each under its name; the gateway orders them."""
 
     routing: RoutingConfig
     tool_loop: ToolLoopConfig
+    responses: ResponsesConfig
+    respan: RespanConfig
     mcp_aggregate: McpAggregateConfig
     request_log: RequestLogConfig
 
@@ -152,9 +175,10 @@ class _Rates(TypedDict):
 
 
 class Price(_Rates, total=False):
-    """Dollars per million tokens."""
+    """Dollars per million tokens, and per second of audio."""
 
     cached_input: float  # for cached input tokens; `input` if unset
+    per_second: float  # for a model billed by the second of audio
 
 
 class ModelConfig(TypedDict, total=False):

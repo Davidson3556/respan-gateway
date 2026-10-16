@@ -17,7 +17,7 @@ use tokio::time::{Instant, timeout_at};
 use super::replay::renumbered;
 use super::tools::{limit, run_tools, spend};
 use super::{Limits, Sink, Step, StepReport, Toolbox};
-use respan_gateway_conversation::native_block as block_of;
+use respan_gateway_conversation::{block_fields, native_block as block_of};
 
 pub(super) struct Run {
     /// Whether the provider takes a tool result flagged as a failure.
@@ -171,7 +171,7 @@ impl Reading {
                     vec![renumbered(&native, block, self.number(block))]
                 }
                 // Fields of a block that is yet to open.
-                Some(block) if native.value["fields"].is_object() => {
+                Some(block) if block_fields(&native.value).is_some() => {
                     self.pending.entry(block).or_default().push(native);
                     Vec::new()
                 }

@@ -78,6 +78,13 @@ describe("ProvidersPage", () => {
     renderPage(<ProvidersPage />);
     expect(await screen.findByText("No providers configured")).toBeInTheDocument();
   });
+
+  it("shows an error, not an empty list, when loading fails", async () => {
+    serve({});
+    renderPage(<ProvidersPage />);
+    expect(await screen.findByText("Couldn't load providers")).toBeInTheDocument();
+    expect(screen.queryByText("No providers configured")).not.toBeInTheDocument();
+  });
 });
 
 describe("RequestsPage", () => {

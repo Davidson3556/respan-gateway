@@ -31,8 +31,8 @@
 //! - Sampling, elicitation, roots and completion are not offered: the
 //!   gateway tells its servers it is a client with no capabilities.
 //!
-//! The session belongs to the client key that opened it, as a server's does
-//! at `/mcp/{name}`. A client that ends its session (`DELETE`) ends the
+//! The session is reached by its id alone, which none can guess, as a
+//! server's is at `/mcp/{name}`. A client that ends its session (`DELETE`) ends the
 //! servers' sessions with it; one that does not leaves them to the servers'
 //! own idle timeouts (the gateway forgets its side after thirty idle minutes
 //! or past a thousand sessions). A reload ends every session of the build it

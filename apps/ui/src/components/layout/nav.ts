@@ -32,3 +32,16 @@ export const build: NavItem[] = [
 ];
 
 export const settings: NavItem = { to: "/settings", label: "Settings", icon: Settings };
+
+/** Every page, in the sidebar's order. */
+export const pages: NavItem[] = [...monitor, ...build, settings];
+
+/** Whether `pathname` is on the page at `to`: the overview only at `/`. */
+export function onPage(to: string, pathname: string): boolean {
+  return to === "/" ? pathname === "/" : pathname.startsWith(to);
+}
+
+/** The page `pathname` is on, if any. */
+export function pageAt(pathname: string): NavItem | undefined {
+  return pages.find(({ to }) => onPage(to, pathname));
+}

@@ -430,10 +430,7 @@ impl Schema for OpenAiChat {
     /// Usage, a tool call's fields, or the response's, kept beside it.
     fn is_inert(raw: &Value) -> bool {
         raw.as_object().is_some_and(|o| {
-            o.len() == 1
-                && ["usage", "call_fields", "response"]
-                    .iter()
-                    .any(|k| o.contains_key(*k))
+            o.len() == 1 && ["usage", "response"].iter().any(|k| o.contains_key(*k))
         })
     }
 }

@@ -134,10 +134,7 @@ impl Plugin for Responses {
         }
         let pending = Pending::default();
         let original = cx.extensions().get::<Original>().and_then(Original::get);
-        pending.lock().instructed = original.is_some_and(|r| {
-            let v: Value = serde_json::from_slice(r.body()).unwrap_or_default();
-            v["instructions"].as_str().is_some_and(|i| !i.is_empty())
-        });
+        pending.lock().instructed = original.is_some_and(|r| OpenAiResponses::instructed(r.body()));
         cx.extensions_mut().insert(pending.clone());
         cx.filter(Keep {
             store: self.store.clone(),
@@ -212,16 +209,18 @@ impl Responses {
     /// calls; and the reasoning this call's answer gives before its tool
     /// calls is kept under their ids.
     fn carry_reasoning(&self, px: &mut ProviderContext) -> Result<()> {
-        if px.format() == RESPONSES {
-            let store = self.store.clone();
-            px.filter(move |input: &mut Input| {
-                put_back(input, |id| {
-                    let turn = store.get(&call_key(id))?;
-                    Some(turn.messages.into_iter().flat_map(|m| m.content).collect())
-                });
-                Ok(())
-            })?;
+        // Only Responses writes, and answers with, its own reasoning.
+        if px.format() != RESPONSES {
+            return Ok(());
         }
+        let store = self.store.clone();
+        px.filter(move |input: &mut Input| {
+            put_back(input, |id| {
+                let turn = store.get(&call_key(id))?;
+                Some(turn.messages.into_iter().flat_map(|m| m.content).collect())
+            });
+            Ok(())
+        })?;
         px.filter(KeepReasoning {
             store: self.store.clone(),
             said: Assembled::default(),

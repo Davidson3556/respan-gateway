@@ -7,7 +7,7 @@ cannot select them.
 
 | Target | Tests | Requirements |
 | --- | ---: | --- |
-| `live_providers` | 9 | Provider keys and outbound network access |
+| `live_providers` | 19 | Provider keys and outbound network access |
 | `live_ws` | 4 | OpenAI/Gemini keys, model access and outbound TLS connections |
 | `reference_server` | 2 | Node.js, npx and network access to download the pinned MCP reference server |
 | `pdf` | 1 | Poppler's `pdftotext` on PATH |
@@ -22,9 +22,13 @@ cargo test --manifest-path validation/Cargo.toml --test reference_server -- --ig
 cargo test --manifest-path validation/Cargo.toml --test pdf -- --ignored
 ```
 
-Live requests may incur provider charges. Required keys and optional endpoint
-or model overrides are described in each test source. A test that skips for a
-missing key does not establish provider interoperability.
+Live requests may incur provider charges. A test skips, passing, when its key
+is unset, so a skipped test does not establish provider interoperability.
+
+| Target | Keys | Optional overrides |
+| --- | --- | --- |
+| `live_providers` | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `RESPAN_API_KEY`, `TYPESAFE_API_KEY` | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `OPENAI_MODEL`, `ANTHROPIC_MODEL`, `GEMINI_MODEL`, `OPENAI_IMAGE_MODEL`, `GEMINI_IMAGE_MODEL`, `GEMINI_EMBEDDING_MODEL`, `RESPAN_MODEL`, `RESPAN_CLAUDE`, `RESPAN_GEMINI`, `RESPAN_THINKER`, `RESPAN_REASONER` |
+| `live_ws` | `OPENAI_API_KEY`, `GEMINI_API_KEY` | `OPENAI_REALTIME_MODEL`, `GEMINI_LIVE_MODEL` |
 
 The gateway binary target builds the same source as `apps/gateway/`. Shared
 gateway and WebSocket harnesses are included from their owning packages. The PDF

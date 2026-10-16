@@ -46,7 +46,7 @@ import {
 import { tokensShort } from "@/lib/models";
 import { describeError } from "@/lib/query-client";
 import { ANY } from "@/lib/requests";
-import { formatPrice } from "@/lib/routes";
+import { formatPrice } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 

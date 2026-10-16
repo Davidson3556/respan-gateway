@@ -4,7 +4,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import type { RouteCandidate, RoutePick, RouteRule, RouteSeen } from "@/lib/api";
 import { formatCount, formatMs, formatPercent } from "@/lib/format";
-import { PICKS, attempts, formatPrice, shares } from "@/lib/routes";
+import { formatPrice } from "@/lib/format";
+import { PICKS, attempts, shares } from "@/lib/routes";
 
 const PICK_ICONS: Record<RoutePick, typeof ListOrdered> = {
   first: ListOrdered,

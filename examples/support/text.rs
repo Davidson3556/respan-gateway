@@ -526,8 +526,8 @@ fn inert(format: &str, raw: &Value) -> bool {
     match format {
         "anthropic-messages" => {
             matches!(raw["type"].as_str(), Some("ping" | "message_delta"))
-                || raw["delta"]["type"] == "signature_delta"
         }
+        _ if respan_gateway_conversation::block_fields(raw).is_some() => true,
         _ => only_usage(raw),
     }
 }

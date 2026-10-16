@@ -1,8 +1,7 @@
 //! Responses, streamed or whole, as events: the decoder.
 
 use super::{
-    ANNOTATION, ITEM_FIELDS, RESPONSE_FIELDS, RESPONSES, USAGE_FIELDS, extra_usage,
-    response_fields, usage_of,
+    ANNOTATION, RESPONSE_FIELDS, RESPONSES, USAGE_FIELDS, extra_usage, response_fields, usage_of,
 };
 use crate::schema::{
     Totals, ended, error_event, native_fields, rest_of, says, says_error, unreadable_event,
@@ -152,8 +151,7 @@ impl ResponsesDecoder {
             None => self.fields_said.push((block, fields.clone())),
         }
         if !fields.is_empty() {
-            let v = json!({ "type": ITEM_FIELDS, "block": block, "fields": fields });
-            self.native(v, out);
+            out.push(Output::block_fields(RESPONSES, block, fields));
         }
     }
 

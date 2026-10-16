@@ -10,7 +10,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use http::header::{AUTHORIZATION, COOKIE, LOCATION, PROXY_AUTHORIZATION};
 use http::{HeaderMap, Method, StatusCode, Uri};
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Limited};
 use respan_gateway_core::Fault;
 
 use respan_gateway_http::rules::is_connection_header;
@@ -214,12 +214,19 @@ impl HttpTransport {
     }
 }
 
-/// `answer`'s body as JSON. An answer other than a success is the provider's
-/// refusal ([`provider_fault`](respan_gateway_http_faults::provider_fault)),
-/// and a body that is no JSON an `upstream` fault.
+/// `answer`'s body as JSON, read up to the default limit. An answer other
+/// than a success is the provider's refusal
+/// ([`provider_fault`](respan_gateway_http_faults::provider_fault)), and a
+/// body that is no JSON, or larger, an `upstream` fault.
 pub async fn json(answer: http::Response<Body>) -> Result<serde_json::Value, Fault> {
     let (head, body) = answer.into_parts();
-    let body = BodyExt::collect(body).await?.to_bytes();
+    let body = Limited::new(body, LIMIT).collect().await;
+    let body = body
+        .map_err(|e| match e.downcast::<Fault>() {
+            Ok(fault) => *fault,
+            Err(_) => Fault::upstream(format!("its answer is over {} MiB", LIMIT >> 20)),
+        })?
+        .to_bytes();
     if !head.status.is_success() {
         let answer = http::Response::from_parts(head, body);
         return Err(respan_gateway_http_faults::provider_fault(answer));
@@ -281,5 +288,24 @@ fn leave_origin(headers: &mut HeaderMap) {
         .collect();
     for name in named {
         headers.remove(name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn answer(body: impl Into<Bytes>) -> http::Response<Body> {
+        http::Response::new(Body::full(body))
+    }
+
+    #[tokio::test]
+    async fn an_answer_is_read_as_json_up_to_the_limit() {
+        let read = json(answer(r#"{"data":[]}"#)).await;
+        assert_eq!(read.ok(), Some(serde_json::json!({"data": []})));
+        // Regression: a listing was read whole, however large.
+        let over = json(answer(vec![b' '; LIMIT + 1])).await;
+        let fault = over.err().map(|f| f.message().to_owned());
+        assert_eq!(fault.as_deref(), Some("its answer is over 32 MiB"));
     }
 }

@@ -1,4 +1,4 @@
-import type { Price, RoutePick, RouteRule } from "@/lib/api";
+import type { RoutePick, RouteRule } from "@/lib/api";
 
 export const PICKS: Record<RoutePick, { label: string; hint: string }> = {
   first: { label: "In order", hint: "The first that can serve it; the rest as listed" },
@@ -7,15 +7,6 @@ export const PICKS: Record<RoutePick, { label: string; hint: string }> = {
   weighted: { label: "Weighted", hint: "At random, by weight" },
   random: { label: "Random", hint: "At random" },
 };
-
-/** "$0.15 / $0.6 per M" */
-export function formatPrice(price: Price | null | undefined): string {
-  if (!price) return "—";
-  if (price.per_second != null && !price.input && !price.output) {
-    return `$${+(price.per_second * 60).toFixed(4)} / min`;
-  }
-  return `$${+price.input.toFixed(3)} / $${+price.output.toFixed(3)}`;
-}
 
 /** What happens when its first pick fails: "falls back", "hedged 200 ms", "no fallback". */
 export function attempts(rule: RouteRule): string {

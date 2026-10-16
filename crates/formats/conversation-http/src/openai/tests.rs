@@ -1542,3 +1542,41 @@ fn stop_after_a_tool_call_finishes_as_tool_use() {
     ]);
     assert_eq!(finish(out), Some(Finish::Stop));
 }
+
+/// Regression: a tool call's own fields, such as a vendor's signature of it,
+/// were lost when the call was replayed, as a tool loop's next step does.
+#[test]
+fn a_tool_calls_own_fields_are_kept_when_it_is_replayed() {
+    let v = json!({ "id": "c", "model": "m", "choices": [{ "index": 0, "finish_reason": "tool_calls",
+        "message": { "role": "assistant", "content": null, "tool_calls": [{
+            "id": "call_1", "type": "function", "extra_content": { "google": { "thought_signature": "s" } },
+            "function": { "name": "f", "arguments": "{}" } }] } }] });
+    let mut whole = Assembled::default();
+    for event in decode_body(&v) {
+        whole.push(&event).expect("folds");
+    }
+    let replayed = whole.replay();
+    let native = replayed.iter().find_map(|part| match part {
+        Content::ToolCall { native, .. } => native.clone(),
+        _ => None,
+    });
+    let native = native.expect("the call's fields");
+    assert_eq!(&*native.format, OPENAI);
+    assert_eq!(
+        native.fields["extra_content"],
+        json!({ "google": { "thought_signature": "s" } })
+    );
+    // Written again for this format, the call carries them.
+    let mut message = Message::new(respan_gateway_conversation::Role::Assistant, "");
+    message.content = replayed;
+    let request = Input::new([
+        Message::new(respan_gateway_conversation::Role::User, "hi"),
+        message,
+    ]);
+    let body = OpenAiChat.encode_request(&request).expect("a request");
+    let call = &body["messages"][1]["tool_calls"][0];
+    assert_eq!(
+        call["extra_content"]["google"]["thought_signature"], "s",
+        "{body:?}"
+    );
+}

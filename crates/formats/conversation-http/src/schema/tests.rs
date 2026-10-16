@@ -101,15 +101,3 @@ fn usage_is_written_only_where_each_count_has_a_field() {
     huge.output_tokens = 0;
     assert!(check_usage(&huge, has(true, true)).is_ok());
 }
-
-#[test]
-fn block_fields_are_found_by_their_number_and_type() {
-    use crate::schema::block_fields;
-
-    let raw = json!({ "type": "item_fields", "block": 3, "fields": { "id": "x" } });
-    let (block, fields) = block_fields(&raw, "block", Some("item_fields")).expect("fields");
-    assert_eq!((block, fields["id"].as_str()), (3, Some("x")));
-    assert!(block_fields(&raw, "block", None).is_some());
-    assert!(block_fields(&raw, "block", Some("other")).is_none());
-    assert!(block_fields(&raw, "index", None).is_none());
-}

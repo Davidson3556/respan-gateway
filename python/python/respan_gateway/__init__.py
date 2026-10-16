@@ -9,8 +9,9 @@
         print(gw.models())
 
 HTTP error statuses are responses (and the SDKs' own exceptions); a failure to
-run a request or start a server is a `GatewayError`, a timeout a
-`GatewayTimeout`, an invalid configuration a `ConfigError`.
+run a request or start a server is a `GatewayError`, a timeout httpx's
+`httpx.ReadTimeout` (an SDK's own timeout error), an invalid configuration a
+`ConfigError`.
 """
 
 from __future__ import annotations

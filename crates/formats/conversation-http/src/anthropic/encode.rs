@@ -2,16 +2,16 @@
 
 use crate::is_inert;
 use crate::schema::{
-    Gate, Schema, block_fields, check_usage, fits, merge_fields, own_fields, unwritable_content,
+    Gate, Schema, check_usage, fits, merge_fields, own_fields, unwritable_content,
 };
-use respan_gateway_conversation::{Block, Delta, Finish, Output, Start, Usage};
+use respan_gateway_conversation::{Block, Delta, Finish, Output, Start, Usage, block_fields};
 use respan_gateway_core::{Fault, NativeValue};
 use respan_gateway_http::Encoder;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_sse::event;
 use serde_json::{Map, Value, json};
 
-use super::{ANTHROPIC, AnthropicMessages, BLOCK_FIELDS, FINISH, StopFields, USAGE, usage_body};
+use super::{ANTHROPIC, AnthropicMessages, FINISH, StopFields, USAGE, usage_body};
 
 /// Writes events as Anthropic's stream: `message_start` at the first need,
 /// each block's events, and at the end `message_delta` and `message_stop`.
@@ -120,6 +120,25 @@ impl EventStream {
             }
         }
         Ok(())
+    }
+
+    /// Fields of `block`: those of a block not yet on the wire join its
+    /// start; a signature that comes after, a `signature_delta` of it.
+    fn block_fields(&mut self, block: u32, fields: &Map<String, Value>, out: &mut BytesMut) {
+        let index = self
+            .blocks
+            .iter()
+            .find(|b| b.block == block)
+            .and_then(|b| b.index);
+        match (index, fields.get("signature")) {
+            (Some(index), Some(signature)) => {
+                let delta = json!({ "type": "signature_delta", "signature": signature });
+                let event =
+                    json!({ "type": "content_block_delta", "index": index, "delta": delta });
+                emit(out, event);
+            }
+            _ => self.fields.push((block, fields.clone())),
+        }
     }
 
     fn open(&mut self, block: u32, kind: &Block, out: &mut BytesMut) -> Result<(), Fault> {
@@ -262,11 +281,10 @@ impl EventStream {
                 self.begin(out);
             }
             Output::Native(NativeValue { format, value: raw })
-                if **format == *ANTHROPIC
-                    && block_fields(raw, "index", Some(BLOCK_FIELDS)).is_some() =>
+                if **format == *ANTHROPIC && block_fields(raw).is_some() =>
             {
-                if let Some((block, fields)) = block_fields(raw, "index", Some(BLOCK_FIELDS)) {
-                    self.fields.push((block, fields.clone()));
+                if let Some((block, fields)) = block_fields(raw) {
+                    self.block_fields(block, fields, out);
                 }
             }
             Output::Native(NativeValue { format, value: raw }) if **format == *ANTHROPIC => {

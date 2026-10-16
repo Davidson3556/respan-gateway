@@ -13,9 +13,8 @@ import {
 import { useProviders } from "@/hooks/queries";
 import { useRequests } from "@/hooks/use-live-requests";
 import { themeOptions, useTheme } from "@/hooks/use-theme";
-import { build, monitor, settings } from "./nav";
+import { pages } from "./nav";
 
-const pages = [...monitor, ...build, settings];
 
 /** The search button in the header, and the ⌘K palette it opens. */
 export function CommandPalette() {

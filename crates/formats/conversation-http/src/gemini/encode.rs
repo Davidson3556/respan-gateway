@@ -392,14 +392,14 @@ impl EventStream {
                 self.finish = Some(finish.clone());
             }
             Output::Native(NativeValue { format, value: raw }) if **format == *GEMINI => {
-                match (raw["type"].as_str(), block_fields(raw, "block", None)) {
-                    (Some("part_fields"), Some((block, fields))) => {
+                match (block_fields(raw), raw["type"].as_str()) {
+                    (Some((block, fields)), _) => {
                         match self.blocks.iter_mut().find(|b| b.block == block) {
                             Some(slot) => slot.fields = Some(fields.clone()),
                             None => self.pending.push((block, fields.clone())),
                         }
                     }
-                    (Some("part"), _) => self.emit(vec![raw["part"].clone()], out)?,
+                    (None, Some("part")) => self.emit(vec![raw["part"].clone()], out)?,
                     _ if self.fields.add(raw) => {}
                     _ => return Err(unwritable_content()),
                 }

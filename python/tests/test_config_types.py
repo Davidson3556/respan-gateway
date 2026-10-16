@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 import tempfile
-from typing import Any, Dict, cast
 
 import respan_gateway as rg
 from respan_gateway.config import GatewayConfig
@@ -15,7 +14,10 @@ def test_a_full_typed_config_parses() -> None:
         "listen": "127.0.0.1:0",
         "body_limit": "32MiB",
         "ws_message_limit": "16MiB",
-        "models": {"openai/gpt-4o": {"pricing": {"input": 2.5, "output": 10, "cached_input": 1.25}}},
+        "models": {
+            "openai/gpt-4o": {"pricing": {"input": 2.5, "output": 10, "cached_input": 1.25}},
+            "openai/whisper-1": {"pricing": {"input": 0, "output": 0, "per_second": 0.0001}},
+        },
         "shutdown_grace": "10s",
         "client_keys": ["client-key", {"name": "ci", "key": "ci-key"}],
         "log": "off",
@@ -74,6 +76,8 @@ def test_a_full_typed_config_parses() -> None:
         "plugins": {
             "routing": {"default": "openai"},
             "request_log": {"history": 500, "file_max": "64MiB"},
+            "responses": {"enabled": True, "keep": "30m"},
+            "respan": {"key": "fake", "url": "http://127.0.0.1:9/v1/traces", "content": False, "service": "test"},
             "mcp_aggregate": {"servers": ["remote", "local"], "allow": ["remote__*"], "deny": ["remote__x"]},
             "tool_loop": {
                 "servers": ["remote", "local"],
@@ -90,4 +94,5 @@ def test_a_full_typed_config_parses() -> None:
             },
         },
     }
-    assert rg.Gateway(config=cast(Dict[str, Any], config)) is not None
+    with rg.Gateway(config=config):
+        pass
