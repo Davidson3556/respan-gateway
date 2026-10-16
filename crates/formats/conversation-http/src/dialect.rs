@@ -109,9 +109,9 @@ where
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
         let (spec, dialect) = (self.spec, self.dialect.clone());
         let stream = io.extensions().get::<StreamResponse>().copied();
-        let wire = io.extensions().get::<Original>().cloned();
+        let original = io.extensions().get::<Original>().cloned();
         let call = Call {
-            translated: own_request::<S>(wire.as_ref()).is_none(),
+            translated: own_request::<S>(original.as_ref()).is_none(),
         };
         let writes = dialect.clone();
         let io = io.with_refusal(move |refused| answer(&spec, refused));
@@ -119,7 +119,7 @@ where
             move |head, input| {
                 // Its path, from the input as the vendor takes it, and its body.
                 let taken = input.map(|i| writes.input(i, &call)).transpose()?;
-                let encoder = post(spec, head, taken.as_deref(), wire.as_ref(), stream)?;
+                let encoder = post(spec, head, taken.as_deref(), original.as_ref(), stream)?;
                 Ok(Box::new(Written {
                     encoder,
                     dialect: writes,

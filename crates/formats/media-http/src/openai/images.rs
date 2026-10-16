@@ -545,7 +545,7 @@ mod tests {
         let form = Form {
             headers: &head.headers,
             raw: &raw,
-            wire: None,
+            original: None,
         };
         decode_request(&head, &form)
     }

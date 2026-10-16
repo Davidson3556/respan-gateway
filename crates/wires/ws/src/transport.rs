@@ -6,11 +6,11 @@ use std::time::Duration;
 use respan_gateway_core::futures::{FutureExt, Stream, StreamExt, stream};
 use respan_gateway_core::{Extensions, Fault};
 use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::call::{invalid, prepare_call, strip_origin_headers};
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http::{self, HeaderMap, StatusCode};
 use respan_gateway_http::rules::is_connection_header;
-use respan_gateway_http::{Body, Completion, Frames, raw::Relayed};
-use respan_gateway_http::{call::prepare_call, call::strip_origin_headers};
+use respan_gateway_http::{Body, Completion, Frames, Sent, raw::Relayed};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
@@ -20,11 +20,9 @@ use crate::Limits;
 use crate::session::{Edge, inbound, pump};
 use respan_gateway_http::rules::header_tokens;
 
-/// How long a provider has to answer the upgrade by default: connecting
-/// takes well under a second to a reachable host, and 10 s spans TCP's
-/// first retransmits of a lost handshake (RFC 6298: after 1 s, then 2 s
-/// more, then 4 s more), as `HttpTransport`'s connect timeout does.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a provider has to answer the upgrade: as long as reaching it
+/// may take.
+const HANDSHAKE_TIMEOUT: Duration = respan_gateway_http::call::CONNECT_TIMEOUT;
 
 /// Headers of the handshake the WebSocket library writes itself, and the
 /// extension and key headers of the client's own connection: none of them
@@ -119,22 +117,8 @@ impl WsTransport {
     /// ([`credentials`](respan_gateway_http::call::credentials)). `Err` with
     /// `config` for a header of the connection or the handshake.
     pub fn with_headers(mut self, headers: HeaderMap) -> Result<Self, Fault> {
-        if let Some(name) = headers.keys().find(|k| is_handshake(k)) {
-            let name = name.as_str();
-            return Err(Fault::config(format!(
-                "header '{name}' is the connection's"
-            )));
-        }
-        self.headers = headers;
+        self.headers = respan_gateway_http::call::own_headers(headers, is_handshake)?;
         Ok(self)
-    }
-
-    /// Use `client` instead of the shared one: it must speak HTTP/1.1, as
-    /// only HTTP/1.1 upgrades, and should not follow redirects, which are
-    /// the client's to follow.
-    pub fn with_client(mut self, client: reqwest::Client) -> Self {
-        self.client = client;
-        self
     }
 
     /// Take `limits` ([`Limits`]): a message, or a refusal's body, over
@@ -218,10 +202,6 @@ fn validate_upgrade(sent: &HeaderMap, received: &HeaderMap) -> Result<(), Fault>
     }
 }
 
-fn invalid(e: impl std::error::Error + Send + Sync + 'static) -> Fault {
-    Fault::config("the provider request is not valid").with_source(e)
-}
-
 /// The fault of a provider that did not answer the upgrade in time.
 fn too_slow() -> Fault {
     Fault::upstream("the provider took too long to accept")
@@ -258,10 +238,7 @@ impl WsTransport {
     }
 
     /// Send an encoded call and return its response.
-    pub async fn send(
-        &self,
-        mut call: http::Request<Body>,
-    ) -> Result<(http::Response<Body>, Option<Completion>), Fault> {
+    pub async fn send(&self, mut call: http::Request<Body>) -> Sent {
         let relayed = call
             .extensions()
             .get::<Extensions>()
@@ -295,9 +272,6 @@ impl WsTransport {
             head.headers = resp.headers().clone();
             strip_origin_headers(&mut head.headers);
             if head.status != StatusCode::SWITCHING_PROTOCOLS {
-                // The body is read whole by the format, as framed here.
-                head.headers.remove(header::TRANSFER_ENCODING);
-                head.headers.remove(header::CONTENT_LENGTH);
                 let broke = |e| Fault::truncated().with_source(e);
                 let body = resp.bytes_stream().map(move |chunk| chunk.map_err(broke));
                 let body = body.boxed();

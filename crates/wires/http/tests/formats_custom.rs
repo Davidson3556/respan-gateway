@@ -21,7 +21,7 @@ use respan_gateway_core::futures::{StreamExt, TryStreamExt};
 use respan_gateway_core::{
     ClientContext, Connection, EventSink, Fault, Filter, Format, Gateway, Plugin, Response,
 };
-use respan_gateway_http::bytes::{Bytes, BytesMut};
+use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::content::{self, default_content_type};
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
@@ -31,12 +31,13 @@ use respan_gateway_http::{
 };
 use respan_gateway_http::{Decoder, Encoder, Sse, Whole, call::credentials};
 use respan_gateway_http_faults::Status;
-use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_passthrough_http as passthrough;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use support::{AddProvider, add_provider, providers, with_plugins};
+use support::{
+    AddProvider, Anywhere, SendFuture, add_provider, openai, providers, unused, with_plugins,
+};
 
 /// A `POST` of `body` to `/{format}`, where that format's clients send.
 fn to(format: &str, body: impl Into<Bytes>) -> http::Request<respan_gateway_http::Body> {
@@ -159,33 +160,6 @@ fn stream(chunks: &[&str]) -> http::Response<Body> {
             .map(|part| Ok(Bytes::copy_from_slice(part.as_bytes())))
             .collect(),
     )
-}
-
-type SendFuture = futures::future::BoxFuture<
-    'static,
-    Result<
-        (
-            http::Response<Body>,
-            Option<respan_gateway_http::Completion>,
-        ),
-        Fault,
-    >,
->;
-
-fn unused() -> impl Clone + Fn(http::Request<Body>) -> SendFuture {
-    |_| Box::pin(async { Err(Fault::internal("provider should not be called")) })
-}
-
-fn openai(fake: &FakeOpenAi) -> impl Clone + Fn(http::Request<Body>) -> SendFuture + use<> {
-    let mut headers = HeaderMap::new();
-    headers.insert("authorization", HeaderValue::from_static("Bearer sk-test"));
-    let client = HttpTransport::new(fake.base_url())
-        .and_then(|client| client.with_headers(headers))
-        .unwrap_or_else(|e| panic!("OpenAI transport: {e}"));
-    move |request| {
-        let client = client.clone();
-        Box::pin(async move { client.send(request).await })
-    }
 }
 
 /// The jev kind's request: a prompt in, an answer out.
@@ -353,48 +327,20 @@ struct Events<W, F> {
     fail: F,
 }
 
-impl<W, F> Events<W, F>
-where
-    W: FnMut(&[Answer]) -> Result<Bytes, Fault> + Send + 'static,
-    F: FnMut(&Fault) -> Bytes + Send + 'static,
-{
-    fn encode_into(&mut self, answer: &Answer, out: &mut BytesMut) -> Result<(), Fault> {
-        out.extend_from_slice(&(self.write)(std::slice::from_ref(answer))?);
-        Ok(())
-    }
-
-    fn end_into(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
-        if let Err(fault) = end {
-            out.extend_from_slice(&(self.fail)(fault));
-        }
-        Ok(())
-    }
-}
-
 impl<W, F> Encoder<Answer> for Events<W, F>
 where
     W: FnMut(&[Answer]) -> Result<Bytes, Fault> + Send + 'static,
     F: FnMut(&Fault) -> Bytes + Send + 'static,
 {
-    fn encode(
-        &mut self,
-        value: &Answer,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.encode_into(value, &mut out)?;
-        frames.push(out.freeze());
+    fn encode(&mut self, answer: &Answer, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        frames.push((self.write)(std::slice::from_ref(answer))?);
         Ok(())
     }
 
-    fn end(
-        &mut self,
-        end: Result<(), Fault>,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.end_into(&end, &mut out)?;
-        frames.extend((!out.is_empty()).then(|| out.freeze()));
+    fn end(&mut self, end: Result<(), Fault>, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        if let Err(fault) = end {
+            frames.extend(Some((self.fail)(&fault)).filter(|b| !b.is_empty()));
+        }
         Ok(())
     }
 }
@@ -502,37 +448,13 @@ impl JevFormat {
 /// Writes jev requests from their values.
 struct Prompts(JevFormat);
 
-impl Prompts {
-    fn encode_into(&mut self, jev: &Jev, out: &mut BytesMut) -> Result<(), Fault> {
-        out.extend_from_slice(self.0.write(jev)?.to_string().as_bytes());
-        Ok(())
-    }
-
-    fn end_into(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
-        Ok(())
-    }
-}
-
 impl Encoder<Jev> for Prompts {
-    fn encode(
-        &mut self,
-        value: &Jev,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.encode_into(value, &mut out)?;
-        frames.push(out.freeze());
+    fn encode(&mut self, jev: &Jev, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        frames.push(Bytes::from(self.0.write(jev)?.to_string()));
         Ok(())
     }
 
-    fn end(
-        &mut self,
-        end: Result<(), Fault>,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.end_into(&end, &mut out)?;
-        frames.extend((!out.is_empty()).then(|| out.freeze()));
+    fn end(&mut self, _: Result<(), Fault>, _: &mut Vec<Bytes>) -> Result<(), Fault> {
         Ok(())
     }
 }
@@ -916,46 +838,6 @@ fn a_kind_of_one_type_for_both_directions_does_not_build() {
 
 #[tokio::test]
 async fn a_format_of_no_kind_relays_and_has_no_input_type() {
-    /// A protocol the gateway only passes on.
-    #[derive(Clone)]
-    struct Opaque;
-
-    impl Format<ClientIo, passthrough::Input<Opaque>, passthrough::Output<Opaque>> for Opaque {
-        fn name(&self) -> &str {
-            "opaque"
-        }
-        fn matches(&self, io: &ClientIo) -> bool {
-            io.request().method() == http::Method::POST && io.request().uri().path() == "/opaque"
-        }
-        fn bind(
-            &self,
-            io: ClientIo,
-        ) -> Result<Connection<passthrough::Input<Opaque>, passthrough::Output<Opaque>>, Fault>
-        {
-            Ok(io.bind(passthrough::read_request, passthrough::write_response))
-        }
-    }
-    impl Format<ProviderIo, passthrough::Output<Opaque>, passthrough::Input<Opaque>> for Opaque {
-        fn name(&self) -> &str {
-            "opaque"
-        }
-        fn bind(
-            &self,
-            io: ProviderIo,
-        ) -> Result<Connection<passthrough::Output<Opaque>, passthrough::Input<Opaque>>, Fault>
-        {
-            Ok(io.bind(
-                |head, input| {
-                    let encoder = passthrough::write_request(head, input)?;
-                    head.method = http::Method::POST;
-                    respan_gateway_http::path::set_path(head, "/")?;
-                    Ok(encoder)
-                },
-                passthrough::read_response,
-            ))
-        }
-    }
-
     /// A guardrail that asks for the jev request.
     struct Guard;
 
@@ -1001,8 +883,8 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
         ),
     });
     let gw = |plugins: Vec<Arc<dyn Plugin>>| {
-        let list = [add_provider("opaque", Opaque, transport.clone())];
-        serving(Opaque, list, plugins, Some("opaque")).unwrap_or_else(|e| panic!("{e}"))
+        let list = [add_provider("opaque", Anywhere, transport.clone())];
+        serving(Anywhere, list, plugins, Some("opaque")).unwrap_or_else(|e| panic!("{e}"))
     };
     let (open, guarded) = (gw(Vec::new()), gw(vec![Arc::new(Guard)]));
     let limited = gw(vec![Arc::new(Limit)]);
@@ -1512,46 +1394,6 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
     let sent = sent.all();
     assert!(!sent[0].headers.contains_key("x-prompt"));
     assert!(String::from_utf8_lossy(&sent[0].body).contains("arrived"));
-}
-
-/// A protocol of no kind that accepts any `POST`, relayed as it came.
-#[derive(Clone)]
-struct Anywhere;
-
-impl Format<ClientIo, passthrough::Input<Anywhere>, passthrough::Output<Anywhere>> for Anywhere {
-    fn name(&self) -> &str {
-        "anywhere"
-    }
-    fn matches(&self, io: &ClientIo) -> bool {
-        io.request().method() == http::Method::POST
-    }
-    fn bind(
-        &self,
-        io: ClientIo,
-    ) -> Result<Connection<passthrough::Input<Anywhere>, passthrough::Output<Anywhere>>, Fault>
-    {
-        Ok(io.bind(passthrough::read_request, passthrough::write_response))
-    }
-}
-impl Format<ProviderIo, passthrough::Output<Anywhere>, passthrough::Input<Anywhere>> for Anywhere {
-    fn name(&self) -> &str {
-        "anywhere"
-    }
-    fn bind(
-        &self,
-        io: ProviderIo,
-    ) -> Result<Connection<passthrough::Output<Anywhere>, passthrough::Input<Anywhere>>, Fault>
-    {
-        Ok(io.bind(
-            |head, input| {
-                let encoder = passthrough::write_request(head, input)?;
-                head.method = http::Method::POST;
-                respan_gateway_http::path::set_path(head, "/")?;
-                Ok(encoder)
-            },
-            passthrough::read_response,
-        ))
-    }
 }
 
 /// Notes the client's format, then refuses the request.

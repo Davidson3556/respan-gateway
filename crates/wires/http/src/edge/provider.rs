@@ -1,16 +1,16 @@
 //! Native HTTP sending bound to the kernel's symmetric event interface.
 
 use super::reader::{Failure, observed};
-use super::upload::{self, Upload};
+use super::upload::{self, Delivery, Upload};
 
 use crate::codec;
-use crate::{Body, Completion, Decoder, Encoder};
+use crate::{Body, Decoder, Encoder, Sent};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::{Future, FutureExt, Stream, StreamExt, TryStreamExt, stream};
 use http::{request::Parts as RequestHead, response::Parts as ResponseHead};
-use respan_gateway_core::{Connection, EventSink, EventStream, Extensions, Fault, RetryAfter};
+use respan_gateway_core::{Connection, EventSink, EventStream, Extensions, Fault};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
@@ -26,10 +26,10 @@ pub fn connect<F, Fut>(
 ) -> impl Fn(Extensions) -> ProviderIo + Clone + Send + Sync + 'static
 where
     F: Fn(http::Request<Body>) -> Fut + Send + Sync + 'static,
-    Fut:
-        Future<Output = Result<(http::Response<Body>, Option<Completion>), Fault>> + Send + 'static,
+    Fut: Future<Output = Sent> + Send + 'static,
 {
-    let send: Arc<Sending> = Arc::new(move |request| send(request).boxed());
+    let send: Arc<dyn Fn(http::Request<Body>) -> BoxFuture<'static, Sent> + Send + Sync> =
+        Arc::new(move |request| send(request).boxed());
     move |extensions| ProviderIo {
         send: send.clone(),
         extensions,
@@ -39,25 +39,22 @@ where
     }
 }
 
-pub(crate) type Sending = dyn Fn(
-        http::Request<Body>,
-    ) -> BoxFuture<'static, Result<(http::Response<Body>, Option<Completion>), Fault>>
-    + Send
-    + Sync;
-
 /// What it takes for an answer to succeed ([`ProviderIo::with_success`]).
 type Success = Box<dyn FnOnce(&ResponseHead, &RequestHead) -> bool + Send>;
 
+/// How a refused answer reads as a fault ([`ProviderIo::with_refusal`]).
+type Refusal = Box<dyn FnOnce(http::Response<Bytes>) -> Fault + Send>;
+
 /// One provider attempt, owning its extensions and sharing only the sender.
 pub struct ProviderIo {
-    send: Arc<Sending>,
+    send: Arc<dyn Fn(http::Request<Body>) -> BoxFuture<'static, Sent> + Send + Sync>,
     extensions: Extensions,
     /// The most bytes a reader holds of its answer at once.
     limit: usize,
     /// What it takes for a success.
     success: Success,
     /// How a refused answer reads as a fault.
-    refusal: Box<dyn FnOnce(http::Response<Bytes>) -> Fault + Send>,
+    refusal: Refusal,
 }
 impl ProviderIo {
     /// Per-call transport state supplied by the gateway and its plugins.
@@ -147,8 +144,7 @@ impl ProviderIo {
                     (Body::full(bytes), None, None)
                 }
                 false => {
-                    let (encoding, body, draining) =
-                        upload::encoding(encode(&mut head, None)?, failed.clone());
+                    let (encoding, body, draining) = upload::encoding(encode(&mut head, None)?);
                     (body, Some(encoding), Some(draining))
                 }
             };
@@ -186,7 +182,7 @@ impl ProviderIo {
             // A streamed upload's source ends with the delivery: done, the
             // caller's input stops being read; failed, it reads the fault.
             let delivery = async move {
-                let (ended, ending) = oneshot::channel::<()>();
+                let (ended, answer_ended) = oneshot::channel::<()>();
                 let response = async move {
                     let (response, completion) = (self.send)(request).await?;
                     let (head, body) = response.into_parts();
@@ -195,51 +191,22 @@ impl ProviderIo {
                     if let Some(slot) = client_head.filter(|_| succeeded) {
                         slot.set(head.clone());
                     }
-                    let body = observed(body, upload.clone(), limit);
+                    let body = observed(body, upload.clone());
                     let applied = move |fault| match &relayed {
                         Some(raw) => raw.apply(fault),
                         None => fault,
                     };
                     if !succeeded {
-                        let fault = match codec::collect(body, limit, || {
-                            respan_gateway_sse::over_limit(limit)
-                        })
-                        .await
-                        {
-                            Ok(bytes) => refusal(http::Response::from_parts(head, bytes)),
-                            // A failed upload says why the call failed.
-                            Err(fault) if upload.get().is_some() => fault,
-                            // An answer whose body is over the limit or broke
-                            // off is the gateway's 502, as it cannot be read
-                            // or relayed, but its `Retry-After` still says
-                            // when to try again.
-                            Err(fault) => {
-                                let answer = http::Response::from_parts(head, Bytes::new());
-                                let head = respan_gateway_http_faults::provider_fault(answer);
-                                match head.get::<RetryAfter>() {
-                                    Some(wait) => fault.with(*wait),
-                                    None => fault,
-                                }
-                            }
-                        };
+                        let fault = refused(head, body, limit, refusal, &upload).await;
                         return Ok((EventStream::refused(applied(fault)), completion));
                     }
-                    let mut events = match decode(&head, &sent) {
-                        Some(decoder) => codec::decode(body, decoder),
+                    let events = match decode(&head, &sent) {
+                        Some(decoder) => codec::decode(body, decoder, Some(limit)),
                         None => EventStream::empty(),
                     }
                     .map_err(applied);
                     let response = match streaming && completion.is_none() {
-                        true => {
-                            let mut ended = Some(ended);
-                            EventStream::stream(stream::poll_fn(move |cx| {
-                                let item = events.poll_next_unpin(cx);
-                                if matches!(item, Poll::Ready(None | Some(Err(_)))) {
-                                    ended.take();
-                                }
-                                item
-                            }))
-                        }
+                        true => ending(events, ended),
                         false => EventStream::stream(events),
                     };
                     Ok::<_, Fault>((response, completion))
@@ -252,7 +219,7 @@ impl ProviderIo {
                             Some(completion) => completion.await,
                             None => {
                                 if let Some(draining) = draining {
-                                    let _ = futures::future::select(draining, ending).await;
+                                    let _ = futures::future::select(draining, answer_ended).await;
                                 }
                                 Ok(())
                             }
@@ -266,19 +233,65 @@ impl ProviderIo {
             };
             let delivery = delivery.boxed().shared();
             if streaming {
-                let mut completion = delivery.clone();
-                let mut source = std::mem::replace(events, EventStream::empty());
-                *events = EventStream::stream(stream::poll_fn(move |cx| {
-                    if let Poll::Ready(end) = Pin::new(&mut completion).poll(cx) {
-                        return Poll::Ready(end.err().map(Err));
-                    }
-                    Pin::new(&mut source).poll_next(cx)
-                }));
+                let source = std::mem::replace(events, EventStream::empty());
+                *events = until_delivered(source, delivery.clone());
             }
             Ok(Upload::new(encoding, delivery, failed))
         });
         (incoming, outgoing)
     }
+}
+
+/// A refused answer's fault: its body read whole, up to `limit`, by
+/// `refusal`. A body over the limit or broken off cannot be read or
+/// relayed: the gateway's 502, which keeps the answer's `Retry-After`, or
+/// the upload's failure, which says why the call failed.
+async fn refused(
+    head: ResponseHead,
+    body: Body,
+    limit: usize,
+    refusal: Refusal,
+    upload: &Failure,
+) -> Fault {
+    let read = codec::collect(body, limit, || respan_gateway_sse::over_limit(limit)).await;
+    match read {
+        Ok(bytes) => refusal(http::Response::from_parts(head, bytes)),
+        Err(fault) if upload.get().is_some() => fault,
+        Err(fault) => match respan_gateway_http_faults::waits(&head.headers) {
+            Some(wait) => fault.with(wait),
+            None => fault,
+        },
+    }
+}
+
+/// `events`, dropping `ended` at their end: a provider that answered in
+/// full reads no more of a streamed upload.
+fn ending<O: Send + 'static>(
+    mut events: impl Stream<Item = Result<O, Fault>> + Unpin + Send + 'static,
+    ended: oneshot::Sender<()>,
+) -> EventStream<O> {
+    let mut ended = Some(ended);
+    EventStream::stream(stream::poll_fn(move |cx| {
+        let item = events.poll_next_unpin(cx);
+        if matches!(item, Poll::Ready(None | Some(Err(_)))) {
+            ended.take();
+        }
+        item
+    }))
+}
+
+/// A streamed upload's `source`, which ends with the call's `delivery`:
+/// done, it stops being read; failed, it reads the fault.
+fn until_delivered<I: Send + Sync + 'static>(
+    mut source: EventStream<I>,
+    mut delivery: Delivery,
+) -> EventStream<I> {
+    EventStream::stream(stream::poll_fn(move |cx| {
+        if let Poll::Ready(end) = Pin::new(&mut delivery).poll(cx) {
+            return Poll::Ready(end.err().map(Err));
+        }
+        Pin::new(&mut source).poll_next(cx)
+    }))
 }
 
 impl std::fmt::Debug for ProviderIo {
@@ -292,6 +305,7 @@ mod tests {
     use super::*;
     use crate::Decoder;
     use futures::SinkExt;
+    use respan_gateway_core::RetryAfter;
     use respan_gateway_http_faults::status;
 
     /// A refusal whose body is over the limit is the gateway's 502, but

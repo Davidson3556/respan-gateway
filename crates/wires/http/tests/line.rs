@@ -8,7 +8,7 @@ use respan_gateway_core::{ErrorCode, Provider};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures::StreamExt;
 use http::StatusCode;
 use http_body_util::BodyExt;
@@ -18,10 +18,10 @@ use respan_gateway_core::{
     Call, ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_http::Body;
-use respan_gateway_http::Encoder;
 use respan_gateway_http::bytes;
 use respan_gateway_http::http::request::Parts as RequestHead;
 use respan_gateway_http::rules::bodiless;
+use respan_gateway_http::{Decoder, Encoder};
 use respan_gateway_http::{http, http_body_util};
 use respan_gateway_http_faults::Status;
 #[allow(dead_code, unused_imports)]
@@ -61,23 +61,14 @@ impl respan_gateway_core::Format<respan_gateway_http::ClientIo, LIn, LOut> for L
         &self,
         io: respan_gateway_http::ClientIo,
     ) -> Result<respan_gateway_core::Connection<LIn, LOut>, Fault> {
+        let read = |raw: Bytes, out: &mut Vec<LIn>| {
+            out.push(LIn(String::from_utf8_lossy(&raw).into_owned()));
+            Ok(())
+        };
         Ok(io
             .with_error(|fault, _, _| Bytes::from(format!("x:{}\n", fault.message())))
             .bind(
-                |_request| {
-                    {
-                        Box::new(move |raw: Bytes, out: &mut Vec<_>| {
-                            let value: Result<_, Fault> = {
-                                {
-                                    let text = String::from_utf8_lossy(&raw).into_owned();
-                                    Ok(LIn(text))
-                                }
-                            };
-                            out.push(value?);
-                            Ok(())
-                        })
-                    }
-                },
+                move |_| Box::new(read),
                 |reply| {
                     let head = reply.head();
                     if reply.request().method() == http::Method::GET {
@@ -119,22 +110,11 @@ impl respan_gateway_core::Format<respan_gateway_http::ProviderIo, LOut, LIn> for
 fn line_outputs(
     head: &http::response::Parts,
     request: &http::Request<Bytes>,
-) -> Option<Box<dyn respan_gateway_http::Decoder<LOut>>> {
+) -> Option<Box<dyn Decoder<LOut>>> {
     if bodiless(request.method(), head.status) {
         return None;
     }
     Some(Box::new(LineDecoder::default()))
-}
-
-impl respan_gateway_http::Decoder<LOut> for LineDecoder {
-    fn decode(&mut self, bytes: Bytes, out: &mut Vec<LOut>) -> Result<(), Fault> {
-        LineDecoder::decode(self, bytes, out)
-    }
-
-    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<LOut>) -> Result<(), Fault> {
-        end?;
-        LineDecoder::end(self, out)
-    }
 }
 
 /// A call as Line writes it: at `/line`, each input as its text.
@@ -153,40 +133,16 @@ fn line_refused(answer: http::Response<Bytes>) -> Fault {
     }
 }
 
-/// Writes each input as its text.
+/// Writes each input as its text, and closes a failed body as a whole one.
 struct Lines;
 
-impl Lines {
-    fn encode_into(&mut self, input: &LIn, out: &mut BytesMut) -> Result<(), Fault> {
-        out.extend_from_slice(input.0.as_bytes());
-        Ok(())
-    }
-
-    fn end_into(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
-        Ok(())
-    }
-}
-
 impl Encoder<LIn> for Lines {
-    fn encode(
-        &mut self,
-        value: &LIn,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.encode_into(value, &mut out)?;
-        frames.push(out.freeze());
+    fn encode(&mut self, value: &LIn, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        frames.push(Bytes::from(value.0.clone()));
         Ok(())
     }
 
-    fn end(
-        &mut self,
-        end: Result<(), Fault>,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.end_into(&end, &mut out)?;
-        frames.extend((!out.is_empty()).then(|| out.freeze()));
+    fn end(&mut self, _: Result<(), Fault>, _: &mut Vec<Bytes>) -> Result<(), Fault> {
         Ok(())
     }
 }
@@ -195,7 +151,7 @@ impl Encoder<LIn> for Lines {
 #[derive(Default)]
 struct LineDecoder(bool, bool);
 
-impl LineDecoder {
+impl Decoder<LOut> for LineDecoder {
     fn decode(&mut self, bytes: Bytes, output: &mut Vec<LOut>) -> Result<(), Fault> {
         for line in String::from_utf8_lossy(&bytes).lines() {
             self.0 = true;
@@ -204,10 +160,7 @@ impl LineDecoder {
             }
             let said = match line.split_once(':') {
                 Some(("i", x)) => out(x),
-                Some(("u", n)) => {
-                    let u = Usage::new(0, n.parse().unwrap_or(0));
-                    LOut(String::new(), u)
-                }
+                Some(("u", n)) => LOut(String::new(), Usage::new(0, n.parse().unwrap_or(0))),
                 Some(("x", m)) => return Err(Fault::upstream(m)),
                 _ if line == "e" => {
                     self.1 = true;
@@ -221,7 +174,8 @@ impl LineDecoder {
     }
 
     /// Like a JSON format, an empty body is not a response of this format.
-    fn end(&mut self, _out: &mut Vec<LOut>) -> Result<(), Fault> {
+    fn end(&mut self, end: Result<(), Fault>, _: &mut Vec<LOut>) -> Result<(), Fault> {
+        end?;
         match (self.0, self.1) {
             (false, _) => Err(Fault::upstream("not a line body")),
             (true, false) => Err(Fault::truncated()),
@@ -235,58 +189,37 @@ impl LineDecoder {
 struct LineEncoder(Option<Usage>);
 
 impl LineEncoder {
-    fn release(&mut self, out: &mut BytesMut) {
+    fn release(&mut self, out: &mut String) {
         if let Some(u) = self.0.take() {
-            let n = u.output_tokens;
-            out.extend_from_slice(format!("u:{n}\n").as_bytes());
+            out.push_str(&format!("u:{}\n", u.output_tokens));
         }
-    }
-}
-
-impl LineEncoder {
-    fn encode_into(&mut self, o: &LOut, out: &mut BytesMut) -> Result<(), Fault> {
-        if !o.1.is_empty() {
-            *self.0.get_or_insert_default() += &o.1;
-        }
-        if !o.0.is_empty() {
-            self.release(out);
-            out.extend_from_slice(format!("i:{}\n", o.0).as_bytes());
-        }
-        Ok(())
-    }
-
-    fn end_into(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
-        match end {
-            Ok(()) => {
-                self.release(out);
-                out.extend_from_slice(b"e\n");
-            }
-            Err(f) => out.extend_from_slice(format!("x:{}\n", f.message()).as_bytes()),
-        }
-        Ok(())
     }
 }
 
 impl Encoder<LOut> for LineEncoder {
-    fn encode(
-        &mut self,
-        value: &LOut,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.encode_into(value, &mut out)?;
-        frames.push(out.freeze());
+    fn encode(&mut self, o: &LOut, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        let mut out = String::new();
+        if !o.1.is_empty() {
+            *self.0.get_or_insert_default() += &o.1;
+        }
+        if !o.0.is_empty() {
+            self.release(&mut out);
+            out.push_str(&format!("i:{}\n", o.0));
+        }
+        frames.push(Bytes::from(out));
         Ok(())
     }
 
-    fn end(
-        &mut self,
-        end: Result<(), Fault>,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.end_into(&end, &mut out)?;
-        frames.extend((!out.is_empty()).then(|| out.freeze()));
+    fn end(&mut self, end: Result<(), Fault>, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        let mut out = String::new();
+        match end {
+            Ok(()) => {
+                self.release(&mut out);
+                out.push_str("e\n");
+            }
+            Err(f) => out.push_str(&format!("x:{}\n", f.message())),
+        }
+        frames.push(Bytes::from(out));
         Ok(())
     }
 }
@@ -296,48 +229,25 @@ impl Encoder<LOut> for LineEncoder {
 struct Script(Arc<Mutex<VecDeque<Reply>>>);
 
 type Reply = (StatusCode, Vec<&'static str>);
-type SendFuture = futures::future::BoxFuture<
-    'static,
-    Result<
-        (
-            http::Response<Body>,
-            Option<respan_gateway_http::Completion>,
-        ),
-        Fault,
-    >,
->;
+type SendFuture = futures::future::BoxFuture<'static, respan_gateway_http::Sent>;
 
 impl Script {
     fn then(self, status: StatusCode, frames: Vec<&'static str>) -> Self {
         lock(&self.0).push_back((status, frames));
         self
     }
-}
 
-impl Script {
-    pub async fn send(
-        &self,
-        _call: http::Request<Body>,
-    ) -> Result<
-        (
-            http::Response<Body>,
-            Option<respan_gateway_http::Completion>,
-        ),
-        Fault,
-    > {
-        let (status, frames) = lock(&self.0).pop_front().expect("scripted");
-        let frames =
-            futures::stream::iter(frames).map(|f| Ok::<_, Fault>(Bytes::from_static(f.as_bytes())));
-        let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
-        head.status = status;
-        Ok((http::Response::from_parts(head, Body::stream(frames)), None))
-    }
-}
-impl Script {
     fn into_sender(self) -> impl Clone + Fn(http::Request<Body>) -> SendFuture {
-        move |call| {
-            let value = self.clone();
-            Box::pin(async move { value.send(call).await })
+        move |_call| {
+            let (status, frames) = lock(&self.0).pop_front().expect("scripted");
+            let frames = frames
+                .into_iter()
+                .map(|f| Ok(Bytes::from_static(f.as_bytes())));
+            let mut head = http::Response::new(()).into_parts().0;
+            head.status = status;
+            let answer =
+                http::Response::from_parts(head, Body::stream(futures::stream::iter(frames)));
+            Box::pin(async move { Ok((answer, None)) })
         }
     }
 }
@@ -1399,16 +1309,7 @@ impl Encoder<LIn> for Untranslatable {
 struct Paths(Shared<String>);
 
 impl Paths {
-    pub async fn send(
-        &self,
-        call: http::Request<Body>,
-    ) -> Result<
-        (
-            http::Response<Body>,
-            Option<respan_gateway_http::Completion>,
-        ),
-        Fault,
-    > {
+    pub async fn send(&self, call: http::Request<Body>) -> respan_gateway_http::Sent {
         lock(&self.0).push(call.uri().path().to_owned());
         let body = futures::stream::iter([Ok(Bytes::from_static(b"i:ok\ne\n"))]);
         Ok((http::Response::new(Body::stream(body)), None))

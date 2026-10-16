@@ -25,8 +25,14 @@ pub type Frames = futures::stream::BoxStream<'static, Result<Bytes, Fault>>;
 /// Actual completion of an outgoing transfer, independent of response headers.
 pub type Completion = BoxFuture<'static, Result<(), Fault>>;
 
+/// What a transport gives for a call: its answer, and, if it knows it, its
+/// upload's actual completion (`None`: only the handoff is complete).
+pub type Sent = Result<(http::Response<Body>, Option<Completion>), Fault>;
+
 const PANICKED: &str = "a plugin or format panicked";
-pub(crate) type Written = (http::Response<Body>, crate::Completion);
+
+/// A response, and its delivery's end.
+pub(crate) type Written = (http::Response<Body>, Completion);
 
 /// `f`'s result, or an `internal` fault if it panicked: a format's code is
 /// run so a panic in it fails its exchange, not the gateway.
@@ -72,7 +78,7 @@ pub(crate) fn end_encoder<T: 'static>(
 /// Drive the gateway alongside an HTTP reply, then let its body own the
 /// remaining work. Cancelling either stage cancels the gateway exchange.
 pub(crate) async fn drive(
-    handled: BoxFuture<'static, Result<(), Fault>>,
+    handled: Completion,
     answer: BoxFuture<'static, Option<Written>>,
 ) -> Result<Written, Fault> {
     use futures::future::{Either, select};
@@ -112,14 +118,11 @@ pub(crate) async fn drive(
 /// The gateway future drops first, ending its calls before their output
 /// streams are dropped by the protocol body.
 struct Pump {
-    handled: Option<BoxFuture<'static, Result<(), Fault>>>,
+    handled: Option<Completion>,
     body: Body,
 }
 
-fn poll_handle(
-    handled: &mut Option<BoxFuture<'static, Result<(), Fault>>>,
-    cx: &mut std::task::Context<'_>,
-) {
+fn poll_handle(handled: &mut Option<Completion>, cx: &mut std::task::Context<'_>) {
     if let Some(work) = handled
         && work.as_mut().poll(cx).is_ready()
     {

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use respan_gateway_core::futures::channel::mpsc;
 use respan_gateway_core::futures::future::{self, BoxFuture};
 use respan_gateway_core::futures::{FutureExt, SinkExt, StreamExt, stream};
@@ -118,40 +118,22 @@ fn refused(status: StatusCode) -> Fault {
         .with(())
 }
 
+/// `text` as one frame, if it says anything.
+fn frame(frames: &mut Vec<Bytes>, text: &str) {
+    frames.extend((!text.is_empty()).then(|| Bytes::from(text.to_owned())));
+}
+
 /// Writes its bytes alone, whatever the input.
 struct Open(&'static str);
 
-impl Open {
-    fn encode_into(&mut self, _: &In, _: &mut BytesMut) -> Result<(), Fault> {
-        Ok(())
-    }
-
-    fn end_into(&mut self, _: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
-        out.extend_from_slice(self.0.as_bytes());
-        Ok(())
-    }
-}
-
 impl Encoder<In> for Open {
-    fn encode(
-        &mut self,
-        value: &In,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.encode_into(value, &mut out)?;
-        frames.push(out.freeze());
+    fn encode(&mut self, _: &In, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        frames.push(Bytes::new());
         Ok(())
     }
 
-    fn end(
-        &mut self,
-        end: Result<(), Fault>,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.end_into(&end, &mut out)?;
-        frames.extend((!out.is_empty()).then(|| out.freeze()));
+    fn end(&mut self, _: Result<(), Fault>, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        frame(frames, self.0);
         Ok(())
     }
 }
@@ -159,7 +141,7 @@ impl Encoder<In> for Open {
 /// `BAD` decodes to `before-bad` and then fails, in the same chunk.
 struct ReqDec;
 
-impl ReqDec {
+impl respan_gateway_http::Decoder<In> for ReqDec {
     fn decode(&mut self, bytes: Bytes, out: &mut Vec<In>) -> Result<(), Fault> {
         let s = String::from_utf8_lossy(&bytes).to_string();
         if s == "BAD" {
@@ -169,63 +151,24 @@ impl ReqDec {
         out.push(In(s));
         Ok(())
     }
-
-    fn end(&mut self, _: &mut Vec<In>) -> Result<(), Fault> {
-        Ok(())
-    }
-}
-
-impl respan_gateway_http::Decoder<In> for ReqDec {
-    fn decode(&mut self, bytes: Bytes, out: &mut Vec<In>) -> Result<(), Fault> {
-        ReqDec::decode(self, bytes, out)
-    }
-
-    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<In>) -> Result<(), Fault> {
-        end?;
-        ReqDec::end(self, out)
-    }
 }
 
 /// Writes an input as text, and `<END>` for clean end. `ENCPANIC` panics.
 struct ReqEnc;
 
-impl ReqEnc {
-    fn encode_into(&mut self, v: &In, out: &mut BytesMut) -> Result<(), Fault> {
+impl Encoder<In> for ReqEnc {
+    fn encode(&mut self, v: &In, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
         if v.0 == "ENCPANIC" {
             panic!("encoder panic");
         }
-        out.extend_from_slice(v.0.as_bytes());
+        frames.push(Bytes::from(v.0.clone()));
         Ok(())
     }
 
-    fn end_into(&mut self, e: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end(&mut self, e: Result<(), Fault>, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
         if e.is_ok() {
-            out.extend_from_slice(b"<END>");
+            frame(frames, "<END>");
         }
-        Ok(())
-    }
-}
-
-impl Encoder<In> for ReqEnc {
-    fn encode(
-        &mut self,
-        value: &In,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.encode_into(value, &mut out)?;
-        frames.push(out.freeze());
-        Ok(())
-    }
-
-    fn end(
-        &mut self,
-        end: Result<(), Fault>,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.end_into(&end, &mut out)?;
-        frames.extend((!out.is_empty()).then(|| out.freeze()));
         Ok(())
     }
 }
@@ -235,7 +178,7 @@ struct RespDec {
     status: u16,
 }
 
-impl RespDec {
+impl respan_gateway_http::Decoder<Out> for RespDec {
     fn decode(&mut self, bytes: Bytes, out: &mut Vec<Out>) -> Result<(), Fault> {
         if self.status != 200 {
             return Err(refused(
@@ -251,7 +194,8 @@ impl RespDec {
         Ok(())
     }
 
-    fn end(&mut self, _: &mut Vec<Out>) -> Result<(), Fault> {
+    fn end(&mut self, end: Result<(), Fault>, _: &mut Vec<Out>) -> Result<(), Fault> {
+        end?;
         match self.done {
             true => Ok(()),
             false => Err(Fault::truncated()),
@@ -259,63 +203,27 @@ impl RespDec {
     }
 }
 
-impl respan_gateway_http::Decoder<Out> for RespDec {
-    fn decode(&mut self, bytes: Bytes, out: &mut Vec<Out>) -> Result<(), Fault> {
-        RespDec::decode(self, bytes, out)
-    }
-
-    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Out>) -> Result<(), Fault> {
-        end?;
-        RespDec::end(self, out)
-    }
-}
-
 struct RespEnc;
 
-impl RespEnc {
-    fn encode_into(&mut self, v: &Out, out: &mut BytesMut) -> Result<(), Fault> {
+impl Encoder<Out> for RespEnc {
+    fn encode(&mut self, v: &Out, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
         if v.0 == "REJECT" {
             return Err(Fault::config("response encoding rejected"));
         }
-        out.extend_from_slice(v.0.as_bytes());
-        out.extend_from_slice(b";");
+        frames.push(Bytes::from(format!("{};", v.0)));
         Ok(())
     }
 
-    fn end_into(&mut self, e: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+    fn end(&mut self, e: Result<(), Fault>, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
         match e {
-            Ok(()) => out.extend_from_slice(b"!"),
-            Err(f) => out.extend_from_slice(format!("ERR {}", f.code()).as_bytes()),
+            Ok(()) => frame(frames, "!"),
+            Err(f) => frame(frames, &format!("ERR {}", f.code())),
         }
         Ok(())
     }
 }
 
-impl Encoder<Out> for RespEnc {
-    fn encode(
-        &mut self,
-        value: &Out,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.encode_into(value, &mut out)?;
-        frames.push(out.freeze());
-        Ok(())
-    }
-
-    fn end(
-        &mut self,
-        end: Result<(), Fault>,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.end_into(&end, &mut out)?;
-        frames.extend((!out.is_empty()).then(|| out.freeze()));
-        Ok(())
-    }
-}
-
-type WireResult = Result<(http::Response<Body>, Option<Completion>), Fault>;
+type WireResult = respan_gateway_http::Sent;
 
 fn fnt<F>(f: F) -> F
 where

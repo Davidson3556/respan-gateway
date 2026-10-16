@@ -63,11 +63,11 @@ struct Fields {
 }
 
 /// A client's request as its decoder reads it: the head's headers and the
-/// body, whose fields are parsed once for every reader of the wire.
+/// body, whose fields are parsed once for every reader of the original.
 struct Form<'a> {
     headers: &'a HeaderMap,
     raw: &'a Bytes,
-    wire: Option<&'a Original>,
+    original: Option<&'a Original>,
 }
 
 impl Form<'_> {
@@ -76,7 +76,7 @@ impl Form<'_> {
     /// reads the same ([`asked`]).
     fn fields(&self) -> Result<Fields, Fault> {
         let parsed = self
-            .wire
+            .original
             .and_then(|w| w.memo(|r| parse_fields(r.headers(), r.body())));
         match parsed {
             Some(parsed) => parsed.clone(),
@@ -431,8 +431,8 @@ where
     I: Clone + Send + Sync + 'static,
     O: Clone + Send + Sync + 'static,
 {
-    let wire = io.extensions().get::<Original>().cloned();
-    let read = wire.clone();
+    let original = io.extensions().get::<Original>().cloned();
+    let read = original.clone();
     io.with_error(refusal).bind(
         move |head| {
             let head = head.clone();
@@ -440,7 +440,7 @@ where
                 let form = Form {
                     headers: &head.headers,
                     raw: &raw,
-                    wire: read.as_ref(),
+                    original: read.as_ref(),
                 };
                 out.push(decode(&head, &form)?);
                 Ok(())
@@ -448,7 +448,7 @@ where
         },
         move |reply| {
             let mut head = reply.head();
-            let fields = asked(wire.as_ref());
+            let fields = asked(original.as_ref());
             let encoder = encoder(reply.request(), fields, &mut head);
             Ok(reply.write(head, encoder))
         },
@@ -471,19 +471,19 @@ fn streams(io: &ProviderIo, paths: &[&str], wants: fn(&Map<String, Value>) -> bo
     if let Some(StreamResponse(stream)) = io.extensions().get::<StreamResponse>() {
         return *stream;
     }
-    let wire = io.extensions().get::<Original>();
-    let paths_match = wire
+    let original = io.extensions().get::<Original>();
+    let paths_match = original
         .and_then(Original::get)
         .is_some_and(|r| paths.iter().any(|p| path_ends_with(r.uri(), p)));
-    paths_match && wants(asked(wire))
+    paths_match && wants(asked(original))
 }
 
 /// The text fields of a client's request, for its response's framing, as
 /// its decoder parsed them ([`Form::fields`]); none if it cannot be read, as
 /// it then was refused.
-fn asked(wire: Option<&Original>) -> &Map<String, Value> {
+fn asked(original: Option<&Original>) -> &Map<String, Value> {
     static NONE: LazyLock<Map<String, Value>> = LazyLock::new(Map::new);
-    let parsed = wire.and_then(|w| w.memo(|r| parse_fields(r.headers(), r.body())));
+    let parsed = original.and_then(|w| w.memo(|r| parse_fields(r.headers(), r.body())));
     parsed
         .and_then(|p| p.as_ref().ok())
         .map_or(&NONE, |f| &f.map)
@@ -583,19 +583,19 @@ mod tests {
             .header(CONTENT_TYPE, "multipart/form-data; boundary=b")
             .body(body)
             .unwrap_or_default();
-        let wire = Original::new(request);
-        let request = wire.get().cloned().unwrap_or_default();
+        let original = Original::new(request);
+        let request = original.get().cloned().unwrap_or_default();
         let (head, raw) = request.into_parts();
         let decoding = Form {
             headers: &head.headers,
             raw: &raw,
-            wire: Some(&wire),
+            original: Some(&original),
         };
         let read = decoding.fields().expect("fields");
         assert_eq!(read.files.len(), 1, "the decoder gets the files");
-        let framing = asked(Some(&wire));
+        let framing = asked(Some(&original));
         assert_eq!(framing["stream"], "true", "the framing gets the text");
-        let parsed = wire.memo(|_| -> Result<Fields, Fault> { unreachable!("parsed again") });
+        let parsed = original.memo(|_| -> Result<Fields, Fault> { unreachable!("parsed again") });
         assert!(parsed.is_some_and(Result::is_ok), "both read the one parse");
     }
 }

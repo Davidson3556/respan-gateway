@@ -104,16 +104,17 @@ pub fn provider_fault(answer: http::Response<Bytes>) -> Fault {
     if status.is_informational() {
         return fault;
     }
-    let wait = answer
-        .headers()
-        .get(RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| retry_after(v, SystemTime::now()));
-    let fault = match wait {
-        Some(wait) => fault.with(RetryAfter(wait)),
+    let fault = match waits(answer.headers()) {
+        Some(wait) => fault.with(wait),
         None => fault,
     };
     fault.with(ProviderError(answer))
+}
+
+/// The wait an answer's `Retry-After` asks for, if it asks for one.
+pub fn waits(headers: &http::HeaderMap) -> Option<RetryAfter> {
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?;
+    retry_after(value, SystemTime::now()).map(RetryAfter)
 }
 
 /// The wait a `Retry-After` value asks for at `now` (RFC 9110 10.2.3):

@@ -59,7 +59,7 @@ async fn realtime_recovers_from_a_bad_event_then_streams_unicode_tool_arguments(
     assert_eq!(serde_json::from_str::<Value>(&arguments).unwrap(), args);
     finish(&mut ws, &server).await;
     assert_eq!(code(&ends.only()), "ok");
-    assert_eq!(calls.all().iter().map(code).collect::<Vec<_>>(), ["ok"]);
+    assert_eq!(codes(calls.all()), ["ok"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -122,10 +122,7 @@ async fn a_cut_realtime_turn_is_truncated_and_never_replayed() {
     assert_eq!(count, 2);
     idle(&server.gateway).await;
     assert_eq!(code(&ends.only()), "truncated");
-    assert_eq!(
-        calls.all().iter().map(code).collect::<Vec<_>>(),
-        ["truncated"]
-    );
+    assert_eq!(codes(calls.all()), ["truncated"]);
     assert_eq!(
         provider
             .requests()

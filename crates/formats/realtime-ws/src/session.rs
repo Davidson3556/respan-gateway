@@ -6,7 +6,7 @@ use respan_gateway_core::futures::stream::{self, PollNext};
 use respan_gateway_core::futures::{FutureExt, StreamExt, future};
 use respan_gateway_core::{Connection, EventStream, Fault, NativeValue};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::http::header::{CONTENT_TYPE, SEC_WEBSOCKET_PROTOCOL, UPGRADE};
+use respan_gateway_http::http::header::{SEC_WEBSOCKET_PROTOCOL, UPGRADE};
 use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri};
 use respan_gateway_http::{self as h, ClientIo, Decoder, Encoder, ProviderIo};
@@ -171,9 +171,7 @@ fn among(said: Said, frames: EventStream<Output>) -> EventStream<Output> {
 /// A refused handshake's answer: text/plain, with the fault's error code
 /// ([`Fault::code`](respan_gateway_core::Fault::code)), never its message.
 fn refusal(fault: &Fault, _request: &Request<Bytes>, head: &mut ResponseHead) -> Bytes {
-    let text = HeaderValue::from_static("text/plain; charset=utf-8");
-    head.headers.insert(CONTENT_TYPE, text);
-    Bytes::from(fault.code().to_owned())
+    respan_gateway_http::rules::plain_text(head, fault.code())
 }
 
 /// Offer `protocol` in `headers` beside the subprotocols the client

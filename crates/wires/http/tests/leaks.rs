@@ -5,15 +5,15 @@ use respan_gateway_conversation::Input;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::{StreamExt, TryStreamExt, stream};
+use futures::{TryStreamExt, stream};
 use http::StatusCode;
 use respan_gateway_conversation::{Block, Finish, Output};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Provider, Response};
 use respan_gateway_core::{async_trait, futures};
+use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http;
-use respan_gateway_http::{Body, Completion, Frames};
 #[allow(dead_code, unused_imports)]
 #[path = "../../../../tests/support/http.rs"]
 mod http_helpers;
@@ -104,54 +104,24 @@ impl Plugin for Probing {
     }
 }
 
-/// Scripted chunks as a body.
-fn body(chunks: Vec<Result<Bytes, Fault>>) -> Frames {
-    stream::iter(chunks).boxed()
-}
-
-/// A provider's answer, whole or streamed, with exact in-memory chunks.
-fn reply(whole: bool) -> http::Response<Vec<Result<Bytes, Fault>>> {
-    let (content_type, chunks) = if whole {
-        (
-            "application/json",
-            vec![Ok(Bytes::from_static(WHOLE.as_bytes()))],
-        )
-    } else {
-        (
-            "text/event-stream",
-            STREAM
-                .iter()
-                .map(|s| Ok(Bytes::from_static(s.as_bytes())))
-                .collect(),
-        )
+/// A provider answering each call whole or streamed, from exact in-memory
+/// chunks, retaining neither request metadata nor extensions: ready chunks
+/// isolate the lifecycle under test from socket buffering and scheduling.
+async fn scripted(call: http::Request<Body>, whole: bool) -> respan_gateway_http::Sent {
+    let _: Vec<Bytes> = call.into_body().try_collect().await?;
+    let (content_type, chunks): (_, Vec<_>) = match whole {
+        true => ("application/json", vec![WHOLE]),
+        false => ("text/event-stream", STREAM.to_vec()),
     };
-    let mut response = http::Response::new(chunks);
-    response.headers_mut().insert(
-        http::header::CONTENT_TYPE,
-        http::HeaderValue::from_static(content_type),
-    );
+    let chunks = chunks
+        .into_iter()
+        .map(|c| Ok(Bytes::from_static(c.as_bytes())));
+    let mut response = http::Response::new(Body::stream(stream::iter(chunks)));
+    let content_type = http::HeaderValue::from_static(content_type);
     response
-}
-
-/// A provider answering each call with `reply(whole)`, retaining neither
-/// request metadata nor extensions. Deterministic ready chunks isolate the
-/// lifecycle under test from socket buffering and scheduling.
-struct Scripted {
-    whole: bool,
-}
-
-impl Scripted {
-    pub async fn send(
-        &self,
-        call: http::Request<Body>,
-    ) -> Result<(http::Response<Body>, Option<Completion>), Fault> {
-        let _: Vec<Bytes> = call.into_body().try_collect().await?;
-        let (head, chunks) = reply(self.whole).into_parts();
-        Ok((
-            http::Response::from_parts(head, Body::stream(body(chunks))),
-            None,
-        ))
-    }
+        .headers_mut()
+        .insert(http::header::CONTENT_TYPE, content_type);
+    Ok((response, None))
 }
 
 /// Run one request answered as `answer`, whole or streamed, its response
@@ -166,25 +136,12 @@ async fn check(answer: Answer, whole: bool, read: bool) {
         plugin: plugin.clone(),
         answer,
     };
+    let send = move |request| scripted(request, whole);
+    let provider =
+        |name| Provider::new(name, OpenAiChat, respan_gateway_http::connect(send, LIMIT));
     let gw = Gateway::new()
-        .provider(Provider::new(
-            "openai",
-            OpenAiChat,
-            respan_gateway_http::connect(
-                move |request| async move { Scripted { whole }.send(request).await },
-                LIMIT,
-            ),
-        ))
-        .and_then(|g| {
-            g.provider(Provider::new(
-                "backup",
-                OpenAiChat,
-                respan_gateway_http::connect(
-                    move |request| async move { Scripted { whole }.send(request).await },
-                    LIMIT,
-                ),
-            ))
-        })
+        .provider(provider("openai"))
+        .and_then(|g| g.provider(provider("backup")))
         .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .map(|g| g.plugin(probing))
         .and_then(|g| g.target("openai"))
@@ -215,38 +172,11 @@ async fn check_all() {
     }
 }
 
+/// The target's answer, a fallback's (which drops the call it falls back
+/// from) and a plugin's own, each whole or streamed, read or dropped.
 #[tokio::test]
-async fn a_calls_whole_response_read_drops_its_request() {
-    check(Answer::Target, true, true).await;
-}
-
-#[tokio::test]
-async fn a_calls_streamed_response_read_drops_its_request() {
-    check(Answer::Target, false, true).await;
-}
-
-#[tokio::test]
-async fn a_calls_whole_response_dropped_unread_drops_its_request() {
-    check(Answer::Target, true, false).await;
-}
-
-#[tokio::test]
-async fn a_calls_streamed_response_dropped_unread_drops_its_request() {
-    check(Answer::Target, false, false).await;
-}
-
-#[tokio::test]
-async fn a_fallback_drops_its_request_and_the_call_it_dropped() {
-    for (whole, read) in [(true, true), (false, true), (true, false), (false, false)] {
-        check(Answer::Fallback, whole, read).await;
-    }
-}
-
-#[tokio::test]
-async fn a_plugins_own_answer_drops_its_request() {
-    for (whole, read) in [(true, true), (false, true), (true, false), (false, false)] {
-        check(Answer::Own, whole, read).await;
-    }
+async fn every_answer_drops_its_request_and_the_gateway_its_plugin() {
+    check_all().await;
 }
 
 /// End hooks run on other threads, so `idle` must not resolve before what

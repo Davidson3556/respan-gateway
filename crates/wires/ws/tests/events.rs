@@ -259,7 +259,7 @@ async fn a_provider_edge_plugin_counts_turns() {
     idle(&server.gateway).await;
     assert_eq!(*turns.settled.lock().unwrap(), [3]);
     assert_eq!(code(&ends.only()), "ok");
-    assert_eq!(calls.all().iter().map(code).collect::<Vec<_>>(), ["ok"]);
+    assert_eq!(codes(calls.all()), ["ok"]);
 }
 
 // A filter that fails ends the session: the client is closed with the
@@ -442,5 +442,5 @@ async fn a_filter_refusing_an_input_closes_the_client_with_its_code() {
     );
     idle(&server.gateway).await;
     assert_eq!(code(&ends.only()), "policy");
-    assert_eq!(calls.all().iter().map(code).collect::<Vec<_>>(), ["policy"]);
+    assert_eq!(codes(calls.all()), ["policy"]);
 }

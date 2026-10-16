@@ -7,11 +7,44 @@ use http::{HeaderMap, HeaderValue};
 use respan_gateway_core::{Extensions, Fault};
 
 use crate::credential::{take_protocol_keys, take_query};
-use crate::rules::{CONNECTION_HEADERS, remove_if, strip_named};
-use crate::{Body, Completion};
+use crate::rules::{remove_if, strip_hops};
+use crate::{Body, Sent};
 use futures::{FutureExt, StreamExt, stream};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// The most bytes of one message by default, a client's request or a
+/// provider's answer held at once: 32 MiB, the largest request the vendors'
+/// JSON APIs take (Anthropic's Messages API), so nothing a vendor would take
+/// is refused, and an answer may be as large as a request.
+pub const MAX_BODY: usize = 32 << 20;
+
+/// How long reaching a provider may take by default: TCP and TLS to a
+/// reachable host take well under a second, and 10 s spans TCP's first
+/// retransmits of a lost handshake (RFC 6298: after 1 s, then 2 s more, then
+/// 4 s more), so a fallback still tries its next provider while the client
+/// waits.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A call its provider cannot be sent, `config`; the error is for logs.
+pub fn invalid(e: impl std::error::Error + Send + Sync + 'static) -> Fault {
+    Fault::config("the provider request is not valid").with_source(e)
+}
+
+/// `headers` for a transport to send with every call, `Err` with `config`
+/// for one `reserved` says is the transport's own.
+pub fn own_headers(
+    headers: HeaderMap,
+    reserved: impl Fn(&HeaderName) -> bool,
+) -> Result<HeaderMap, Fault> {
+    match headers.keys().find(|name| reserved(name)) {
+        Some(name) => Err(Fault::config(format!(
+            "header '{}' is the connection's",
+            name.as_str()
+        ))),
+        None => Ok(headers),
+    }
+}
 
 /// `url` as a transport's base URL, without a trailing `/`: one of
 /// `schemes`, a host with an optional port other than 0, an optional path
@@ -56,8 +89,7 @@ pub fn prepare_call(
         return Err(Fault::bad_request("the request path has a dot segment"));
     }
     let uri = format!("{base}{path}").parse::<http::Uri>();
-    *call.uri_mut() =
-        uri.map_err(|e| Fault::config("the provider request is not valid").with_source(e))?;
+    *call.uri_mut() = uri.map_err(invalid)?;
     Ok(())
 }
 
@@ -76,17 +108,17 @@ fn has_dot_segment(path: &str) -> bool {
 /// `X-Forwarded-*` and `X-Real-IP`, which plugins still see
 /// ([`Original`](crate::raw::Original)) and a call's [`CallHeaders`] may set.
 pub(crate) fn proxy_call(head: &mut http::request::Parts) {
-    strip_named(&mut head.headers);
-    remove_if(&mut head.headers, |n| !passes(n));
+    strip_hops(&mut head.headers, true);
+    remove_if(&mut head.headers, denied);
     if head.headers.contains_key(UPGRADE) {
         let upgrade = HeaderValue::from_static("upgrade");
         head.headers.insert(CONNECTION, upgrade);
     }
 }
 
-/// Whether a proxy passes on header `name` ([`proxy_call`]).
-fn passes(name: &HeaderName) -> bool {
-    let hop = CONNECTION_HEADERS.contains(name) && name != UPGRADE;
+/// Whether a proxy keeps header `name` from a call, beyond a hop's own
+/// ([`proxy_call`]).
+fn denied(name: &HeaderName) -> bool {
     let name = name.as_str();
     let denied = matches!(
         name,
@@ -104,7 +136,7 @@ fn passes(name: &HeaderName) -> bool {
             | "via"
             | "x-real-ip"
     );
-    !hop && !denied && !name.starts_with("if-") && !name.starts_with("x-forwarded-")
+    denied || name.starts_with("if-") || name.starts_with("x-forwarded-")
 }
 
 pub use crate::credential::is_credential;
@@ -180,17 +212,10 @@ pub fn watchdog<F, Fut>(
     inner: F,
     head: Duration,
     idle: Duration,
-) -> impl Fn(
-    http::Request<Body>,
-) -> BoxFuture<'static, Result<(http::Response<Body>, Option<Completion>), Fault>>
-+ Clone
-+ Send
-+ Sync
-+ 'static
+) -> impl Fn(http::Request<Body>) -> BoxFuture<'static, Sent> + Clone + Send + Sync + 'static
 where
     F: Fn(http::Request<Body>) -> Fut + Send + Sync + 'static,
-    Fut:
-        Future<Output = Result<(http::Response<Body>, Option<Completion>), Fault>> + Send + 'static,
+    Fut: Future<Output = Sent> + Send + 'static,
 {
     let inner = Arc::new(inner);
     move |call| {
@@ -384,6 +409,7 @@ mod tests {
 #[cfg(test)]
 mod watchdog_tests {
     use super::*;
+    use crate::Completion;
     use bytes::Bytes;
     use respan_gateway_core::FaultKind;
     fn secs(n: u64) -> Duration {

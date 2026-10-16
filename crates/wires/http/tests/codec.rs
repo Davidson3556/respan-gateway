@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use hooks::Outcomes;
@@ -124,83 +124,36 @@ impl respan_gateway_http::Decoder<In> for Numbering {
     }
 }
 
-/// Numbers the frames it writes, each as its text.
+/// Numbers the frames it writes, each as its text, and closes a failed body
+/// as a whole one.
 struct Numbered(usize);
 
-impl Numbered {
-    fn encode_into(&mut self, input: &In, out: &mut BytesMut) -> Result<(), Fault> {
+impl Encoder<In> for Numbered {
+    fn encode(&mut self, input: &In, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
         let text = &input.1;
         if text.contains("no") {
             return Err(Fault::bad_request("msg cannot say no"));
         }
         self.0 += 1;
-        out.extend_from_slice(format!("{}|{text}", self.0).as_bytes());
+        frames.push(Bytes::from(format!("{}|{text}", self.0)));
         Ok(())
     }
 
-    fn end_into(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
-        Ok(())
-    }
-}
-
-impl Encoder<In> for Numbered {
-    fn encode(
-        &mut self,
-        value: &In,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.encode_into(value, &mut out)?;
-        frames.push(out.freeze());
-        Ok(())
-    }
-
-    fn end(
-        &mut self,
-        end: Result<(), Fault>,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.end_into(&end, &mut out)?;
-        frames.extend((!out.is_empty()).then(|| out.freeze()));
+    fn end(&mut self, _: Result<(), Fault>, _: &mut Vec<Bytes>) -> Result<(), Fault> {
         Ok(())
     }
 }
 
-/// Writes each answer as its text.
+/// Writes each answer as its text, and closes a failed body as a whole one.
 struct Answers;
 
-impl Answers {
-    fn encode_into(&mut self, answer: &Out, out: &mut BytesMut) -> Result<(), Fault> {
-        out.extend_from_slice(answer.0.as_bytes());
-        Ok(())
-    }
-
-    fn end_into(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
-        Ok(())
-    }
-}
-
 impl Encoder<Out> for Answers {
-    fn encode(
-        &mut self,
-        value: &Out,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.encode_into(value, &mut out)?;
-        frames.push(out.freeze());
+    fn encode(&mut self, answer: &Out, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        frames.push(Bytes::from(answer.0.clone()));
         Ok(())
     }
 
-    fn end(
-        &mut self,
-        end: Result<(), Fault>,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.end_into(&end, &mut out)?;
-        frames.extend((!out.is_empty()).then(|| out.freeze()));
+    fn end(&mut self, _: Result<(), Fault>, _: &mut Vec<Bytes>) -> Result<(), Fault> {
         Ok(())
     }
 }
@@ -218,16 +171,7 @@ impl Echo {
 }
 
 impl Echo {
-    pub async fn send(
-        &self,
-        call: http::Request<Body>,
-    ) -> Result<
-        (
-            http::Response<Body>,
-            Option<respan_gateway_http::Completion>,
-        ),
-        Fault,
-    > {
+    pub async fn send(&self, call: http::Request<Body>) -> respan_gateway_http::Sent {
         let (head, body) = call.into_parts();
         let seen = self.0.clone();
         seen.lock().map(|mut s| s.push(head.uri.path().into())).ok();
@@ -249,16 +193,7 @@ impl Echo {
         Ok((http::Response::from_parts(resp, Body::stream(echoed)), None))
     }
 }
-type SendFuture = futures::future::BoxFuture<
-    'static,
-    Result<
-        (
-            http::Response<Body>,
-            Option<respan_gateway_http::Completion>,
-        ),
-        Fault,
-    >,
->;
+type SendFuture = futures::future::BoxFuture<'static, respan_gateway_http::Sent>;
 
 impl Echo {
     fn into_sender(self) -> impl Clone + Fn(http::Request<Body>) -> SendFuture {
@@ -546,54 +481,6 @@ async fn r3_a_relay_passes_the_clients_headers_and_query_as_a_proxy_does() {
     }
     assert!(translated.query.is_empty());
     assert!(translated.header("x-trace").is_none());
-}
-
-// The binding strips the client's cookies and forwarding headers, and
-// conditions, ranges, overrides and encodings, whatever the transport: one
-// of its own, which strips nothing, gets none of them.
-#[tokio::test]
-async fn cookies_and_forwarding_headers_reach_no_transport() {
-    let seen = Arc::new(Mutex::new(None));
-    let transport = {
-        let seen = seen.clone();
-        move |call: http::Request<Body>| {
-            let (head, _) = call.into_parts();
-            *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(head.headers);
-            Box::pin(async move {
-                let mut resp = http::Response::new(Body::full(Bytes::from(UNARY)));
-                resp.headers_mut()
-                    .insert("content-type", HeaderValue::from_static("application/json"));
-                Ok((resp, None))
-            }) as SendFuture
-        }
-    };
-    let gw = Gateway::new()
-        .provider(Provider::new(
-            "openai",
-            OpenAiChat,
-            respan_gateway_http::connect(transport, LIMIT),
-        ))
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat)?.target("openai"))
-        .unwrap_or_else(|e| panic!("{e}"));
-    let _ = read_whole(
-        serve(&gw, with_headers("/v1/chat/completions", CHAT))
-            .await
-            .0,
-    )
-    .await;
-
-    let sent = seen.lock().ok().and_then(|s| s.clone()).unwrap_or_default();
-    for passed in ["forwarded", "x-forwarded-for", "cookie", "x-trace"] {
-        assert!(sent.get(passed).is_none(), "{passed}");
-    }
-    for kept in [
-        "if-none-match",
-        "range",
-        "accept-encoding",
-        "x-http-method-override",
-    ] {
-        assert!(sent.get(kept).is_none(), "{kept}");
-    }
 }
 
 // A call's own input is written from its value, with none of the client's

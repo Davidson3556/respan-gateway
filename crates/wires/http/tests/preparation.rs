@@ -29,23 +29,31 @@ fn request(opening: Opening) -> Request<h::Body> {
     request
 }
 
+/// A request decoder that reads each frame as an empty input.
+fn reads() -> Box<dyn h::Decoder<String>> {
+    Box::new(|_: Bytes, out: &mut Vec<String>| {
+        out.push(String::new());
+        Ok(())
+    })
+}
+
+/// A response encoder that writes each value as an empty frame.
+fn writes() -> Box<dyn h::Encoder<u8>> {
+    Box::new(|_: &u8, out: &mut Vec<Bytes>| {
+        out.push(Bytes::new());
+        Ok(())
+    })
+}
+
 async fn preparation_failure(opening: Opening, panic: bool) {
     let (io, answer) = h::ClientIo::accept(request(opening), LIMIT);
     let (read, mut sink) = io
         .with_error(|fault, _, _| Bytes::from(fault.message().to_owned()))
         .bind(
-            |_| {
-                Box::new(|_: Bytes, out: &mut Vec<String>| {
-                    out.push(String::new());
-                    Ok(())
-                })
-            },
+            |_| reads(),
             move |reply| {
                 let head = respan_gateway_http::http::Response::new(()).into_parts().0;
-                let encoder = Box::new(|_: &u8, out: &mut Vec<Bytes>| {
-                    out.push(Bytes::new());
-                    Ok(())
-                });
+                let encoder = writes();
                 let _sink = match opening {
                     Opening::Delayed | Opening::Empty => reply.write(head, encoder),
                     Opening::Immediate => {
@@ -107,16 +115,11 @@ async fn preparation_failure(opening: Opening, panic: bool) {
 }
 
 #[tokio::test]
-async fn preparation_error_wins_after_constructing_each_response_sink() {
-    for opening in [Opening::Delayed, Opening::Immediate, Opening::Empty] {
-        preparation_failure(opening, false).await;
-    }
-}
-
-#[tokio::test]
-async fn preparation_panic_wins_after_constructing_each_response_sink() {
-    for opening in [Opening::Delayed, Opening::Immediate, Opening::Empty] {
-        preparation_failure(opening, true).await;
+async fn a_preparation_error_or_panic_wins_after_constructing_each_response_sink() {
+    for panic in [false, true] {
+        for opening in [Opening::Delayed, Opening::Immediate, Opening::Empty] {
+            preparation_failure(opening, panic).await;
+        }
     }
 }
 
@@ -127,22 +130,11 @@ async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
         let (read, mut sink) = io
             .with_error(|fault, _, _| Bytes::from(fault.message().to_owned()))
             .bind(
-                |_| {
-                    Box::new(|_: Bytes, out: &mut Vec<String>| {
-                        out.push(String::new());
-                        Ok(())
-                    })
-                },
+                |_| reads(),
                 move |reply| {
                     drop(answer);
                     let head = respan_gateway_http::http::Response::new(()).into_parts().0;
-                    Ok(reply.write(
-                        head,
-                        Box::new(|_: &u8, out: &mut Vec<Bytes>| {
-                            out.push(Bytes::new());
-                            Ok(())
-                        }),
-                    ))
+                    Ok(reply.write(head, writes()))
                 },
             );
         let _input = read.await.expect("incoming request opens");
@@ -161,21 +153,10 @@ async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
 async fn a_response_prepared_before_its_request_was_read_fails() {
     let (io, _answer) = h::ClientIo::accept(request(Opening::Delayed), LIMIT);
     let (_read, mut sink) = io.bind(
-        |_| {
-            Box::new(|_: Bytes, out: &mut Vec<String>| {
-                out.push(String::new());
-                Ok(())
-            })
-        },
+        |_| reads(),
         |reply| {
             let head = reply.head();
-            Ok(reply.write(
-                head,
-                Box::new(|_: &u8, out: &mut Vec<Bytes>| {
-                    out.push(Bytes::new());
-                    Ok(())
-                }),
-            ))
+            Ok(reply.write(head, writes()))
         },
     );
     let fault = sink
@@ -194,24 +175,16 @@ async fn a_response_prepared_before_its_request_was_read_fails() {
 struct Prefixed<T>(Bytes, Box<dyn respan_gateway_http::Encoder<T>>);
 
 impl<T: 'static> respan_gateway_http::Encoder<T> for Prefixed<T> {
-    fn start(&mut self, out: &mut Vec<Bytes>) -> Result<(), respan_gateway_core::Fault> {
+    fn start(&mut self, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         out.push(self.0.clone());
         self.1.start(out)
     }
 
-    fn encode(
-        &mut self,
-        value: &T,
-        out: &mut Vec<Bytes>,
-    ) -> Result<(), respan_gateway_core::Fault> {
+    fn encode(&mut self, value: &T, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         self.1.encode(value, out)
     }
 
-    fn end(
-        &mut self,
-        end: Result<(), respan_gateway_core::Fault>,
-        out: &mut Vec<Bytes>,
-    ) -> Result<(), respan_gateway_core::Fault> {
+    fn end(&mut self, end: Result<(), Fault>, out: &mut Vec<Bytes>) -> Result<(), Fault> {
         self.1.end(end, out)
     }
 }

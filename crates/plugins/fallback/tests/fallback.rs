@@ -15,12 +15,12 @@ use respan_gateway_core::{
     ClientContext, Connection, ErrorCode, EventSink, EventStream, Fault, Format, Gateway, Plugin,
     Provider, ProviderContext, Response, async_trait,
 };
+use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{
     self, HeaderMap, HeaderValue, StatusCode,
     header::{AUTHORIZATION, RETRY_AFTER},
 };
-use respan_gateway_http::{Body, Completion};
 use respan_gateway_http_faults::retryable;
 use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_plugin_fallback::{Attempt, Backoff, Role, Until, first_success, race};
@@ -184,7 +184,7 @@ impl Plugin for Active {
 }
 
 /// Native HTTP result, including independent outgoing delivery completion.
-type Answered = Result<(http::Response<Body>, Option<Completion>), Fault>;
+type Answered = respan_gateway_http::Sent;
 
 /// Answers only after `delay`, without hiding the native HTTP callback.
 fn slow<F, Fut>(

@@ -554,16 +554,7 @@ async fn the_kernel_leaves_origin_headers_to_the_transport() {
     struct Cookie;
 
     impl Cookie {
-        pub async fn send(
-            &self,
-            _req: http::Request<Body>,
-        ) -> Result<
-            (
-                http::Response<Body>,
-                Option<respan_gateway_http::Completion>,
-            ),
-            Fault,
-        > {
+        pub async fn send(&self, _req: http::Request<Body>) -> respan_gateway_http::Sent {
             let body = http_body_util::Full::new(bytes::Bytes::from(UNARY));
             let mut resp = http::Response::new(http_body_util::BodyExt::boxed_unsync(
                 http_body_util::BodyExt::map_err(body, Fault::from),

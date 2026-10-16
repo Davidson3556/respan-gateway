@@ -1,7 +1,7 @@
 //! Client input and its one response handoff.
 
 use super::writer::Writer;
-use super::{PANICKED, Written, end_encoder, guarded, locked};
+use super::{PANICKED, Written, guarded, locked};
 use crate::codec::{self, decode_one};
 use crate::rules::{bodiless, error_head, outgoing, plain_response, strip_hops};
 use crate::{
@@ -27,7 +27,6 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 
 type ErrorWriter = dyn Fn(&Fault, &http::Request<Bytes>, &mut ResponseHead) -> Bytes + Send + Sync;
-type Slot = Arc<Mutex<Handoff>>;
 struct Handoff {
     sender: Option<oneshot::Sender<Written>>,
     staged: Option<Written>,
@@ -86,10 +85,10 @@ pub struct ClientIo {
     request: http::Request<Body>,
     live: bool,
     limit: usize,
-    wire: Original,
-    head: ClientHead,
+    original: Original,
+    client_head: ClientHead,
     credential: Option<Credential>,
-    reply: oneshot::Sender<Written>,
+    respond: oneshot::Sender<Written>,
     error: Arc<ErrorWriter>,
 }
 impl ClientIo {
@@ -125,20 +124,20 @@ impl ClientIo {
     ) -> (Self, BoxFuture<'static, Option<Written>>) {
         let (mut head, body) = request.into_parts();
         let credential = Credential::lift(&mut head);
-        let wire = Original::unread();
+        let original = Original::unread();
         if live {
-            wire.fill(http::Request::from_parts(head.clone(), Bytes::new()));
+            original.fill(http::Request::from_parts(head.clone(), Bytes::new()));
         }
-        let (reply, answer) = oneshot::channel();
+        let (respond, answer) = oneshot::channel();
         (
             Self {
                 request: http::Request::from_parts(head, body),
                 live,
                 limit,
-                wire,
-                head: ClientHead::default(),
+                original,
+                client_head: ClientHead::default(),
                 credential,
-                reply,
+                respond,
                 error: Arc::new(crate::rules::plain),
             },
             async move { answer.await.ok() }.boxed(),
@@ -149,8 +148,8 @@ impl ClientIo {
     /// puts its head ([`Relayed`](crate::raw::Relayed)).
     pub fn extensions(&self) -> Extensions {
         let mut extensions = Extensions::new();
-        extensions.insert(self.wire.clone());
-        extensions.insert(self.head.clone());
+        extensions.insert(self.original.clone());
+        extensions.insert(self.client_head.clone());
         if let Some(credential) = &self.credential {
             extensions.insert(credential.clone());
         }
@@ -196,14 +195,14 @@ impl ClientIo {
             request,
             live,
             limit,
-            reply,
-            wire,
-            head: client_head,
+            respond,
+            original,
+            client_head,
             error,
             ..
         } = self;
         let (head, body) = request.into_parts();
-        let filled = wire.clone();
+        let filled = original.clone();
         let incoming = async move {
             if live {
                 let frames = body.map(move |frame| match frame {
@@ -211,7 +210,7 @@ impl ClientIo {
                     frame => frame,
                 });
                 let decoder = decode(&head);
-                return Ok(codec::decode(Body::stream(frames), decoder));
+                return Ok(codec::decode(Body::stream(frames), decoder, None));
             }
             let whole = codec::collect(body, limit, too_large).await;
             let raw = whole.as_ref().cloned().unwrap_or_default();
@@ -222,17 +221,20 @@ impl ClientIo {
         .boxed();
         let outgoing = EventSink::preparing(move |events: &mut EventStream<O>| {
             // The kernel prepares a response once its request opened, which
-            // filled the wire.
+            // filled its original.
             let unread = "a response was prepared before its request was read";
-            let request = wire.get().cloned().ok_or_else(|| Fault::internal(unread))?;
-            if reply.is_canceled() {
+            let request = original
+                .get()
+                .cloned()
+                .ok_or_else(|| Fault::internal(unread))?;
+            if respond.is_canceled() {
                 return Err(Fault::abandoned());
             }
             let reply = Reply {
                 head: client_head,
                 request: Arc::new(request),
                 slot: Arc::new(Mutex::new(Handoff {
-                    sender: Some(reply),
+                    sender: Some(respond),
                     staged: None,
                     committed: false,
                     failed: None,
@@ -286,7 +288,7 @@ impl ClientIo {
 pub struct Reply {
     head: ClientHead,
     request: Arc<http::Request<Bytes>>,
-    slot: Slot,
+    slot: Arc<Mutex<Handoff>>,
     error: Arc<ErrorWriter>,
     live: bool,
 }
@@ -349,15 +351,8 @@ impl Reply {
             return client;
         }
         let mut client = Client::new(self, head, Some(encoder));
-        let mut out = Vec::new();
-        let started = match &mut client.encoder {
-            Some(encoder) => guarded(|| encoder.start(&mut out)),
-            None => Ok(()),
-        };
-        match started {
-            Ok(()) => {
-                client.send(out);
-            }
+        match client.writer.start() {
+            Ok(frames) => _ = client.send(frames),
             Err(fault) => client.finish(Err(fault)),
         }
         client
@@ -383,22 +378,20 @@ fn too_large() -> Fault {
         .with(Status(StatusCode::PAYLOAD_TOO_LARGE))
 }
 
-/// A response's sink. Its encoder is `None` once it ended; its head, body
-/// and completion are `unopened` until handed to the adapter.
+/// A response's sink: its writer, and its head, body and completion,
+/// `unopened` until handed to the adapter.
 struct Client<T> {
     reply: Reply,
     unopened: Option<(ResponseHead, Frames, Completion)>,
-    encoder: Option<Box<dyn Encoder<T>>>,
-    writer: Writer,
+    writer: Writer<T>,
 }
 impl<T> Unpin for Client<T> {}
 impl<T: 'static> Client<T> {
     fn new(reply: Reply, head: ResponseHead, encoder: Option<Box<dyn Encoder<T>>>) -> Self {
-        let (writer, frames, completion) = Writer::new();
+        let (writer, frames, completion) = Writer::new(encoder);
         Self {
             reply,
             unopened: Some((head, frames, completion)),
-            encoder,
             writer,
         }
     }
@@ -420,7 +413,7 @@ impl<T: 'static> Client<T> {
         sent
     }
     fn unwritable(&mut self, fault: Fault) {
-        self.encoder = None;
+        self.writer.drop_encoder();
         self.writer.end(Err(fault.clone()), None);
         let mut response = plain_response(&fault);
         response.extensions_mut().insert(Unwritten);
@@ -431,7 +424,7 @@ impl<T: 'static> Client<T> {
     /// Write `fault` as the response: an explicit [`RawReply`] as it came,
     /// else its status and `Retry-After` and the format's error body.
     fn refuse(&mut self, fault: Fault) {
-        self.encoder = None;
+        self.writer.drop_encoder();
         let mut head = http::Response::new(()).into_parts().0;
         let bytes = match fault.get::<RawReply>() {
             Some(RawReply(raw)) => {
@@ -460,11 +453,10 @@ impl<T: 'static> Client<T> {
         self.open();
     }
     fn finish(&mut self, end: Result<(), Fault>) {
-        let Some(mut encoder) = self.encoder.take() else {
+        let mut out = Vec::new();
+        let Some((end, abort)) = self.writer.end_encoder(end, &mut out) else {
             return;
         };
-        let mut out = Vec::new();
-        let (end, abort) = end_encoder(encoder.as_mut(), end, &mut out);
         if self.unopened.is_some()
             && let Err(fault) = end
         {
@@ -492,23 +484,15 @@ impl<T: 'static> Sink<Result<T, Fault>> for Client<T> {
         if let Some(fault) = locked(&self.reply.slot).failed.clone() {
             return Poll::Ready(Err(fault));
         }
-        match self.encoder {
-            Some(_) => self.writer.poll_ready(cx, false),
-            None => self.writer.poll_close(cx),
+        match self.writer.is_open() {
+            true => self.writer.poll_ready(cx, false),
+            false => self.writer.poll_close(cx),
         }
     }
     fn start_send(mut self: Pin<&mut Self>, item: Result<T, Fault>) -> Result<(), Fault> {
-        let Some(encoder) = &mut self.encoder else {
-            return Ok(());
-        };
-        let mut out = Vec::new();
-        let encoded = match item {
-            Ok(value) => guarded(|| encoder.encode(&value, &mut out)),
-            Err(fault) => Err(fault),
-        };
-        match encoded {
-            Ok(()) => {
-                if self.send(out) {
+        match self.writer.encode(item) {
+            Ok(frames) => {
+                if self.send(frames) {
                     self.open();
                 }
             }
@@ -520,7 +504,7 @@ impl<T: 'static> Sink<Result<T, Fault>> for Client<T> {
         self.poll_ready(cx)
     }
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        if self.encoder.is_some() {
+        if self.writer.is_open() {
             ready!(self.writer.poll_ready(cx, false))?;
             self.finish(Ok(()));
         }
@@ -568,7 +552,7 @@ pub fn handle<B>(
     gateway: &Gateway,
     req: http::Request<B>,
     limit: usize,
-) -> impl Future<Output = Handled> + Send + 'static
+) -> impl Future<Output = Written> + Send + 'static
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
@@ -583,7 +567,7 @@ pub fn handle_live<B>(
     gateway: &Gateway,
     req: http::Request<B>,
     limit: usize,
-) -> impl Future<Output = Handled> + Send + 'static
+) -> impl Future<Output = Written> + Send + 'static
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
@@ -591,15 +575,12 @@ where
     handled(gateway, req, true, limit)
 }
 
-/// What [`handle`] gives: the response, and its delivery's end.
-type Handled = (http::Response<Body>, BoxFuture<'static, Result<(), Fault>>);
-
 fn handled<B>(
     gateway: &Gateway,
     req: http::Request<B>,
     live: bool,
     limit: usize,
-) -> impl Future<Output = Handled> + Send + 'static
+) -> impl Future<Output = Written> + Send + 'static
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,

@@ -17,10 +17,8 @@ use respan_gateway_http::http::header;
 use respan_gateway_http::http::request::Parts as RequestHead;
 use respan_gateway_ws::Limits;
 
-/// The most bytes of a request [`Host`] reads by default: 32 MiB, the largest
-/// request the vendors' JSON APIs take (Anthropic's Messages API), so no
-/// request a provider would take is refused here.
-const MAX_BODY_BYTES: usize = 32 << 20;
+/// The most bytes of a request [`Host`] reads by default.
+const MAX_BODY_BYTES: usize = respan_gateway_http::call::MAX_BODY;
 
 type BodyLimit = dyn Fn(&RequestHead) -> usize + Send + Sync;
 

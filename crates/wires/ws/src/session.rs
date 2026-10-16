@@ -14,6 +14,7 @@ use respan_gateway_core::{Fault, Gateway};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::header::{self, HeaderValue};
 use respan_gateway_http::http::{self, Method, StatusCode, Version};
+use respan_gateway_http::rules::{plain_text, remove_if};
 use respan_gateway_http::{Body, Credential, Frames};
 use respan_gateway_http_faults::status;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -110,13 +111,9 @@ where
         let mut offers = header_tokens(&offered.headers, header::SEC_WEBSOCKET_PROTOCOL);
         offers.any(|offer| offer.as_bytes() == chosen.as_bytes())
     });
-    let own: Vec<_> = (head.headers.keys())
-        .filter(|name| name.as_str().starts_with("sec-websocket-"))
-        .cloned()
-        .collect();
-    for name in own {
-        head.headers.remove(name);
-    }
+    remove_if(&mut head.headers, |name| {
+        name.as_str().starts_with("sec-websocket-")
+    });
     let headers = &mut head.headers;
     headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
     headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
@@ -186,9 +183,8 @@ async fn refusal(
 fn text(fault: &Fault) -> http::Response<Body> {
     let mut head = http::Response::new(()).into_parts().0;
     head.status = status(fault);
-    let plain = HeaderValue::from_static("text/plain; charset=utf-8");
-    head.headers.insert(header::CONTENT_TYPE, plain);
-    http::Response::from_parts(head, Body::full(fault.code().to_owned()))
+    let text = plain_text(&mut head, fault.code());
+    http::Response::from_parts(head, Body::full(text))
 }
 
 /// Which edge a connection is, for what its peer's end means.

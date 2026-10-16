@@ -29,42 +29,11 @@ use respan_gateway_core::{
     Response, async_trait,
 };
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
+use respan_gateway_http::http::{self, HeaderValue, StatusCode};
 use respan_gateway_http::{Body, ClientIo, ProviderIo, connect};
 use respan_gateway_http_faults::Status;
-use respan_gateway_http_transport::HttpTransport;
-use respan_gateway_passthrough_http as passthrough;
 use serde_json::json;
-use support::{Metered, with_plugins};
-
-/// A protocol the gateway relays unread: a kind of its own.
-struct Raw;
-
-impl Format<ClientIo, passthrough::Input<Raw>, passthrough::Output<Raw>> for Raw {
-    fn name(&self) -> &str {
-        "raw"
-    }
-    fn matches(&self, io: &ClientIo) -> bool {
-        io.request().uri().path().starts_with("/raw")
-    }
-    fn bind(
-        &self,
-        io: ClientIo,
-    ) -> Result<Connection<passthrough::Input<Raw>, passthrough::Output<Raw>>, Fault> {
-        Ok(io.bind(passthrough::read_request, passthrough::write_response))
-    }
-}
-impl Format<ProviderIo, passthrough::Output<Raw>, passthrough::Input<Raw>> for Raw {
-    fn name(&self) -> &str {
-        "raw"
-    }
-    fn bind(
-        &self,
-        io: ProviderIo,
-    ) -> Result<Connection<passthrough::Output<Raw>, passthrough::Input<Raw>>, Fault> {
-        Ok(io.bind(passthrough::write_request, passthrough::read_response))
-    }
-}
+use support::{Anywhere, Metered, SendFuture, openai, provider, unused, with_plugins};
 
 /// A gateway serving `format` over the caller's transport, recording outcomes
 /// on both edges.
@@ -93,37 +62,6 @@ where
     let gw = gw.map(|g| with_plugins(g, plugins));
     let gw = gw.and_then(|g| g.target("p"));
     (gw.unwrap_or_else(|e| panic!("{e}")), log, calls)
-}
-
-type SendFuture = futures::future::BoxFuture<
-    'static,
-    Result<
-        (
-            http::Response<Body>,
-            Option<respan_gateway_http::Completion>,
-        ),
-        Fault,
-    >,
->;
-
-fn provider(
-    base: &str,
-    header: &'static str,
-    key: &'static str,
-) -> impl Clone + Fn(http::Request<Body>) -> SendFuture + use<> {
-    let mut headers = HeaderMap::new();
-    headers.insert(header, HeaderValue::from_static(key));
-    let client = HttpTransport::new(base)
-        .and_then(|http| http.with_headers(headers))
-        .unwrap_or_else(|e| panic!("provider transport: {e}"));
-    move |request| {
-        let client = client.clone();
-        Box::pin(async move { client.send(request).await })
-    }
-}
-
-fn openai(fake: &FakeOpenAi) -> impl Clone + Fn(http::Request<Body>) -> SendFuture + use<> {
-    provider(&fake.base_url(), "authorization", "Bearer sk-test")
 }
 
 fn anthropic(fake: &FakeAnthropic) -> impl Clone + Fn(http::Request<Body>) -> SendFuture + use<> {
@@ -165,16 +103,6 @@ fn local(
     }
 }
 
-fn never_called() -> impl Clone + Fn(http::Request<Body>) -> SendFuture {
-    |_| Box::pin(async { Err(Fault::internal("provider should not be called")) })
-}
-
-impl Clone for Raw {
-    fn clone(&self) -> Self {
-        Raw
-    }
-}
-
 // Must hold: a passthrough of no kind relays an event stream byte for
 // byte, however the provider split it, its comments included.
 #[tokio::test]
@@ -191,7 +119,7 @@ async fn a_passthrough_of_no_kind_relays_an_event_stream_byte_for_byte() {
         stream.iter().copied().map(Bytes::from).collect(),
         sent.clone(),
     );
-    let (gw, log, _) = gateway(Raw, transport, Vec::new());
+    let (gw, log, _) = gateway(Anywhere, transport, Vec::new());
 
     let (status, _, body) = read_whole(serve(&gw, post("/raw", "anything")).await.0).await;
     gw.idle().await;
@@ -216,7 +144,7 @@ async fn a_passthrough_of_no_kind_relays_a_whole_body_and_a_failure_as_they_came
             vec![Bytes::from(body)],
             Arc::default(),
         );
-        let (gw, _, _) = gateway(Raw, transport, Vec::new());
+        let (gw, _, _) = gateway(Anywhere, transport, Vec::new());
         let (got, _, read) = read_whole(serve(&gw, post("/raw", "x")).await.0).await;
 
         assert_eq!(
@@ -522,7 +450,7 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
         Arc::new(meter.clone()),
         Arc::new(Answers),
     ];
-    let (gw, _, _) = gateway(OpenAiChat, never_called(), plugins);
+    let (gw, _, _) = gateway(OpenAiChat, unused(), plugins);
     let chat = r#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hi"}]}"#;
 
     let (_, _, body) = read_whole(serve(&gw, post("/v1/chat/completions", chat)).await.0).await;

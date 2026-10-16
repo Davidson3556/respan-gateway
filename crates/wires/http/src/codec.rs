@@ -292,16 +292,17 @@ where
     })
 }
 
-/// The values `decoder` reads of `body`, frame by frame, its limit the
-/// body's, until it is [`done`](Decoder::done). Values read before a
+/// The values `decoder` reads of `body`, frame by frame, holding at most
+/// `limit` bytes ([`Decoder::limit`]), until it is [`done`](Decoder::done). Values read before a
 /// failure come before it. It reads no frame
 /// ahead while values remain, and yields after [`FRAMES_PER_POLL`] frames
 /// that read as nothing.
 pub(crate) fn decode<T: Send + 'static>(
     body: Body,
     mut decoder: Box<dyn Decoder<T>>,
+    limit: Option<usize>,
 ) -> EventStream<T> {
-    decoder.limit(body.limit);
+    decoder.limit(limit);
     let mut ready = Vec::new();
     let started = decoder.start(&mut ready);
     let mut ready: VecDeque<_> = ready.into_iter().map(Ok).collect();
@@ -411,7 +412,7 @@ mod tests {
             seen.fetch_add(1, Ordering::SeqCst);
             Ok(Bytes::new())
         }));
-        let mut read = decode(body, Box::new(|_: Bytes, _: &mut Vec<u8>| Ok(())));
+        let mut read = decode(body, Box::new(|_: Bytes, _: &mut Vec<u8>| Ok(())), None);
         assert!(read.next().now_or_never().is_none());
         assert_eq!(count.load(Ordering::SeqCst), FRAMES_PER_POLL);
     }
@@ -440,10 +441,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_body_over_its_limit_fails_upstream() {
-        let mut body = Body::full("12345");
-        body.limit = Some(4);
+        let body = Body::full("12345");
         let whole = Whole::new(|_: Bytes, _: &mut Vec<()>| Ok(()));
-        let got: Vec<_> = decode(body, Box::new(whole)).collect().await;
+        let got: Vec<_> = decode(body, Box::new(whole), Some(4)).collect().await;
         let fault = got.into_iter().next().and_then(Result::err);
         assert!(fault.is_some_and(|f| f.is(FaultKind::Provider)));
     }
@@ -458,7 +458,7 @@ mod tests {
             Ok(())
         });
         let body = Body::full(Bytes::from_static(b": ping\n\ndata: x\n\ndata: y\n\n"));
-        let out: Vec<_> = decode(body, Box::new(events)).collect().await;
+        let out: Vec<_> = decode(body, Box::new(events), None).collect().await;
         assert!(out.len() == 2 && out[0].is_ok() && out[1].is_err());
     }
 }

@@ -497,10 +497,11 @@ async fn canceling_during_enqueue_removes_a_ticket_inserted_later() -> Result<()
     blocker
         .await
         .map_err(|error| Fault::internal("blocker failed").with_source(error))??;
-    // Let the already-running insert finish after its awaiting task is gone.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The insert already running finishes after its awaiting task is gone,
+    // and its ticket goes with it: the next request waits for that, however
+    // long a loaded machine takes.
     let next = slots
-        .acquire(0, "next", Instant::now() + Duration::from_millis(300))
+        .acquire(0, "next", Instant::now() + Duration::from_secs(5))
         .await?
         .ok_or_else(|| Fault::internal("canceled enqueue consumed capacity"))?;
     assert_eq!(slots.counts().await?, (0, 0));

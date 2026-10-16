@@ -34,11 +34,8 @@ pub const DEFAULT_LISTEN: SocketAddr =
 /// unless the config's `shutdown_grace` says.
 const SHUTDOWN: Duration = Duration::from_secs(30);
 /// The most bytes of a client's request, and of a provider's answer held at
-/// once, unless the config's `body_limit` says: 32 MiB, the largest request
-/// the vendors' JSON APIs take (Anthropic's Messages API), so the gateway
-/// refuses nothing a vendor would take, and an answer may be as large as a
-/// request.
-const BODY_LIMIT: usize = 32 << 20;
+/// once, unless the config's `body_limit` says.
+const BODY_LIMIT: usize = respan_gateway_http::call::MAX_BODY;
 
 /// A gateway built from a [`Config`], and its HTTP application: the
 /// formats served, `/healthz`, `/v1/models`, the request log, and the web

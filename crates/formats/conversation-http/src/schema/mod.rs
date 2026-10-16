@@ -307,15 +307,15 @@ pub trait Schema: Copy + Send + Sync + 'static {
     /// This format at the client edge: requests in, responses out.
     fn bind_client(&self, io: ClientIo) -> Result<Connection<Input, Output>, Fault> {
         let schema = *self;
-        let wire = io
+        let original = io
             .extensions()
             .get::<respan_gateway_http::raw::Original>()
             .cloned();
         let io = io.with_error(move |fault, request, head| schema.refusal(fault, request, head));
         Ok(io.bind(
             move |head| {
-                if let Some(wire) = &wire {
-                    exchange::seed_asked::<Self>(wire);
+                if let Some(original) = &original {
+                    exchange::seed_asked::<Self>(original);
                 }
                 schema.read_request(head)
             },
@@ -328,13 +328,13 @@ pub trait Schema: Copy + Send + Sync + 'static {
     fn bind_provider(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
         let schema = *self;
         let stream = io.extensions().get::<StreamResponse>().copied();
-        let wire = io
+        let original = io
             .extensions()
             .get::<respan_gateway_http::raw::Original>()
             .cloned();
         let io = io.with_refusal(move |answer| errors::answer(&schema, answer));
         Ok(io.bind(
-            move |head, input| exchange::post(schema, head, input, wire.as_ref(), stream),
+            move |head, input| exchange::post(schema, head, input, original.as_ref(), stream),
             move |head, call| schema.read_response(head, call),
         ))
     }

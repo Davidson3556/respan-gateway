@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use h::{
     Body, Encoder,
-    bytes::{Bytes, BytesMut},
+    bytes::Bytes,
     http::{Request, Response},
 };
 use respan_gateway_core::futures::{self, FutureExt, Sink, SinkExt, StreamExt, future, stream};
@@ -26,46 +26,27 @@ struct Writes {
     fail_encode: bool,
     fail_end: bool,
 }
-impl Writes {
-    fn encode_into(&mut self, value: &u8, out: &mut BytesMut) -> Result<(), Fault> {
+impl Encoder<u8> for Writes {
+    fn encode(&mut self, value: &u8, frames: &mut Vec<h::bytes::Bytes>) -> Result<(), Fault> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_encode {
             return Err(Fault::config("encode"));
         }
-        out.extend_from_slice(&[*value]);
-        Ok(())
-    }
-    fn end_into(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
-        self.ends.fetch_add(1, Ordering::SeqCst);
-        end.clone()?;
-        if self.fail_end {
-            return Err(Fault::config("end"));
-        }
-        out.extend_from_slice(b"!");
-        Ok(())
-    }
-}
-
-impl Encoder<u8> for Writes {
-    fn encode(
-        &mut self,
-        value: &u8,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.encode_into(value, &mut out)?;
-        frames.push(out.freeze());
+        frames.push(h::bytes::Bytes::copy_from_slice(&[*value]));
         Ok(())
     }
 
     fn end(
         &mut self,
         end: Result<(), Fault>,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
+        frames: &mut Vec<h::bytes::Bytes>,
     ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.end_into(&end, &mut out)?;
-        frames.extend((!out.is_empty()).then(|| out.freeze()));
+        self.ends.fetch_add(1, Ordering::SeqCst);
+        end?;
+        if self.fail_end {
+            return Err(Fault::config("end"));
+        }
+        frames.push(h::bytes::Bytes::from_static(b"!"));
         Ok(())
     }
 }

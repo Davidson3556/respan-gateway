@@ -654,3 +654,8 @@ pub fn code(end: &Result<(), Fault>) -> String {
         Err(fault) => fault.code().to_owned(),
     }
 }
+
+/// The codes of `ends`, in order.
+pub fn codes(ends: Vec<Result<(), Fault>>) -> Vec<String> {
+    ends.iter().map(code).collect()
+}

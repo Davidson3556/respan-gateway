@@ -2,7 +2,6 @@
 //! taking the key as the format takes it; and its model list.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::{Connect, KeyIn, Models, Reach, Upstream, Vendor, located};
 use respan_gateway_core::{Fault, Gateway};
@@ -113,7 +112,7 @@ impl VendorProvider {
             vendor: &NONE,
             formats: Vec::new(),
             key: Key::Client,
-            limit: 32 << 20,
+            limit: respan_gateway_http::call::MAX_BODY,
             sessions: Limits::default(),
         }
     }
@@ -295,9 +294,7 @@ impl VendorProvider {
         };
         let mut client = HttpTransport::new(base)?;
         if let Some(follow) = follow {
-            client = client
-                .with_connect_timeout(Duration::from_secs(10))?
-                .follow_redirects(follow);
+            client = client.follow_redirects(follow);
         }
         let client = Arc::new(client.with_headers(auth)?);
         let host = base.split_once("://").map_or(base, |(_, rest)| rest);

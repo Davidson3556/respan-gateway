@@ -81,7 +81,7 @@ async fn a_realtime_session_is_byte_exact_both_ways() {
     ));
     idle(&server.gateway).await;
     assert_eq!(code(&ends.only()), "ok");
-    assert_eq!(calls.all().iter().map(code).collect::<Vec<_>>(), ["ok"]);
+    assert_eq!(codes(calls.all()), ["ok"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -122,7 +122,7 @@ async fn a_gemini_live_session_is_byte_exact_both_ways() {
     ));
     idle(&server.gateway).await;
     assert_eq!(code(&ends.only()), "ok");
-    assert_eq!(calls.all().iter().map(code).collect::<Vec<_>>(), ["ok"]);
+    assert_eq!(codes(calls.all()), ["ok"]);
 }
 
 // The provider's refusal of the upgrade (mockllm answers 401 to a key-less

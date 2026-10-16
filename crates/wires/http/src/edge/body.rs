@@ -13,10 +13,6 @@ use crate::Frames;
 /// does not imply a live semantic input; the incoming adapter selects that.
 pub struct Body {
     data: Data,
-    /// The most bytes a reader holds of it at once: of a provider's answer,
-    /// its transport's ([`connect`](crate::connect)); `None` for a body no
-    /// binding read.
-    pub(crate) limit: Option<usize>,
 }
 
 enum Data {
@@ -29,7 +25,6 @@ impl Body {
     pub fn full(bytes: impl Into<Bytes>) -> Self {
         Self {
             data: Data::Full(Some(bytes.into())),
-            limit: None,
         }
     }
 
@@ -37,7 +32,6 @@ impl Body {
     pub fn stream(stream: impl Stream<Item = Result<Bytes, Fault>> + Send + 'static) -> Self {
         Self {
             data: Data::Stream(stream.boxed()),
-            limit: None,
         }
     }
 

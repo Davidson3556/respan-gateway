@@ -5,20 +5,19 @@
 //! (`respan_gateway_http::call`), shared with every transport.
 
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{AUTHORIZATION, COOKIE, LOCATION, PROXY_AUTHORIZATION};
+use http::header::{COOKIE, LOCATION};
 use http::{HeaderMap, Method, StatusCode, Uri};
 use http_body_util::{BodyExt, Limited};
 use respan_gateway_core::Fault;
 
-use respan_gateway_http::rules::is_connection_header;
-use respan_gateway_http::{Body, Completion, ProviderIo};
+use respan_gateway_http::call::{CONNECT_TIMEOUT, MAX_BODY, invalid, own_headers};
+use respan_gateway_http::rules::{is_connection_header, remove_if};
+use respan_gateway_http::{Body, ProviderIo, Sent};
 use respan_gateway_http::{call::is_credential, call::prepare_call, call::strip_origin_headers};
 
-/// The Reqwest this transport is built on, at its version, such as for
-/// [`HttpTransport::with_client`].
+/// The Reqwest this transport is built on, at its version.
 pub use reqwest;
 
 /// The most redirects a call follows.
@@ -27,25 +26,8 @@ const REDIRECTS: usize = 5;
 /// Whether a redirect to a URI is followed.
 type Allow = dyn Fn(&Uri) -> bool + Send + Sync;
 
-/// A call the provider cannot be sent; the error is for logs.
-fn invalid(e: impl std::error::Error + Send + Sync + 'static) -> Fault {
-    Fault::config("the provider request is not valid").with_source(e)
-}
-
-/// How long connecting to a provider may take by default: TCP and TLS to a
-/// reachable host take well under a second, and 10 s spans TCP's first
-/// retransmits of a lost handshake (RFC 6298: after 1 s, then 2 s more, then
-/// 4 s more), so a fallback still tries its next provider while the client
-/// waits.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The most bytes of one answer read at once by default: 32 MiB, the
-/// largest request the vendors' JSON APIs take (Anthropic's Messages API),
-/// so an answer may be as large as a request may be.
-const LIMIT: usize = 32 << 20;
-
 /// Reaches one provider over HTTP(S) at a base URL, which each call's path
-/// extends, sharing one connection pool unless given a client. It prepares
+/// extends, sharing one connection pool. It prepares
 /// a call ([`prepare_call`]) and strips the response
 /// ([`strip_origin_headers`]). It sets no timeout on an answer: timing is
 /// [`watchdog`](respan_gateway_http::call::watchdog)'s.
@@ -68,20 +50,19 @@ impl std::fmt::Debug for HttpTransport {
     }
 }
 
-/// A client that returns redirects unfollowed, as they are the client's to
-/// follow, and gives up connecting after `connect`.
-fn client(connect: Duration) -> Result<reqwest::Client, Fault> {
-    reqwest::Client::builder()
-        .connect_timeout(connect)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| Fault::internal("the HTTP client could not be built").with_source(e))
-}
-
-/// The client every transport shares: [`client`] with [`CONNECT_TIMEOUT`].
+/// The client every transport shares: it returns redirects unfollowed, as
+/// they are the client's to follow, and gives up connecting after
+/// [`CONNECT_TIMEOUT`].
 fn shared_client() -> Result<reqwest::Client, Fault> {
     static CLIENT: OnceLock<Result<reqwest::Client, Fault>> = OnceLock::new();
-    CLIENT.get_or_init(|| client(CONNECT_TIMEOUT)).clone()
+    let client = || {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| Fault::internal("the HTTP client could not be built").with_source(e))
+    };
+    CLIENT.get_or_init(client).clone()
 }
 
 impl HttpTransport {
@@ -102,23 +83,8 @@ impl HttpTransport {
     /// set before, in place of the client's ([`credentials`](respan_gateway_http::call::credentials)).
     /// `Err` with `config` for a connection header.
     pub fn with_headers(mut self, headers: HeaderMap) -> Result<Self, Fault> {
-        if let Some(name) = headers.keys().find(|k| is_connection_header(k)) {
-            let name = name.as_str();
-            return Err(Fault::config(format!(
-                "header '{name}' is the connection's"
-            )));
-        }
-        self.headers = headers;
+        self.headers = own_headers(headers, is_connection_header)?;
         Ok(self)
-    }
-
-    /// Use `client` and its pool instead of the shared one. It should not
-    /// follow redirects: they are the client's to follow, or
-    /// [`follow_redirects`](Self::follow_redirects)'s, which keeps the call's
-    /// credentials to its origin.
-    pub fn with_client(mut self, client: reqwest::Client) -> Self {
-        self.client = client;
-        self
     }
 
     /// Follow a redirect of a `GET` or `HEAD` call to a location `allow`
@@ -134,23 +100,13 @@ impl HttpTransport {
         self
     }
 
-    /// Give up connecting after `timeout`, with a pool of its own. `Err`
-    /// with `internal` if the client cannot be built.
-    pub fn with_connect_timeout(mut self, timeout: Duration) -> Result<Self, Fault> {
-        self.client = client(timeout)?;
-        Ok(self)
-    }
-
     /// Send an encoded call and return its response.
-    pub async fn send(
-        &self,
-        mut call: http::Request<Body>,
-    ) -> Result<(http::Response<Body>, Option<Completion>), Fault> {
+    pub async fn send(&self, mut call: http::Request<Body>) -> Sent {
         prepare_call(&mut call, &self.base, &self.headers)?;
         let (mut parts, body) = call.into_parts();
-        let bodiless = !body.is_streaming() && body.full_bytes().is_none_or(|b| b.is_empty());
+        let no_body = !body.is_streaming() && body.full_bytes().is_none_or(|b| b.is_empty());
         let reads = matches!(parts.method, Method::GET | Method::HEAD);
-        let follow = self.follow.as_ref().filter(|_| bodiless && reads);
+        let follow = self.follow.as_ref().filter(|_| no_body && reads);
         // A whole call is one frame, or none if empty, and goes with its length.
         let mut body = Some(body);
         let mut hops = 0;
@@ -209,7 +165,7 @@ impl HttpTransport {
                 let client = client.clone();
                 async move { client.send(request).await }
             },
-            LIMIT,
+            MAX_BODY,
         )
     }
 }
@@ -220,11 +176,11 @@ impl HttpTransport {
 /// body that is no JSON, or larger, an `upstream` fault.
 pub async fn json(answer: http::Response<Body>) -> Result<serde_json::Value, Fault> {
     let (head, body) = answer.into_parts();
-    let body = Limited::new(body, LIMIT).collect().await;
+    let body = Limited::new(body, MAX_BODY).collect().await;
     let body = body
         .map_err(|e| match e.downcast::<Fault>() {
             Ok(fault) => *fault,
-            Err(_) => Fault::upstream(format!("its answer is over {} MiB", LIMIT >> 20)),
+            Err(_) => Fault::upstream(format!("its answer is over {} MiB", MAX_BODY >> 20)),
         })?
         .to_bytes();
     if !head.status.is_success() {
@@ -277,18 +233,10 @@ fn origin(uri: &Uri) -> (Option<&str>, Option<&str>, Option<u16>) {
 }
 
 /// Remove from `headers` what only the origin they were meant for may see.
+/// `Authorization` and `Proxy-Authorization` name a credential too.
 fn leave_origin(headers: &mut HeaderMap) {
-    for name in [AUTHORIZATION, COOKIE, PROXY_AUTHORIZATION] {
-        headers.remove(name);
-    }
-    let named: Vec<_> = headers
-        .keys()
-        .filter(|n| is_credential(n.as_str()))
-        .cloned()
-        .collect();
-    for name in named {
-        headers.remove(name);
-    }
+    headers.remove(COOKIE);
+    remove_if(headers, |n| is_credential(n.as_str()));
 }
 
 #[cfg(test)]
@@ -304,7 +252,7 @@ mod tests {
         let read = json(answer(r#"{"data":[]}"#)).await;
         assert_eq!(read.ok(), Some(serde_json::json!({"data": []})));
         // Regression: a listing was read whole, however large.
-        let over = json(answer(vec![b' '; LIMIT + 1])).await;
+        let over = json(answer(vec![b' '; MAX_BODY + 1])).await;
         let fault = over.err().map(|f| f.message().to_owned());
         assert_eq!(fault.as_deref(), Some("its answer is over 32 MiB"));
     }

@@ -51,7 +51,7 @@ async fn a_graceful_client_close_reaches_the_provider() {
             "{via:?}"
         );
         assert_eq!(code(&ends.only()), "ok");
-        assert_eq!(calls.all().iter().map(code).collect::<Vec<_>>(), ["ok"]);
+        assert_eq!(codes(calls.all()), ["ok"]);
         eventually("the provider's connection closed", || {
             probe.live.load(Ordering::SeqCst) == 0
         })
@@ -85,7 +85,7 @@ async fn a_provider_close_reaches_the_client_with_its_code_only_on_a_relay() {
             idle(&server.gateway).await;
             assert_eq!(code(&ends.only()), end, "{via:?} {sent}");
             let calls = calls.all();
-            assert_eq!(calls.iter().map(code).collect::<Vec<_>>(), [end]);
+            assert_eq!(codes(calls.clone()), [end]);
             if let Err(fault) = &calls[0] {
                 assert_eq!(fault.get::<ProviderClose>(), Some(&ProviderClose(sent)));
                 let relayed = fault.get::<CloseCode>().is_some();
@@ -108,10 +108,7 @@ async fn a_provider_that_drops_is_truncated() {
         );
         idle(&server.gateway).await;
         assert_eq!(code(&ends.only()), "truncated");
-        assert_eq!(
-            calls.all().iter().map(code).collect::<Vec<_>>(),
-            ["truncated"]
-        );
+        assert_eq!(codes(calls.all()), ["truncated"]);
     }
 }
 
@@ -137,56 +134,31 @@ async fn a_provider_that_drops_at_once_is_a_101_then_a_close() {
     }
 }
 
-// An abrupt client drop closes the provider's connection going away (1001);
-// each hook runs once, told `abandoned`, and the gateway goes idle.
+// An abrupt client drop, before it said anything or after, closes the
+// provider's connection going away (1001); each hook runs once, told
+// `abandoned`, and the gateway goes idle.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_abrupt_client_drop_closes_the_provider_going_away() {
     for via in Via::ALL {
-        let (probe, server, ends, calls, mut ws) = session(via).await;
-        say(&mut ws, r#""one""#).await;
-        eventually("the provider read it", || probe.texts() == [r#""one""#]).await;
-        drop(ws);
-        idle(&server.gateway).await;
-        eventually("the provider's connection closed", || {
-            probe.live.load(Ordering::SeqCst) == 0
-        })
-        .await;
-        assert_eq!(
-            probe.seen(),
-            [Seen::Text(r#""one""#.into()), Seen::Close(Some(1001))],
-            "{via:?}"
-        );
-        assert_eq!(
-            ends.all().iter().map(code).collect::<Vec<_>>(),
-            ["abandoned"]
-        );
-        assert_eq!(
-            calls.all().iter().map(code).collect::<Vec<_>>(),
-            ["abandoned"]
-        );
-    }
-}
-
-// The same, before the client said anything.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_abrupt_drop_before_any_frame_ends_the_same() {
-    for via in Via::ALL {
-        let (probe, server, ends, calls, ws) = session(via).await;
-        drop(ws);
-        idle(&server.gateway).await;
-        eventually("the provider's connection closed", || {
-            probe.live.load(Ordering::SeqCst) == 0
-        })
-        .await;
-        assert_eq!(probe.seen(), [Seen::Close(Some(1001))], "{via:?}");
-        assert_eq!(
-            ends.all().iter().map(code).collect::<Vec<_>>(),
-            ["abandoned"]
-        );
-        assert_eq!(
-            calls.all().iter().map(code).collect::<Vec<_>>(),
-            ["abandoned"]
-        );
+        for said in [None, Some(r#""one""#)] {
+            let (probe, server, ends, calls, mut ws) = session(via).await;
+            let mut seen = Vec::new();
+            if let Some(text) = said {
+                say(&mut ws, text).await;
+                eventually("the provider read it", || probe.texts() == [text]).await;
+                seen.push(Seen::Text(text.into()));
+            }
+            drop(ws);
+            idle(&server.gateway).await;
+            eventually("the provider's connection closed", || {
+                probe.live.load(Ordering::SeqCst) == 0
+            })
+            .await;
+            seen.push(Seen::Close(Some(1001)));
+            assert_eq!(probe.seen(), seen, "{via:?}");
+            assert_eq!(codes(ends.all()), ["abandoned"]);
+            assert_eq!(codes(calls.all()), ["abandoned"]);
+        }
     }
 }
 
@@ -224,7 +196,7 @@ async fn a_binary_or_oversized_client_message_closes_it_with_1003_or_1009() {
             .await;
             assert_eq!(code(&ends.only()), "bad_request", "{via:?} {want}");
             let calls = calls.all();
-            assert_eq!(calls.iter().map(code).collect::<Vec<_>>(), ["bad_request"]);
+            assert_eq!(codes(calls.clone()), ["bad_request"]);
             // Never relayed.
             assert_eq!(probe.seen(), [Seen::Close(Some(want))], "{via:?}");
         }
@@ -290,7 +262,7 @@ async fn a_refused_input_closes_both_sides_with_its_code() {
         [Seen::Text(r#""fine""#.into()), Seen::Close(Some(1008))]
     );
     assert_eq!(code(&ends.only()), "policy");
-    assert_eq!(calls.all().iter().map(code).collect::<Vec<_>>(), ["policy"]);
+    assert_eq!(codes(calls.all()), ["policy"]);
 }
 
 // What the client sees of a provider that is not there: an ordinary HTTP
@@ -318,10 +290,7 @@ async fn an_unreachable_provider_is_a_502_to_the_handshake() {
         assert!(!body.contains(&gone.to_string()), "no address: {body}");
         idle(&server.gateway).await;
         assert_eq!(code(&ends.only()), "upstream");
-        assert_eq!(
-            calls.all().iter().map(code).collect::<Vec<_>>(),
-            ["upstream"]
-        );
+        assert_eq!(codes(calls.all()), ["upstream"]);
     }
 }
 
@@ -486,10 +455,7 @@ async fn a_client_silent_through_a_ping_is_gone() {
         .await;
         assert_eq!(probe.seen().last(), Some(&Seen::Close(Some(1001))));
         assert_eq!(code(&ends.only()), "abandoned");
-        assert_eq!(
-            calls.all().iter().map(code).collect::<Vec<_>>(),
-            ["abandoned"]
-        );
+        assert_eq!(codes(calls.all()), ["abandoned"]);
         drop(ws);
     }
 }
@@ -525,8 +491,5 @@ async fn a_provider_silent_through_a_ping_is_truncated() {
     );
     idle(&server.gateway).await;
     assert_eq!(code(&ends.only()), "truncated");
-    assert_eq!(
-        calls.all().iter().map(code).collect::<Vec<_>>(),
-        ["truncated"]
-    );
+    assert_eq!(codes(calls.all()), ["truncated"]);
 }

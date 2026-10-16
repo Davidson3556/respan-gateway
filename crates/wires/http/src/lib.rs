@@ -69,6 +69,6 @@ pub use {bytes, http, http_body, http_body_util};
 pub use codec::{All, Decoder, Encoder, Sse, Whole};
 pub use credential::Credential;
 pub use edge::{
-    Body, ClientIo, Completion, Frames, ProviderIo, Reply, connect, handle, handle_live,
+    Body, ClientIo, Completion, Frames, ProviderIo, Reply, Sent, connect, handle, handle_live,
 };
 pub use upstream::{Connect, KeyIn, Reach, Upstream};

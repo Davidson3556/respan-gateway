@@ -18,7 +18,7 @@ use respan_gateway_http::{
 };
 
 pub type Reply = http::Response<Vec<Result<Bytes, Fault>>>;
-type WireResult = Result<(http::Response<Body>, Option<Completion>), Fault>;
+type WireResult = respan_gateway_http::Sent;
 
 pub fn sse(chunks: &[&str]) -> Reply {
     let chunks = chunks

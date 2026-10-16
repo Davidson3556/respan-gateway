@@ -42,7 +42,7 @@ pub(crate) fn post<C: Schema>(
     schema: C,
     head: &mut RequestHead,
     input: Option<&Input>,
-    wire: Option<&Original>,
+    original: Option<&Original>,
     stream: Option<StreamResponse>,
 ) -> Result<Box<dyn Encoder<Input>>, Fault> {
     if input.is_none() {
@@ -56,10 +56,10 @@ pub(crate) fn post<C: Schema>(
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     // The client's request, if of this format: its spec's headers and query
     // parameters go on, and it spells what the format spells two ways.
-    let original = own_request::<C>(wire);
-    if let Some(original) = original {
+    let own = own_request::<C>(original);
+    if let Some(own) = own {
         for name in C::CARRIED {
-            for value in original.headers().get_all(*name) {
+            for value in own.headers().get_all(*name) {
                 head.headers.append(*name, value.clone());
             }
         }
@@ -69,7 +69,7 @@ pub(crate) fn post<C: Schema>(
         head.headers.entry(*name).or_insert(value);
     }
     let stream = stream.map(|s| s.0).unwrap_or_else(|| {
-        let asked = wire.and_then(|w| w.memo(|r| probe(r.body())));
+        let asked = original.and_then(|w| w.memo(|r| probe(r.body())));
         asked.is_none_or(|asked| asked.stream)
     });
     match input.and_then(|input| schema.target(input, stream).transpose()) {
@@ -81,7 +81,7 @@ pub(crate) fn post<C: Schema>(
         }
         None => respan_gateway_http::path::set_path(head, C::PATH)?,
     }
-    if let Some(query) = original.and_then(|r| carried_query::<C>(r.uri())) {
+    if let Some(query) = own.and_then(|r| carried_query::<C>(r.uri())) {
         let at = match head.uri.query() {
             Some(own) => format!("{}?{own}&{query}", head.uri.path()),
             None => format!("{}?{query}", head.uri.path()),
@@ -90,7 +90,7 @@ pub(crate) fn post<C: Schema>(
             Fault::internal(format!("a call's path {at:?} is no path")).with_source(e)
         })?;
     }
-    let original = original.map(|r| serde_json::from_slice(r.body()).unwrap_or(Value::Null));
+    let original = own.map(|r| serde_json::from_slice(r.body()).unwrap_or(Value::Null));
     Ok(Box::new(RequestEncoder {
         schema,
         stream,
@@ -100,8 +100,9 @@ pub(crate) fn post<C: Schema>(
 
 /// The client's request, if of `C`'s format: one to a path ending in
 /// [`Schema::PATH`].
-pub(crate) fn own_request<C: Schema>(wire: Option<&Original>) -> Option<&http::Request<Bytes>> {
-    wire.and_then(Original::get)
+pub(crate) fn own_request<C: Schema>(original: Option<&Original>) -> Option<&http::Request<Bytes>> {
+    original
+        .and_then(Original::get)
         .filter(|r| r.uri().path().ends_with(C::PATH))
 }
 
@@ -185,9 +186,9 @@ pub(crate) fn asked<C: Schema>(request: &http::Request<Bytes>) -> Asked {
 }
 
 /// Keep what the client of format `C` asked of its response with its
-/// request's wire, for the provider's edge to read.
-pub(crate) fn seed_asked<C: Schema>(wire: &Original) {
-    wire.memo(asked::<C>);
+/// request's original, for the provider's edge to read.
+pub(crate) fn seed_asked<C: Schema>(original: &Original) {
+    original.memo(asked::<C>);
 }
 
 /// [`Asked`] of a JSON body, reading only its two fields.
@@ -311,9 +312,7 @@ pub(crate) fn refusal<C: Schema>(fault: &Fault, head: &mut ResponseHead) -> Byte
     if !(head.status.is_client_error() || head.status.is_server_error()) {
         head.status = StatusCode::INTERNAL_SERVER_ERROR;
         head.headers.clear();
-        let text = HeaderValue::from_static("text/plain; charset=utf-8");
-        head.headers.insert(CONTENT_TYPE, text);
-        return Bytes::from(fault.message().to_owned());
+        return respan_gateway_http::rules::plain_text(head, fault.message());
     }
     let json = HeaderValue::from_static("application/json");
     head.headers.insert(CONTENT_TYPE, json);

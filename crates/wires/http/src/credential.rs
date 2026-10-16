@@ -106,13 +106,7 @@ impl Credential {
             !is_key(&crate::path::decoded(value))
         });
         let mut taken = self.query.len() != before;
-        let entries: Vec<String> = self
-            .headers
-            .get_all(SEC_WEBSOCKET_PROTOCOL)
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .flat_map(|v| v.split(',').map(|e| e.trim().to_owned()))
-            .collect();
+        let entries = protocols(&self.headers);
         let kept: Vec<&str> = entries
             .iter()
             .map(String::as_str)
@@ -125,10 +119,7 @@ impl Credential {
             .collect();
         if kept.len() != entries.len() {
             taken = true;
-            match HeaderValue::from_str(&kept.join(", ")) {
-                Ok(kept) if !kept.is_empty() => self.headers.insert(SEC_WEBSOCKET_PROTOCOL, kept),
-                _ => self.headers.remove(SEC_WEBSOCKET_PROTOCOL),
-            };
+            set_protocols(&mut self.headers, &kept);
         }
         taken
     }
@@ -214,14 +205,7 @@ const PROTOCOL_MARKERS: [&str; 2] = ["token", "bearer"];
 /// It goes if `markers` is true, for a caller that puts other keys where
 /// these were: a marker with no key after it makes a provider refuse.
 pub(crate) fn take_protocol_keys(headers: &mut HeaderMap, markers: bool) -> Option<HeaderValue> {
-    let all: Vec<String> = headers
-        .get_all(SEC_WEBSOCKET_PROTOCOL)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(',').map(str::trim))
-        .filter(|e| !e.is_empty())
-        .map(str::to_owned)
-        .collect();
+    let all = protocols(headers);
     let (mut keys, mut kept) = (Vec::new(), Vec::new());
     let mut named = false;
     let mut found = false;
@@ -242,13 +226,29 @@ pub(crate) fn take_protocol_keys(headers: &mut HeaderMap, markers: bool) -> Opti
     if keys.is_empty() && !(found && markers) {
         return None;
     }
-    match HeaderValue::from_str(&kept.join(", ")) {
-        Ok(kept) if !kept.is_empty() => headers.insert(SEC_WEBSOCKET_PROTOCOL, kept),
-        _ => headers.remove(SEC_WEBSOCKET_PROTOCOL),
-    };
+    set_protocols(headers, &kept);
     HeaderValue::from_str(&keys.join(", "))
         .ok()
         .filter(|k| !k.is_empty())
+}
+
+/// The entries of `headers`' `Sec-WebSocket-Protocol`, but empty ones (RFC
+/// 6455 4.1 has none).
+fn protocols(headers: &HeaderMap) -> Vec<String> {
+    let entries = crate::rules::header_tokens(headers, SEC_WEBSOCKET_PROTOCOL);
+    entries
+        .filter(|e| !e.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `headers`' `Sec-WebSocket-Protocol` made `entries`, or gone for none.
+fn set_protocols(headers: &mut HeaderMap, entries: &[impl AsRef<str>]) {
+    let entries: Vec<&str> = entries.iter().map(AsRef::as_ref).collect();
+    match HeaderValue::from_str(&entries.join(", ")) {
+        Ok(kept) if !kept.is_empty() => headers.insert(SEC_WEBSOCKET_PROTOCOL, kept),
+        _ => headers.remove(SEC_WEBSOCKET_PROTOCOL),
+    };
 }
 
 /// Whether a header or query parameter `name` names a credential. The

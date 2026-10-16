@@ -3,8 +3,8 @@
 
 use super::reader::Failure;
 use super::writer::Writer;
-use super::{end_encoder, guarded};
 use crate::{Body, Completion, Encoder};
+use bytes::Bytes;
 use futures::future::{BoxFuture, Shared};
 use futures::{Future, Sink};
 use respan_gateway_core::Fault;
@@ -14,94 +14,19 @@ use std::task::{Context, Poll, ready};
 /// The call's delivery ([`ProviderIo::bind`](crate::ProviderIo::bind)).
 pub(crate) type Delivery = Shared<BoxFuture<'static, Result<(), Fault>>>;
 
-/// Live input's encoder and the byte writer a transport's body reads.
-pub(crate) struct Encoding<T> {
-    /// `None` once ended.
-    encoder: Option<Box<dyn Encoder<T>>>,
-    writer: Writer,
-    failed: Failure,
+/// A writer of live input's frames with `encoder`: it, the body a
+/// transport reads, and its completion once its reader drained it.
+pub(crate) fn encoding<T: 'static>(encoder: Box<dyn Encoder<T>>) -> (Writer<T>, Body, Completion) {
+    let (writer, frames, draining) = Writer::new(Some(encoder));
+    (writer, Body::stream(frames), draining)
 }
 
-/// Encode live input with `encoder`, its failure kept in `failed`: its
-/// sink's half, the body a transport reads, and the writer's completion
-/// once its reader drained it.
-pub(crate) fn encoding<T: 'static>(
-    encoder: Box<dyn Encoder<T>>,
-    failed: Failure,
-) -> (Encoding<T>, Body, Completion) {
-    let (writer, frames, draining) = Writer::new();
-    let mut encoding = Encoding {
-        encoder: Some(encoder),
-        writer,
-        failed,
-    };
-    let mut out = Vec::new();
-    let started = match &mut encoding.encoder {
-        Some(encoder) => guarded(|| encoder.start(&mut out)),
-        None => Ok(()),
-    };
-    match started {
-        Ok(()) => out
-            .into_iter()
-            .for_each(|frame| encoding.writer.send(frame)),
-        Err(fault) => encoding.finish(Err(fault)),
-    }
-    (encoding, Body::stream(frames), draining)
-}
-
-impl<T: 'static> Encoding<T> {
-    fn push(&mut self, item: Result<T, Fault>) {
-        let Some(encoder) = &mut self.encoder else {
-            return;
-        };
-        let mut out = Vec::new();
-        let encoded = match item {
-            Ok(value) => guarded(|| encoder.encode(&value, &mut out)),
-            Err(fault) => Err(fault),
-        };
-        match encoded {
-            Ok(()) => out.into_iter().for_each(|frame| self.writer.send(frame)),
-            Err(fault) => self.finish(Err(fault)),
-        }
-    }
-
-    /// End the upload as `end` says. Any failure breaks the body off after
-    /// its error framing, so no transport takes it for a whole upload.
-    fn finish(&mut self, end: Result<(), Fault>) {
-        let Some(mut encoder) = self.encoder.take() else {
-            return;
-        };
-        let mut out = Vec::new();
-        let (end, _) = end_encoder(encoder.as_mut(), end, &mut out);
-        if let Err(fault) = &end {
-            let _ = self.failed.set(fault.clone());
-        }
-        out.into_iter().for_each(|frame| self.writer.send(frame));
-        self.writer.end(end.clone(), end.err());
-    }
-
-    /// Finish and wait until the transport took every frame. A transport
-    /// that dropped the body ends it `Ok` unless the upload itself failed:
-    /// the delivery says how such a call ended.
-    fn close(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        if self.encoder.is_some() {
-            if let Err(fault) = ready!(self.writer.poll_ready(cx, false)) {
-                return Poll::Ready(self.failed.get().map_or(Ok(()), |_| Err(fault)));
-            }
-            self.finish(Ok(()));
-        }
-        match self.writer.poll_close(cx) {
-            Poll::Ready(Err(_)) if self.failed.get().is_none() => Poll::Ready(Ok(())),
-            end => end,
-        }
-    }
-}
-
-/// A call's sink: its live input's [`Encoding`], or none for a call encoded
-/// whole, coupled to the call's delivery. A refused answer may discard the
-/// byte reader; the delivery, not that discard, decides how the call ended.
+/// A call's sink: its live input's writer ([`encoding`]), or none for a
+/// call encoded whole, coupled to the call's delivery; an upload's failure
+/// kept in `failed`. A refused answer may discard the byte reader; the
+/// delivery, not that discard, decides how the call ended.
 pub(crate) struct Upload<T> {
-    encoding: Option<Encoding<T>>,
+    writer: Option<Writer<T>>,
     delivery: Delivery,
     delivered: Option<Result<(), Fault>>,
     failed: Failure,
@@ -111,13 +36,68 @@ pub(crate) struct Upload<T> {
 impl<T> Unpin for Upload<T> {}
 
 impl<T: 'static> Upload<T> {
-    pub(crate) fn new(encoding: Option<Encoding<T>>, delivery: Delivery, failed: Failure) -> Self {
-        Self {
-            encoding,
+    pub(crate) fn new(writer: Option<Writer<T>>, delivery: Delivery, failed: Failure) -> Self {
+        let mut upload = Self {
+            writer,
             delivery,
             delivered: None,
             failed,
             closed: false,
+        };
+        if let Some(writer) = &mut upload.writer {
+            let started = writer.start();
+            upload.sent(started);
+        }
+        upload
+    }
+
+    /// Send `frames`, or end with their fault.
+    fn sent(&mut self, frames: Result<Vec<Bytes>, Fault>) {
+        let Some(writer) = &self.writer else {
+            return;
+        };
+        match frames {
+            Ok(frames) => frames.into_iter().for_each(|f| writer.send(f)),
+            Err(fault) => self.finish(Err(fault)),
+        }
+    }
+
+    /// End the upload as `end` says. Any failure breaks the body off after
+    /// its error framing, so no transport takes it for a whole upload.
+    fn finish(&mut self, end: Result<(), Fault>) {
+        let Some(writer) = &mut self.writer else {
+            return;
+        };
+        let mut out = Vec::new();
+        let Some((end, _)) = writer.end_encoder(end, &mut out) else {
+            return;
+        };
+        if let Err(fault) = &end {
+            let _ = self.failed.set(fault.clone());
+        }
+        out.into_iter().for_each(|frame| writer.send(frame));
+        writer.end(end.clone(), end.err());
+    }
+
+    /// Finish and wait until the transport took every frame. A transport
+    /// that dropped the body ends it `Ok` unless the upload itself failed:
+    /// the delivery says how such a call ended.
+    fn close_writer(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
+        let Some(writer) = &self.writer else {
+            return Poll::Ready(Ok(()));
+        };
+        if writer.is_open() {
+            if let Err(fault) = ready!(writer.poll_ready(cx, false)) {
+                return Poll::Ready(self.failed.get().map_or(Ok(()), |_| Err(fault)));
+            }
+            self.finish(Ok(()));
+        }
+        let Some(writer) = &self.writer else {
+            return Poll::Ready(Ok(()));
+        };
+        match writer.poll_close(cx) {
+            Poll::Ready(Err(_)) if self.failed.get().is_none() => Poll::Ready(Ok(())),
+            end => end,
         }
     }
 
@@ -139,10 +119,10 @@ impl<T: 'static> Upload<T> {
         if matches!(delivery, Poll::Ready(Err(_))) {
             return delivery;
         }
-        let Some(encoding) = &self.encoding else {
+        let Some(writer) = &self.writer else {
             return Poll::Ready(Ok(()));
         };
-        match encoding.writer.poll_ready(cx, requested) {
+        match writer.poll_ready(cx, requested) {
             Poll::Ready(Err(_)) if self.failed.get().is_none() => delivery,
             Poll::Ready(Err(_)) => Poll::Ready(Err(self
                 .failed
@@ -161,8 +141,9 @@ impl<T: 'static> Sink<Result<T, Fault>> for Upload<T> {
         self.readiness(cx, true)
     }
     fn start_send(mut self: Pin<&mut Self>, item: Result<T, Fault>) -> Result<(), Fault> {
-        if let Some(encoding) = &mut self.encoding {
-            encoding.push(item);
+        if let Some(writer) = &mut self.writer {
+            let encoded = writer.encode(item);
+            self.sent(encoded);
         }
         Ok(())
     }
@@ -174,9 +155,7 @@ impl<T: 'static> Sink<Result<T, Fault>> for Upload<T> {
             return Poll::Ready(end);
         }
         if !self.closed {
-            if let Some(encoding) = &mut self.encoding {
-                ready!(encoding.close(cx))?;
-            }
+            ready!(self.close_writer(cx))?;
             self.closed = true;
         }
         self.progress(cx)

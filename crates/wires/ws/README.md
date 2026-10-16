@@ -17,8 +17,7 @@ the vendors that speak them
   `wss://` provider. It prepares a call as `HttpTransport` does
   (`respan_gateway_http::call::prepare_call`), so a client's key passes only where
   a plugin put it back. `.with_headers(map)` sets the transport's own keys,
-  `.with_limits(limits)` its `Limits`, and `.with_client(client)` a client
-  in place of the shared one. The provider has 10 s to answer the upgrade,
+  and `.with_limits(limits)` its `Limits`. The provider has 10 s to answer the upgrade,
   a refusal's body included.
 - `.with_binary_text(true)` accepts a provider's binary messages containing
   UTF-8 text, such as Gemini Live's JSON. These become text messages toward

@@ -59,6 +59,15 @@ pub fn success(answer: &ResponseHead, call: &RequestHead) -> bool {
     }
 }
 
+/// The content type of plain text.
+pub const TEXT_PLAIN: HeaderValue = HeaderValue::from_static("text/plain; charset=utf-8");
+
+/// `text` as `head`'s body, in plain text.
+pub fn plain_text(head: &mut ResponseHead, text: &str) -> Bytes {
+    head.headers.insert(CONTENT_TYPE, TEXT_PLAIN);
+    Bytes::from(text.to_owned())
+}
+
 /// A format's error writer ([`ClientIo::bind`](crate::ClientIo::bind)) for a protocol without an
 /// error envelope: the fault's message as text/plain.
 pub(crate) fn plain(
@@ -66,11 +75,7 @@ pub(crate) fn plain(
     _request: &http::Request<Bytes>,
     head: &mut ResponseHead,
 ) -> Bytes {
-    head.headers.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    );
-    Bytes::from(fault.message().to_owned())
+    plain_text(head, fault.message())
 }
 
 /// Remove the headers `Connection` names and a hop's own, but `Upgrade` if
@@ -86,7 +91,7 @@ pub(crate) fn strip_hops(headers: &mut HeaderMap, keep_upgrade: bool) {
 }
 
 /// Remove each header whose name `is` says.
-pub(crate) fn remove_if(headers: &mut HeaderMap, is: impl Fn(&HeaderName) -> bool) {
+pub fn remove_if(headers: &mut HeaderMap, is: impl Fn(&HeaderName) -> bool) {
     let names: Vec<HeaderName> = headers.keys().filter(|n| is(n)).cloned().collect();
     for name in names {
         headers.remove(name);
@@ -120,11 +125,10 @@ pub(crate) fn outgoing(head: &mut http::response::Parts) {
 /// `fault` as a text/plain response with its status and message, for what
 /// no format can write.
 pub(crate) fn plain_response(fault: &Fault) -> http::Response<Body> {
-    let mut resp = http::Response::new(Body::full(fault.message().to_owned()));
-    *resp.status_mut() = status(fault);
-    let text = HeaderValue::from_static("text/plain; charset=utf-8");
-    resp.headers_mut().insert(CONTENT_TYPE, text);
-    resp
+    let mut head = http::Response::new(()).into_parts().0;
+    head.status = status(fault);
+    let text = plain_text(&mut head, fault.message());
+    http::Response::from_parts(head, Body::full(text))
 }
 
 /// Write `fault`'s status and retry, as `Retry-After` in whole seconds, into

@@ -60,7 +60,7 @@ const RATE_LIMITED: &str = r#"{"error":{"type":"rate_limit_error","message":"slo
 const BAD: &str = r#"{"error":{"message":"bad model","type":"invalid_request_error","param":"model","code":null}}"#;
 
 type Marks = Arc<Mutex<Vec<bool>>>;
-type WireResult = Result<(http::Response<Body>, Option<Completion>), Fault>;
+type WireResult = respan_gateway_http::Sent;
 
 /// A native sender that records whether each call was relayed, to a
 /// provider of its client's own format.

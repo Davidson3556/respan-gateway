@@ -12,7 +12,7 @@ use http_support::{LIMIT, post, serve, serve_live, streamed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use http::header::AUTHORIZATION;
 use http::header::{CONNECTION, CONTENT_ENCODING, UPGRADE};
@@ -34,14 +34,14 @@ use respan_gateway_core::{
 };
 use respan_gateway_http::Encoder;
 use respan_gateway_http::path::set_path;
-use respan_gateway_http::{ClientIo, Completion, ProviderIo, raw::Original};
+use respan_gateway_http::{ClientIo, ProviderIo, raw::Original};
 use respan_gateway_http::{http, http_body, http_body_util};
 use serde_json::{Value, json};
 
 /// A provider registration used only by this suite.
 type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
 
-type WireResult = Result<(http::Response<Body>, Option<Completion>), Fault>;
+type WireResult = respan_gateway_http::Sent;
 type SendRequest = Arc<
     dyn Fn(http::Request<Body>) -> futures::future::BoxFuture<'static, WireResult> + Send + Sync,
 >;
@@ -193,39 +193,15 @@ fn talk_call(
 /// Writes each talk message from its text and its other fields.
 struct Says;
 
-impl Says {
-    fn encode_into(&mut self, say: &Say, out: &mut BytesMut) -> Result<(), Fault> {
+impl Encoder<Say> for Says {
+    fn encode(&mut self, say: &Say, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
         let mut v = say.1.clone();
         v.insert("say".into(), say.0.clone().into());
-        out.extend_from_slice(Value::Object(v).to_string().as_bytes());
+        frames.push(Bytes::from(Value::Object(v).to_string()));
         Ok(())
     }
 
-    fn end_into(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
-        Ok(())
-    }
-}
-
-impl Encoder<Say> for Says {
-    fn encode(
-        &mut self,
-        value: &Say,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.encode_into(value, &mut out)?;
-        frames.push(out.freeze());
-        Ok(())
-    }
-
-    fn end(
-        &mut self,
-        end: Result<(), Fault>,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.end_into(&end, &mut out)?;
-        frames.extend((!out.is_empty()).then(|| out.freeze()));
+    fn end(&mut self, _: Result<(), Fault>, _: &mut Vec<Bytes>) -> Result<(), Fault> {
         Ok(())
     }
 }
@@ -246,40 +222,16 @@ impl respan_gateway_http::Decoder<Heard> for Messages {
 
 struct Write;
 
-impl Write {
-    fn encode_into(&mut self, heard: &Heard, out: &mut BytesMut) -> Result<(), Fault> {
-        out.extend_from_slice(json!({ "heard": heard.0 }).to_string().as_bytes());
-        Ok(())
-    }
-
-    fn end_into(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
-        if let Err(f) = end {
-            out.extend_from_slice(json!({ "error": f.message() }).to_string().as_bytes());
-        }
-        Ok(())
-    }
-}
-
 impl Encoder<Heard> for Write {
-    fn encode(
-        &mut self,
-        value: &Heard,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.encode_into(value, &mut out)?;
-        frames.push(out.freeze());
+    fn encode(&mut self, heard: &Heard, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        frames.push(Bytes::from(json!({ "heard": heard.0 }).to_string()));
         Ok(())
     }
 
-    fn end(
-        &mut self,
-        end: Result<(), Fault>,
-        frames: &mut Vec<respan_gateway_http::bytes::Bytes>,
-    ) -> Result<(), Fault> {
-        let mut out = respan_gateway_http::bytes::BytesMut::new();
-        self.end_into(&end, &mut out)?;
-        frames.extend((!out.is_empty()).then(|| out.freeze()));
+    fn end(&mut self, end: Result<(), Fault>, frames: &mut Vec<Bytes>) -> Result<(), Fault> {
+        if let Err(f) = end {
+            frames.push(Bytes::from(json!({ "error": f.message() }).to_string()));
+        }
         Ok(())
     }
 }
@@ -1027,21 +979,21 @@ async fn a_call_pending_at_the_requests_end_ends_abandoned_before_it() {
     assert!(notes.contains(&"call abandoned".to_owned()), "{notes:?}");
 }
 
-#[tokio::test]
-async fn a_retry_after_a_call_that_failed_unread_gets_every_input() {
-    /// Calls `down`, then `echo` when that fails.
-    struct Retry;
+/// Calls its provider, then `echo` when that fails.
+struct Retry(&'static str);
 
-    #[async_trait]
-    impl Plugin for Retry {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            match cx.call("down").await {
-                Ok(resp) => Ok(Some(resp)),
-                Err(_) => Ok(Some(cx.call("echo").await?)),
-            }
+#[async_trait]
+impl Plugin for Retry {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        match cx.call(self.0).await {
+            Ok(resp) => Ok(Some(resp)),
+            Err(_) => Ok(Some(cx.call("echo").await?)),
         }
     }
+}
 
+#[tokio::test]
+async fn a_retry_after_a_call_that_failed_unread_gets_every_input() {
     let echo = Echo::default();
     let list = vec![
         add_provider(
@@ -1054,7 +1006,7 @@ async fn a_retry_after_a_call_that_failed_unread_gets_every_input() {
         ),
         add_provider("echo", Talk, echo.sender()),
     ];
-    let (gw, _) = talk_to(list, vec![Arc::new(Retry)]);
+    let (gw, _) = talk_to(list, vec![Arc::new(Retry("down"))]);
     let (send, req) = upgrade();
 
     let (resp, _) = serve_live(&gw, req).await;
@@ -1451,44 +1403,17 @@ async fn a_call_kept_past_its_request_does_not_keep_the_clients_body() {
 
 #[tokio::test]
 async fn a_retry_after_a_call_that_read_the_end_gets_a_clean_end() {
-    /// Reads the call's body to its end, then fails.
-    #[derive(Clone)]
-    struct ReadThenFail;
-
-    impl ReadThenFail {
-        pub async fn send(&self, call: http::Request<Body>) -> WireResult {
-            let _ = StreamExt::collect::<Vec<_>>(call.into_body()).await;
-            Err(Fault::upstream("unreachable after reading"))
-        }
-    }
-    impl ReadThenFail {
-        fn sender(&self) -> SendRequest {
-            let value = self.clone();
-            sender(move |call| {
-                let value = value.clone();
-                async move { value.send(call).await }
-            })
-        }
-    }
-
-    struct Retry;
-
-    #[async_trait]
-    impl Plugin for Retry {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            match cx.call("flaky").await {
-                Ok(resp) => Ok(Some(resp)),
-                Err(_) => Ok(Some(cx.call("echo").await?)),
-            }
-        }
-    }
-
+    // The first reads the call's body to its end, then fails.
+    let read_then_fail = sender(|call: http::Request<Body>| async move {
+        let _ = StreamExt::collect::<Vec<_>>(call.into_body()).await;
+        Err(Fault::upstream("unreachable after reading"))
+    });
     let echo = Echo::default();
     let list = vec![
-        add_provider("flaky", Talk, ReadThenFail.sender()),
+        add_provider("flaky", Talk, read_then_fail),
         add_provider("echo", Talk, echo.sender()),
     ];
-    let (gw, _) = talk_to(list, vec![Arc::new(Retry)]);
+    let (gw, _) = talk_to(list, vec![Arc::new(Retry("flaky"))]);
     let (send, req) = upgrade();
     // The client says nothing and closes.
     drop(send);

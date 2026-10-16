@@ -8,8 +8,8 @@ use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Provider, Response, async_trait};
+use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION};
-use respan_gateway_http::{Body, Completion};
 use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_passthrough_http::Passthrough;
 use respan_gateway_plugin_routing::{
@@ -26,7 +26,7 @@ fn ended(end: Result<(), Fault>) -> Result<(), String> {
 mod http_support;
 use http_support::{LIMIT, post, read_whole, serve};
 
-type Answered = Result<(http::Response<Body>, Option<Completion>), Fault>;
+type Answered = respan_gateway_http::Sent;
 
 const A: &str = "http://a.test/v1";
 const B: &str = "http://b.test/v1";
