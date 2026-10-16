@@ -1,19 +1,16 @@
 #![warn(missing_docs)]
-//! Fallback: the [`Fallback`] plugin sends a request to its target, then to
-//! each provider of the target's chain in turn, until one succeeds; the
-//! [`Hedge`] plugin races them, each started a little after the last.
-//!
-//! It is built on transport-neutral attempt control that other plugins can
-//! use too: sequential retries and fallback ([`first_success`], [`Backoff`]),
-//! a staggered race ([`race`]), and each attempt's [`Role`] ([`Attempt`]).
+//! Fallback: transport-neutral attempt control, which the router's routes
+//! (`respan_gateway_plugin_routing::Dispatch`) and other plugins use:
+//! sequential retries and fallback ([`first_success`], [`Backoff`]), a
+//! staggered race ([`race`]), and each attempt's [`Role`] ([`Attempt`]).
 //! The caller supplies a retry classifier; HTTP callers can use
 //! `respan_gateway_http_faults::retryable`.
 //!
 //! Both helpers read each answer [`Until`] a stopping point, using a
 //! plugin-supplied predicate for [`Until::content`]: they return a success
 //! only once it got there, and never retry after that, so a stream that fails
-//! later reaches the client cut short, not replayed. An attempt policy the
-//! plugins do not cover is a few lines of `on_client`:
+//! later reaches the client cut short, not replayed. An attempt policy
+//! routes do not cover is a few lines of `on_client`:
 //!
 //! ```ignore
 //! let calls = ["openai", "anthropic"].map(|p| cx.call(p));
@@ -23,7 +20,6 @@
 //! ```
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -31,7 +27,7 @@ use std::time::{Duration, Instant};
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::stream::FuturesUnordered;
 use respan_gateway_core::futures::{FutureExt, StreamExt};
-use respan_gateway_core::{Call, ClientContext, Fault, Plugin, Response, RetryAfter, async_trait};
+use respan_gateway_core::{Call, Fault, Response, RetryAfter};
 
 /// How often to try one call, and how long to wait between tries.
 #[derive(Debug, Clone, Copy)]
@@ -351,214 +347,6 @@ pub async fn race(
             }
             else => return last(previous),
         }
-    }
-}
-
-/// Whether a failed attempt may be retried: [`first_success`]'s classifier.
-type Classifier = Arc<dyn Fn(&Fault, bool) -> bool + Send + Sync>;
-
-/// Whether a plugin applies to a request.
-type Condition = Arc<dyn Fn(&ClientContext) -> bool + Send + Sync>;
-
-/// Each target's providers to try after it, in order, and which requests
-/// the plugin applies to.
-#[derive(Clone, Default)]
-struct Chains {
-    after: HashMap<String, Vec<String>>,
-    when: Option<Condition>,
-}
-
-impl Chains {
-    fn add(&mut self, target: String, providers: Vec<String>) {
-        self.after.insert(target, providers);
-    }
-
-    /// A call to the request's target and to each provider of its chain,
-    /// if it has one and the plugin applies to it.
-    fn calls(&self, cx: &mut ClientContext) -> Option<Vec<Call>> {
-        let target = cx.target()?.to_owned();
-        let chain = self.after.get(&target)?;
-        if self.when.as_ref().is_some_and(|when| !when(cx)) {
-            return None;
-        }
-        let providers = std::iter::once(&target).chain(chain);
-        Some(providers.map(|p| cx.call(p.as_str())).collect())
-    }
-}
-
-/// The fallback plugin: a request whose target has a chain is sent to the
-/// target, then to each provider of its chain in turn, by
-/// [`first_success`], and the client gets the first success. Each provider
-/// is tried as `backoff` allows (once, by default), and each answer is read
-/// `until` its stopping point ([`Until::Head`], by default) before it is
-/// judged. A request whose target has no chain is left alone.
-///
-/// It answers the request itself, so register it after the plugins that
-/// target and edit the request (such as routing), and before any that
-/// would answer it instead.
-///
-/// ```ignore
-/// let fallback = Fallback::new(respan_gateway_http_faults::retryable)
-///     .after("openai", ["anthropic"])
-///     .backoff(Backoff::new(2, Duration::from_millis(250), Duration::from_secs(5)))
-///     .until(Until::content(Output::is_content));
-/// let gateway = gateway.plugin(routing).plugin(fallback);
-/// ```
-#[derive(Clone)]
-pub struct Fallback {
-    chains: Chains,
-    backoff: Backoff,
-    until: Until,
-    should_retry: Classifier,
-}
-
-impl Fallback {
-    /// No chains yet, each provider tried once, its answer judged at its
-    /// head; `should_retry` is [`first_success`]'s classifier, such as
-    /// `respan_gateway_http_faults::retryable`.
-    pub fn new(should_retry: impl Fn(&Fault, bool) -> bool + Send + Sync + 'static) -> Self {
-        Self {
-            chains: Chains::default(),
-            backoff: Backoff::once(),
-            until: Until::Head,
-            should_retry: Arc::new(should_retry),
-        }
-    }
-
-    /// A request targeted at `target` falls back to `providers`, in order.
-    /// An empty chain retries the target alone, as `backoff` allows. A
-    /// later chain for the same target replaces the earlier one.
-    pub fn after(
-        mut self,
-        target: impl Into<String>,
-        providers: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        let chain = providers.into_iter().map(Into::into).collect();
-        self.chains.add(target.into(), chain);
-        self
-    }
-
-    /// How often each provider is tried, and the waits between.
-    pub fn backoff(mut self, backoff: Backoff) -> Self {
-        self.backoff = backoff;
-        self
-    }
-
-    /// How far each answer is read before it is judged.
-    pub fn until(mut self, until: Until) -> Self {
-        self.until = until;
-        self
-    }
-
-    /// Applies only to the requests `when` accepts; every request with a
-    /// chain, if unset.
-    pub fn when(mut self, when: impl Fn(&ClientContext) -> bool + Send + Sync + 'static) -> Self {
-        self.chains.when = Some(Arc::new(when));
-        self
-    }
-}
-
-impl std::fmt::Debug for Fallback {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Fallback")
-            .field("chains", &self.chains.after)
-            .field("backoff", &self.backoff)
-            .field("until", &self.until)
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
-impl Plugin for Fallback {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let Some(calls) = self.chains.calls(cx) else {
-            return Ok(None);
-        };
-        let should_retry = |fault: &Fault, opened: bool| (self.should_retry)(fault, opened);
-        first_success(calls, &self.backoff, self.until.clone(), should_retry)
-            .await
-            .map(Some)
-    }
-}
-
-/// The hedge plugin: a request whose target has a chain is sent to the
-/// target, and to each provider of its chain `stagger` after the one
-/// before (at once when every call started has failed), by [`race`]. The
-/// first success read `until` its stopping point ([`Until::Head`], by
-/// default) wins and the others are dropped. A request whose target has no
-/// chain is left alone.
-///
-/// It answers the request itself, so register it as [`Fallback`] is; a
-/// request both apply to goes to the one registered first.
-///
-/// ```ignore
-/// let hedge = Hedge::new(Duration::from_millis(200))
-///     .after("openai", ["openai-eu"])
-///     .until(Until::content(Output::is_content));
-/// ```
-#[derive(Clone)]
-pub struct Hedge {
-    chains: Chains,
-    stagger: Duration,
-    until: Until,
-}
-
-impl Hedge {
-    /// No chains yet, each call started `stagger` after the one before,
-    /// its answer judged at its head.
-    pub fn new(stagger: Duration) -> Self {
-        Self {
-            chains: Chains::default(),
-            stagger,
-            until: Until::Head,
-        }
-    }
-
-    /// A request targeted at `target` is hedged with `providers`, started
-    /// in order. A later chain for the same target replaces the earlier one.
-    pub fn after(
-        mut self,
-        target: impl Into<String>,
-        providers: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        let chain = providers.into_iter().map(Into::into).collect();
-        self.chains.add(target.into(), chain);
-        self
-    }
-
-    /// How far each answer is read before it is judged.
-    pub fn until(mut self, until: Until) -> Self {
-        self.until = until;
-        self
-    }
-
-    /// Applies only to the requests `when` accepts; every request with a
-    /// chain, if unset.
-    pub fn when(mut self, when: impl Fn(&ClientContext) -> bool + Send + Sync + 'static) -> Self {
-        self.chains.when = Some(Arc::new(when));
-        self
-    }
-}
-
-impl std::fmt::Debug for Hedge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Hedge")
-            .field("chains", &self.chains.after)
-            .field("stagger", &self.stagger)
-            .field("until", &self.until)
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
-impl Plugin for Hedge {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let Some(calls) = self.chains.calls(cx) else {
-            return Ok(None);
-        };
-        race(calls, self.stagger, self.until.clone())
-            .await
-            .map(Some)
     }
 }
 

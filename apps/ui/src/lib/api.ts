@@ -146,6 +146,8 @@ export interface Price {
   input: number;
   output: number;
   cached_input?: number;
+  /** Per second of audio, for a model billed by its length. */
+  per_second?: number;
 }
 
 export type RoutePick = "first" | "cheapest" | "fastest" | "weighted" | "random";

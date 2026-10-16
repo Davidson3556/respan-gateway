@@ -6,7 +6,7 @@ registers the ones it wants; they compose in registration order.
 | Crate | Package | What it does |
 |---|---|---|
 | [`routing`](routing/README.md) | `respan-gateway-plugin-routing` | `Routing` targets each request at a provider by its model and a route's rules; `Dispatch` sends it to the route's candidates |
-| [`fallback`](fallback/README.md) | `respan-gateway-plugin-fallback` | `Fallback` and `Hedge` send a request down, or race, its target's chain; also the retry and race helpers they and `Dispatch` are built on |
+| [`fallback`](fallback/README.md) | `respan-gateway-plugin-fallback` | The retry, backoff and race helpers routing's `Dispatch` is built on |
 | [`tool-loop`](tool-loop/README.md) | `respan-gateway-plugin-tool-loop` | `ToolLoop` runs tools inside chat requests, for every chat format; `ToolFilter` and `ToolScope` say which tools are offered |
 | [`credentials`](credentials/README.md) | `respan-gateway-plugin-credentials` | `ClientCredentials` sends a client's own key to the named providers that have none, of the client's format |
 | [`mcp-aggregate`](mcp-aggregate/README.md) | `respan-gateway-plugin-mcp-aggregate` | `Aggregate` fronts many MCP servers as one at `/mcp` |

@@ -267,7 +267,8 @@ async fn transcribe(app: &App, model: &str) -> (StatusCode, Value) {
 async fn each_media_kind_is_relayed_to_its_provider_and_logged() {
     let openai = Fake::start().await;
     let app = app(&format!(
-        "openai = {{ vendor = \"openai\", formats = [\"openai-chat\", \"openai-images\", \"openai-transcriptions\", \"openai-speech\", \"openai-videos\", \"openai-embeddings\"], key = \"sk-o\", base_url = \"{}/v1\" }}\n",
+        "openai = {{ vendor = \"openai\", formats = [\"openai-chat\", \"openai-images\", \"openai-transcriptions\", \"openai-speech\", \"openai-videos\", \"openai-embeddings\"], key = \"sk-o\", base_url = \"{}/v1\" }}\n\
+         [models.\"openai/whisper-1\"]\npricing = {{ input = 0, output = 0, per_second = 0.0001 }}\n",
         openai.base
     ));
 
@@ -353,6 +354,9 @@ async fn each_media_kind_is_relayed_to_its_provider_and_logged() {
         transcription["usage"],
         json!({"input_tokens": 0, "output_tokens": 0, "seconds": 4.0})
     );
+    // Billed by the second, at the price the config declares.
+    let cost = transcription["cost_usd"].as_f64().unwrap_or_default();
+    assert!((cost - 0.0004).abs() < 1e-9, "{transcription}");
     let speech = record("/v1/audio/speech");
     assert_eq!(
         (&speech["kind"], &speech["status"]),

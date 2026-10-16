@@ -33,6 +33,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
 respan-gateway-plugin-relay.workspace = true
+respan-gateway-plugin-routing.workspace = true
 sha2 = "0.10"
 hmac = "0.12"
 getrandom = "0.3"

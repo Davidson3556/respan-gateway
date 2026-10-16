@@ -23,9 +23,7 @@ use respan_gateway_http::http::{
 use respan_gateway_http::{Body, Completion};
 use respan_gateway_http_faults::retryable;
 use respan_gateway_http_transport::HttpTransport;
-use respan_gateway_plugin_fallback::{
-    Attempt, Backoff, Fallback, Hedge, Role, Until, first_success, race,
-};
+use respan_gateway_plugin_fallback::{Attempt, Backoff, Role, Until, first_success, race};
 /// An end by its message, for comparing: `Fault` has no equality.
 fn ended(end: Result<(), Fault>) -> Result<(), String> {
     end.map_err(|f| f.message().to_owned())
@@ -1312,107 +1310,4 @@ async fn until_end_falls_back_when_a_provider_filter_fails_at_end() {
         assert_eq!((status, ended(end)), (StatusCode::OK, Ok(())));
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
     }
-}
-
-/// `plugin` over the harness, its default target `a`.
-async fn fallback(plugin: impl Plugin) -> Harness {
-    targeted(plugin, "a").await
-}
-
-/// `plugin` over the harness, its default target `target`.
-async fn targeted(plugin: impl Plugin, target: &str) -> Harness {
-    let mut h = harness(plugin).await;
-    h.gw = h.gw.target(target).unwrap_or_else(|f| panic!("{f}"));
-    h
-}
-
-#[tokio::test]
-async fn the_plugin_falls_back_from_its_target_to_the_chain() {
-    let h = fallback(Fallback::new(retryable).after("a", ["b"])).await;
-    h.mock.reply(A, too_many("0")).reply(B, ok());
-    let (status, _, body, end) = h.send().await;
-    assert_eq!((status, ended(end)), (StatusCode::OK, Ok(())));
-    assert!(body.contains("Hello"), "{body}");
-    assert_eq!(h.sent_to(), ["a.test", "b.test"]);
-    let roles: Vec<_> = h.record.all().into_iter().map(|e| (e.0, e.2)).collect();
-    assert_eq!(
-        roles,
-        [("a".into(), Role::Loser), ("b".into(), Role::Winner)]
-    );
-}
-
-#[tokio::test]
-async fn the_plugin_retries_its_target_as_its_backoff_allows_before_falling_back() {
-    let plugin = Fallback::new(retryable)
-        .after("a", ["b"])
-        .backoff(retries(2))
-        .until(Until::content(Output::is_content));
-    let h = fallback(plugin).await;
-    h.mock
-        .reply(A, too_many("0"))
-        .reply(A, too_many("0"))
-        .reply(B, ok());
-    let (status, ..) = h.send().await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(h.sent_to(), ["a.test", "a.test", "b.test"]);
-}
-
-#[tokio::test]
-async fn the_plugin_leaves_a_target_without_a_chain_alone() {
-    let h = fallback(Fallback::new(retryable).after("b", ["a"])).await;
-    h.mock.reply(A, too_many("0"));
-    let (status, ..) = h.send().await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(h.sent_to(), ["a.test"]);
-    assert!(h.record.all().is_empty(), "no attempt of the plugin's");
-}
-
-#[tokio::test]
-async fn the_plugin_gives_the_client_the_last_failure_when_the_chain_fails() {
-    let h = fallback(Fallback::new(retryable).after("a", ["b"])).await;
-    h.mock.reply(A, too_many("0")).reply(B, too_many("0"));
-    let (status, ..) = h.send().await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(h.sent_to(), ["a.test", "b.test"]);
-}
-
-#[tokio::test]
-async fn the_plugin_leaves_a_request_its_condition_refuses_alone() {
-    let plugin = Fallback::new(retryable).after("a", ["b"]).when(|_| false);
-    let h = fallback(plugin).await;
-    h.mock.reply(A, too_many("0"));
-    let (status, ..) = h.send().await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(h.sent_to(), ["a.test"]);
-}
-
-#[tokio::test]
-async fn the_hedge_plugin_starts_its_chain_after_the_stagger_and_takes_the_first_success() {
-    let plugin = Hedge::new(Duration::from_millis(200))
-        .after("slow", ["b"])
-        .until(Until::content(Output::is_content));
-    let h = targeted(plugin, "slow").await;
-    h.mock.reply(A, ok()).reply(B, ok());
-    let start = Instant::now();
-    let (status, _, _, end) = h.send().await;
-    assert_eq!((status, ended(end)), (StatusCode::OK, Ok(())));
-    assert!(start.elapsed() < secs(4), "{:?}", start.elapsed());
-    let won: Vec<_> = h
-        .record
-        .all()
-        .into_iter()
-        .filter(|e| e.2 == Role::Winner)
-        .collect();
-    assert_eq!(won.len(), 1);
-    assert_eq!(won[0].0, "b");
-}
-
-#[tokio::test]
-async fn the_hedge_plugin_leaves_a_target_without_a_chain_alone() {
-    let h = fallback(Hedge::new(Duration::ZERO).after("b", ["a"])).await;
-    h.mock.reply(A, ok());
-    let (status, ..) = h.send().await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(h.sent_to(), ["a.test"]);
-    assert!(h.record.all().is_empty(), "no attempt of the plugin's");
 }

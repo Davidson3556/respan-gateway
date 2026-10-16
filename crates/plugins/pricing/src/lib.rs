@@ -34,7 +34,7 @@ pub struct Charge {
     pub provider: String,
     /// The model it was sent.
     pub model: String,
-    /// What the report says was used.
+    /// The tokens the report says were used; none for seconds of audio.
     pub usage: Usage,
     /// What that cost, in US dollars.
     pub usd: f64,
@@ -120,12 +120,18 @@ impl Plugin for Pricing {
         on_usage(
             px,
             Arc::new(move |used| {
-                let Used::Usage(usage) = used else { return };
+                let (usage, usd) = match used {
+                    Used::Usage(usage) => (usage, charge(&price, &usage)),
+                    Used::Seconds(seconds) => match price.per_second {
+                        Some(rate) => (Usage::default(), seconds * rate),
+                        None => return,
+                    },
+                };
                 let charge = Charge {
                     provider: provider.clone(),
                     model: model.clone(),
                     usage,
-                    usd: charge(&price, &usage),
+                    usd,
                 };
                 on_charge(&extensions, &charge);
             }),

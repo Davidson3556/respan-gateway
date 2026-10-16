@@ -11,6 +11,9 @@ export const PICKS: Record<RoutePick, { label: string; hint: string }> = {
 /** "$0.15 / $0.6 per M" */
 export function formatPrice(price: Price | null | undefined): string {
   if (!price) return "—";
+  if (price.per_second != null && !price.input && !price.output) {
+    return `$${+(price.per_second * 60).toFixed(4)} / min`;
+  }
   return `$${+price.input.toFixed(3)} / $${+price.output.toFixed(3)}`;
 }
 

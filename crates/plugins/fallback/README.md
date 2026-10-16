@@ -1,35 +1,17 @@
 # respan-gateway-plugin-fallback
 
-`Fallback` sends a request to its target, then to each provider of the
-target's chain in turn, and the client gets the first success; `Hedge` races
-them instead, each started a stagger after the last. A request whose target
-has no chain is left alone. They are library plugins: the gateway binary
-configures attempts per route (`[routes.<model>]`'s `fallback`, `tries`,
-`hedge`), sent by the routing crate's `Dispatch` with the helpers below.
-
-```rust,ignore
-use respan_gateway_plugin_fallback::{Backoff, Fallback, Until};
-
-let fallback = Fallback::new(respan_gateway_http::rules::retryable)
-    .after("openai", ["anthropic"])          // target, then its fallbacks
-    .backoff(Backoff::new(2, Duration::from_millis(250), Duration::from_secs(5)))
-    .until(Until::content(Output::is_content));
-let gateway = gateway.plugin(routing).plugin(fallback);
-```
-
-Each provider is tried as `backoff` allows (once by default) and each answer
-is read `until` its stopping point (its head by default) before it is judged.
-It answers the request itself, so register it after the plugins that target
-and edit the request, such as routing.
+Attempt control: sequential retry and fallback, a staggered race, and each
+attempt's role. Fallback and hedging per model are routes
+([routing](../routing/README.md): a `Rule`'s `fallback`, `backoff`, `hedge`
+and `until`, sent by its `Dispatch`, as the gateway binary's
+`[routes.<model>]` configure); these are the helpers it is built on.
 
 ## Attempt helpers
 
-The plugin is built on transport-neutral attempt orchestration that other
-plugins can call from `on_client` too: sequential retry and
-fallback, a staggered race, and each attempt's role. Each answer is read
-`Until` a stopping point before it is judged: its `Head`, a plugin-chosen
-event (`Until::content(predicate)`), or its `End` (`Response::until_end`,
-held whole). A success counts only once read that far; nothing is retried
+They are transport-neutral, and any plugin can call them from `on_client`.
+Each answer is read `Until` a stopping point before it is judged: its
+`Head`, a plugin-chosen event (`Until::content(predicate)`), or its `End`
+(`Response::until_end`, held whole). A success counts only once read that far; nothing is retried
 after commitment.
 
 - `first_success(calls, &Backoff, Until, should_retry)`: each call in turn,

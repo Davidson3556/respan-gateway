@@ -521,13 +521,15 @@ impl Plugin for Routing {
         if model.call.is_none() {
             planned.to.truncate(1);
         }
+        // A target a plugin before chose keeps the request as it is.
+        if cx.target().is_some() && cx.target() != self.default.as_deref() {
+            return Ok(None);
+        }
         let first = planned.to[0].clone();
-        if cx.target().is_none() || cx.target() == self.default.as_deref() {
-            cx.set_target(first.internal.clone());
-            cx.extensions_mut().insert(first.clone());
-            if matches!(planned.by, By::Rule(_)) {
-                cx.extensions_mut().insert(Arc::new(planned));
-            }
+        cx.set_target(first.internal.clone());
+        cx.extensions_mut().insert(first.clone());
+        if matches!(planned.by, By::Rule(_)) {
+            cx.extensions_mut().insert(Arc::new(planned));
         }
         // A route or a `provider/` prefix sends another name.
         if let Some(sent) = first.model.filter(|sent| Some(sent) != asked.as_ref()) {

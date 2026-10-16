@@ -7,6 +7,8 @@ use crate::edge::{bind_provider, content, kept, sends};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use respan_gateway_conversation::{Media, MediaSource};
+use respan_gateway_conversation_http::Schema;
+use respan_gateway_conversation_http::gemini::{self, GeminiGenerate};
 use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, ErrorCode, Fault, Format, NativeFields};
 use respan_gateway_http::bytes::Bytes;
@@ -628,10 +630,9 @@ fn operation_of_job(job: &Job, base: &str) -> Value {
             } else {
                 let status = error
                     .code
-                    .filter(|c| is_status_name(c))
+                    .filter(|c| gemini::is_status_name(c))
                     .unwrap_or_else(|| "INTERNAL".into());
-                operation["error"] =
-                    json!({ "code": code_of(&status), "message": error.message, "status": status });
+                operation["error"] = json!({ "code": gemini::status_code(&status), "message": error.message, "status": status });
             }
         }
         _ => {}
@@ -639,53 +640,32 @@ fn operation_of_job(job: &Job, base: &str) -> Value {
     operation
 }
 
-/// A client's refusal, in Google's shape: `{"error": {code, message, status}}`.
-fn refusal(fault: &Fault, _request: &http::Request<Bytes>, head: &mut ResponseHead) -> Bytes {
-    let status = head.status.as_u16();
-    head.headers
-        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    let error = json!({ "error": { "code": status, "message": fault.message(), "status": status_name(status) } });
-    Bytes::from(error.to_string())
-}
-
-/// Whether `name` is a `google.rpc.Code` name, such as `NOT_FOUND`.
-fn is_status_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_')
-}
-
-/// The `google.rpc.Code` name Google gives an HTTP `status`.
-fn status_name(status: u16) -> &'static str {
-    match status {
-        400 => "INVALID_ARGUMENT",
-        401 => "UNAUTHENTICATED",
-        403 => "PERMISSION_DENIED",
-        404 => "NOT_FOUND",
-        429 => "RESOURCE_EXHAUSTED",
-        501 => "UNIMPLEMENTED",
-        502 | 503 => "UNAVAILABLE",
-        504 => "DEADLINE_EXCEEDED",
-        s if s >= 500 => "INTERNAL",
-        _ => "FAILED_PRECONDITION",
-    }
-}
-
-/// The HTTP status of a `google.rpc.Code` name.
-fn code_of(status: &str) -> u16 {
-    match status {
-        "INVALID_ARGUMENT" | "FAILED_PRECONDITION" => 400,
-        "UNAUTHENTICATED" => 401,
-        "PERMISSION_DENIED" => 403,
-        "NOT_FOUND" => 404,
-        "RESOURCE_EXHAUSTED" => 429,
-        "UNAVAILABLE" => 503,
-        "DEADLINE_EXCEEDED" => 504,
-        _ => 500,
-    }
+/// A client's refusal, as Gemini's `generateContent` writes it:
+/// `{"error": {code, message, status}}`.
+fn refusal(fault: &Fault, request: &http::Request<Bytes>, head: &mut ResponseHead) -> Bytes {
+    GeminiGenerate.refusal(fault, request, head)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: this format's own copy of Google's names lacked 409 and
+    /// 499, and read `UNIMPLEMENTED` back as 500.
+    #[test]
+    fn a_refusal_and_an_operations_error_use_googles_names_both_ways() {
+        let request = http::Request::new(Bytes::new());
+        for (status, name) in [(409, "ABORTED"), (499, "CANCELLED"), (501, "UNIMPLEMENTED")] {
+            let status_code = http::StatusCode::from_u16(status).unwrap_or_default();
+            let mut head = http::Response::new(()).into_parts().0;
+            head.status = status_code;
+            let fault = Fault::upstream("no").with(respan_gateway_http_faults::Status(status_code));
+            let body = refusal(&fault, &request, &mut head);
+            let v: Value = serde_json::from_slice(&body).unwrap_or_default();
+            assert_eq!(v["error"]["status"], name, "{v}");
+            assert_eq!(gemini::status_code(name), status);
+        }
+    }
 
     #[test]
     fn a_job_id_is_a_path_segment_that_names_its_operation() {

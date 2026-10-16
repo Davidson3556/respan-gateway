@@ -2,7 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A model's price, in US dollars per million tokens.
+/// A model's price, in US dollars per million tokens, and per second of
+/// audio for a model billed by its length.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Price {
@@ -13,6 +14,9 @@ pub struct Price {
     /// Of each input token read from a cache; `input` if unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_input: Option<f64>,
+    /// Of each second of audio, as a transcription model may bill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_second: Option<f64>,
 }
 
 impl Price {
@@ -23,6 +27,7 @@ impl Price {
             input,
             output,
             cached_input,
+            per_second: None,
         }
     }
 

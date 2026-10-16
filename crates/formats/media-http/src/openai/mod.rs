@@ -37,7 +37,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use respan_gateway_conversation::{Media, MediaSource, Usage};
 use respan_gateway_conversation_http::fields::{merge_missing, rest_of, set, unix_now};
-use respan_gateway_conversation_http::{merge_details, read_provider_error};
+use respan_gateway_conversation_http::openai::OpenAiChat;
+use respan_gateway_conversation_http::{Schema, read_provider_error};
 use respan_gateway_core::{Connection, Details, ErrorCode, Fault, NativeFields, NativeValue};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
@@ -46,7 +47,7 @@ use respan_gateway_http::http::{
     response::Parts as ResponseHead,
 };
 use respan_gateway_http::path::path_ends_with;
-use respan_gateway_http::{ClientIo, Encoder, ProviderIo, raw::Original, raw::RawReply};
+use respan_gateway_http::{ClientIo, Encoder, ProviderIo, raw::Original};
 use serde_json::{Map, Value, json};
 use std::sync::LazyLock;
 
@@ -407,28 +408,9 @@ fn unreadable(format: &str, what: &str) -> Fault {
     Fault::upstream(format!("the provider's {format} response {what}"))
 }
 
-/// A refusal in OpenAI's error schema, under the fault's status: its
-/// details merged, or the provider's own answer if a plugin asked for it
-/// ([`RawReply`]). A status that says no error is a plain 500, as the
-/// adapter writes what no format can.
-fn refusal(fault: &Fault, _request: &http::Request<Bytes>, head: &mut ResponseHead) -> Bytes {
-    if !(head.status.is_client_error() || head.status.is_server_error()) {
-        head.status = StatusCode::INTERNAL_SERVER_ERROR;
-        head.headers.clear();
-        let text = HeaderValue::from_static("text/plain; charset=utf-8");
-        head.headers.insert(CONTENT_TYPE, text);
-        return Bytes::from(fault.message().to_owned());
-    }
-    let json = HeaderValue::from_static("application/json");
-    head.headers.insert(CONTENT_TYPE, json);
-    if let Some(RawReply(answer)) = fault.get::<RawReply>() {
-        return answer.body().clone();
-    }
-    let code = fault.code();
-    let error = json!({ "message": fault.message(), "type": code, "param": null, "code": code });
-    json!({ "error": merge_details(error, fault) })
-        .to_string()
-        .into()
+/// A refusal in OpenAI's error schema, as Chat Completions writes it.
+fn refusal(fault: &Fault, request: &http::Request<Bytes>, head: &mut ResponseHead) -> Bytes {
+    OpenAiChat.refusal(fault, request, head)
 }
 
 /// Chooses the encoder of a response from the client's request, the text

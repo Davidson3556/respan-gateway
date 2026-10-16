@@ -395,12 +395,14 @@ async fn bad_prices_and_sizes_are_refused() {
         "plugins = { request_log = { file_max = 0 } }\n".to_owned(),
     ] {
         let path = support::write_config(&format!("listen = \"127.0.0.1:0\"\n{text}\n"));
-        let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
+        // A config it takes would serve until killed: a deadline, not a hang.
+        let run = tokio::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
             .args(["--config", path.to_str().unwrap()])
-            .output()
-            .await
-            .unwrap();
-        assert!(!out.status.success(), "{text}");
+            .kill_on_drop(true)
+            .output();
+        let out = tokio::time::timeout(Duration::from_secs(30), run).await;
+        let out = out.unwrap_or_else(|_| panic!("taken, and served: {text}"));
+        assert!(!out.unwrap().status.success(), "{text}");
     }
 }
 

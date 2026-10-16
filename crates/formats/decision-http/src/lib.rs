@@ -13,7 +13,8 @@
 //! the format's own and written back where it was.
 
 use respan_gateway_conversation_http::fields::{merge_missing, rest_of, set};
-use respan_gateway_conversation_http::{merge_details, read_provider_error};
+use respan_gateway_conversation_http::openai::OpenAiChat;
+use respan_gateway_conversation_http::{Schema, read_provider_error};
 use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, Details, ErrorCode, Fault, Format, NativeFields};
 use respan_gateway_decision::{Answer, Ask, Input, Output, Question, Start, Usage, Verdict};
@@ -415,22 +416,31 @@ fn invalid(param: &str, what: &str) -> Fault {
     Fault::bad_request(format!("'{param}' {what}")).with(Details(details))
 }
 
-/// A refusal, `{"error": {"message", "type", "code"}}` with the fault's
-/// details, which TypeSafe's SDKs read the message of.
-fn refusal(fault: &Fault, _: &http::Request<Bytes>, head: &mut ResponseHead) -> Bytes {
-    let json = HeaderValue::from_static("application/json");
-    head.headers.insert(CONTENT_TYPE, json);
-    let code = fault.code();
-    let error = json!({ "message": fault.message(), "type": code, "code": code });
-    json!({ "error": merge_details(error, fault) })
-        .to_string()
-        .into()
+/// A refusal in OpenAI's error schema, as Chat Completions writes it.
+fn refusal(fault: &Fault, request: &http::Request<Bytes>, head: &mut ResponseHead) -> Bytes {
+    OpenAiChat.refusal(fault, request, head)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use respan_gateway_core::FaultKind;
+
+    /// Regression: this format's own copy dropped `param` and wrote an
+    /// error under a success status.
+    #[test]
+    fn a_refusal_is_written_as_chat_completions_writes_one() {
+        let request = http::Request::new(Bytes::new());
+        let mut head = http::Response::new(()).into_parts().0;
+        head.status = http::StatusCode::BAD_REQUEST;
+        let body = refusal(&Fault::bad_request("no model"), &request, &mut head);
+        let v: Value = serde_json::from_slice(&body).unwrap_or_default();
+        assert!(v["error"].get("param").is_some(), "{v}");
+        head.status = http::StatusCode::OK;
+        let body = refusal(&Fault::bad_request("no model"), &request, &mut head);
+        assert_eq!(head.status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(&body[..], b"no model");
+    }
 
     #[test]
     fn a_request_of_each_question_type_is_read_and_written_back() {

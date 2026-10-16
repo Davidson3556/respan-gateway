@@ -449,8 +449,26 @@ impl Schema for GeminiGenerate {
 }
 
 /// Whether `name` is a `google.rpc.Code` name, such as `NOT_FOUND`.
-fn is_status_name(name: &str) -> bool {
+pub fn is_status_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+}
+
+/// The HTTP status Google answers a `google.rpc.Code` name with; 500 for
+/// one it does not know.
+pub fn status_code(name: &str) -> u16 {
+    match name {
+        "INVALID_ARGUMENT" | "FAILED_PRECONDITION" | "OUT_OF_RANGE" => 400,
+        "UNAUTHENTICATED" => 401,
+        "PERMISSION_DENIED" => 403,
+        "NOT_FOUND" => 404,
+        "ABORTED" | "ALREADY_EXISTS" => 409,
+        "RESOURCE_EXHAUSTED" => 429,
+        "CANCELLED" => 499,
+        "UNIMPLEMENTED" => 501,
+        "UNAVAILABLE" => 503,
+        "DEADLINE_EXCEEDED" => 504,
+        _ => 500,
+    }
 }
 
 /// The `google.rpc.Code` name Google gives an HTTP `status`.

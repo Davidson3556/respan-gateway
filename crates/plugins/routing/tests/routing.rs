@@ -337,7 +337,7 @@ impl Plugin for TargetsB {
 }
 
 /// Providers `a` and `b` of OpenAI Chat and routing that sends `gpt-4o`
-/// to `a`, after a plugin that targets `b` if `earlier`, else over a gateway
+/// to `a` as `model-a`, after a plugin that targets `b` if `earlier`, else over a gateway
 /// whose default target is `b`.
 fn targeted_gateway(mock: &Fakes, earlier: bool) -> Gateway {
     let speaks = |internal: &str| {
@@ -350,7 +350,7 @@ fn targeted_gateway(mock: &Fakes, earlier: bool) -> Gateway {
     let routes = Routes::new()
         .provider("a", speaks("a"))
         .provider("b", speaks("b"))
-        .rule(Rule::new("gpt-4o", vec![Candidate::parse("a")]));
+        .rule(Rule::new("gpt-4o", vec![Candidate::parse("a/model-a")]));
     let mut routing = Routing::new(Arc::new(routes)).format(
         "openai-chat",
         CHAT,
@@ -389,6 +389,8 @@ async fn routing_keeps_a_target_an_earlier_plugin_set() {
     assert_eq!(status, StatusCode::OK);
     assert!(answer.contains("an earlier plugin's choice"), "{answer}");
     assert_eq!(mock.sent(), ["b.test"]);
+    // Nor is the route's model name sent to the provider it did not choose.
+    assert_eq!(mock.b.requests()[0].body["model"], "gpt-4o");
 }
 
 #[tokio::test]

@@ -111,13 +111,15 @@ key = "env:OPENAI_API_KEY"
 
 # Models you declare, by provider/model: laid over what the provider's
 # list says of each, or all that is known of one it does not list. Its
-# pricing (dollars per million tokens) prices each call to it. These are
-# example values, not a current vendor price list.
+# pricing (dollars per million tokens, or per second of audio) prices each
+# call to it. These are example values, not a current vendor price list.
 # [models."openai/my-model"]
 # pricing = { input = 1.0, output = 2.0, cached_input = 0.5 }
 # display_name = "My model"
 # context_window = 128000
 # capabilities = ["tools", "reasoning"]
+# [models."openai/whisper-1"]
+# pricing = { input = 0, output = 0, per_second = 0.0001 }   # By the second of audio
 
 # ── MCP servers and tools ─────────────────────────────────────────────
 # [mcp.github]
