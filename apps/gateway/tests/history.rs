@@ -1,12 +1,9 @@
-//! The request history: its export, its file (kept across restarts,
-//! rotated, never failing a request) and the cost of each request.
+//! The request history: its export and the cost of each request.
 
 #![allow(clippy::unwrap_used)]
 
 mod support;
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeOpenAi};
@@ -14,13 +11,6 @@ use serde_json::{Value, json};
 use support::{Gateway, client};
 
 const CHAT: &str = "/v1/chat/completions";
-
-fn scratch(name: &str) -> PathBuf {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    dir.join(format!("history-{}-{n}-{name}", std::process::id()))
-}
 
 fn config(up: &FakeOpenAi, extra: &str) -> String {
     let url = up.base_url();
@@ -53,18 +43,6 @@ async fn records(gw: &Gateway) -> Vec<Value> {
     let mut all = all["requests"].as_array().unwrap().clone();
     all.reverse();
     all
-}
-
-/// Waits, bounded, until `file` has `lines` lines.
-async fn lines_in(file: &Path, lines: usize) -> Vec<String> {
-    for _ in 0..500 {
-        let text = std::fs::read_to_string(file).unwrap_or_default();
-        if text.lines().count() >= lines {
-            return text.lines().map(str::to_owned).collect();
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("{} never had {lines} lines", file.display());
 }
 
 /// Waits, bounded, until every request has finished.
@@ -200,146 +178,6 @@ async fn settled_with(gw: &Gateway, key: &str) {
 }
 
 #[tokio::test]
-async fn a_history_file_keeps_the_history_across_a_restart() {
-    let file = scratch("kept.jsonl");
-    let up = FakeOpenAi::start().await;
-    up.answer(Answer::text("hello"));
-    let text = config(
-        &up,
-        &format!(
-            "plugins = {{ request_log = {{ file = \"{}\" }} }}\n",
-            file.display()
-        ),
-    );
-
-    let mut first = Gateway::start(&text).await;
-    for model in ["gpt-4o", "o3"] {
-        assert_eq!(chat(&first, model).await, 200);
-    }
-    settled(&first).await;
-    let written = lines_in(&file, 2).await;
-    first.child.kill().await.unwrap();
-
-    // The file holds the API's records, and nothing of the conversation.
-    let line: Value = serde_json::from_str(&written[0]).unwrap();
-    assert_eq!(line["model"], "gpt-4o");
-    assert_eq!(line["provider"], "openai");
-    assert!(!written.join("").contains("hello"));
-
-    let second = Gateway::start(&text).await;
-    let kept = records(&second).await;
-    let models: Vec<&Value> = kept.iter().map(|r| &r["model"]).collect();
-    assert_eq!(models, ["gpt-4o", "o3"]);
-    assert_eq!(kept[0]["id"], line["id"]);
-    // Detail is served for them, and new requests number on.
-    let (status, _) = get(
-        &second,
-        &format!("/ui/api/requests/{}", line["id"].as_str().unwrap()),
-    )
-    .await;
-    assert_eq!(status, 200);
-    assert_eq!(chat(&second, "gpt-4o").await, 200);
-    settled(&second).await;
-    let all = records(&second).await;
-    assert_eq!(all.len(), 3);
-    assert_ne!(all[2]["id"], all[1]["id"]);
-    assert!(all[2]["id"].as_str() > all[1]["id"].as_str());
-    // They were not this run's requests.
-    let (_, overview) = get(&second, "/ui/api/overview").await;
-    assert_eq!(support::json(&overview)["totals"]["requests"], 1);
-}
-
-#[tokio::test]
-async fn only_the_last_request_history_records_are_read_back() {
-    let file = scratch("tail.jsonl");
-    let up = FakeOpenAi::start().await;
-    up.answer(Answer::text("hello"));
-    let text = config(
-        &up,
-        &format!(
-            "plugins = {{ request_log = {{ file = \"{}\", history = 2 }} }}\n",
-            file.display()
-        ),
-    );
-    let mut first = Gateway::start(&text).await;
-    for model in ["a", "b", "c"] {
-        assert_eq!(chat(&first, model).await, 200);
-    }
-    lines_in(&file, 3).await;
-    first.child.kill().await.unwrap();
-    let second = Gateway::start(&text).await;
-    let models: Vec<Value> = records(&second)
-        .await
-        .iter()
-        .map(|r| r["model"].clone())
-        .collect();
-    assert_eq!(models, [json!("b"), json!("c")]);
-}
-
-#[tokio::test]
-async fn the_file_is_rotated_by_size_keeping_one_old_file() {
-    let file = scratch("rotated.jsonl");
-    let old = PathBuf::from(format!("{}.1", file.display()));
-    let up = FakeOpenAi::start().await;
-    up.answer(Answer::text("hello"));
-    let text = config(
-        &up,
-        &format!(
-            "plugins = {{ request_log = {{ file = \"{}\", file_max = \"3KiB\" }} }}\n",
-            file.display()
-        ),
-    );
-    let gw = Gateway::start(&text).await;
-    for _ in 0..30 {
-        assert_eq!(chat(&gw, "gpt-4o").await, 200);
-    }
-    settled(&gw).await;
-    // Every record lands in the file or the old one, and neither is past
-    // the limit; the oldest have gone with the replaced old file.
-    for _ in 0..500 {
-        let size = |p: &Path| std::fs::metadata(p).map_or(0, |m| m.len());
-        if old.exists() && size(&file) + size(&old) > 0 {
-            let kept = lines_in(&file, 1).await.len() + lines_in(&old, 1).await.len();
-            if kept >= 10 {
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(old.exists(), "no rotated file");
-    assert!(std::fs::metadata(&file).unwrap().len() <= 3 << 10);
-    assert!(std::fs::metadata(&old).unwrap().len() <= 3 << 10);
-    assert!(!PathBuf::from(format!("{}.2", file.display())).exists());
-    for line in lines_in(&old, 1).await {
-        serde_json::from_str::<Value>(&line).unwrap();
-    }
-}
-
-#[tokio::test]
-async fn a_file_that_cannot_be_written_does_not_fail_requests() {
-    // Its parent is a file, so it can neither be read nor created.
-    let parent = scratch("not-a-dir");
-    std::fs::write(&parent, "x").unwrap();
-    let file = parent.join("requests.jsonl");
-    let up = FakeOpenAi::start().await;
-    up.answer(Answer::text("hello"));
-    let text = config(
-        &up,
-        &format!(
-            "plugins = {{ request_log = {{ file = \"{}\" }} }}\n",
-            file.display()
-        ),
-    );
-    let gw = Gateway::start(&text).await;
-    for _ in 0..3 {
-        assert_eq!(chat(&gw, "gpt-4o").await, 200);
-    }
-    settled(&gw).await;
-    assert_eq!(records(&gw).await.len(), 3);
-    assert!(!file.exists());
-}
-
-#[tokio::test]
 async fn a_declared_models_pricing_gives_each_request_a_cost_and_the_totals_their_sum() {
     let up = FakeOpenAi::start().await;
     up.answer(Answer::text("hello"));
@@ -384,7 +222,7 @@ async fn a_declared_models_pricing_gives_each_request_a_cost_and_the_totals_thei
 }
 
 #[tokio::test]
-async fn bad_prices_and_sizes_are_refused() {
+async fn bad_prices_are_refused() {
     let openai = "providers = { openai = { formats = \"openai-chat\", base_url = \"http://x.test\", key = \"k\" } }\n";
     for text in [
         format!(
@@ -399,7 +237,6 @@ async fn bad_prices_and_sizes_are_refused() {
         ),
         // Retired, saying what replaced it.
         format!("{openai}prices = {{ gpt-4o = {{ input = 1, output = 1 }} }}\n"),
-        "plugins = { request_log = { file_max = 0 } }\n".to_owned(),
     ] {
         let path = support::write_config(&format!("listen = \"127.0.0.1:0\"\n{text}\n"));
         // A config it takes would serve until killed: a deadline, not a hang.
@@ -473,27 +310,6 @@ async fn requests_carry_the_name_of_their_client_key() {
     let row: Vec<&str> = lines.next().unwrap().split(',').collect();
     assert_eq!(row[column], "key-2");
     assert!(lines.next().is_none());
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn the_history_file_is_private() {
-    use std::os::unix::fs::PermissionsExt;
-    let file = scratch("private.jsonl");
-    let up = FakeOpenAi::start().await;
-    up.answer(Answer::text("hello"));
-    let text = config(
-        &up,
-        &format!(
-            "plugins = {{ request_log = {{ file = \"{}\" }} }}\n",
-            file.display()
-        ),
-    );
-    let gw = Gateway::start(&text).await;
-    assert_eq!(chat(&gw, "gpt-4o").await, 200);
-    lines_in(&file, 1).await;
-    let mode = std::fs::metadata(&file).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o600);
 }
 
 #[tokio::test]

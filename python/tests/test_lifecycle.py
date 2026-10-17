@@ -69,11 +69,9 @@ def test_requests_and_providers(gw):
     assert {p["name"] for p in asyncio.run(gw.aproviders())} == {"openai", "any"}
 
 
-def test_export_requests_filters_and_costs(fake, tmp_path):
-    history = tmp_path / "requests.jsonl"
+def test_export_requests_filters_and_costs(fake):
     config = {
         **config_for(fake),
-        "plugins": {"request_log": {"file": str(history)}},
         "models": {"openai/fake-1": {"pricing": {"input": 1_000_000, "output": 1_000_000}}},
     }
     with rg.Gateway(config=config) as gw:
@@ -88,7 +86,6 @@ def test_export_requests_filters_and_costs(fake, tmp_path):
             gw.export_requests("xml")
         record = json.loads(lines[0])
         assert record["cost_usd"] == record["usage"]["input_tokens"] + record["usage"]["output_tokens"]
-    assert history.exists()
 
 
 def test_admin_api_off_is_a_gateway_error(fake):

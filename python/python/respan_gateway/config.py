@@ -135,8 +135,6 @@ class RequestLogConfig(TypedDict, total=False):
     """The request history the web UI and admin API read."""
 
     history: int  # finished requests kept in memory
-    file: str  # append each finished request as a JSON line; reloaded at start
-    file_max: Union[int, str]  # bytes, or "64MiB": rotated to `<file>.1` at this size
 
 
 class ResponsesConfig(TypedDict, total=False):

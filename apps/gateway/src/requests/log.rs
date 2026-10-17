@@ -17,7 +17,7 @@ use tokio::sync::broadcast;
 use super::KEPT;
 use super::record::{RequestRecord, clip, rfc3339};
 use crate::config::Config;
-use crate::history::{self, Filter, Writer};
+use crate::history::Filter;
 use crate::logging::{Level, LogFormat, escape_controls, paint};
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -60,18 +60,6 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// A request that finished before this run, as the history file holds
-    /// it.
-    fn finished(record: RequestRecord) -> Self {
-        Self {
-            record: Mutex::new(record),
-            started: Instant::now(),
-            finished: AtomicBool::new(true),
-            recorded: AtomicBool::new(false),
-            ended: AtomicBool::new(false),
-        }
-    }
-
     pub(super) fn record(&self) -> MutexGuard<'_, RequestRecord> {
         self.record.lock()
     }
@@ -99,8 +87,6 @@ struct Kept {
     capacity: usize,
     format: LogFormat,
     recent: VecDeque<Arc<Entry>>,
-    /// Where finished requests are also written, if the config says.
-    writer: Option<Writer>,
     totals: Totals,
     providers: HashMap<String, ProviderStats>,
 }
@@ -113,26 +99,15 @@ pub struct RequestLog {
 }
 
 impl RequestLog {
-    /// A log as `config` says: keeping its last `request_log.history` requests,
-    /// printing each as its `log` says, starting with the ones its
-    /// `request_log.file` holds.
+    /// A log as `config` says: keeping its last `request_log.history` requests
+    /// in memory, printing each as its `log` says.
     pub fn new(config: &Config) -> Arc<Self> {
-        let capacity = config.plugins.request_log.history.unwrap_or(KEPT);
-        let loaded = (config.plugins.request_log.file.as_deref())
-            .map(|path| history::load(path, capacity))
-            .unwrap_or_default();
-        let next_id = (loaded.iter())
-            .filter_map(|r| r.id.strip_prefix("r_")?.parse::<u64>().ok())
-            .max()
-            .map_or(1, |last| last + 1);
-        let recent = loaded.into_iter().map(Entry::finished).map(Arc::new);
         let log = Arc::new(Self {
-            next_id: AtomicU64::new(next_id),
+            next_id: AtomicU64::new(1),
             kept: Mutex::new(Kept {
-                capacity,
+                capacity: config.plugins.request_log.history.unwrap_or(KEPT),
                 format: config.log,
-                recent: recent.collect(),
-                writer: None,
+                recent: VecDeque::new(),
                 totals: Totals::default(),
                 providers: HashMap::new(),
             }),
@@ -150,9 +125,6 @@ impl RequestLog {
         kept.format = config.log;
         while kept.recent.len() > kept.capacity {
             kept.recent.pop_front();
-        }
-        if !kept.writer.as_ref().is_some_and(|w| w.is(config)) {
-            kept.writer = Writer::from_config(config);
         }
     }
 
@@ -284,9 +256,6 @@ impl RequestLog {
                 stats.requests += 1;
                 stats.errors += u64::from(failed);
                 stats.total_ms += record.duration_ms.unwrap_or_default();
-            }
-            if let Some(writer) = &kept.writer {
-                writer.append(&record);
             }
             kept.format
         };

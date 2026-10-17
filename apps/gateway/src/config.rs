@@ -550,15 +550,6 @@ pub struct RequestLogConfig {
     /// keeps; 1000 if unset.
     #[serde(default, deserialize_with = "request_log_history")]
     pub history: Option<usize>,
-    /// A file each finished request is appended to as one JSON line (the
-    /// history's records: no bodies, no keys), and the last `history` of
-    /// which are read back at start; none if unset.
-    pub file: Option<PathBuf>,
-    /// The size at which that file moves to `<file>.1` (replacing the one
-    /// there) and a new one starts; a number of bytes or a size such as
-    /// `64MiB`; 64 MiB if unset.
-    #[serde(default, deserialize_with = "size")]
-    pub file_max: Option<usize>,
 }
 
 /// Browser access: the origins whose pages may call the gateway.

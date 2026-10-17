@@ -77,7 +77,7 @@ def test_a_full_typed_config_parses() -> None:
         "cors": {"origins": ["https://app.example.com"]},
         "plugins": {
             "routing": {"default": "openai"},
-            "request_log": {"history": 500, "file_max": "64MiB"},
+            "request_log": {"history": 500},
             "responses": {"enabled": True, "keep": "30m"},
             "respan": {"key": "fake", "url": "http://127.0.0.1:9/v1/traces", "content": False, "service": "test"},
             "mcp_aggregate": {"servers": ["remote", "local"], "allow": ["remote__*"], "deny": ["remote__x"]},
