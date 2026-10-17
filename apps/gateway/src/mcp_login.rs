@@ -7,10 +7,14 @@
 //! (RFC 8414) names its endpoints. The gateway registers itself as a public
 //! client (RFC 7591), then asks for the person's approval by a device code
 //! (RFC 8628) where the server offers one, else in a browser (authorization
-//! code with PKCE, RFC 7636, to a listener on `127.0.0.1`). Tokens are asked
+//! code with PKCE, RFC 7636, to a listener on `127.0.0.1`). Enter opens the
+//! page in the default browser; where the browser runs elsewhere (over SSH,
+//! with no display), the address it lands on after approving is pasted at
+//! the terminal instead. Tokens are asked
 //! for the server alone (`resource`, RFC 8707), with `offline_access` where
 //! offered, so a refresh token comes back: what the login keeps.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -20,6 +24,7 @@ use respan_gateway_http_transport::reqwest;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::mcp::McpAuth;
@@ -27,6 +32,9 @@ use crate::mcp_oauth::{Login, logins_dir, save};
 
 /// How long a person has to approve.
 const APPROVAL: Duration = Duration::from_secs(10 * 60);
+
+/// The page the browser lands on after approving.
+const PAGE: &str = include_str!("mcp_login.html");
 
 /// Logs in to server `name` of `config` and saves the login; where it is.
 pub async fn login(config: &Config, name: &str) -> Result<PathBuf, String> {
@@ -42,7 +50,10 @@ pub async fn login(config: &Config, name: &str) -> Result<PathBuf, String> {
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("no HTTP client: {e}"))?;
-    let at = Endpoints { http: &http };
+    let at = Endpoints {
+        http: &http,
+        server: name,
+    };
 
     let resource = at.resource_metadata(url).await?;
     let issuer = resource["authorization_servers"][0]
@@ -159,6 +170,8 @@ fn text(v: &Value, key: &str) -> Result<String, String> {
 
 struct Endpoints<'a> {
     http: &'a reqwest::Client,
+    /// The MCP server's name in the config, for a person.
+    server: &'a str,
 }
 
 impl Endpoints<'_> {
@@ -327,7 +340,20 @@ impl Endpoints<'_> {
             .as_str()
             .or(device["verification_uri"].as_str())
             .ok_or("the device code names no page to approve it at")?;
-        println!("To log in, open {verify}\nand confirm the code {user_code}.");
+        println!(
+            "To log in to '{}', open\n\n  {verify}\n\nand confirm the code {user_code}.",
+            self.server
+        );
+        // Enter opens the page, while the code is polled for.
+        let _opener = typed().filter(|_| has_browser()).map(|mut lines| {
+            println!("Press Enter to open it in your browser.");
+            let verify = verify.to_owned();
+            Abort(tokio::spawn(async move {
+                while lines.recv().await.is_some() {
+                    open(&verify);
+                }
+            }))
+        });
         let mut interval = Duration::from_secs(device["interval"].as_u64().unwrap_or(5).max(1));
         let deadline = tokio::time::Instant::now() + APPROVAL;
         let mut form = vec![
@@ -399,8 +425,7 @@ impl Endpoints<'_> {
                 query.append_pair("scope", &scopes.join(" "));
             }
         }
-        println!("To log in, open this page in a browser on this machine:\n{url}");
-        let code = tokio::time::timeout(APPROVAL, callback(&listener, &state))
+        let code = tokio::time::timeout(APPROVAL, self.approval(&listener, &state, url.as_str()))
             .await
             .map_err(|_| "the login was not approved in time".to_owned())??;
         let mut form = vec![
@@ -423,10 +448,113 @@ impl Endpoints<'_> {
         }
         Ok((client, answer))
     }
+
+    /// The code of an approval at `url`: brought back to `listener` by the
+    /// browser, or the address it landed on pasted at the terminal.
+    async fn approval(
+        &self,
+        listener: &tokio::net::TcpListener,
+        state: &str,
+        url: &str,
+    ) -> Result<String, String> {
+        let lines = typed();
+        println!(
+            "To log in to '{}', approve the gateway at:\n\n  {url}\n",
+            self.server
+        );
+        match (&lines, has_browser()) {
+            (Some(_), true) => println!(
+                "Press Enter to open it in your browser. If the browser is on another \
+                 machine, paste here the address it lands on after you approve."
+            ),
+            (Some(_), false) => println!(
+                "Open it in a browser on any machine. After you approve, the browser goes \
+                 to a 127.0.0.1 address that may not load there; paste that address here."
+            ),
+            (None, _) => println!("Open it in a browser on this machine."),
+        }
+        let heard = callback(listener, state, self.server);
+        tokio::pin!(heard);
+        let Some(mut lines) = lines else {
+            return heard.await;
+        };
+        loop {
+            tokio::select! {
+                code = &mut heard => return code,
+                line = lines.recv() => match line.as_deref().map(str::trim) {
+                    None => return (&mut heard).await,
+                    Some("") => open(url),
+                    Some(line) => match pasted(line, state) {
+                        Some(Heard::Code(code)) => return Ok(code),
+                        Some(Heard::Refused(why)) => {
+                            return Err(format!("the login was refused: {why}"));
+                        }
+                        Some(Heard::Stranger) => println!(
+                            "That address is from another login; paste the one this \
+                             login's page sent the browser to."
+                        ),
+                        None => println!(
+                            "That is not the address the browser landed on: it starts \
+                             with http://127.0.0.1 and has ?code= in it."
+                        ),
+                    },
+                },
+            }
+        }
+    }
 }
 
-/// The code the browser brings back to `listener`, if its `state` matches.
-async fn callback(listener: &tokio::net::TcpListener, state: &str) -> Result<String, String> {
+/// What came back of an approval.
+#[derive(Debug, PartialEq)]
+enum Heard {
+    Code(String),
+    /// Refused, and why.
+    Refused(String),
+    /// The answer to another login: its `state` is not this one's.
+    Stranger,
+}
+
+/// What the query of a callback says, for the login of `state`.
+fn heard(query: &str, state: &str) -> Heard {
+    let pairs: Vec<(String, String)> = form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect();
+    let get = |k: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| key == k)
+            .map(|(_, v)| v.as_str())
+    };
+    if get("state") != Some(state) {
+        return Heard::Stranger;
+    }
+    if let Some(error) = get("error") {
+        let what = get("error_description").unwrap_or_default();
+        return Heard::Refused(format!("{error} {what}").trim().to_owned());
+    }
+    match get("code") {
+        Some(code) => Heard::Code(code.to_owned()),
+        None => Heard::Refused("the browser brought back no code".into()),
+    }
+}
+
+/// What a pasted line says: the address the browser landed on, or its
+/// query alone; `None` for neither.
+fn pasted(line: &str, state: &str) -> Option<Heard> {
+    let query = line.split_once('?').map_or(line, |(_, q)| q);
+    let query = query.split('#').next().unwrap_or_default();
+    let named = |k: &str| query.split('&').any(|p| p.starts_with(&format!("{k}=")));
+    (named("code") || named("error")).then(|| heard(query, state))
+}
+
+/// The code the browser brings back to `listener`, if its `state` matches;
+/// each visit is answered with a page for the person at the browser.
+async fn callback(
+    listener: &tokio::net::TcpListener,
+    state: &str,
+    server: &str,
+) -> Result<String, String> {
+    let server = escape(server);
     loop {
         let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
         let mut buf = vec![0u8; 8192];
@@ -439,40 +567,111 @@ async fn callback(listener: &tokio::net::TcpListener, state: &str) -> Result<Str
                 .await;
             continue;
         };
-        let pairs: Vec<(String, String)> = form_urlencoded::parse(query.as_bytes())
-            .into_owned()
-            .collect();
-        let get = |k: &str| {
-            pairs
-                .iter()
-                .find(|(key, _)| key == k)
-                .map(|(_, v)| v.clone())
+        let (answer, done) = match heard(query, state) {
+            Heard::Code(code) => (
+                page(
+                    "200 OK",
+                    true,
+                    &format!("Logged in to {server}"),
+                    "The gateway has its login. You can close this tab and return to the terminal.",
+                ),
+                Some(Ok(code)),
+            ),
+            Heard::Refused(why) => (
+                page(
+                    "200 OK",
+                    false,
+                    "Login refused",
+                    &format!(
+                        "{server} refused the login: <code>{}</code>. Return to the terminal to try again.",
+                        escape(&why)
+                    ),
+                ),
+                Some(Err(format!("the login was refused: {why}"))),
+            ),
+            Heard::Stranger => (
+                page(
+                    "400 Bad Request",
+                    false,
+                    "Not this login",
+                    "This page is from another login attempt. Return to the terminal and open the page it shows now.",
+                ),
+                None,
+            ),
         };
-        let page = |text: &str| {
-            format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\n\r\n{text}",
-                text.len()
-            )
-        };
-        if get("state").as_deref() != Some(state) {
-            let _ = stream
-                .write_all(page("This is not the login asked for.").as_bytes())
-                .await;
-            continue;
+        let _ = stream.write_all(answer.as_bytes()).await;
+        if let Some(done) = done {
+            return done;
         }
-        if let Some(error) = get("error") {
-            let _ = stream
-                .write_all(page("The login was refused.").as_bytes())
-                .await;
-            return Err(format!("the login was refused: {error}"));
+    }
+}
+
+/// An HTTP answer of the login page: `ok` or not, its `title` and `detail`
+/// HTML.
+fn page(status: &str, ok: bool, title: &str, detail: &str) -> String {
+    let html = PAGE
+        .replace("{{tone}}", if ok { "ok" } else { "bad" })
+        .replace("{{title}}", title)
+        .replace("{{detail}}", detail);
+    format!(
+        "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\n\
+         cache-control: no-store\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{html}",
+        html.len()
+    )
+}
+
+/// `text` as HTML text.
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Whether a browser opens here: not over SSH, and on Linux and the BSDs
+/// only with a display.
+fn has_browser() -> bool {
+    let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    if set("SSH_CONNECTION") || set("SSH_TTY") {
+        return false;
+    }
+    !cfg!(unix) || cfg!(target_os = "macos") || set("DISPLAY") || set("WAYLAND_DISPLAY")
+}
+
+/// Opens `url` in the default browser.
+fn open(url: &str) {
+    match webbrowser::open(url) {
+        Ok(()) => println!("Opened in your browser; waiting for your approval..."),
+        Err(_) => println!("No browser opens here: open the page on another machine."),
+    }
+}
+
+/// The lines a person types, where one is at a terminal: read on a thread
+/// of its own, as a read blocked on stdin would keep a runtime from
+/// shutting down.
+fn typed() -> Option<mpsc::UnboundedReceiver<String>> {
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    let (tx, rx) = mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
         }
-        let code = get("code").ok_or("the browser brought back no code")?;
-        let _ = stream
-            .write_all(
-                page("Logged in: you can close this tab and return to the terminal.").as_bytes(),
-            )
-            .await;
-        return Ok(code);
+    });
+    Some(rx)
+}
+
+/// A task aborted when this is dropped.
+struct Abort(tokio::task::JoinHandle<()>);
+
+impl Drop for Abort {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -509,6 +708,36 @@ mod tests {
             Some("https://a.test/.well-known/oauth-protected-resource/mcp")
         );
         assert_eq!(quoted("Bearer realm=\"x\"", "resource_metadata"), None);
+    }
+
+    #[test]
+    fn a_pasted_address_brings_its_code_back() {
+        let at = "http://127.0.0.1:4321/callback?code=abc&state=s1";
+        assert_eq!(pasted(at, "s1"), Some(Heard::Code("abc".into())));
+        assert_eq!(
+            pasted("code=abc&state=s1#x", "s1"),
+            Some(Heard::Code("abc".into()))
+        );
+        assert_eq!(pasted(at, "s2"), Some(Heard::Stranger));
+        let refused = "/callback?error=access_denied&error_description=no&state=s1";
+        assert_eq!(
+            pasted(refused, "s1"),
+            Some(Heard::Refused("access_denied no".into()))
+        );
+        assert_eq!(pasted("hello", "s1"), None);
+        assert_eq!(
+            pasted("http://127.0.0.1:4321/callback?state=s1", "s1"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_login_page_escapes_what_the_server_said() {
+        let answer = page("200 OK", false, "t", &escape("<script>"));
+        assert!(answer.contains("&lt;script&gt;") && !answer.contains("<script>"));
+        assert!(answer.contains("class=\"bad\""));
+        let body = answer.split("\r\n\r\n").nth(1).expect("a body");
+        assert!(answer.contains(&format!("content-length: {}\r\n", body.len())));
     }
 
     #[test]

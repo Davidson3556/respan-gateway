@@ -69,6 +69,7 @@ terminal_size = "0.4"
 toml.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "process", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
+webbrowser = "1"
 
 [dev-dependencies]
 uuid.workspace = true
