@@ -58,7 +58,7 @@ use crate::schema::{
     Asked, Names, NativeFieldsExt, Schema, UsageFields, check_usage, count, decode_message,
     merge_details, merge_fields, merge_into, native_fields, parse_effort, set, stop_json,
     take_native, tidy, unix_now, unsupported_fields, untranslatable, unwritable_content,
-    usage_extra,
+    unwritable_native, usage_extra,
 };
 use respan_gateway_conversation::{
     Assembled, AssembledBlock, AssembledItem, Block, Content, Finish, Input, Output, Reasoning,
@@ -377,7 +377,7 @@ impl Schema for OpenAiChat {
             }
             match (&**format == OPENAI, raw["choices"].as_array()) {
                 (true, Some(more)) => more.iter().for_each(|c| merge_choice(&mut choices, c)),
-                _ if !is_inert(format, raw) => return Err(unwritable_content()),
+                _ if !is_inert(format, raw) => return Err(unwritable_native(format, raw)),
                 _ => {}
             }
         }

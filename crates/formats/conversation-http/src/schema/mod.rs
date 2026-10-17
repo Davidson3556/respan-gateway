@@ -36,11 +36,11 @@ pub(crate) use exchange::{
 };
 pub(crate) use respan_gateway_conversation::block_fields;
 pub(crate) use values::{
-    INERT, Keep, Names, NativeFieldsExt, Totals, UsageFields, check_usage, count, decode_content,
-    decode_message, decode_tools, each_tool, encode_content, encode_message, encode_native, ended,
-    fits, kept_fields, merge_fields, merge_into, merge_missing, native_fields, only, own_fields,
-    remainder, set, stop_json, tidy, tool_field, unsupported_fields, untranslatable,
-    unwritable_content, usage_extra,
+    INERT, Keep, Names, NativeFieldsExt, Totals, UsageFields, arguments_object, check_usage, count,
+    decode_content, decode_message, decode_tools, each_tool, encode_content, encode_message,
+    encode_native, ended, fits, kept_fields, merge_fields, merge_into, merge_missing,
+    native_fields, only, own_fields, remainder, set, source_url, stop_json, tidy, tool_field,
+    unsupported_fields, untranslatable, unwritable_content, unwritable_native, usage_extra,
 };
 pub(crate) use values::{effort_name, own_native, parse_effort, reasoning_of, take_native};
 

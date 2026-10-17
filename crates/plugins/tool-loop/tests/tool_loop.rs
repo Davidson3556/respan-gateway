@@ -577,7 +577,7 @@ async fn a_tool_that_hangs_is_cut_off_and_an_oversized_answer_is_trimmed() {
 
     let rig = Rig::with(
         Fake::new().answering("files__read", Outcome::ok("x".repeat(100))),
-        |a| a.max_result(10),
+        |a| a.max_result(40),
     )
     .await;
     rig.openai.answer(calls(vec![read_a()], (1, 1)));
@@ -587,10 +587,7 @@ async fn a_tool_that_hangs_is_cut_off_and_an_oversized_answer_is_trimmed() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(
-        content.starts_with("xxxxxxxxxx\n[cut: 90 more bytes]"),
-        "{content}"
-    );
+    assert_eq!(content, format!("{}\n[cut: 81 more bytes]", "x".repeat(19)));
 }
 
 #[tokio::test]
@@ -875,7 +872,9 @@ async fn the_answers_of_one_request_share_a_budget() {
         .map(|m| m["content"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(tools[0], "x".repeat(100));
-    assert!(tools[1].starts_with(&"x".repeat(50)), "{}", tools[1]);
-    assert!(tools[1].contains("[cut: 50 more bytes]"), "{}", tools[1]);
+    assert_eq!(
+        tools[1],
+        format!("{}\n[cut: 71 more bytes]", "x".repeat(29))
+    );
     assert!(tools[2].contains("left out"), "{}", tools[2]);
 }

@@ -105,19 +105,65 @@ impl Memo {
 
 /// The client's response head, if one was chosen for it: a relayed answer's,
 /// which the provider binding gives the client binding through the
-/// exchange's extensions.
+/// exchange's extensions. Every relayed call that succeeds claims it
+/// ([`HeadClaim`]); the head is the latest claim still held, so a call that
+/// failed or was dropped for another, as a race's loser or a retried
+/// attempt is, gives the client none of its head.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ClientHead(Arc<Mutex<Option<Parts>>>);
+pub(crate) struct ClientHead(Arc<Mutex<Claims>>);
+
+/// The heads claimed and still held, oldest first.
+#[derive(Debug, Default)]
+struct Claims {
+    next: u64,
+    held: Vec<(u64, Parts)>,
+}
 
 impl ClientHead {
     /// The head chosen, if any.
     pub(crate) fn get(&self) -> Option<Parts> {
-        self.0.lock().clone()
+        self.0.lock().held.last().map(|(_, head)| head.clone())
     }
 
-    /// Choose `head`.
-    pub(crate) fn set(&self, head: Parts) {
-        *self.0.lock() = Some(head);
+    /// Claim `head` for the client, until the claim fails or is dropped
+    /// before its answer ended.
+    pub(crate) fn claim(&self, head: Parts) -> HeadClaim {
+        let mut claims = self.0.lock();
+        let id = claims.next;
+        claims.next += 1;
+        claims.held.push((id, head));
+        HeadClaim {
+            slot: Some(self.clone()),
+            id,
+        }
+    }
+}
+
+/// One call's claim of the client's head: released when its answer fails
+/// or is dropped unended, kept once it ended cleanly.
+#[derive(Debug)]
+pub(crate) struct HeadClaim {
+    slot: Option<ClientHead>,
+    id: u64,
+}
+
+impl HeadClaim {
+    /// Keep the head claimed past this claim's drop: its answer ended.
+    pub(crate) fn keep(&mut self) {
+        self.slot = None;
+    }
+
+    /// Give the head up: its answer failed.
+    pub(crate) fn release(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            slot.0.lock().held.retain(|(id, _)| *id != self.id);
+        }
+    }
+}
+
+impl Drop for HeadClaim {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 

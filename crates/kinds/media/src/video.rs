@@ -390,8 +390,9 @@ struct Maker {
     shared: bool,
 }
 
-/// Sends a job's follow-up (`Retrieve`, `Content`, `Remix`, `Delete`) to
-/// the provider that made the job, which only the job's id says: by its
+/// Sends a job's follow-up (`Retrieve`, `Content`, `Remix`, `Delete`, and a
+/// `List` after it) to the provider that made the job, which only the job's
+/// id says: by its
 /// spelling (OpenAI's start `video_`, Veo's `veo_`), or, when several
 /// providers spell their ids alike, by the provider's name it wraps them in
 /// on the way out, `<provider>~<id>`, and unwraps on the way in. An id
@@ -456,7 +457,7 @@ impl Plugin for VideoJobs {
         let Ok(input) = cx.input::<Input>() else {
             return Ok(None);
         };
-        let found = input.job_id().and_then(|id| {
+        let found = followed(input).and_then(|id| {
             let (maker, inner) = self.maker(id, cx.target())?;
             Some((
                 maker.internal.clone(),
@@ -485,12 +486,24 @@ impl Plugin for VideoJobs {
     }
 }
 
+/// The job an operation follows: the one it is on, or the one a page
+/// starts after.
+fn followed(input: &Input) -> Option<&str> {
+    match input {
+        Input::List { after, .. } => after.as_deref(),
+        _ => input.job_id(),
+    }
+}
+
 fn set_job_id(input: &mut Input, inner: &str) {
     match input {
         Input::Remix { id, .. }
         | Input::Retrieve { id, .. }
         | Input::Content { id, .. }
-        | Input::Delete { id, .. } => *id = inner.to_owned(),
+        | Input::Delete { id, .. }
+        | Input::List {
+            after: Some(id), ..
+        } => *id = inner.to_owned(),
         _ => {}
     }
 }
@@ -552,5 +565,30 @@ mod tests {
         };
         set_job_id(&mut input, "video_1");
         assert_eq!(input.job_id(), Some("video_1"));
+    }
+
+    /// Regression: a page's `after` kept the wrapping its id was given out
+    /// in, and went to whichever provider the router picked.
+    #[test]
+    fn a_page_after_a_wrapped_job_goes_to_its_maker_unwrapped() {
+        let mut input = Input::List {
+            after: Some("west~video_1".into()),
+            limit: None,
+            order: None,
+        };
+        let after = followed(&input).map(str::to_owned);
+        assert_eq!(after.as_deref(), Some("west~video_1"));
+        let found = after
+            .as_deref()
+            .and_then(|id| maker(id, Some("east:openai-videos")));
+        assert_eq!(found, Some(("west".to_owned(), "video_1".to_owned())));
+        set_job_id(&mut input, "video_1");
+        assert_eq!(followed(&input), Some("video_1"));
+        let first = Input::List {
+            after: None,
+            limit: None,
+            order: None,
+        };
+        assert_eq!(followed(&first), None);
     }
 }

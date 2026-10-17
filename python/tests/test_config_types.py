@@ -15,7 +15,8 @@ def test_a_full_typed_config_parses() -> None:
         "body_limit": "32MiB",
         "ws_message_limit": "16MiB",
         "models": {
-            "openai/gpt-4o": {"pricing": {"input": 2.5, "output": 10, "cached_input": 1.25}},
+            "openai/gpt-4o": {"pricing": {"input": 2.5, "output": 10, "cached_input": 1.25, "cache_write": 3}},
+            "custom/claude-x": {"maker": "anthropic", "kind": "chat"},
             "openai/whisper-1": {"pricing": {"input": 0, "output": 0, "per_second": 0.0001}},
         },
         "shutdown_grace": "10s",
@@ -24,6 +25,7 @@ def test_a_full_typed_config_parses() -> None:
         "ui": True,
         "providers": {
             "openai": {"vendor": "openai", "key": "sk-fake"},
+            "split": {"formats": {"openai-chat": "http://127.0.0.1:9/v1", "anthropic-messages": "http://127.0.0.1:9"}},
             "custom": {
                 "formats": ["openai-chat"],
                 "base_url": "http://127.0.0.1:9/v1",

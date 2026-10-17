@@ -8,7 +8,8 @@ use respan_gateway_core::Fault;
 use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::futures::stream;
 use respan_gateway_core::futures::{StreamExt, future};
-use respan_gateway_http::http::Method;
+use respan_gateway_http::http::{Method, StatusCode};
+use respan_gateway_http_faults::Status;
 use respan_gateway_mcp::{Input, Message, Output, RpcError};
 use serde_json::{Map, Value, json};
 
@@ -54,7 +55,7 @@ impl Run {
         let pages = asking.map(|(server, cursor)| {
             let session = session.clone();
             async move {
-                let opened = session.opened(&server).await?;
+                let opened = self.upstream(&session, &server).await.ok()?;
                 opened.capabilities.get(capability)?;
                 let params = match &cursor {
                     Some(cursor) => json!({ "cursor": cursor }),
@@ -127,7 +128,13 @@ impl Run {
             for _ in 0..2 {
                 match self.forward(&session, &server, &id, &method, &params).await {
                     Ok(outputs) => return outputs,
-                    Err(fault) => last = Some(fault),
+                    // Tried again only if it surely did not run.
+                    Err((fault, unrun)) => {
+                        last = Some(fault);
+                        if !unrun {
+                            break;
+                        }
+                    }
                 }
             }
             let why = last.map_or(String::new(), |f| f.message().to_owned());
@@ -140,7 +147,8 @@ impl Run {
     }
 
     /// One try at a routed request: its answer as a stream, once its first
-    /// output is in; a session the server lost is forgotten, for the next
+    /// output is in; else its fault, and whether the request surely did not
+    /// run ([`unrun`]). A session the server lost is forgotten, for the next
     /// try to open again.
     pub(super) async fn forward(
         &self,
@@ -149,10 +157,13 @@ impl Run {
         id: &Value,
         method: &str,
         params: &Value,
-    ) -> Result<Outputs, Fault> {
-        let opened = self.upstream(session, server).await?;
+    ) -> Result<Outputs, (Fault, bool)> {
+        let opened = self
+            .upstream(session, server)
+            .await
+            .map_err(|f| (f, true))?;
         let asked = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let mut input = Input::new(Method::POST, vec![message(asked)?]);
+        let mut input = Input::new(Method::POST, vec![message(asked).map_err(|f| (f, false))?]);
         input.session.clone_from(&opened.id);
         input.protocol_version = Some(opened.protocol.clone());
         let tried = async {
@@ -167,7 +178,8 @@ impl Run {
             Ok(started) => started,
             Err(fault) => {
                 session.forget(server, &opened).await;
-                return Err(fault);
+                let unrun = unrun(&fault);
+                return Err((fault, unrun));
             }
         };
         let (server, id) = (server.to_owned(), id.clone());
@@ -290,4 +302,16 @@ impl Run {
         }
         Ok((messages, named))
     }
+}
+
+/// Whether a request that failed with `fault` surely did not run: the
+/// server answered 404, as MCP has it answer for a session it ended (or a
+/// fault coded `no_session`), or it could not be connected to.
+fn unrun(fault: &Fault) -> bool {
+    let lost = fault
+        .get::<Status>()
+        .is_some_and(|s| s.0 == StatusCode::NOT_FOUND);
+    let refused = fault.cause::<std::io::Error>();
+    lost || fault.code() == "no_session"
+        || refused.is_some_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused)
 }

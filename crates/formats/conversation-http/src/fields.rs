@@ -1,6 +1,7 @@
 //! JSON object helpers for formats that read a body's fields and write
 //! them back, keeping what they have no place for.
 
+use respan_gateway_core::{Details, Fault, NativeFields};
 use serde_json::{Map, Value};
 
 /// The seconds since the Unix epoch, as a response's `created` says.
@@ -33,6 +34,33 @@ pub fn set(map: &mut Map<String, Value>, key: &str, value: Option<impl Into<Valu
     if let Some(value) = value {
         map.insert(key.into(), value.into());
     }
+}
+
+/// `fields` as the native of a value of `format`: none if empty.
+pub fn native_of(format: &str, fields: Map<String, Value>) -> Option<NativeFields> {
+    (!fields.is_empty()).then(|| NativeFields::new(format, fields))
+}
+
+/// The fields of `native` to write in `format`: all of them if they are
+/// its, none if there are none; another format's are refused, as only it
+/// knows what they mean.
+pub fn kept(format: &str, native: &Option<NativeFields>) -> Result<Map<String, Value>, Fault> {
+    match native {
+        Some(n) if &*n.format == format => Ok(n.fields.clone()),
+        Some(n) if !n.is_empty() => Err(Fault::bad_request(format!(
+            "fields of format {} cannot be written in {format}",
+            n.format
+        ))),
+        _ => Ok(Map::new()),
+    }
+}
+
+/// A 400 for a request whose field `param` `what`, naming it in its
+/// details.
+pub fn invalid(param: &str, what: &str) -> Fault {
+    let mut details = Map::new();
+    details.insert("param".into(), param.into());
+    Fault::bad_request(format!("'{param}' {what}")).with(Details(details))
 }
 
 #[cfg(test)]

@@ -139,7 +139,9 @@ async fn the_history_is_exported_as_json_lines_or_csv_and_filtered() {
     assert_eq!(same, text);
 
     // The UI's filters.
-    let (_, text) = export("?model=GPT-4O").await;
+    let (_, text) = export("?model=GPT-4o").await;
+    assert_eq!(ids(&text), [json!("GPT-4o")]);
+    let (_, text) = export("?q=GPT-4O").await;
     assert_eq!(ids(&text), [json!("gpt-4o-mini"), json!("GPT-4o")]);
     let (_, text) = export("?status=2xx&kind=chat&provider=openai").await;
     assert_eq!(text.lines().count(), 3);
@@ -154,6 +156,11 @@ async fn the_history_is_exported_as_json_lines_or_csv_and_filtered() {
     let (_, text) = export("?since=2999-01-01").await;
     assert!(text.is_empty());
     let (_, text) = export("?since=2000-01-01").await;
+    assert_eq!(text.lines().count(), 4);
+    // A time in another zone is a time, not text.
+    let (_, text) = export("?since=2999-01-01T00:00:00%2B14:00").await;
+    assert!(text.is_empty());
+    let (_, text) = export("?since=2000-01-01T09:00:00-05:00").await;
     assert_eq!(text.lines().count(), 4);
 
     // CSV: a header, a row each, the model quoted if need be.

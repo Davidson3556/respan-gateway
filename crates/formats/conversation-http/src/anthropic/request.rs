@@ -4,9 +4,9 @@
 //! `native` of the request, the tool or the part.
 
 use crate::schema::{
-    Keep, NativeFieldsExt, decode_content, decode_tools, each_tool, encode_content, encode_native,
-    kept_fields, merge_missing, native_fields, only, own_native, remainder, rest_of, set,
-    take_native, tool_field, untranslatable,
+    Keep, NativeFieldsExt, arguments_object, decode_content, decode_tools, each_tool,
+    encode_content, encode_native, kept_fields, merge_missing, native_fields, only, own_native,
+    remainder, rest_of, set, take_native, tool_field, untranslatable,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use respan_gateway_conversation::{
@@ -17,15 +17,6 @@ use respan_gateway_core::NativeFields;
 use serde_json::{Map, Value, json};
 
 use crate::anthropic::{ANTHROPIC, AnthropicMessages};
-
-/// A tool call's arguments as JSON: an object, `{}` for none.
-pub(crate) fn arguments_json(arguments: &str) -> Result<Value, Fault> {
-    if arguments.trim().is_empty() {
-        return Ok(json!({}));
-    }
-    let not_json = |_| Fault::bad_request("a tool call's arguments are not JSON");
-    serde_json::from_str(arguments).map_err(not_json)
-}
 
 /// Anthropic's custom tools and choice, with whether calls may be
 /// parallel, as the kind's.
@@ -269,7 +260,7 @@ fn tool_block(part: &Content) -> Result<Value, Fault> {
             native,
             ..
         } => {
-            let input = arguments_json(arguments)?;
+            let input = arguments_object(arguments)?;
             let mut block = json!({ "type": "tool_use", "id": id, "name": name, "input": input });
             block_fields(&mut block, native)?;
             Ok(block)
@@ -456,7 +447,27 @@ pub(crate) fn write_thinking(input: &Input) -> Result<Option<Value>, Fault> {
     }
     Ok(match (r.effort, r.budget_tokens) {
         (Some(Effort::Off), _) => Some(json!({ "type": "disabled" })),
-        (_, Some(budget)) => Some(json!({ "type": "enabled", "budget_tokens": budget })),
+        (_, Some(budget)) => {
+            check_thinking(input, budget)?;
+            Some(json!({ "type": "enabled", "budget_tokens": budget }))
+        }
         (_, None) => own(),
     })
+}
+
+/// Refuse what Anthropic refuses beside a thinking budget: a budget under
+/// 1024, a temperature but 1, `top_k`.
+fn check_thinking(input: &Input, budget: u64) -> Result<(), Fault> {
+    if budget < 1024 {
+        return Err(untranslatable("a thinking budget under 1024 in Anthropic"));
+    }
+    if input.options.temperature.is_some_and(|t| t != 1.0) {
+        return Err(untranslatable(
+            "a temperature other than 1 beside thinking in Anthropic",
+        ));
+    }
+    if input.options.top_k.is_some() {
+        return Err(untranslatable("top_k beside thinking in Anthropic"));
+    }
+    Ok(())
 }

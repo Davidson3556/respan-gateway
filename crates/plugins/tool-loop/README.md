@@ -12,7 +12,9 @@ one reply with the usage summed. It stops at a reply with no such call, at a
 call of a client's own tool (returned to the client; the gateway's calls in it
 are left out), at `max_steps` (the last call forbids tools) and at `timeout`.
 Register it after the plugins that route and edit requests, since it answers
-the request itself:
+the request itself. It calls the request's target alone, as routing set it
+(a rule's first candidate): a request it runs gets none of its route's
+fallback, retries or hedge, which routing's `Dispatch` would have given:
 
 ```rust,ignore
 let tool_loop = ToolLoop::new(MyTools) // impl Tools
@@ -25,7 +27,8 @@ let gateway = gateway.plugin(Routing::new(routes)).plugin(tool_loop);
 
 Each model call carries `Step(n)` in its extensions; a runner that
 calls tools through the gateway marks those calls with `ToolHop` so
-other plugins can tell them apart. `ToolLoop::flag_errors_for` says which
+other plugins can tell them apart. A request's `ToolScope` limits the tools
+offered further; one that names none offers none. `ToolLoop::flag_errors_for` says which
 providers can be sent a result flagged as a failure (others get `Error: `
 text). What the model said goes back in the next step as the kind holds it,
 reasoning and native fields included (a signed Anthropic `thinking` block, a

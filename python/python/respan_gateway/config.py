@@ -22,7 +22,9 @@ class ProviderConfig(TypedDict, total=False):
     """One provider: a vendor, explicit formats, or a vendor with some settings replaced."""
 
     vendor: str  # "openai", "anthropic", "gemini", "groq", ...
-    formats: Union[str, List[str]]  # e.g. "openai-chat", ["openai-images", "openai-embeddings"]
+    # e.g. "openai-chat", ["openai-images", "openai-embeddings"], or each at its own base URL:
+    # {"openai-chat": "https://a.example/v1", "anthropic-messages": "https://b.example"}
+    formats: Union[str, List[str], Dict[str, str]]
     base_url: str
     key: str  # literal or "env:NAME"
     auth: Auth
@@ -177,7 +179,8 @@ class _Rates(TypedDict):
 class Price(_Rates, total=False):
     """Dollars per million tokens, and per second of audio."""
 
-    cached_input: float  # for cached input tokens; `input` if unset
+    cached_input: float  # for input tokens read from a cache; `input` if unset
+    cache_write: float  # for input tokens written to a cache; `input` if unset
     per_second: float  # for a model billed by the second of audio
 
 
@@ -186,6 +189,7 @@ class ModelConfig(TypedDict, total=False):
 
     pricing: Price  # a call's cost is its model's pricing
     kind: str
+    maker: str  # who made it, e.g. "anthropic", for a provider serving others' models
     display_name: str
     description: str
     context_window: int

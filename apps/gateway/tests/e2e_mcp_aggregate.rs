@@ -713,6 +713,28 @@ async fn a_client_keys_tools_limit_what_the_aggregate_lists_and_calls() {
     assert!(allowed.response(4).get("result").is_some());
     let wide_call = as_key(KEY, wide, 5, "tools/call", echo("alpha")).await;
     assert!(wide_call.response(5).get("result").is_some());
+
+    // A server's own endpoint offers all its tools, so the narrow key is
+    // refused there; the wide one is not.
+    let direct = |key: &'static str| {
+        let hello = request(
+            1,
+            "initialize",
+            json!({"protocolVersion": PROTOCOL,
+            "capabilities": {}, "clientInfo": {"name": "e2e", "version": "1"}}),
+        );
+        client()
+            .post(gw.url("/mcp/alpha"))
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .bearer_auth(key)
+            .body(hello.to_string())
+            .send()
+    };
+    let refused = direct(OTHER).await.unwrap();
+    assert_eq!(refused.status(), 403);
+    assert!(refused.text().await.unwrap().contains("tools_limited"));
+    assert_eq!(direct(KEY).await.unwrap().status(), 200);
 }
 
 #[tokio::test]
@@ -941,6 +963,20 @@ async fn a_refresh_token_is_used_and_its_rotation_kept() {
     let forms = tokens.forms();
     assert_eq!(forms.len(), 2);
     assert_eq!(field(&forms[1], "refresh_token"), Some("refresh-1"));
+
+    // A reload reads the config's spent token again, and keeps the rotation.
+    let reloaded = client()
+        .post(gw.url("/ui/api/reload"))
+        .bearer_auth(KEY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reloaded.status(), 200);
+    *up.wants.lock() = Some("tok-3".into());
+    assert_eq!(post(3).await, 200);
+    let forms = tokens.forms();
+    assert_eq!(forms.len(), 3);
+    assert_eq!(field(&forms[2], "refresh_token"), Some("refresh-2"));
 }
 
 #[tokio::test]

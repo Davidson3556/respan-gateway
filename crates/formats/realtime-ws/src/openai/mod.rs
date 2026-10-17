@@ -15,7 +15,7 @@ use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::WsTransport;
 
 use crate::foreign::{Drop, Harmless};
-use crate::session::{Spec, model_at};
+use crate::session::{Spec, model_at, model_query};
 use crate::{SessionModel, requested_model};
 
 const NAME: &str = SPEC.name;
@@ -161,7 +161,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiRealtime {
                 "OpenAI Realtime takes its model at connect: name it with ?model= on the session's URL",
             )
         })?;
-        let query = Some(format!("model={model}"));
+        let query = Some(model_query(&model));
         let mut provider = input::Provider::new(model);
         let write = Box::new(move |event: &Input, out: &mut Vec<Bytes>| provider.write(event, out));
         let mut provider = output::Provider::default();

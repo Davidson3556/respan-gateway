@@ -14,8 +14,8 @@ use serde_json::{Map, Value, json};
 
 use super::{GEMINI, ROLES, SYNTHETIC};
 use crate::schema::{
-    Keep, NativeFieldsExt, effort_name, kept_fields, merge_fields, merge_missing, native_fields,
-    parse_effort, reasoning_of, remainder, set, untranslatable,
+    Keep, NativeFieldsExt, arguments_object, effort_name, kept_fields, merge_fields, merge_missing,
+    native_fields, parse_effort, reasoning_of, remainder, set, untranslatable,
 };
 
 /// The id a call of Gemini's without one is given: its position, so that its
@@ -280,19 +280,6 @@ pub(super) fn write_messages(messages: &[Message]) -> Result<Vec<Value>, Fault> 
     Ok(contents.into_iter().map(|(c, _)| c.into()).collect())
 }
 
-/// `arguments`, JSON text, as an object, `{}` for none.
-fn args_json(arguments: &str) -> Result<Value, Fault> {
-    if arguments.trim().is_empty() {
-        return Ok(json!({}));
-    }
-    match serde_json::from_str::<Value>(arguments) {
-        Ok(args) if args.is_object() => Ok(args),
-        _ => Err(Fault::bad_request(
-            "a tool call's arguments are not a JSON object, as Gemini's are",
-        )),
-    }
-}
-
 /// Whether a call to `model` signs the function calls in its history: one
 /// to any model but those before Gemini 3.
 pub fn needs_signatures(model: Option<&str>) -> bool {
@@ -348,7 +335,7 @@ fn write_part(c: &Content, names: &mut Vec<(String, String)>) -> Result<Value, F
             ..
         } => {
             names.push((id.clone(), name.clone()));
-            let mut call = json!({ "name": name, "args": args_json(arguments)? });
+            let mut call = json!({ "name": name, "args": arguments_object(arguments)? });
             if !is_synthetic(id) {
                 call["id"] = id.as_str().into();
             }

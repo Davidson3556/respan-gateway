@@ -172,7 +172,9 @@ loopback and same-origin browsers, and **refuses to start on a non-loopback
 address**, so nobody who can reach it spends your provider keys.
 
 A key may be named, may be `admin` (needed for the admin API under
-`/ui/api/`), and may be limited to certain `tools`. Browser apps on other
+`/ui/api/`), and may be limited to certain `tools` (`server__tool` globs;
+`[]` for none). A limited key reaches MCP servers only through `/mcp`,
+never `/mcp/{name}`, which offers all of a server's tools. Browser apps on other
 origins need a `cors = { origins = [...] }` entry.
 
 ### Routing

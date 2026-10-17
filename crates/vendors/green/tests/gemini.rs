@@ -23,7 +23,11 @@ async fn model_id_prefix() {
     let models = gemini.models().await.expect("a list").expect("models");
     assert_eq!(models[0].display_name.as_deref(), Some("Gemini 2.5 Flash"));
     assert_eq!(models[0].context_window, Some(1048576));
-    assert_eq!(models[0].capabilities, [Capability::Reasoning]);
+    assert_eq!(
+        models[0].capabilities,
+        [Capability::Tools, Capability::Reasoning]
+    );
+    assert!(models[1].capabilities.is_empty());
     assert_eq!(
         support::ids(models),
         ["gemini-2.5-flash", "gemini-live-2.5-flash-preview"]

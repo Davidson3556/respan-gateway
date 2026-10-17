@@ -3,13 +3,15 @@ import { ANY, type RequestFilter } from "@/lib/requests";
 
 export type ExportFormat = "jsonl" | "csv";
 
-/** The export URL for the filters in force; unset filters and the free-text search are left out. */
+/** The export URL for the filters in force, the free-text search among them; unset ones are left out. */
 export function exportPath(format: ExportFormat, filter: Partial<RequestFilter>, since?: string): string {
   const query = new URLSearchParams({ format });
   for (const name of ["kind", "status", "provider", "model", "client"] as const) {
     const value = filter[name];
     if (value && value !== ANY) query.set(name, value);
   }
+  const q = filter.q?.trim();
+  if (q) query.set("q", q);
   if (since) query.set("since", since);
   return `/ui/api/requests/export?${query}`;
 }
@@ -26,6 +28,7 @@ export async function downloadExport(format: ExportFormat, filter: Partial<Reque
     link.click();
     link.remove();
   } finally {
-    URL.revokeObjectURL(url);
+    // Revoked a beat later: some browsers start the download only after click() returns.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 }

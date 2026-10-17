@@ -3,11 +3,12 @@
 //! includes the version, `https://generativelanguage.googleapis.com/v1beta`,
 //! and its transport the key, `x-goog-api-key`.
 
-use crate::edge::{bind_provider, content, kept, sends};
+use crate::edge::{bind_provider, content, sends};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use respan_gateway_conversation::{Media, MediaSource};
 use respan_gateway_conversation_http::Schema;
+use respan_gateway_conversation_http::fields::kept;
 use respan_gateway_conversation_http::gemini::{self, GeminiGenerate};
 use respan_gateway_core::Provider;
 use respan_gateway_core::{Connection, ErrorCode, Fault, Format, NativeFields};
@@ -421,9 +422,11 @@ impl Format<ClientIo, Input, Output> for GeminiVeo {
 enum Route {
     /// `POST .../models/{model}:predictLongRunning`.
     Create(String),
-    /// `GET .../operations/{id}`, as a job's operation is named.
+    /// `GET .../operations/{id}`, as a job's operation is named
+    /// ([`issued`]).
     Retrieve(String),
-    /// `GET .../files/{id}:download`, where a finished job's video is.
+    /// `GET .../files/{id}:download`, where a finished job's video is
+    /// ([`issued`]).
     Download(String),
 }
 
@@ -447,13 +450,23 @@ fn route(method: &Method, uri: &Uri) -> Option<Route> {
             let model = last.strip_suffix(":predictLongRunning")?;
             is_segment(model).then(|| Route::Create(model.to_owned()))
         }
-        Method::GET if parent == "operations" => Some(Route::Retrieve(last.clone())),
+        Method::GET if parent == "operations" && issued(last) => {
+            Some(Route::Retrieve(last.clone()))
+        }
         Method::GET if parent == "files" => {
-            let id = last.strip_suffix(":download")?;
+            let id = last.strip_suffix(":download").filter(|id| issued(id))?;
             Some(Route::Download(id.to_owned()))
         }
         _ => None,
     }
+}
+
+/// Whether `id` is spelled as a job id the gateway gives out, Veo's or
+/// OpenAI's, perhaps wrapped in its provider's name (`<provider>~<id>`):
+/// none of Google's own files or operations is, so those pass through.
+fn issued(id: &str) -> bool {
+    let inner = id.split_once('~').map_or(id, |(_, inner)| inner);
+    [PREFIX, "video_"].iter().any(|s| inner.starts_with(s))
 }
 
 /// What a client asks: a creation's body read into the kind's, the rest by
@@ -685,6 +698,43 @@ mod tests {
             GeminiVeo::job_id("models/x?y"),
         ] {
             assert_eq!(GeminiVeo::operation(&refused), None, "{refused}");
+        }
+    }
+
+    /// Regression: every `GET .../operations/{x}` and `.../files/{x}:download`
+    /// was read as a job's, so the Files API's downloads and other
+    /// operations never reached passthrough.
+    #[test]
+    fn only_the_gateways_jobs_are_routed() {
+        let route = |path: &str| route(&Method::GET, &path.parse().unwrap_or_default());
+        let id = GeminiVeo::job_id("models/veo-3.0-generate-001/operations/a1");
+        for (path, routed) in [
+            (
+                format!("/v1beta/models/veo-3.0/operations/{id}"),
+                Some(Route::Retrieve(id.clone())),
+            ),
+            (
+                format!("/v1beta/operations/{id}"),
+                Some(Route::Retrieve(id.clone())),
+            ),
+            (
+                "/v1beta/operations/east~video_1".into(),
+                Some(Route::Retrieve("east~video_1".into())),
+            ),
+            (
+                format!("/v1beta/files/{id}:download"),
+                Some(Route::Download(id.clone())),
+            ),
+            (
+                "/v1beta/files/video_1:download".into(),
+                Some(Route::Download("video_1".into())),
+            ),
+            ("/v1beta/files/abc123:download".into(), None),
+            ("/v1beta/operations/abc123".into(), None),
+            ("/v1beta/models/gemini-2.5/operations/abc123".into(), None),
+            ("/v1beta/tunedModels/t/operations/abc123".into(), None),
+        ] {
+            assert_eq!(route(&path), routed, "{path}");
         }
     }
 

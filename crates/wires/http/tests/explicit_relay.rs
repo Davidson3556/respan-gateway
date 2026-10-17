@@ -210,3 +210,87 @@ async fn provider_errors_are_inspectable_but_only_explicit_raw_replies_are_writt
         assert_eq!(response.headers().contains_key("x-provider"), error);
     }
 }
+
+/// Two relayed calls, one dropped for the other (a race's loser), or one
+/// that fails after its head for a translated retry (a fallback).
+struct Pick {
+    retry: bool,
+}
+#[async_trait]
+impl Plugin for Pick {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let first = cx.call("p").with_extension(h::raw::Relayed).await?;
+        if self.retry {
+            let mut first = first;
+            assert!(first.until_end().await.is_err(), "the first broke off");
+            drop(first);
+            return Ok(Some(cx.call("p").await?));
+        }
+        let second = cx.call("p").with_extension(h::raw::Relayed).await?;
+        drop(second);
+        Ok(Some(first))
+    }
+}
+
+/// The client's response to `pick`, each call answered `x-call: <n>`, the
+/// first breaking off mid-body if `broken`.
+async fn picked(pick: Pick, broken: bool) -> http::Response<Bytes> {
+    use h::http_body_util::BodyExt;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let format = Text(Arc::default());
+    let gateway = Gateway::new()
+        .client::<String, Bytes, h::ClientIo>(format.clone())
+        .expect("client")
+        .provider(Provider::new(
+            "p",
+            format,
+            h::connect(
+                move |_| {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        let body = match broken && n == 0 {
+                            true => h::Body::stream(futures::stream::iter([
+                                Ok(Bytes::from_static(b"half")),
+                                Err(Fault::upstream("broke off")),
+                            ])),
+                            false => h::Body::full(format!("call {n}")),
+                        };
+                        let response = http::Response::builder()
+                            .status(201)
+                            .header("x-call", n.to_string())
+                            .body(body)
+                            .expect("response");
+                        Ok((response, None))
+                    }
+                },
+                LIMIT,
+            ),
+        ))
+        .expect("provider")
+        .target("p")
+        .expect("target")
+        .plugin(pick);
+    let request = http::Request::new(h::Body::full("q"));
+    let (response, end) = serve(&gateway, request).await;
+    let (head, body) = response.into_parts();
+    let bytes = BodyExt::collect(body).await.expect("body").to_bytes();
+    let _ = end.await;
+    gateway.idle().await;
+    http::Response::from_parts(head, bytes)
+}
+
+#[tokio::test]
+async fn a_relayed_answer_dropped_for_another_leaves_the_winners_head() {
+    let response = picked(Pick { retry: false }, false).await;
+    assert_eq!(response.body(), "call 0");
+    assert_eq!(response.status(), 201);
+    assert_eq!(response.headers()["x-call"], "0");
+}
+
+#[tokio::test]
+async fn a_relayed_answer_that_broke_off_leaves_no_head_for_its_retry() {
+    let response = picked(Pick { retry: true }, true).await;
+    assert_eq!(response.body(), "call 1");
+    assert_eq!(response.status(), 200, "the translated answer's own head");
+    assert!(!response.headers().contains_key("x-call"));
+}

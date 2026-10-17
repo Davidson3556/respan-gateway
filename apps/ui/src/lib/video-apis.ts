@@ -2,7 +2,7 @@
 // job is created, read, polled and downloaded in its API; the page reads
 // every job the same way.
 
-import type { ApiOption } from "@/lib/playground-apis";
+import type { ApiOption, Json } from "@/lib/playground-apis";
 
 /** A video job, as the page reads it whatever the API. */
 export interface VideoJob {
@@ -24,8 +24,6 @@ export interface VideoApi extends ApiOption {
   /** Where a finished job's video is. */
   content: (job: VideoJob, answer: Json) => string;
 }
-
-type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 const openaiVideos: VideoApi = {
   id: "openai-videos",

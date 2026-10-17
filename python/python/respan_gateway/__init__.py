@@ -20,6 +20,8 @@ import asyncio
 import contextlib
 import json
 import os
+import sys
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterator, List, Mapping, Optional, Union, cast
 
 import httpx
@@ -179,24 +181,13 @@ class Gateway:
 
     def _anthropic(self, asynchronous: bool, api_key: Optional[str], kwargs: Dict[str, Any]) -> Any:
         anthropic = _import("anthropic")
-
-        def build(http: Any) -> Any:
-            transport = transports(http)[1 if asynchronous else 0](self._native)
-            client = (http.AsyncClient if asynchronous else http.Client)(transport=transport)
-            cls = anthropic.AsyncAnthropic if asynchronous else anthropic.Anthropic
-            made = cls(base_url=_BASE, api_key=api_key or "unused", http_client=client, **kwargs)
-            self._clients.append(client)
-            return made
-
-        try:
-            return build(httpx)
-        except TypeError:
-            # Recent SDK versions use httpx2, whose clients are not httpx's.
-            try:
-                import httpx2
-            except ImportError:
-                raise TypeError("the anthropic package does not accept an httpx client") from None
-            return build(httpx2)
+        http = _httpx_of(anthropic)
+        transport = transports(http)[1 if asynchronous else 0](self._native)
+        client = (http.AsyncClient if asynchronous else http.Client)(transport=transport)
+        # Kept before the SDK sees it, so it is closed even if `kwargs` are refused.
+        self._clients.append(client)
+        cls = anthropic.AsyncAnthropic if asynchronous else anthropic.Anthropic
+        return cls(base_url=_BASE, api_key=api_key or "unused", http_client=client, **kwargs)
 
     # -- raw requests --------------------------------------------------------
 
@@ -352,6 +343,17 @@ def _import(name: str) -> Any:
         return __import__(name)
     except ImportError:
         raise ImportError(f"this needs the {name} package: pip install {name}") from None
+
+
+def _httpx_of(sdk: ModuleType) -> ModuleType:
+    """The httpx-compatible module `sdk` builds its clients on: `httpx`, or
+    `httpx2` in recent versions, read off the base of its `DefaultHttpxClient`."""
+    default = getattr(sdk, "DefaultHttpxClient", None)
+    for base in getattr(default, "__mro__", ()):
+        top = base.__module__.split(".")[0]
+        if top != sdk.__name__ and top in sys.modules and hasattr(sys.modules[top], "Client"):
+            return sys.modules[top]
+    return httpx
 
 
 def _items(response: httpx.Response, key: str) -> List[Dict[str, Any]]:

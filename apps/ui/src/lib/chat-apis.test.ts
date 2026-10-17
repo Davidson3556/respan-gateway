@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { chatApi, chatApis, servedChatApis, type ChatApiId, type ChatDelta } from "./chat-apis";
+import { chatApi, chatApis, type ChatApiId, type ChatDelta } from "./chat-apis";
+import type { ServedFormat } from "./api";
+import { servedApis } from "./playground-apis";
 import { SseParser } from "./sse";
 
 const messages = [
@@ -123,18 +125,18 @@ describe("stream adapters", () => {
   });
 });
 
-describe("servedChatApis", () => {
+describe("servedApis for chat", () => {
   it("lists only the chat APIs the gateway serves, in display order", () => {
-    const serve = [
+    const serve: Pick<ServedFormat, "format" | "kind">[] = [
       { format: "gemini-generate", kind: "chat" },
       { format: "openai-chat", kind: "chat" },
       { format: "openai-realtime", kind: "realtime" },
     ];
-    expect(servedChatApis(serve).map((a) => a.id)).toEqual(["openai-chat", "gemini-generate"]);
+    expect(servedApis("chat", chatApis, serve).map((a) => a.id)).toEqual(["openai-chat", "gemini-generate"]);
   });
 
   it("falls back to OpenAI Chat before the gateway has answered", () => {
-    expect(servedChatApis(undefined).map((a) => a.id)).toEqual(["openai-chat"]);
+    expect(servedApis("chat", chatApis, undefined).map((a) => a.id)).toEqual(["openai-chat"]);
     expect(chatApis).toHaveLength(4);
   });
 });

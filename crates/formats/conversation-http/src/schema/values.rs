@@ -3,10 +3,11 @@
 //! faults of what cannot be written, and small JSON helpers.
 
 use crate::fields;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use respan_gateway_conversation::{
     Block, Content, Delta, Finish, Input, Message, Output, Role, Tool, ToolChoice,
 };
-use respan_gateway_conversation::{Effort, Reasoning, Start, Usage};
+use respan_gateway_conversation::{Effort, MediaSource, Reasoning, Start, Usage};
 use respan_gateway_core::{ErrorCode, Fault, NativeFields, NativeValue};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http_faults::Status;
@@ -14,6 +15,33 @@ use serde_json::{Map, Value};
 
 use super::Schema;
 use super::errors::says;
+
+/// A tool call's `arguments`, JSON text, as the object they are, `{}` for
+/// none.
+pub(crate) fn arguments_object(arguments: &str) -> Result<Value, Fault> {
+    if arguments.trim().is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+    match serde_json::from_str::<Value>(arguments) {
+        Ok(args) if args.is_object() => Ok(args),
+        _ => Err(Fault::bad_request(
+            "a tool call's arguments are not a JSON object",
+        )),
+    }
+}
+
+/// The media type and source of a URL: the data of a `data:` URL, else the
+/// URL, of type `fallback`.
+pub(crate) fn source_url(url: &str, fallback: &str) -> Option<(String, MediaSource)> {
+    match url.strip_prefix("data:") {
+        Some(data) => {
+            let (mime, data) = data.split_once(";base64,")?;
+            let bytes = STANDARD.decode(data).ok()?;
+            Some((mime.into(), MediaSource::Bytes(bytes.into())))
+        }
+        None => Some((fallback.into(), MediaSource::Url(url.into()))),
+    }
+}
 
 /// A request body that is not a JSON object.
 pub(crate) fn not_an_object() -> Fault {
@@ -467,7 +495,9 @@ impl Names<Finish> {
                 fallback: Some(fallback),
                 ..
             } => self.reason(fallback),
-            Finish::Native { .. } => Err(unwritable_content()),
+            Finish::Native { format, reason, .. } => Err(unwritable(Some(format!(
+                "{format}'s finish reason `{reason}`"
+            )))),
             _ => self.name(finish).ok_or_else(unwritable_content),
         }
     }
@@ -485,7 +515,29 @@ pub(crate) fn untranslatable(what: &str) -> Fault {
 
 /// A 502 for content the client's format cannot write anew, such as a tool call.
 pub(crate) fn unwritable_content() -> Fault {
+    unwritable(None)
+}
+
+/// [`unwritable_content`] for a value the kind has no form for: which it
+/// is, by its format and its `type` or its fields, never what it says.
+pub(crate) fn unwritable_native(format: &str, value: &Value) -> Fault {
+    let what = match (value.get("type").and_then(Value::as_str), value.as_object()) {
+        (Some(kind), _) => format!("`{kind}`"),
+        (None, Some(fields)) => {
+            let names: Vec<&str> = fields.keys().map(String::as_str).collect();
+            format!("fields `{}`", names.join("`, `"))
+        }
+        (None, None) => "value".to_owned(),
+    };
+    unwritable(Some(format!("{format}'s {what}")))
+}
+
+fn unwritable(what: Option<String>) -> Fault {
     let message = "the response holds content that cannot yet be written anew in this format";
+    let message = match what {
+        Some(what) => format!("{message}: {what}"),
+        None => message.to_owned(),
+    };
     Fault::new(message)
         .with(ErrorCode("untranslatable".into()))
         .with(Status(StatusCode::BAD_GATEWAY))

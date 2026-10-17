@@ -2,7 +2,7 @@
 // API's streaming request and reads its stream events; nothing else here
 // knows which API is in use.
 
-import { servedApis } from "@/lib/playground-apis";
+import type { Json } from "@/lib/playground-apis";
 import type { SseEvent } from "@/lib/sse";
 
 export type ChatApiId =
@@ -34,8 +34,6 @@ export interface ChatApi {
   /** Reads one SSE event; throws on an error the stream reports. */
   read: (event: SseEvent) => ChatDelta;
 }
-
-type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 const parse = (event: SseEvent): Json => JSON.parse(event.data) as Json;
 
@@ -169,11 +167,3 @@ const geminiGenerate: ChatApi = {
 export const chatApis: ChatApi[] = [openaiChat, anthropicMessages, openaiResponses, geminiGenerate];
 
 export const chatApi = (id: string): ChatApi => chatApis.find((a) => a.id === id) ?? openaiChat;
-
-/**
- * The APIs `serve` lists for chat, in display order; just OpenAI Chat until the
- * gateway has answered (it always serves that one).
- */
-export function servedChatApis(serve: { format: string; kind: string }[] | undefined): ChatApi[] {
-  return servedApis("chat", chatApis, serve);
-}

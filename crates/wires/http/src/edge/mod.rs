@@ -12,7 +12,7 @@ use bytes::Bytes;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use http_body_util::BodyExt;
-use respan_gateway_core::Fault;
+use respan_gateway_core::{Fault, guarded};
 
 pub use body::Body;
 pub use client::{ClientIo, Reply, handle, handle_live};
@@ -29,17 +29,8 @@ pub type Completion = BoxFuture<'static, Result<(), Fault>>;
 /// upload's actual completion (`None`: only the handoff is complete).
 pub type Sent = Result<(http::Response<Body>, Option<Completion>), Fault>;
 
-const PANICKED: &str = "a plugin or format panicked";
-
 /// A response, and its delivery's end.
 pub(crate) type Written = (http::Response<Body>, Completion);
-
-/// `f`'s result, or an `internal` fault if it panicked: a format's code is
-/// run so a panic in it fails its exchange, not the gateway.
-pub(crate) fn guarded<R>(f: impl FnOnce() -> Result<R, Fault>) -> Result<R, Fault> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
-        .unwrap_or_else(|_| Err(Fault::internal(PANICKED)))
-}
 
 /// End `encoder` as `end` says, its closing frames in `out`, as
 /// [`Encoder::end`](crate::Encoder::end) promises: if ending well fails, it

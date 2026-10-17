@@ -47,7 +47,8 @@ appeared, so a relay in this format sends it back and a plugin can read it
 `{"choices": [..]}`; usage's own as a native `{"usage": {..}}`. A vendor's
 departures from the spec, such as reasoning in `reasoning_content`, are its
 plugins' in the [providers crate](../../providers/README.md), which read
-these. Reasoning has no field in this format, and is refused.
+these. Reasoning has no field in this format, and is refused, as is media
+in a tool result.
 
 A block is any number unique in a response, such as a plugin's own: both
 formats' encoders write blocks in the order they open.
@@ -60,7 +61,8 @@ such as `https://api.anthropic.com`, and `anthropic-version: 2023-06-01` is
 sent if the request names none.
 
 Thinking is the kind's reasoning; its signature, and what else the kind has
-no form for, stays native to this format. A full context window
+no form for, stays native to this format. Reasoning without its signature,
+which Anthropic refuses, is left out of a request. A full context window
 (`model_context_window_exceeded`) is a native finish whose fallback is the
 token limit.
 
@@ -152,7 +154,7 @@ to its own format unchanged, and is refused in another.
 | Kind | OpenAI Chat | Responses | Anthropic | Gemini |
 | --- | --- | --- | --- | --- |
 | `effort: Off` | `reasoning_effort: "none"` | `reasoning.effort: "none"` | `thinking: {type: "disabled"}` | `thinkingBudget: 0` |
-| `effort: Minimal/Low/Medium/High` | `reasoning_effort` | `reasoning.effort` | refused | `thinkingLevel` |
+| `effort: Minimal/Low/Medium/High` | `reasoning_effort` | `reasoning.effort` | `output_config.effort` (`low` for `Minimal`) | `thinkingLevel` |
 | `budget_tokens: n` | refused | refused | `thinking: {type: "enabled", budget_tokens: n}` | `thinkingBudget: n` |
 | `summary: true` | refused | `reasoning.summary: "auto"` | (thinking is returned) | `includeThoughts: true` |
 | `summary: false` | (nothing) | (no summary) | refused | `includeThoughts: false` |
@@ -160,8 +162,10 @@ to its own format unchanged, and is refused in another.
 
 An effort and a budget do not convert, so each travels only to a format that
 has it (see the [kind](../../kinds/conversation/README.md)); asking for both
-at once is refused everywhere. Gemini levels are read in either case and
-written in lower case.
+at once is refused everywhere but Anthropic. Anthropic's rules of thinking
+hold beside a budget: one under 1024, a temperature but 1, or `top_k` is
+refused, and a default `max_tokens` exceeds the budget. Gemini levels are
+read in either case and written in lower case.
 
 ## Finish
 

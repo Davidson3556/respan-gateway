@@ -28,7 +28,9 @@ pub async fn track(State(log): State<Arc<RequestLog>>, mut req: Request, next: N
         .unwrap_or_default();
     extensions.insert(Tracked(entry.clone()));
     req.extensions_mut().insert(extensions);
+    let mut headless = Headless(Some((log.clone(), entry.clone())));
     let resp = next.run(req).await;
+    headless.0 = None;
     let status = resp.status();
     let session = {
         let mut record = entry.record();
@@ -64,6 +66,20 @@ pub async fn track(State(log): State<Arc<RequestLog>>, mut req: Request, next: N
         error_body: error_body.then(Vec::new),
     };
     Response::from_parts(head, Body::new(body))
+}
+
+/// Finishes its entry if dropped while armed: the request was dropped
+/// before its response head, as when the client left or a caller's timeout
+/// cut it.
+struct Headless(Option<(Arc<RequestLog>, Arc<Entry>)>);
+
+impl Drop for Headless {
+    fn drop(&mut self) {
+        if let Some((log, entry)) = self.0.take() {
+            let left = "the client left before the response began";
+            log.finish(&entry, Some(left.to_owned()));
+        }
+    }
 }
 
 /// A response body that tells the log when its first bytes go and when it

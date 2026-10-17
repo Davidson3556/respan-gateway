@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 use bytes::Bytes;
 use http::header::{COOKIE, LOCATION};
 use http::{HeaderMap, Method, StatusCode, Uri};
-use http_body_util::{BodyExt, Limited};
+use http_body_util::BodyExt;
 use respan_gateway_core::Fault;
 
 use respan_gateway_http::call::{CONNECT_TIMEOUT, MAX_BODY, invalid, own_headers};
@@ -176,13 +176,7 @@ impl HttpTransport {
 /// body that is no JSON, or larger, an `upstream` fault.
 pub async fn json(answer: http::Response<Body>) -> Result<serde_json::Value, Fault> {
     let (head, body) = answer.into_parts();
-    let body = Limited::new(body, MAX_BODY).collect().await;
-    let body = body
-        .map_err(|e| match e.downcast::<Fault>() {
-            Ok(fault) => *fault,
-            Err(_) => Fault::upstream(format!("its answer is over {} MiB", MAX_BODY >> 20)),
-        })?
-        .to_bytes();
+    let body = body.read_answer(MAX_BODY).await?;
     if !head.status.is_success() {
         let answer = http::Response::from_parts(head, body);
         return Err(respan_gateway_http_faults::provider_fault(answer));
@@ -254,6 +248,7 @@ mod tests {
         // Regression: a listing was read whole, however large.
         let over = json(answer(vec![b' '; MAX_BODY + 1])).await;
         let fault = over.err().map(|f| f.message().to_owned());
-        assert_eq!(fault.as_deref(), Some("its answer is over 32 MiB"));
+        let said = format!("the provider's answer is over the limit of {MAX_BODY} bytes");
+        assert_eq!(fault.as_deref(), Some(said.as_str()));
     }
 }

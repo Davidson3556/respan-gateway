@@ -36,9 +36,10 @@ mod tests;
 
 use crate::is_inert;
 use crate::schema::{
-    Asked, Names, NativeFieldsExt, Schema, UsageFields, check_usage, count, decode_content,
-    decode_message, encode_content, encode_message, merge_details, merge_fields, native_fields,
-    own_fields, says, set, stop_json, unsupported_fields, unwritable_content, usage_extra,
+    Asked, Names, NativeFieldsExt, Schema, UsageFields, arguments_object, check_usage, count,
+    decode_content, decode_message, encode_content, encode_message, merge_details, merge_fields,
+    merge_into, native_fields, own_fields, says, set, stop_json, unsupported_fields,
+    unwritable_content, unwritable_native, usage_extra,
 };
 use respan_gateway_conversation::{
     Assembled, AssembledItem, Block, Content, Finish, Input, Message, Output, Role, Usage,
@@ -53,8 +54,8 @@ use serde_json::{Map, Value, json};
 use decode::AnthropicDecoder;
 use encode::EventStream;
 use request::{
-    arguments_json, read_effort, read_output, read_thinking, read_tools_of, write_output,
-    write_thinking, write_tools,
+    read_effort, read_output, read_thinking, read_tools_of, write_output, write_thinking,
+    write_tools,
 };
 
 /// The `max_tokens` of a translated request without one, as it is required.
@@ -178,16 +179,25 @@ fn split_system(chat: &Input) -> Result<(Vec<Content>, &[Message]), Fault> {
     Ok((parts.collect(), rest))
 }
 
-/// `m` without its empty text parts, which Anthropic refuses, if it says
-/// something else, such as a tool call.
-fn without_empty_text(m: &Message) -> std::borrow::Cow<'_, Message> {
-    let empty = |c: &Content| matches!(c, Content::Text { text, .. } if text.is_empty());
-    if !m.content.iter().any(empty) || m.content.iter().all(empty) {
-        return std::borrow::Cow::Borrowed(m);
+/// `m` as Anthropic takes it: without reasoning it did not sign, which it
+/// refuses and lets an earlier turn leave out, and without empty text parts
+/// if it says something else, such as a tool call.
+fn writable(m: &Message) -> std::borrow::Cow<'_, Message> {
+    let unsigned = |c: &Content| match c {
+        Content::Reasoning { native, .. } => {
+            native.format() != Some(ANTHROPIC) || !native.fields().contains_key("signature")
+        }
+        _ => false,
+    };
+    let mut m = std::borrow::Cow::Borrowed(m);
+    if m.content.iter().any(unsigned) {
+        m.to_mut().content.retain(|c| !unsigned(c));
     }
-    let mut m = m.clone();
-    m.content.retain(|c| !empty(c));
-    std::borrow::Cow::Owned(m)
+    let empty = |c: &Content| matches!(c, Content::Text { text, .. } if text.is_empty());
+    if m.content.iter().any(empty) && !m.content.iter().all(empty) {
+        m.to_mut().content.retain(|c| !empty(c));
+    }
+    m
 }
 
 /// Whether a message says nothing: no content, or only empty text.
@@ -305,8 +315,17 @@ impl Schema for AnthropicMessages {
                 "Anthropic's temperature is at most 1, so a higher one cannot be translated",
             ));
         }
+        let thinking = write_thinking(chat)?;
+        // Anthropic's `max_tokens` must exceed the thinking budget.
+        let budget = thinking.as_ref().and_then(|t| t["budget_tokens"].as_u64());
+        let default = match budget {
+            Some(budget) if budget >= DEFAULT_MAX_TOKENS => {
+                budget.saturating_add(DEFAULT_MAX_TOKENS)
+            }
+            _ => DEFAULT_MAX_TOKENS,
+        };
         let mut v = Map::new();
-        let max_tokens = chat.options.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let max_tokens = chat.options.max_output_tokens.unwrap_or(default);
         v.insert("max_tokens".into(), max_tokens.into());
         set(
             &mut v,
@@ -320,9 +339,10 @@ impl Schema for AnthropicMessages {
         let last = rest.len().saturating_sub(1);
         let kept = rest
             .iter()
+            .map(writable)
             .enumerate()
-            .filter(|&(i, m)| i == last || !is_empty(m));
-        let messages = kept.map(|(_, m)| encode_message::<Self>(&without_empty_text(m), &ROLES));
+            .filter(|(i, m)| *i == last || !is_empty(m));
+        let messages = kept.map(|(_, m)| encode_message::<Self>(&m, &ROLES));
         let messages: Vec<Value> = messages.collect::<Result<_, _>>()?;
         v.insert("messages".into(), messages.into());
         set(
@@ -357,7 +377,7 @@ impl Schema for AnthropicMessages {
         set(&mut v, "metadata", (!empty).then_some(metadata));
         write_tools(chat, &mut v)?;
         write_output(chat, &mut v)?;
-        set(&mut v, "thinking", write_thinking(chat)?);
+        set(&mut v, "thinking", thinking);
         Ok(v)
     }
 
@@ -385,7 +405,7 @@ impl Schema for AnthropicMessages {
                         Block::Reasoning => json!({ "type": "thinking", "thinking": part.text }),
                         Block::ToolCall { id, name } => {
                             let input =
-                                arguments_json(&part.text).map_err(|_| unwritable_content())?;
+                                arguments_object(&part.text).map_err(|_| unwritable_content())?;
                             json!({ "type": "tool_use", "id": id, "name": name, "input": input })
                         }
                         _ => return Err(unwritable_content()),
@@ -455,11 +475,13 @@ impl Schema for AnthropicMessages {
                 }
                 AssembledItem::Native(NativeValue { format, value: raw })
                     if is_inert(format, raw) => {}
-                AssembledItem::Native(..) => return Err(unwritable_content()),
+                AssembledItem::Native(NativeValue { format, value: raw }) => {
+                    return Err(unwritable_native(format, raw));
+                }
             }
         }
         for (place, text) in input {
-            content[place]["input"] = arguments_json(&text).map_err(|_| unwritable_content())?;
+            content[place]["input"] = arguments_object(&text).map_err(|_| unwritable_content())?;
         }
         let finish = whole.finish.as_ref().unwrap_or(&Finish::Stop);
         let (id, model) = whole
@@ -511,13 +533,7 @@ impl StopFields {
         for (key, value) in raw.as_object().into_iter().flatten() {
             match (key.as_str(), value.as_object()) {
                 ("type", _) => {}
-                ("usage", Some(usage)) => {
-                    let mut all = Value::Object(std::mem::take(&mut self.usage));
-                    merge_fields(&mut all, usage);
-                    if let Value::Object(all) = all {
-                        self.usage = all;
-                    }
-                }
+                ("usage", Some(usage)) => merge_into(&mut self.usage, usage),
                 ("delta", Some(delta)) => self.delta.extend(delta.clone()),
                 _ => _ = self.top.insert(key.clone(), value.clone()),
             }

@@ -158,11 +158,29 @@ impl Plugin for Responses {
         let Some(pending) = px.extensions().get::<Pending>().cloned() else {
             return Ok(());
         };
+        let (store, keep, target) = (self.store.clone(), self.keep, px.format().to_owned());
+        // OpenAI's own Responses keep its responses, but not the gateway's:
+        // a conversation that crossed to another provider (a fallback's) is
+        // sent whole, as to one that keeps nothing.
         if px.format() == RESPONSES {
             pending.lock().openai = true;
-            return Ok(());
+            return px.filter(move |input: &mut Input| {
+                let ours = input.native.as_mut().filter(|n| &*n.format == RESPONSES);
+                let Some(native) = ours else { return Ok(()) };
+                let parent = native
+                    .fields
+                    .get("previous_response_id")
+                    .and_then(Value::as_str);
+                let Some(before) = parent.and_then(|id| conversation(&*store, id)) else {
+                    return Ok(());
+                };
+                native.fields.shift_remove("previous_response_id");
+                let at = instructions(&pending, input);
+                let before = before.into_iter().map(|m| writable(m, &target));
+                input.messages.splice(at..at, before);
+                Ok(())
+            });
         }
-        let (store, keep, target) = (self.store.clone(), self.keep, px.format().to_owned());
         px.filter(move |input: &mut Input| {
             let ours = input.native.as_mut().filter(|n| &*n.format == RESPONSES);
             let (parent, kept) = match ours {
@@ -174,12 +192,7 @@ impl Plugin for Responses {
                 }
                 None => (None, true),
             };
-            let leading = input
-                .messages
-                .first()
-                .is_some_and(|m| m.role == Role::System);
-            // The instructions are the request's own, not the conversation's.
-            let instructions = usize::from(pending.lock().instructed && leading);
+            let instructions = instructions(&pending, input);
             let added = input.messages[instructions..].to_vec();
             if let Some(id) = &parent {
                 let before = conversation(&*store, id).ok_or_else(|| {
@@ -202,6 +215,16 @@ impl Plugin for Responses {
             Ok(())
         })
     }
+}
+
+/// How many of `input`'s messages are the request's instructions, not its
+/// conversation: a leading system message, if it named `instructions`.
+fn instructions(pending: &Pending, input: &Input) -> usize {
+    let leading = input
+        .messages
+        .first()
+        .is_some_and(|m| m.role == Role::System);
+    usize::from(pending.lock().instructed && leading)
 }
 
 impl Responses {

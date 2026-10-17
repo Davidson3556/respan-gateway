@@ -50,6 +50,13 @@ pub fn header_tokens(headers: &HeaderMap, name: HeaderName) -> impl Iterator<Ite
         .map(str::trim)
 }
 
+/// The first content coding of `headers` but `identity` (RFC 9110 8.4), if
+/// any: what a reader of the bytes as they came cannot read.
+pub(crate) fn content_coding(headers: &HeaderMap) -> Option<&str> {
+    header_tokens(headers, header::CONTENT_ENCODING)
+        .find(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case("identity"))
+}
+
 /// HTTP's success, an [`ProviderIo`](crate::ProviderIo)'s unless it says another: 2xx, or a 101
 /// to a call that asked to switch protocols (RFC 9110 15.2.2).
 pub fn success(answer: &ResponseHead, call: &RequestHead) -> bool {
@@ -122,12 +129,13 @@ pub(crate) fn outgoing(head: &mut http::response::Parts) {
     head.version = http::Version::default();
 }
 
-/// `fault` as a text/plain response with its status and message, for what
-/// no format can write.
-pub(crate) fn plain_response(fault: &Fault) -> http::Response<Body> {
+/// `text` as a text/plain response under `fault`'s status, for what no
+/// format can write: its message, or, where a message may say too much, its
+/// code.
+pub fn plain_response(fault: &Fault, text: &str) -> http::Response<Body> {
     let mut head = http::Response::new(()).into_parts().0;
     head.status = status(fault);
-    let text = plain_text(&mut head, fault.message());
+    let text = plain_text(&mut head, text);
     http::Response::from_parts(head, Body::full(text))
 }
 
@@ -252,7 +260,7 @@ mod tests {
 
     #[test]
     fn plain_text_carries_the_status_and_message() {
-        let resp = plain_response(&Fault::not_found("nothing here"));
+        let resp = plain_response(&Fault::not_found("nothing here"), "nothing here");
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(resp.headers()[CONTENT_TYPE], "text/plain; charset=utf-8");
     }

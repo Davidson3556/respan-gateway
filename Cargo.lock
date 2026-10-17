@@ -1662,6 +1662,7 @@ dependencies = [
  "futures",
  "mockllm",
  "parking_lot",
+ "percent-encoding",
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
@@ -1966,13 +1967,16 @@ dependencies = [
 name = "respan-gateway-plugin-responses"
 version = "0.1.0"
 dependencies = [
+ "mockllm",
  "moka",
  "parking_lot",
  "respan-gateway-conversation",
  "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http",
+ "respan-gateway-http-transport",
  "serde_json",
+ "tokio",
  "uuid",
 ]
 
@@ -1992,6 +1996,7 @@ dependencies = [
  "respan-gateway-passthrough-http",
  "respan-gateway-plugin-fallback",
  "respan-gateway-sdk",
+ "serde",
  "serde_json",
  "tokio",
  "wildmatch",
@@ -2106,6 +2111,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "respan-gateway-core",
+ "respan-gateway-http-faults",
  "serde_json",
 ]
 

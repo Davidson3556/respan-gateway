@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { initialRealtime, realtimeReducer, type RealtimeState } from "./realtime";
-import { geminiLive, servedRealtimeApis } from "./realtime-apis";
+import type { ServedFormat } from "./api";
+import { servedApis } from "./playground-apis";
+import { geminiLive, realtimeApis } from "./realtime-apis";
 
 /** The state a session reaches from Gemini Live's `messages`, as the page reads them. */
 function geminiSession(...messages: unknown[]): RealtimeState {
@@ -100,10 +102,10 @@ describe("Gemini Live", () => {
   });
 });
 
-describe("servedRealtimeApis", () => {
+describe("servedApis for realtime", () => {
   it("offers the APIs the gateway serves, else OpenAI Realtime", () => {
-    const ids = (serve: { format: string; kind: string }[] | undefined) =>
-      servedRealtimeApis(serve).map((a) => a.id);
+    const ids = (serve: Pick<ServedFormat, "format" | "kind">[] | undefined) =>
+      servedApis("realtime", realtimeApis, serve).map((a) => a.id);
     expect(ids([{ format: "gemini-live", kind: "realtime" }, { format: "openai-realtime", kind: "realtime" }])).toEqual(
       ["openai-realtime", "gemini-live"],
     );

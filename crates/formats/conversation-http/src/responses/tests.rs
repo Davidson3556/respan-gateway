@@ -3,7 +3,7 @@ use super::*;
 use crate::anthropic::AnthropicMessages;
 use crate::openai::OpenAiChat;
 use respan_gateway_conversation::{Block, Message, ResponseFormat, Role, Tool, ToolChoice};
-use respan_gateway_core::NativeFields;
+use respan_gateway_core::{NativeFields, NativeValue};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::{Decoder, Sse};
 use respan_gateway_sse::event_json;
@@ -954,6 +954,28 @@ fn instructions_count_as_the_reader_reads_them() {
             OpenAiResponses::instructed(body.as_bytes()),
             instructed,
             "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_foreign_value_it_cannot_write_is_named_in_its_refusal() {
+    let foreign = NativeValue::new("openai-chat", json!({"logprobs": {}, "refusal": "no"}));
+    let replies = [
+        Output::start("r1", "m"),
+        Output::block_start(0, Block::Text),
+        Output::text(0, "hi"),
+        Output::block_end(0),
+        Output::Native(foreign),
+    ];
+    for refused in [body_of(&replies).map(drop), stream_of(&replies).map(drop)] {
+        let fault = refused.expect_err("refused");
+        assert!(
+            fault
+                .message()
+                .ends_with("in this format: openai-chat's fields `logprobs`, `refusal`"),
+            "{}",
+            fault.message()
         );
     }
 }

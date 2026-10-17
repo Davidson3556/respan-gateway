@@ -310,3 +310,28 @@ fn top_k_is_anthropics_and_geminis() {
     assert!(OpenAiChat.encode_request(&a).is_err());
     assert!(OpenAiResponses.encode_request(&a).is_err());
 }
+
+#[test]
+fn a_budget_keeps_to_anthropics_rules_of_thinking() {
+    let budget = |n: u64, extra: Value| {
+        let mut input = OpenAiChat.decode_json(&chat(extra));
+        input.options.reasoning = Some(Reasoning::budget(n));
+        AnthropicMessages.encode_request(&input)
+    };
+    // The default `max_tokens` exceeds the budget.
+    let a = budget(8192, json!({})).unwrap();
+    assert!(
+        a["max_tokens"].as_u64().unwrap() > 8192,
+        "{}",
+        a["max_tokens"]
+    );
+    assert_eq!(budget(1024, json!({})).unwrap()["max_tokens"], 4096);
+    assert!(budget(1024, json!({ "temperature": 1 })).is_ok());
+    // A budget under 1024, a temperature but 1, `top_k`: Anthropic refuses.
+    assert!(budget(1023, json!({})).is_err());
+    assert!(budget(1024, json!({ "temperature": 0.5 })).is_err());
+    let mut input = OpenAiChat.decode_json(&chat(json!({})));
+    input.options.reasoning = Some(Reasoning::budget(1024));
+    input.options.top_k = Some(40);
+    assert!(AnthropicMessages.encode_request(&input).is_err());
+}

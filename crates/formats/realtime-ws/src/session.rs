@@ -156,6 +156,13 @@ pub(crate) fn model_at(uri: &Uri) -> Option<String> {
         .map(|(_, model)| model.into_owned())
 }
 
+/// A handshake's query naming `model`, escaped, as [`model_at`] reads it.
+pub(crate) fn model_query(model: &str) -> String {
+    form_urlencoded::Serializer::new(String::new())
+        .append_pair("model", model)
+        .finish()
+}
+
 /// The events of `frames`, with what was `said` first whenever there is
 /// some, until the frames end.
 fn among(said: Said, frames: EventStream<Output>) -> EventStream<Output> {
@@ -262,6 +269,19 @@ mod tests {
         for refused in [written("two", Some(&event)), written("one", None)] {
             let refused = refused.expect_err("foreign event");
             assert!(refused.code() == "config");
+        }
+    }
+
+    /// Regression: a model was put in the query as it was, so `a b` broke
+    /// the URL and `x&foo=bar` added a parameter.
+    #[test]
+    fn a_model_is_one_value_of_the_query() {
+        for model in ["gpt-realtime", "a b", "x&foo=bar", "100%"] {
+            let uri: Uri = format!("/v1/realtime?{}", model_query(model))
+                .parse()
+                .expect("a URI");
+            assert_eq!(model_at(&uri).as_deref(), Some(model));
+            assert_eq!(uri.query().map(|q| q.matches('=').count()), Some(1));
         }
     }
 }

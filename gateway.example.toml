@@ -17,6 +17,7 @@ ui = true                         # Web UI at http://127.0.0.1:8080/ui/
 # client_keys = [
 #   { name = "ops", key = "env:OPS_KEY", admin = true },
 #   { name = "app", key = "env:APP_KEY", admin = false },
+#   { name = "bot", key = "env:BOT_KEY", tools = ["github__search_*"] },  # MCP at /mcp only
 # ]
 # body_limit = "32MiB"
 # ws_message_limit = "16MiB"

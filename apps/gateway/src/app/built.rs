@@ -110,6 +110,7 @@ impl Built {
             }
             None => gateway,
         };
+        let fronted = aggregate.clone();
         let (gateway, closer, aggregate) =
             with_plugins(gateway, &config, aggregate, &plan, &formats, &process.log);
         let gateway = match respan_calls {
@@ -128,8 +129,15 @@ impl Built {
         .layer(from_fn_with_state(keys.clone(), auth::consume))
         .layer(from_fn_with_state(process.log.clone(), requests::track));
         let admin = Arc::new(
-            Admin::new(process.clone(), &config, &plan, &formats, gateway.clone())
-                .respan(respan_health),
+            Admin::new(
+                process.clone(),
+                &config,
+                &plan,
+                &formats,
+                gateway.clone(),
+                fronted,
+            )
+            .respan(respan_health),
         );
         let cors = match &config.cors {
             Some(c) => Some(Cors::new(&c.origins, keys.required()).map_err(Error::new)?),

@@ -426,7 +426,7 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
 }
 
 /// Where a configured key comes from, for a person to read: never the key.
-fn key_source(value: &str) -> String {
+pub fn key_source(value: &str) -> String {
     match value.strip_prefix("env:") {
         Some(var) => format!("env {var}"),
         None => "config".to_owned(),
@@ -473,8 +473,19 @@ fn clients(entries: &[ClientKey]) -> Result<Vec<Client>, Fault> {
                 "client_keys: the name '{name}' is used twice"
             )));
         }
+        // The first entry with a key would take every request with it.
+        if let Some(first) = clients.iter().find(|c| c.key == key) {
+            return Err(Fault::config(format!(
+                "client_keys: '{name}' has the key of '{}'",
+                first.name
+            )));
+        }
         let admin = entry.admin().unwrap_or(!named_admins);
         let tools = entry.tools().map(<[String]>::to_vec);
+        if let Some(tools) = &tools {
+            let owner = format!("client_keys: '{name}': tools");
+            crate::mcp_aggregate::check_patterns(&owner, tools).map_err(Fault::config)?;
+        }
         clients.push(Client {
             name,
             key,

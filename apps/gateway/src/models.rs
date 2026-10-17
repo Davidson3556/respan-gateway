@@ -153,7 +153,7 @@ impl Models {
         let rules = self.routes.rules().iter().filter(|r| !r.is_glob());
         rules.map(|rule| {
             let first = rule.to.first().and_then(|c| c.model_for(Some(&rule.name)));
-            let kind = kind_of(first.as_deref().unwrap_or(&rule.name)).unwrap_or(kind::CHAT);
+            let kind = kind_of(first.as_deref().unwrap_or(&rule.name));
             let to: Vec<String> = rule.to.iter().map(ToString::to_string).collect();
             json!({
                 "id": rule.name,
@@ -227,7 +227,7 @@ impl Models {
         let mut cards: Vec<Model> = models;
         for card in &mut cards {
             card.provider.clone_from(&listing.provider);
-            card.kind = kind_of(&card.id).map(|k| k.to_owned());
+            card.kind = Some(kind_of(&card.id).to_owned());
             if let Some(declared) = listing.declared.iter().find(|d| d.id == card.id) {
                 card.overlay(declared);
             }
@@ -240,7 +240,7 @@ impl Models {
         let models = cards
             .iter()
             .filter_map(|card| {
-                let kind = card.kind.as_deref().or_else(|| kind_of(&card.id))?;
+                let kind = card.kind.as_deref().unwrap_or_else(|| kind_of(&card.id));
                 let (kind, format) = listing.kinds.iter().find(|(k, _)| *k == kind)?;
                 let mut model = serde_json::to_value(card).ok()?;
                 model["id"] = self.public_id(listing, kind, format, &card.id).into();
@@ -264,12 +264,12 @@ impl Models {
     }
 }
 
-/// What a model does, by its name as vendors spell them; `None` for one the
-/// gateway serves no kind of.
-fn kind_of(id: &str) -> Option<&'static str> {
+/// What a model does, by its name as vendors spell them; chat unless the
+/// name says otherwise.
+fn kind_of(id: &str) -> &'static str {
     let id = id.to_ascii_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| id.contains(w));
-    let kind = match () {
+    match () {
         _ if has(&["embed"]) => kind::EMBEDDING,
         _ if has(&["dall-e", "gpt-image", "imagen", "grok-2-image", "flux"]) => kind::IMAGE,
         _ if has(&["whisper", "transcribe"]) => kind::TRANSCRIPTION,
@@ -278,8 +278,7 @@ fn kind_of(id: &str) -> Option<&'static str> {
         _ if has(&["realtime", "-live", "live-", "native-audio"]) => kind::REALTIME,
         _ if has(&["jev", "clef", "systemone"]) => kind::DECISION,
         _ => kind::CHAT,
-    };
-    Some(kind)
+    }
 }
 
 /// `GET /v1/models`: the merged list in OpenAI's shape, or in Anthropic's
@@ -401,24 +400,24 @@ mod tests {
     #[test]
     fn a_models_kind_is_read_from_its_name() {
         let kind = kind_of;
-        assert_eq!(kind("gpt-4o-mini"), Some("chat"));
-        assert_eq!(kind("gpt-image-1"), Some("image"));
-        assert_eq!(kind("imagen-4.0-generate-001"), Some("image"));
-        assert_eq!(kind("whisper-large-v3"), Some("transcription"));
-        assert_eq!(kind("gpt-4o-mini-transcribe"), Some("transcription"));
-        assert_eq!(kind("gpt-4o-mini-tts"), Some("speech"));
-        assert_eq!(kind("sora-2"), Some("video"));
-        assert_eq!(kind("veo-3.0-generate-001"), Some("video"));
-        assert_eq!(kind("gpt-realtime"), Some("realtime"));
-        assert_eq!(kind("gemini-live-2.5-flash-preview"), Some("realtime"));
-        assert_eq!(kind("gemini-2.0-flash-live-001"), Some("realtime"));
+        assert_eq!(kind("gpt-4o-mini"), "chat");
+        assert_eq!(kind("gpt-image-1"), "image");
+        assert_eq!(kind("imagen-4.0-generate-001"), "image");
+        assert_eq!(kind("whisper-large-v3"), "transcription");
+        assert_eq!(kind("gpt-4o-mini-transcribe"), "transcription");
+        assert_eq!(kind("gpt-4o-mini-tts"), "speech");
+        assert_eq!(kind("sora-2"), "video");
+        assert_eq!(kind("veo-3.0-generate-001"), "video");
+        assert_eq!(kind("gpt-realtime"), "realtime");
+        assert_eq!(kind("gemini-live-2.5-flash-preview"), "realtime");
+        assert_eq!(kind("gemini-2.0-flash-live-001"), "realtime");
         assert_eq!(
             kind("gemini-2.5-flash-native-audio-preview-09-2025"),
-            Some("realtime")
+            "realtime"
         );
-        assert_eq!(kind("gemini-2.5-flash"), Some("chat"));
-        assert_eq!(kind("text-embedding-3-small"), Some("embedding"));
-        assert_eq!(kind("gemini-embedding-001"), Some("embedding"));
-        assert_eq!(kind("jev-latest"), Some("decision"));
+        assert_eq!(kind("gemini-2.5-flash"), "chat");
+        assert_eq!(kind("text-embedding-3-small"), "embedding");
+        assert_eq!(kind("gemini-embedding-001"), "embedding");
+        assert_eq!(kind("jev-latest"), "decision");
     }
 }

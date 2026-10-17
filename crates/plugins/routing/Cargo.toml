@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+serde.workspace = true
 wildmatch.workspace = true
 parking_lot.workspace = true
 respan-gateway-core.workspace = true

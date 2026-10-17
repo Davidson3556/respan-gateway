@@ -143,9 +143,9 @@ buffer producers can progress. A `Body` with `full_bytes()` can be cloned
 without polling.
 
 Keep `Body::full` for finite, inspectable bytes, and `Body::stream`
-for pull-driven frames. Unlike a generic full or stream adapter, a
-provider's answer's `Body` also carries its transport's `limit`: the most
-bytes a reader holds of it at once.
+for pull-driven frames. A `Body` carries no limit of its own: the most
+bytes a reader holds of a provider's answer at once is its `ProviderIo`'s,
+the `limit` given to `connect`.
 
 A client's `Decoder` reads a whole request, as one frame, into its one
 input, lazily, or each live frame as it comes. A provider's answer decoder

@@ -4,10 +4,15 @@ import { downloadExport, exportPath } from "./export";
 
 describe("exportPath", () => {
   it("carries only the filters that are set", () => {
-    const filter = { status: "error", kind: "chat", provider: "all", model: "claude", client: "ci", q: "ignored" };
+    const filter = { status: "error", kind: "chat", provider: "all", model: "claude", client: "ci", q: "" };
     expect(exportPath("csv", filter)).toBe(
       "/ui/api/requests/export?format=csv&kind=chat&status=error&model=claude&client=ci",
     );
+  });
+
+  it("carries the free-text search, trimmed", () => {
+    expect(exportPath("jsonl", { q: "  /v1/chat " })).toBe("/ui/api/requests/export?format=jsonl&q=%2Fv1%2Fchat");
+    expect(exportPath("jsonl", { q: "   " })).toBe("/ui/api/requests/export?format=jsonl");
   });
 
   it("asks for everything with no filters, and passes a since time", () => {
@@ -30,13 +35,17 @@ describe("downloadExport", () => {
       clicked.push(`${this.download} ${this.href}`);
     });
 
+    vi.useFakeTimers();
     await downloadExport("csv", { kind: "chat" });
 
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("/ui/api/requests/export?format=csv&kind=chat");
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer sk-gw");
     expect(clicked).toEqual(["requests.csv blob:export"]);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    vi.runAllTimers();
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:export");
+    vi.useRealTimers();
     setGatewayKey(null);
   });
 

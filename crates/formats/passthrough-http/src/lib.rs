@@ -313,7 +313,8 @@ impl Format<ProviderIo, Output<Self>, Input<Self>> for Passthrough {
         "passthrough"
     }
     /// Relays successes and the redirects of a call that asked to switch no
-    /// protocols, which are the client's to follow.
+    /// protocols, which are the client's to follow, in whatever content
+    /// coding they came: their bytes are not read.
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output<Self>, Input<Self>>, Fault> {
         let relayed = |answer: &http::response::Parts, call: &RequestHead| {
             let asked = call.headers.contains_key(http::header::UPGRADE);
@@ -321,7 +322,8 @@ impl Format<ProviderIo, Output<Self>, Input<Self>> for Passthrough {
                 || (answer.status.is_redirection() && !asked)
         };
         let write = request_writer(&io);
-        Ok(io.with_success(relayed).bind(write, read_response))
+        let io = io.with_success(relayed).with_content_codings();
+        Ok(io.bind(write, read_response))
     }
 }
 

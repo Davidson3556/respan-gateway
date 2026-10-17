@@ -88,6 +88,7 @@ impl Admin {
         plan: &Plan,
         formats: &[KnownFormat],
         gateway: Gateway,
+        aggregate: Option<Vec<String>>,
     ) -> Self {
         let providers = plan
             .upstreams
@@ -149,10 +150,9 @@ impl Admin {
                 let filter = ToolFilter::new(t.allow.clone(), t.deny.clone());
                 (t.servers.clone(), filter)
             }),
-            aggregate: (config.plugins.mcp_aggregate.as_ref()).and_then(|a| {
-                let servers = crate::mcp_aggregate::check(a, &plan.mcp).ok()?;
-                Some((servers, ToolFilter::new(a.allow.clone(), a.deny.clone())))
-            }),
+            aggregate: (config.plugins.mcp_aggregate.as_ref())
+                .zip(aggregate)
+                .map(|(a, servers)| (servers, ToolFilter::new(a.allow.clone(), a.deny.clone()))),
             gateway,
             tools: moka::sync::Cache::builder()
                 .time_to_live(Duration::from_secs(60))
@@ -272,6 +272,7 @@ async fn overview(State(admin): State<Arc<Admin>>) -> Json<Value> {
         "config_source": source,
         "config_path": path,
         "totals": process.log.totals(),
+        "history": process.log.capacity(),
         "respan": admin.respan.as_ref().map(|h| respan_json(&h.report())),
     }))
 }
@@ -598,7 +599,7 @@ struct Recent {
 
 /// `GET /ui/api/requests?limit=N`: the last requests, newest first, narrowed
 /// by the export's filters (`kind`, `status`, `provider`, `client`, `model`,
-/// `since`).
+/// `q`, `since`).
 async fn requests(State(admin): State<Arc<Admin>>, Query(q): Query<Recent>) -> Json<Value> {
     let requests = admin.process.log.recent(q.limit.unwrap_or(100), &q.filter);
     Json(json!({ "requests": requests }))
@@ -616,8 +617,10 @@ struct ExportQuery {
 /// oldest first, one record per line (`jsonl`, the records of
 /// `/ui/api/requests`; or `csv` with a header row), as a download. The
 /// filters narrow it as the UI's do, all optional: `kind`; `status` (`ok`,
-/// `error`, `pending`, or a class such as `2xx`); `provider`; `client` (a key's name); `model` (a
-/// case-blind substring); `since` (an RFC 3339 time or date).
+/// `error`, `pending`, or a class such as `2xx`); `provider`; `client` (a key's name); `model`;
+/// `q` (free text, matched in any case against the model and the path);
+/// `since` (an RFC 3339 time, or a date for its midnight UTC; 400 if
+/// neither).
 async fn export(State(admin): State<Arc<Admin>>, Query(q): Query<ExportQuery>) -> Response {
     let (content_type, name, header): (_, _, Option<&str>) = match q.format.as_deref() {
         None | Some("jsonl") => ("application/x-ndjson", "requests.jsonl", None),

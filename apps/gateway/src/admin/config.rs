@@ -15,7 +15,8 @@ pub const PLACEHOLDER: &str = "…";
 /// (the entry, or a named entry's `key`), a provider's key (also inside
 /// `auth`), an MCP server's header, bearer key, OAuth client secret and
 /// refresh token, environment value or argument (not the program), and a
-/// URL that holds credentials. An `env:NAME` reference is no secret; it is
+/// URL that holds credentials (a server's, a provider's, an OAuth token
+/// endpoint's or Respan's). An `env:NAME` reference is no secret; it is
 /// shown as written.
 fn is_secret(path: &[String], value: &Value) -> bool {
     let path: Vec<&str> = path.iter().map(String::as_str).collect();
@@ -30,7 +31,11 @@ fn is_secret(path: &[String], value: &Value) -> bool {
         | ["mcp", _, "auth", "oauth", "client_secret" | "refresh_token"]
         | ["mcp", _, "env", _]
         | ["mcp", _, "args", _] => !value.is_null(),
-        ["mcp", _, "url"] | ["providers", _, "base_url"] | ["providers", _, "formats", _] => value
+        ["mcp", _, "url"]
+        | ["mcp", _, "auth", "oauth", "token_url"]
+        | ["plugins", "respan", "url"]
+        | ["providers", _, "base_url"]
+        | ["providers", _, "formats", _] => value
             .as_str()
             .is_some_and(|u| u == PLACEHOLDER || url_holds_secret(u)),
         _ => false,

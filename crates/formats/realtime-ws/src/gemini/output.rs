@@ -138,7 +138,8 @@ impl Provider {
             _ => {}
         }
         if at(v, &["serverContent", "interrupted"]) == Some(&Value::Bool(true)) {
-            let said = !self.spoke || state.open;
+            // An interruption of no response stays the Live API's to say.
+            let said = state.open;
             if !self.spoke {
                 self.told = true;
                 events.push(Output::SpeechStarted {
@@ -464,7 +465,12 @@ impl Client {
             return Ok(());
         };
         match &event {
-            Output::ResponseStart { .. } => self.answering.store(true, Ordering::Relaxed),
+            // A response's audio starts afresh: none the last one's
+            // resampler held spills into it.
+            Output::ResponseStart { .. } => {
+                self.answering.store(true, Ordering::Relaxed);
+                self.convert = Convert::default();
+            }
             Output::ResponseDone { .. } => self.answering.store(false, Ordering::Relaxed),
             _ => {}
         }
@@ -487,10 +493,14 @@ impl Client {
             Output::SpeechStarted { at_ms, native } if says(native, "voiceActivity") => {
                 (activity("ACTIVITY_START", at_ms), native)
             }
-            Output::SpeechStarted { native, .. } => {
+            // Speech interrupts a response being written; else it is
+            // written only as the Live API said it, if it did.
+            Output::SpeechStarted { native, .. } if self.answering.load(Ordering::Relaxed) => {
                 self.interrupted = true;
                 (interrupted, native)
             }
+            Output::SpeechStarted { native: None, .. } => return Ok(Vec::new()),
+            Output::SpeechStarted { native, .. } => (json!({}), native),
             Output::SpeechStopped { at_ms, native } => (activity("ACTIVITY_END", at_ms), native),
             Output::InputTranscript { complete: true, .. } if std::mem::take(&mut self.heard) => {
                 return Ok(Vec::new());
@@ -549,10 +559,7 @@ impl Client {
                 return Ok(Vec::new());
             }
             Output::Usage(used) => {
-                let held = self.usage.get_or_insert_default();
-                held.tokens += &used.tokens;
-                held.input_audio_tokens += used.input_audio_tokens;
-                held.output_audio_tokens += used.output_audio_tokens;
+                *self.usage.get_or_insert_default() += used;
                 return Ok(Vec::new());
             }
             // The Live API ends a turn of calls, or one interrupted, with

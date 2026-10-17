@@ -38,6 +38,8 @@ export interface Overview {
   /** The config file's path when `config_source` is `file`. */
   config_path: string | null;
   totals: Totals;
+  /** How many requests the gateway keeps (`request_log.history`). */
+  history: number;
   /** How sending traces to Respan goes; null without its plugin. */
   respan?: RespanHealth | null;
 }
@@ -140,7 +142,6 @@ export interface RouteSeen {
   cooling: boolean;
 }
 
-/** US dollars per million tokens. */
 /** A model's price, in US dollars per million tokens, and who says it: the config, which overrides, or the provider's list. */
 export interface Price {
   input: number;
@@ -428,8 +429,6 @@ export const api = {
   overview: (signal?: AbortSignal) => getJson<Overview>("/ui/api/overview", signal),
   providers: (signal?: AbortSignal) =>
     getJson<{ providers: Provider[] }>("/ui/api/providers", signal).then((r) => r.providers),
-  mcp: (signal?: AbortSignal) =>
-    getJson<{ servers: McpServer[] }>("/ui/api/mcp", signal).then((r) => r.servers),
   mcpOverview: (signal?: AbortSignal) => getJson<McpOverview>("/ui/api/mcp", signal),
   mcpTools: (name: string, refresh: boolean, signal?: AbortSignal) =>
     getJson<McpTools>(`/ui/api/mcp/${encodeURIComponent(name)}/tools${refresh ? "?refresh=true" : ""}`, signal),

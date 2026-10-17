@@ -3,7 +3,7 @@
 // and reads what the server sends into OpenAI Realtime's events, which the
 // page and its reducer read whatever the API.
 
-import { servedApis } from "@/lib/playground-apis";
+import type { Json } from "@/lib/playground-apis";
 import type { ServerEvent } from "@/lib/realtime";
 import { REALTIME_RATE } from "@/lib/realtime-audio";
 
@@ -40,8 +40,6 @@ export interface RealtimeApi {
 
 const socketUrl = (location: Pick<Location, "protocol" | "host">, path: string) =>
   `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}`;
-
-type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 /**
  * OpenAI Realtime: `/v1/realtime?model=…`. A browser's WebSocket can set no
@@ -183,10 +181,3 @@ export const geminiLive: RealtimeApi = {
 };
 
 export const realtimeApis: RealtimeApi[] = [openaiRealtime, geminiLive];
-
-/** The APIs the gateway serves sessions in; OpenAI Realtime if it lists none. */
-export function servedRealtimeApis(
-  serve: { format: string; kind: string }[] | undefined,
-): RealtimeApi[] {
-  return servedApis("realtime", realtimeApis, serve);
-}

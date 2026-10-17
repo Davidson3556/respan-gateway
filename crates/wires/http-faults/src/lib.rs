@@ -111,6 +111,14 @@ pub fn provider_fault(answer: http::Response<Bytes>) -> Fault {
     fault.with(ProviderError(answer))
 }
 
+/// The fault of a provider's answer that holds more than `limit` bytes at
+/// once: an event, or a whole body. It is upstream, so a 502.
+pub fn over_limit(limit: usize) -> Fault {
+    Fault::upstream(format!(
+        "the provider's answer is over the limit of {limit} bytes"
+    ))
+}
+
 /// The wait an answer's `Retry-After` asks for, if it asks for one.
 pub fn waits(headers: &http::HeaderMap) -> Option<RetryAfter> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?;

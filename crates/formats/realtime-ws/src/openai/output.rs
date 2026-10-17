@@ -277,6 +277,11 @@ impl Client {
         let Some(event) = foreign::strip(NAME, event)? else {
             return Ok(());
         };
+        // A response's audio starts afresh: none the last one's resampler
+        // held spills into it.
+        if let Output::ResponseStart { .. } = event {
+            self.convert = Convert::default();
+        }
         let mut events = Vec::new();
         self.encode(&event, &mut events)?;
         let made_up = !owned(&event);
@@ -421,10 +426,7 @@ impl Client {
                 (v, native)
             }
             Output::Usage(usage) => {
-                let held = self.usage.get_or_insert_default();
-                held.tokens += &usage.tokens;
-                held.input_audio_tokens += usage.input_audio_tokens;
-                held.output_audio_tokens += usage.output_audio_tokens;
+                *self.usage.get_or_insert_default() += usage;
                 return Ok(());
             }
             Output::ResponseDone { status, native } => {

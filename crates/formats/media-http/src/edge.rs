@@ -1,14 +1,13 @@
 //! What the HTTP formats of this crate share, OpenAI's and Veo's.
 
 use respan_gateway_conversation_http::read_provider_error;
-use respan_gateway_core::{Connection, Fault, NativeFields};
+use respan_gateway_core::{Connection, Fault};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{
     self, request::Parts as RequestHead, response::Parts as ResponseHead,
 };
 use respan_gateway_http::{Decoder, Encoder, ProviderIo, Sse};
 use respan_gateway_media::video;
-use serde_json::{Map, Value};
 
 /// The provider edge of `format`: a call whose head `encode` sets (a `POST`
 /// to start with) and whose body it returns, its success read by the
@@ -101,21 +100,4 @@ pub(crate) fn frame(
         frames.push(out.freeze());
     }
     Ok(())
-}
-
-/// The fields of `native` to write in `format`: all of them if they are
-/// its, none if there are none; another format's are refused, as only it
-/// knows what they mean.
-pub(crate) fn kept(
-    format: &str,
-    native: &Option<NativeFields>,
-) -> Result<Map<String, Value>, Fault> {
-    match native {
-        Some(n) if &*n.format == format => Ok(n.fields.clone()),
-        Some(n) if !n.is_empty() => Err(Fault::bad_request(format!(
-            "fields of format {} cannot be written in {format}",
-            n.format
-        ))),
-        _ => Ok(Map::new()),
-    }
 }

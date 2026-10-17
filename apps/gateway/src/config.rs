@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use indexmap::IndexMap;
+pub use respan_gateway_plugin_routing::Pick;
 use serde::{Deserialize, Deserializer};
 
 use crate::Error;
@@ -34,7 +35,9 @@ pub struct NamedKey {
     #[serde(default)]
     pub admin: Option<bool>,
     /// The tool loop and aggregate tools (`server__tool` globs) the key's
-    /// requests may use, within the global `allow` and `deny`; all if unset.
+    /// requests may use, within the global `allow` and `deny`; all if unset,
+    /// none if empty. A key that sets it reaches MCP servers at `/mcp`
+    /// alone, not each at `/mcp/{name}`, which offers all of a server's.
     #[serde(default)]
     pub tools: Option<Vec<String>>,
 }
@@ -439,7 +442,7 @@ pub struct RouteConfig {
     /// (by each model's `pricing`: input plus three times output), `fastest` (by the gateway's own record of each one's time
     /// to a response), `weighted` or `random`. `first` if unset.
     #[serde(default)]
-    pub pick: PickName,
+    pub pick: Pick,
     /// What a candidate's model must be able to do, as its provider's
     /// listing says, such as `tools` or `vision`; one the listing says
     /// nothing of is kept.
@@ -513,18 +516,6 @@ fn route_targets<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<RouteTarget>, D:
             },
         })
         .collect())
-}
-
-/// How a route orders its candidates.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PickName {
-    #[default]
-    First,
-    Cheapest,
-    Fastest,
-    Weighted,
-    Random,
 }
 
 /// Which requests a route applies to.
@@ -1277,7 +1268,7 @@ vendor = "anthropic"
                 },
             ]
         );
-        assert_eq!(smart.pick, PickName::Weighted);
+        assert_eq!(smart.pick, Pick::Weighted);
         assert_eq!(smart.needs, ["tools"]);
         assert_eq!(smart.when.clients, ["ops"]);
         assert_eq!(smart.tries, Some(2));
@@ -1286,7 +1277,7 @@ vendor = "anthropic"
         let llama = &config.routes["llama-*"];
         assert_eq!(llama.to[0].target, "groq");
         assert_eq!(llama.hedge, Some(Duration::from_millis(300)));
-        assert_eq!(llama.pick, PickName::First);
+        assert_eq!(llama.pick, Pick::First);
         let said = Config::parse("[routes.x]\nto = 3\n")
             .err()
             .map(|e| e.to_string())

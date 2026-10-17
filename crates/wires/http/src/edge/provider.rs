@@ -36,6 +36,7 @@ where
         limit,
         success: Box::new(crate::rules::success),
         refusal: Box::new(respan_gateway_http_faults::provider_fault),
+        codings: false,
     }
 }
 
@@ -55,6 +56,8 @@ pub struct ProviderIo {
     success: Success,
     /// How a refused answer reads as a fault.
     refusal: Refusal,
+    /// Whether a success in a content coding is read as it came.
+    codings: bool,
 }
 impl ProviderIo {
     /// Per-call transport state supplied by the gateway and its plugins.
@@ -86,6 +89,14 @@ impl ProviderIo {
         self
     }
 
+    /// Take a success in any content coding, its bytes as they came, as a
+    /// format that relays them unread does, instead of failing it
+    /// `upstream`: the gateway decodes no coding.
+    pub fn with_content_codings(mut self) -> Self {
+        self.codings = true;
+        self
+    }
+
     /// Bind the call's encoder and its answer's decoder to core events.
     ///
     /// `encode` writes the call's head, given as `GET /` with no headers, and
@@ -97,7 +108,7 @@ impl ProviderIo {
     /// loses what a proxy does not pass on: a hop's headers but `Upgrade`,
     /// which gets its `Connection: upgrade` (RFC 9110 7.6.1, 7.8); `Host`;
     /// `Expect`; conditions and ranges (13, 14); method overrides;
-    /// `Accept-Encoding`, as the gateway decodes what it reads; and the
+    /// `Accept-Encoding`, as the gateway decodes no content coding; and the
     /// gateway origin's `Cookie`, `Forwarded`, `Via`, `X-Forwarded-*` and
     /// `X-Real-IP`, which plugins still see ([`Original`](crate::raw::Original)) and a
     /// call's [`CallHeaders`](crate::call::CallHeaders) may set.
@@ -107,9 +118,12 @@ impl ProviderIo {
     /// head and the call as sent (its body the whole bytes of one input, or
     /// empty for live input, which streamed), or `None` for no body to read; a fault its
     /// body says later fails it. Any other answer is refused, read into its
-    /// fault ([`with_refusal`](Self::with_refusal)). A call
-    /// [`Relayed`](crate::raw::Relayed) gives the client its answer's head
-    /// and error answer.
+    /// fault ([`with_refusal`](Self::with_refusal)). A success in a content
+    /// coding but `identity` fails `upstream` unread, unless relayed or
+    /// [taken as it came](Self::with_content_codings). A call
+    /// [`Relayed`](crate::raw::Relayed) gives the client its answer's head,
+    /// unless the answer fails or is dropped unended first, and its error
+    /// answer.
     pub fn bind<I, O>(
         self,
         encode: impl FnOnce(&mut RequestHead, Option<&I>) -> Result<Box<dyn Encoder<I>>, Fault>
@@ -162,6 +176,7 @@ impl ProviderIo {
             let success = self.success;
             let refusal = self.refusal;
             let limit = self.limit;
+            let codings = self.codings || relayed.is_some();
             request.extensions_mut().insert(self.extensions);
             let upload = failed.clone();
             // The call's delivery, which the sink drives and every poll of
@@ -188,9 +203,12 @@ impl ProviderIo {
                     let (head, body) = response.into_parts();
                     let call = sent.clone().into_parts().0;
                     let succeeded = success(&head, &call);
-                    if let Some(slot) = client_head.filter(|_| succeeded) {
-                        slot.set(head.clone());
-                    }
+                    // Claimed now, before the answer is handed over, and held
+                    // by its events: a call that fails or is dropped for
+                    // another gives the client none of its head.
+                    let claim = client_head
+                        .filter(|_| succeeded)
+                        .map(|slot| slot.claim(head.clone()));
                     let body = observed(body, upload.clone());
                     let applied = move |fault| match &relayed {
                         Some(raw) => raw.apply(fault),
@@ -200,11 +218,23 @@ impl ProviderIo {
                         let fault = refused(head, body, limit, refusal, &upload).await;
                         return Ok((EventStream::refused(applied(fault)), completion));
                     }
+                    // Nothing decodes a content coding: a typed decoder would
+                    // read its bytes as garbage. A relayed answer goes as it
+                    // came, its head and coding the client's.
+                    if !codings
+                        && let Some(coding) = crate::rules::content_coding(&head.headers)
+                    {
+                        let fault = Fault::upstream(format!(
+                            "the provider's answer is in content coding {coding}, which the gateway does not decode"
+                        ));
+                        return Ok((EventStream::refused(fault), completion));
+                    }
                     let events = match decode(&head, &sent) {
                         Some(decoder) => codec::decode(body, decoder, Some(limit)),
                         None => EventStream::empty(),
                     }
                     .map_err(applied);
+                    let events = claimed(events, claim);
                     let response = match streaming && completion.is_none() {
                         true => ending(events, ended),
                         false => EventStream::stream(events),
@@ -253,7 +283,7 @@ async fn refused(
     refusal: Refusal,
     upload: &Failure,
 ) -> Fault {
-    let read = codec::collect(body, limit, || respan_gateway_sse::over_limit(limit)).await;
+    let read = body.read_answer(limit).await;
     match read {
         Ok(bytes) => refusal(http::Response::from_parts(head, bytes)),
         Err(fault) if upload.get().is_some() => fault,
@@ -262,6 +292,23 @@ async fn refused(
             None => fault,
         },
     }
+}
+
+/// `events`, holding `claim` of the client's head: kept at a clean end,
+/// released at a failure or a drop before the end.
+fn claimed<O>(
+    mut events: impl Stream<Item = Result<O, Fault>> + Unpin + Send + 'static,
+    mut claim: Option<crate::raw::HeadClaim>,
+) -> impl Stream<Item = Result<O, Fault>> + Unpin + Send + 'static {
+    stream::poll_fn(move |cx| {
+        let item = events.poll_next_unpin(cx);
+        match (&item, claim.as_mut()) {
+            (Poll::Ready(None), Some(claim)) => claim.keep(),
+            (Poll::Ready(Some(Err(_))), Some(claim)) => claim.release(),
+            _ => {}
+        }
+        item
+    })
 }
 
 /// `events`, dropping `ended` at their end: a provider that answered in
@@ -341,5 +388,58 @@ mod tests {
             fault.get(),
             Some(&RetryAfter(std::time::Duration::from_secs(7)))
         );
+    }
+
+    /// The answer `coding` reads as, as a typed format binds it, relayed if
+    /// `relayed`: its first output, or its refusal.
+    async fn coded(coding: &'static str, relayed: bool) -> Result<Bytes, Fault> {
+        let send = move |_| async move {
+            let answer = http::Response::builder()
+                .header("content-encoding", coding)
+                .body(Body::full("bytes"));
+            Ok((answer.unwrap_or_default(), None))
+        };
+        let mut extensions = Extensions::new();
+        if relayed {
+            extensions.insert(crate::raw::Relayed);
+        }
+        let (incoming, mut outgoing) = connect(send, 64)(extensions).bind(
+            |_, _| {
+                Ok(Box::new(|value: &Bytes, out: &mut Vec<Bytes>| {
+                    out.push(value.clone());
+                    Ok(())
+                }))
+            },
+            |_, _| {
+                let read = crate::Whole::new(|bytes: Bytes, out: &mut Vec<Bytes>| {
+                    out.push(bytes);
+                    Ok(())
+                });
+                Some(Box::new(read) as Box<dyn Decoder<Bytes>>)
+            },
+        );
+        let mut input = EventStream::single(Bytes::from_static(b"q"));
+        outgoing.prepare(&mut input)?;
+        let (answer, _) = futures::join!(incoming, outgoing.close());
+        let mut events = answer?;
+        if let Some(fault) = events.refusal() {
+            return Err(fault.clone());
+        }
+        events.next().await.unwrap_or_else(|| Ok(Bytes::new()))
+    }
+
+    /// Nothing decodes a content coding: a success in one is a provider's
+    /// fault, but relayed, which goes as it came.
+    #[tokio::test]
+    async fn a_success_in_a_content_coding_is_refused_unless_relayed() {
+        let refused = coded("gzip", false).await.err();
+        let said = refused.as_ref().map(|f| (f.kind(), status(f)));
+        let upstream = respan_gateway_core::FaultKind::Provider;
+        assert_eq!(said, Some((upstream, http::StatusCode::BAD_GATEWAY)));
+        assert_eq!(
+            coded("Identity", false).await.ok(),
+            Some(Bytes::from("bytes"))
+        );
+        assert_eq!(coded("gzip", true).await.ok(), Some(Bytes::from("bytes")));
     }
 }

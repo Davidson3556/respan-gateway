@@ -11,8 +11,6 @@ mod session;
 mod stdio;
 mod streamable;
 
-/// Who a call's session belongs to: the HTTP wire's, here for the MCP
-/// crates that name it.
 pub use stdio::StdioTransport;
 pub use streamable::{FORMAT, SESSION, StreamableHttp};
 

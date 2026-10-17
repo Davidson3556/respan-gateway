@@ -63,16 +63,23 @@ pub fn check(config: &AggregateConfig, servers: &[McpServer]) -> Result<Vec<Stri
         }
     }
     for (key, patterns) in [("allow", &config.allow), ("deny", &config.deny)] {
-        if patterns
-            .iter()
-            .any(|p| p.is_empty() || p.contains(char::is_whitespace))
-        {
-            return Err(bad(format!(
-                "{key}: a pattern is a tool name, with `*` for any characters"
-            )));
-        }
+        check_patterns(key, patterns).map_err(bad)?;
     }
     Ok(names)
+}
+
+/// Patterns of tool names as the aggregate has them, `{server}__{name}`,
+/// with `*` for any characters: none empty or with a space.
+pub fn check_patterns(key: &str, patterns: &[String]) -> Result<(), String> {
+    match patterns
+        .iter()
+        .any(|p| p.is_empty() || p.contains(char::is_whitespace))
+    {
+        true => Err(format!(
+            "{key}: a pattern is a tool name, with `*` for any characters"
+        )),
+        false => Ok(()),
+    }
 }
 
 /// The aggregate of `servers` (checked by [`check`]) under `config`'s filter.

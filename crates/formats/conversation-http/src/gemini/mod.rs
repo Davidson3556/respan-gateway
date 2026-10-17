@@ -84,7 +84,8 @@ mod tests;
 use crate::is_inert;
 use crate::schema::{
     Asked, Keep, Names, NativeFieldsExt, Schema, UsageFields, block_fields, check_usage, count,
-    kept_fields, merge_details, merge_fields, native_fields, set, unwritable_content, usage_extra,
+    kept_fields, merge_details, merge_fields, native_fields, set, unwritable_content,
+    unwritable_native, usage_extra,
 };
 use respan_gateway_conversation::{Assembled, AssembledItem, Block, Finish, Input, Output, Usage};
 use respan_gateway_core::Provider;
@@ -152,14 +153,16 @@ fn finish_of(reason: &str) -> Finish {
     }
 }
 
-/// The model and the method a Gemini path names: `.../models/{model}:{method}`.
-fn call_of(uri: &http::Uri) -> Option<(&str, &str)> {
+/// The model, unescaped, and the method a Gemini path names:
+/// `.../models/{model}:{method}`.
+fn call_of(uri: &http::Uri) -> Option<(String, &str)> {
     let path = uri.path();
     let (rest, last) = path.rsplit_once('/')?;
     let (model, method) = last.rsplit_once(':')?;
     let named = rest.rsplit('/').next() == Some("models") && !model.is_empty();
     let known = matches!(method, "generateContent" | "streamGenerateContent");
-    (named && known).then_some((model, method))
+    let unescaped = || percent_encoding::percent_decode_str(model).decode_utf8_lossy();
+    (named && known).then(|| (unescaped().into_owned(), method))
 }
 
 /// Whether a streaming call at `uri` asks for server-sent events (`alt=sse`).
@@ -243,7 +246,7 @@ impl GeminiGenerate {
             _ => return Err(Fault::bad_request("request body is not a JSON object")),
         };
         let mut chat = self.decode_json(&v);
-        chat.model = call_of(&head.uri).map(|(model, _)| model.to_owned());
+        chat.model = call_of(&head.uri).map(|(model, _)| model);
         Ok(chat)
     }
 }
@@ -424,7 +427,9 @@ impl Schema for GeminiGenerate {
                 }
                 AssembledItem::Native(NativeValue { format, value: raw })
                     if is_inert(format, raw) => {}
-                AssembledItem::Native(..) => return Err(unwritable_content()),
+                AssembledItem::Native(NativeValue { format, value: raw }) => {
+                    return Err(unwritable_native(format, raw));
+                }
             }
         }
         let finish = whole.finish.as_ref().unwrap_or(&Finish::Stop);

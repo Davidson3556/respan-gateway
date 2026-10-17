@@ -5,7 +5,6 @@ import { api, getGatewayKey, subscribeGatewayKey, type Kind } from "@/lib/api";
 export const queryKeys = {
   overview: ["overview"] as const,
   providers: ["providers"] as const,
-  mcp: ["mcp"] as const,
   routes: ["routes"] as const,
   requests: ["requests"] as const,
   request: (id: string) => ["request", id] as const,
@@ -36,16 +35,6 @@ export function useProviders() {
   });
 }
 
-/** MCP servers; none if the gateway predates them or has none. */
-export function useMcpServers() {
-  return useQuery({
-    queryKey: queryKeys.mcp,
-    queryFn: ({ signal }) => api.mcp(signal).catch(() => []),
-    refetchInterval: 10_000,
-  });
-}
-
-/** The routes; `live` refetches them for each candidate's latest record. */
 /** The MCP servers with who uses them; refreshed for their counts. */
 export function useMcpOverview() {
   return useQuery({
@@ -69,6 +58,7 @@ export function useMcpTools(name: string, enabled: boolean) {
   });
 }
 
+/** The routes; `live` refetches them for each candidate's latest record. */
 export function useRoutes(live = false) {
   return useQuery({
     queryKey: queryKeys.routes,

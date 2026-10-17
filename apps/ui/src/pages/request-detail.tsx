@@ -17,12 +17,14 @@ import {
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { queryKeys } from "@/hooks/queries";
+import { useLiveMode } from "@/hooks/use-live-requests";
 import { ApiError, api, type RequestRecord } from "@/lib/api";
 import { formatCost, formatCount, formatDateTime, formatMs, formatPercent } from "@/lib/format";
 import { timingOf, tokensPerSecond } from "@/lib/requests";
 
 function useRequestRecord(id: string) {
   const queryClient = useQueryClient();
+  const mode = useLiveMode();
   return useQuery({
     queryKey: queryKeys.request(id),
     queryFn: ({ signal }) => api.request(id, signal),
@@ -30,6 +32,9 @@ function useRequestRecord(id: string) {
       queryClient.getQueryData<RequestRecord[]>(queryKeys.requests)?.find((r) => r.id === id),
     // Records in flight change; finished ones don't.
     staleTime: (q) => (q.state.data?.status == null ? 0 : Infinity),
+    // Without the stream nothing pushes a pending record's changes: poll it.
+    refetchInterval: (q) =>
+      mode !== "live" && q.state.data && q.state.data.status == null && !q.state.error ? 2000 : false,
   });
 }
 
@@ -217,7 +222,7 @@ export function RequestDetailSheet() {
           <EmptyState icon={Ghost} title="Request not found" className="mx-4">
             <p>
               {error instanceof ApiError && error.status === 404
-                ? "The gateway keeps the last 1,000 requests; this one has been evicted."
+                ? "The gateway keeps only its most recent requests; this one has been evicted."
                 : "It couldn't be loaded from the gateway."}
             </p>
           </EmptyState>

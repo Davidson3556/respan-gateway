@@ -95,17 +95,29 @@ pub(super) fn passed(server: &str, mut output: Output) -> Output {
 /// a prompt's messages.
 pub(super) fn rewrite_result(server: &str, mut m: Message) -> Message {
     if let Some(result) = m.result_mut() {
-        for content in result["contents"].as_array_mut().into_iter().flatten() {
+        for content in each(result, "contents") {
             prefix_field(server, content, "uri");
         }
-        for item in result["content"].as_array_mut().into_iter().flatten() {
+        for item in each(result, "content") {
             prefix_content(server, item);
         }
-        for message in result["messages"].as_array_mut().into_iter().flatten() {
-            prefix_content(server, &mut message["content"]);
+        for message in each(result, "messages") {
+            if let Some(content) = message.get_mut("content") {
+                prefix_content(server, content);
+            }
         }
     }
     m
+}
+
+/// The items of the list `value` holds at `key`, if it holds one: looked
+/// up, not indexed, which would add a `null` where there is none.
+fn each<'a>(value: &'a mut Value, key: &str) -> impl Iterator<Item = &'a mut Value> {
+    value
+        .get_mut(key)
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
 }
 
 /// A notification of `server`'s as the client has it: `resources/updated`
@@ -203,6 +215,19 @@ mod tests {
         assert_eq!(split(&servers, "a__c"), Some(("a", "c")));
         assert_eq!(split(&servers, "a__"), None);
         assert_eq!(split(&servers, "nothing"), None);
+    }
+
+    #[test]
+    fn a_result_is_rewritten_with_nothing_added() {
+        let link = json!({ "type": "resource_link", "uri": "file:///a" });
+        let said = json!({ "jsonrpc": "2.0", "id": 1, "result": { "content": [link] } });
+        let m: Message = serde_json::from_value(said).expect("a response");
+        let result = rewrite_result("fs", m)
+            .result_mut()
+            .cloned()
+            .expect("a result");
+        let link = json!({ "type": "resource_link", "uri": "mcp://fs/file:///a" });
+        assert_eq!(result, json!({ "content": [link] }));
     }
 
     #[test]

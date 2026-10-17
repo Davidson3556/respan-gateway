@@ -56,9 +56,9 @@ impl Rule {
         }
     }
 
-    /// Whether its name is a glob rather than one model.
+    /// Whether its name is a glob (with a `*` or `?`) rather than one model.
     pub fn is_glob(&self) -> bool {
-        self.name.contains('*')
+        self.name.contains(['*', '?'])
     }
 
     /// Whether it routes a request for `model`.
@@ -126,7 +126,8 @@ impl fmt::Display for Candidate {
 
 /// How a route orders its candidates for a request. Whichever it is, one
 /// that failed its last few calls just now goes last.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Pick {
     /// As listed.
     #[default]
@@ -272,6 +273,9 @@ mod tests {
         assert!(glob("smart", "smart"));
         assert!(!glob("smart", "smarter"));
         assert!(!glob("a*a", "a"));
+        assert!(glob("gpt-?o", "gpt-4o") && !glob("gpt-?o", "gpt-o"));
+        assert!(Rule::new("gpt-?o", Vec::new()).is_glob());
+        assert!(!Rule::new("gpt-4o", Vec::new()).is_glob());
     }
 
     #[test]

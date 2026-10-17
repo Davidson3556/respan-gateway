@@ -14,9 +14,8 @@ use respan_gateway_core::{Fault, Gateway};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::header::{self, HeaderValue};
 use respan_gateway_http::http::{self, Method, StatusCode, Version};
-use respan_gateway_http::rules::{plain_text, remove_if};
+use respan_gateway_http::rules::{plain_response, remove_if};
 use respan_gateway_http::{Body, Credential, Frames};
-use respan_gateway_http_faults::status;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::WebSocketStream;
@@ -181,10 +180,7 @@ async fn refusal(
 
 /// `fault` as text/plain under its status: its error code, never its message.
 fn text(fault: &Fault) -> http::Response<Body> {
-    let mut head = http::Response::new(()).into_parts().0;
-    head.status = status(fault);
-    let text = plain_text(&mut head, fault.code());
-    http::Response::from_parts(head, Body::full(text))
+    plain_response(fault, fault.code())
 }
 
 /// Which edge a connection is, for what its peer's end means.

@@ -1,6 +1,11 @@
 // What every playground tab shares of the client APIs it can speak: each
 // tab lists its own, and offers those the gateway serves for its kind.
 
+import type { ServedFormat } from "@/lib/api";
+
+/** A JSON object of an API's, read loosely: the adapters know its shape. */
+export type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+
 /** A client API a tab can speak, by the format the gateway names it. */
 export interface ApiOption {
   id: string;
@@ -16,7 +21,7 @@ export interface ApiOption {
 export function servedApis<A extends { id: string }>(
   kind: string,
   apis: A[],
-  serve: { format: string; kind: string }[] | undefined,
+  serve: Pick<ServedFormat, "format" | "kind">[] | undefined,
 ): A[] {
   const served = apis.filter((a) => serve?.some((s) => s.kind === kind && s.format === a.id));
   return served.length > 0 ? served : apis.slice(0, 1);

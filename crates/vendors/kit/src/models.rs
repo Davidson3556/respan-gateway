@@ -25,12 +25,16 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type Models = Result<Vec<Model>, Fault>;
 
 /// The models of an answer as OpenAI's, `{"data": [{"id", "created"}]}`,
-/// with what OpenAI-compatible lists add read where they say it: a
+/// or a bare array as Together's, with what OpenAI-compatible lists add read where they say it: a
 /// name, a description, a context length, an output limit, modalities
 /// and pricing (OpenRouter's per token, Together's per million).
 pub fn listed(answer: &Value) -> Vec<Model> {
-    let models = answer["data"].as_array().into_iter().flatten();
-    models.filter_map(compatible).collect()
+    let models = answer.as_array().or_else(|| answer["data"].as_array());
+    models
+        .into_iter()
+        .flatten()
+        .filter_map(compatible)
+        .collect()
 }
 
 /// One entry of an OpenAI-compatible list.
@@ -74,12 +78,18 @@ fn names(v: &Value) -> impl Iterator<Item = &str> {
 }
 
 /// A list's pricing: OpenRouter's, `prompt` and `completion` in dollars per
-/// token as text; else Together's, `input` and `output` per million.
+/// token as text; else Together's, `input` and `output` per million. A
+/// negative price, as OpenRouter's placeholder `"-1"`, is unknown.
 fn pricing(p: &Value) -> Option<Price> {
-    let number = |v: &Value| v.as_f64().or_else(|| v.as_str()?.parse().ok());
+    let number = |v: &Value| {
+        let n: f64 = v.as_f64().or_else(|| v.as_str()?.parse().ok())?;
+        (n >= 0.0).then_some(n)
+    };
     if let (Some(input), Some(output)) = (number(&p["prompt"]), number(&p["completion"])) {
-        let cached = number(&p["input_cache_read"]).map(|c| c * 1e6);
-        return Some(Price::new(input * 1e6, output * 1e6, cached));
+        let per_million = |key| number(&p[key]).map(|n| n * 1e6);
+        let mut price = Price::new(input * 1e6, output * 1e6, per_million("input_cache_read"));
+        price.cache_write = per_million("input_cache_write");
+        return Some(price);
     }
     let (input, output) = (number(&p["input"])?, number(&p["output"])?);
     Some(Price::new(input, output, number(&p["cached_input"])))
@@ -106,7 +116,8 @@ mod tests {
             { "id": "anthropic/claude-x", "name": "Anthropic: Claude X", "context_length": 200000,
               "architecture": { "input_modalities": ["text", "image"] },
               "top_provider": { "max_completion_tokens": 64000 },
-              "pricing": { "prompt": "0.000003", "completion": "0.000015", "input_cache_read": "0.0000003" },
+              "pricing": { "prompt": "0.000003", "completion": "0.000015", "input_cache_read": "0.0000003",
+                           "input_cache_write": "0.00000375" },
               "supported_parameters": ["tools", "reasoning", "temperature"] },
             // Together's: per-million prices, a display name.
             { "id": "meta-llama/Llama-3", "display_name": "Llama 3", "context_length": 8192,
@@ -132,6 +143,7 @@ mod tests {
         let price = router.price.expect("priced");
         assert!((price.input - 3.0).abs() < 1e-9 && (price.output - 15.0).abs() < 1e-9);
         assert!((price.cached_input.unwrap_or_default() - 0.3).abs() < 1e-9);
+        assert!((price.cache_write.unwrap_or_default() - 3.75).abs() < 1e-9);
         assert_eq!(models[1].price, Some(Price::new(0.88, 0.88, None)));
         assert_eq!(models[2].context_window, Some(32000));
         assert_eq!(models[2].input_modalities, [Modality::Image]);
@@ -140,6 +152,18 @@ mod tests {
         assert_eq!(retires, Some(1_792_713_600));
         assert_eq!(models[3].created.map(|t| t.timestamp()), Some(1));
         assert_eq!(models[3].price, None);
+    }
+
+    #[test]
+    fn a_placeholder_price_is_unknown_and_a_bare_array_a_list() {
+        let answer = json!([
+            { "id": "auto", "pricing": { "prompt": "-1", "completion": "-1" } },
+            { "id": "free", "pricing": { "prompt": "0", "completion": "0", "input_cache_read": "-1" } },
+        ]);
+        let models = listed(&answer);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].price, None);
+        assert_eq!(models[1].price, Some(Price::new(0.0, 0.0, None)));
     }
 
     #[test]

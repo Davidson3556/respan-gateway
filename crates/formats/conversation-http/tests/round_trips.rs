@@ -624,7 +624,10 @@ fn reasoning_is_typed_but_signatures_remain_format_specific() {
             .iter()
             .any(|p| matches!(p, Content::Reasoning {text,..} if text=="consider"))
     );
-    assert_eq!(same(ANTHROPIC, &body), body);
+    // Anthropic refuses thinking it did not sign; an earlier turn may leave
+    // it out.
+    let unsigned = same(ANTHROPIC, &body);
+    assert_eq!(unsigned["messages"][0]["content"], "");
     let signed = anthropic(
         json!([{"role":"assistant","content":[{"type":"thinking","thinking":"consider","signature":"sig"}]}]),
     );

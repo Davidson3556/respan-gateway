@@ -120,7 +120,9 @@ pub(crate) fn report(text: &str) -> String {
         .join("\n")
 }
 
-fn escape_controls(text: &str) -> String {
+/// `text` with its control characters escaped, so none can forge a line
+/// or drive a terminal.
+pub(crate) fn escape_controls(text: &str) -> String {
     text.chars()
         .flat_map(|c| {
             if c.is_control() {

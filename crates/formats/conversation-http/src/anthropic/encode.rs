@@ -3,6 +3,7 @@
 use crate::is_inert;
 use crate::schema::{
     Gate, Schema, check_usage, fits, merge_fields, own_fields, unwritable_content,
+    unwritable_native,
 };
 use respan_gateway_conversation::{Block, Delta, Finish, Output, Start, Usage, block_fields};
 use respan_gateway_core::{Fault, NativeValue};
@@ -305,6 +306,9 @@ impl EventStream {
                 }
             }
             Output::Native(NativeValue { format, value: raw }) if is_inert(format, raw) => {}
+            Output::Native(NativeValue { format, value: raw }) => {
+                return Err(unwritable_native(format, raw));
+            }
             _ => return Err(unwritable_content()),
         }
         Ok(())

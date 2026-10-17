@@ -18,7 +18,7 @@ use super::KEPT;
 use super::record::{RequestRecord, clip, rfc3339};
 use crate::config::Config;
 use crate::history::{self, Filter, Writer};
-use crate::logging::{Level, LogFormat, paint};
+use crate::logging::{Level, LogFormat, escape_controls, paint};
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct Totals {
@@ -154,6 +154,11 @@ impl RequestLog {
         if !kept.writer.as_ref().is_some_and(|w| w.is(config)) {
             kept.writer = Writer::from_config(config);
         }
+    }
+
+    /// How many requests it keeps: `request_log.history`.
+    pub fn capacity(&self) -> usize {
+        self.kept().capacity
     }
 
     fn kept(&self) -> MutexGuard<'_, Kept> {
@@ -498,14 +503,6 @@ fn duration(ms: u64) -> String {
 }
 
 /// `line` with its control characters escaped, so one request is one line.
-fn escape_controls(line: &str) -> String {
-    let escaped = |c: char| match c.is_control() {
-        true => c.escape_default().collect(),
-        false => c.to_string(),
-    };
-    line.chars().map(escaped).collect()
-}
-
 /// `cost`, in US dollars: cents, or two significant digits below a cent,
 /// so a call's fraction of a cent does not read as nothing.
 fn usd(cost: f64) -> String {

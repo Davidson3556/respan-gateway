@@ -15,6 +15,7 @@ const overview: Overview = {
   auth_required: true,
   config_source: "file",
   config_path: "gateway.toml",
+  history: 1000,
   totals: { requests: 0, errors: 0, in_flight: 0, input_tokens: 0, output_tokens: 0 },
 };
 

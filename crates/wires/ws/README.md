@@ -24,7 +24,7 @@ the vendors that speak them
   the client; invalid UTF-8 is a fault. Disabled by default.
 - `CloseCode(u16)`: an extension on a `Fault` that picks the code the client is
   closed with, in place of 1011. A code no Close may carry (1004 to 1006,
-  1015, outside 1000 to 4999) is sent as 1011.
+  1015 to 2999, outside 1000 to 4999) is sent as 1011.
 - `ProviderClose(u16)`: the code a provider closed with, other than 1000, on
   the `upstream` fault the transport ends the answer with. The client is told
   it only as a `CloseCode`, which the transport adds on a call `Relayed`

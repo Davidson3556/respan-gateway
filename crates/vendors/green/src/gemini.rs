@@ -148,6 +148,12 @@ fn list_models(p: &VendorProvider) -> BoxFuture<'_, Models> {
             model.description = m["description"].as_str().map(str::to_owned);
             model.context_window = m["inputTokenLimit"].as_u64();
             model.max_output_tokens = m["outputTokenLimit"].as_u64();
+            // Its list says only whether one thinks; every model that
+            // generates content calls tools.
+            let methods = m["supportedGenerationMethods"].as_array();
+            if methods.is_some_and(|ms| ms.iter().any(|m| m == "generateContent")) {
+                model.can(Capability::Tools);
+            }
             if m["thinking"] == true {
                 model.can(Capability::Reasoning);
             }

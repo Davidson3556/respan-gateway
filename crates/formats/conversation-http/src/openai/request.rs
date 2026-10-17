@@ -7,7 +7,7 @@
 use crate::schema::{
     Keep, Names, NativeFieldsExt, decode_tools, each_tool, effort_name, encode_content,
     encode_message, encode_native, kept_fields, merge_missing, native_fields, only, own_native,
-    reasoning_of, remainder, rest_of, set, tool_field, untranslatable,
+    reasoning_of, remainder, rest_of, set, source_url, tool_field, untranslatable,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use respan_gateway_conversation::{
@@ -201,6 +201,15 @@ fn openai_result(
     if is_error {
         return Err(untranslatable("a tool result that is an error"));
     }
+    let media = |c: &Content| {
+        matches!(
+            c,
+            Content::Image(_) | Content::Audio(_) | Content::Document(_)
+        )
+    };
+    if content.iter().any(media) {
+        return Err(untranslatable("media in an OpenAI tool message"));
+    }
     let mut v = Map::new();
     v.insert("role".into(), "tool".into());
     v.insert("tool_call_id".into(), id.into());
@@ -314,20 +323,6 @@ pub(crate) fn decode_part(v: &Value) -> Option<Content> {
         1 => Content::Audio(media),
         _ => Content::Document(media),
     })
-}
-
-/// The media type and source of a URL: the data of a `data:` URL, else the
-/// URL, of type `fallback`.
-fn source_url(url: &str, fallback: &str) -> Option<(String, MediaSource)> {
-    if let Some(data) = url.strip_prefix("data:") {
-        let (mime, data) = data.split_once(";base64,")?;
-        Some((
-            mime.into(),
-            MediaSource::Bytes(STANDARD.decode(data).ok()?.into()),
-        ))
-    } else {
-        Some((fallback.into(), MediaSource::Url(url.into())))
-    }
 }
 
 /// A part of the kind's as OpenAI writes it, refusing what it cannot say.

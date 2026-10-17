@@ -65,7 +65,9 @@ each in turn until one succeeds, retried as its `backoff` allows
 (`first_success`), or raced when it has a `hedge` (`race`); a request no rule
 routed, or whose target a later plugin changed, is left alone. It answers
 the request itself, so register it last, after every plugin that targets,
-edits or answers the request.
+edits or answers the request. A request a plugin before it answers, as the
+tool loop does a chat request it runs tools for, goes to the rule's first
+candidate alone, with no fallback, retry or hedge.
 
 Plugins compose in registration order: `Routing` keeps a target a plugin
 before it set. A gateway's own default target is not a plugin's choice;

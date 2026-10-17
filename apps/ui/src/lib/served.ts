@@ -1,5 +1,4 @@
 import { api as gateway, type Provider, type RequestRecord } from "@/lib/api";
-import type { ChatApiId } from "@/lib/chat-apis";
 
 /** A call to find the record of: in the client format `api`, for `model`, begun at `since`. */
 export interface Want {
@@ -14,8 +13,8 @@ export interface Want {
 export interface Served {
   id: string;
   provider: string | null;
-  /** The client API it was translated from, when the provider speaks another. */
-  translatedFrom: ChatApiId | null;
+  /** The client format it was translated from, when the provider speaks another. */
+  translatedFrom: string | null;
   /** Calls to the model, when the gateway ran a tool loop. */
   steps: RequestRecord["steps"];
 }
@@ -64,7 +63,7 @@ export function servedBy(record: RequestRecord, providers: Provider[] | undefine
   return {
     id: record.id,
     provider: record.provider,
-    translatedFrom: translated ? (record.format as ChatApiId) : null,
+    translatedFrom: translated ? record.format : null,
     steps: record.steps,
   };
 }

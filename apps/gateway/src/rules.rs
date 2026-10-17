@@ -9,7 +9,7 @@ use respan_gateway_plugin_routing::{Candidate, Pick, Rule};
 
 use crate::auth::Client;
 use crate::compose::Upstream;
-use crate::config::{Commit, Config, PickName, RouteConfig};
+use crate::config::{Commit, Config, RouteConfig};
 use crate::formats::KnownFormat;
 
 /// The most tries per candidate.
@@ -71,7 +71,7 @@ fn rule(
         if to.contains(&candidate) {
             return Err(format!("to: '{}' is listed twice", target.target));
         }
-        if target.weight == 0 && route.pick == PickName::Weighted {
+        if target.weight == 0 && route.pick == Pick::Weighted {
             return Err(format!("to: '{}': a weight must be above 0", target.target));
         }
         candidate.weight = target.weight;
@@ -111,13 +111,7 @@ fn rule(
         return Err("hedge races the candidates, so cannot go with `fallback = false`".into());
     }
     let mut rule = Rule::new(name, to);
-    rule.pick = match route.pick {
-        PickName::First => Pick::First,
-        PickName::Cheapest => Pick::Cheapest,
-        PickName::Fastest => Pick::Fastest,
-        PickName::Weighted => Pick::Weighted,
-        PickName::Random => Pick::Random,
-    };
+    rule.pick = route.pick;
     rule.needs = route.needs.clone();
     rule.clients = route.when.clients.clone();
     rule.kinds = route.when.kinds.clone();

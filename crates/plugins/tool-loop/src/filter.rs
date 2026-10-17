@@ -27,17 +27,17 @@ impl ToolFilter {
 /// whatever knows the client. A tool is offered to such a request only if
 /// it is within this and the runner's own filter.
 #[derive(Debug, Clone)]
-pub struct ToolScope(ToolFilter);
+pub struct ToolScope(Vec<String>);
 
 impl ToolScope {
-    /// Limit a client to the tools `tools` names.
+    /// Limit a client to the tools `tools` names: none, if it names none.
     pub fn new(tools: Vec<String>) -> Self {
-        Self(ToolFilter::new(tools, Vec::new()))
+        Self(tools)
     }
 
     /// Whether the tool `name` is within the scope.
     pub fn offers(&self, name: &str) -> bool {
-        self.0.offers(name)
+        self.0.iter().any(|p| glob(p, name))
     }
 }
 
@@ -75,5 +75,12 @@ mod tests {
         assert!(!some.offers("fs__read"));
         let denied = filter(&[], &["fs__write"]);
         assert!(denied.offers("fs__read") && !denied.offers("fs__write"));
+    }
+
+    #[test]
+    fn a_scope_naming_nothing_offers_nothing() {
+        assert!(!ToolScope::new(Vec::new()).offers("gh__search"));
+        let scope = ToolScope::new(vec!["gh__*".to_owned()]);
+        assert!(scope.offers("gh__search") && !scope.offers("fs__read"));
     }
 }

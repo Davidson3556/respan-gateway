@@ -85,7 +85,8 @@ pub struct CloseCode(pub u16);
 
 impl CloseCode {
     /// This code if a Close frame may carry it (RFC 6455 7.4), else 1011:
-    /// 1004 to 1006, 1015, and any outside 1000 to 4999 may not be sent.
+    /// 1004 to 1006, 1015 to 2999, and any outside 1000 to 4999 may not be
+    /// sent.
     pub(crate) fn sendable(self) -> u16 {
         match self.0 {
             1000..=1003 | 1007..=1014 | 3000..=4999 => self.0,

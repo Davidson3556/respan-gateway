@@ -19,7 +19,9 @@
 //! A token, a secret and a refresh token are never logged, put in a fault,
 //! or shown by `Debug`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use respan_gateway_core::Fault;
@@ -29,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::compose::secret;
+use crate::compose::{key_source, secret};
 
 /// How long the token endpoint has to answer.
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -39,6 +41,12 @@ const SKEW: Duration = Duration::from_secs(30);
 const DEFAULT_LIFETIME: Duration = Duration::from_secs(3600);
 /// The longest a token may live in the cache, whatever the endpoint says.
 const MAX_LIFETIME: Duration = Duration::from_secs(24 * 3600);
+
+/// The refresh token each one a config names was rotated to, for the life
+/// of the process: a reload reads the config's again, which the token
+/// endpoint has spent.
+static ROTATED: LazyLock<parking_lot::Mutex<HashMap<String, String>>> =
+    LazyLock::new(Default::default);
 
 /// What `mcp login` saved of a server's authorization, to get its tokens
 /// with: the client it registered and the refresh token it was given.
@@ -137,6 +145,9 @@ pub struct OAuth {
     /// The login file a rotated refresh token is written back to, and what
     /// it holds.
     saved: Option<(PathBuf, Login)>,
+    /// The refresh token the config names, under which a rotation is kept
+    /// in [`ROTATED`].
+    configured: Option<String>,
     http: reqwest::Client,
     state: Mutex<State>,
     /// `env X` or `config`, for a person to read.
@@ -171,15 +182,15 @@ impl OAuth {
         };
         let client_id = read("client_id", &config.client_id)?;
         let client_secret = read("client_secret", &config.client_secret)?;
-        let refresh = match &config.refresh_token {
+        let configured = match &config.refresh_token {
             Some(token) => Some(read("refresh_token", token)?),
             None => None,
         };
-        let from = match config.client_secret.strip_prefix("env:") {
-            Some(var) => format!("env {var}"),
-            None => "config".to_owned(),
-        };
-        Self::build(
+        let refresh = configured
+            .as_ref()
+            .map(|token| ROTATED.lock().get(token).unwrap_or(token).clone());
+        let from = key_source(&config.client_secret);
+        let mut oauth = Self::build(
             owner,
             &config.token_url,
             client_id,
@@ -187,7 +198,9 @@ impl OAuth {
             &config.scopes,
             refresh,
             from,
-        )
+        )?;
+        oauth.configured = configured;
+        Ok(oauth)
     }
 
     /// The source of server `name`'s login at `path`, which `mcp login`
@@ -264,6 +277,7 @@ impl OAuth {
             scope,
             resource: None,
             saved: None,
+            configured: None,
             http,
             refreshing: refresh.is_some(),
             source,
@@ -314,6 +328,9 @@ impl OAuth {
                         path.display()
                     );
                 }
+            }
+            if let Some(configured) = &self.configured {
+                ROTATED.lock().insert(configured.clone(), rotated.clone());
             }
             state.refresh = Some(rotated);
         }

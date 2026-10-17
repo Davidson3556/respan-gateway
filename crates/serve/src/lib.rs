@@ -15,6 +15,7 @@ use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::future::{BoxFuture, Shared};
 use respan_gateway_http::http::header;
 use respan_gateway_http::http::request::Parts as RequestHead;
+use respan_gateway_http::rules::header_tokens;
 use respan_gateway_ws::Limits;
 
 /// The most bytes of a request [`Host`] reads by default.
@@ -101,8 +102,10 @@ impl Host {
         Router::new().fallback(move |mut req: Request| {
             let (gateway, limit, stop) = (gateway.clone(), limit.clone(), stop.clone());
             async move {
-                let upgrade = req.headers().get(header::UPGRADE);
-                if !upgrade.is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket")) {
+                // As the session's handshake reads it: one token of many.
+                let websocket = header_tokens(req.headers(), header::UPGRADE)
+                    .any(|token| token.eq_ignore_ascii_case("websocket"));
+                if !websocket {
                     return whole(gateway, req, &*limit).await;
                 }
                 let upgraded = hyper::upgrade::on(&mut req).map(|io| io.ok().map(TokioIo::new));

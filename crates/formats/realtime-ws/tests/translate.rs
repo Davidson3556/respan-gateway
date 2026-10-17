@@ -513,8 +513,8 @@ async fn gemini_to_openai_sets_up() {
 }
 
 // 23, 24, 25: 16 kHz audio is OpenAI's 24 kHz; the model's audio comes as
-// inline data at 24 kHz; speech is an interruption, and a response's end
-// the turn's.
+// inline data at 24 kHz; speech with no response is no interruption, and a
+// response's end the turn's.
 #[tokio::test]
 async fn gemini_to_openai_runs_a_voice_turn() {
     let (fake, mut client, _) = set_up_gemini().await;
@@ -534,14 +534,16 @@ async fn gemini_to_openai_runs_a_voice_turn() {
         ..Turn::default()
     });
     fake.user_speaks();
-    assert_eq!(
-        client.hear().await,
-        json!({"serverContent": {"interrupted": true}})
-    );
     fake.user_stops();
     let turn = client
         .until(|m| m["serverContent"]["turnComplete"] == true)
         .await;
+    // Speech before the response interrupts nothing.
+    assert!(
+        turn.iter()
+            .all(|m| m["serverContent"].get("interrupted").is_none()),
+        "{turn:?}"
+    );
     let audio: Vec<u8> = turn
         .iter()
         .filter_map(|m| m["serverContent"]["modelTurn"]["parts"][0].get("inlineData"))

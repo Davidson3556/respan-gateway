@@ -2,8 +2,7 @@
 
 use super::super::RESPONSES;
 use super::{ITEM_ROLE, MESSAGE, ROLES};
-use crate::schema::{INERT, NativeFieldsExt, native_fields, only, remainder, says};
-use base64::{Engine, engine::general_purpose::STANDARD};
+use crate::schema::{INERT, NativeFieldsExt, native_fields, only, remainder, says, source_url};
 use respan_gateway_conversation::{Content, Input, Media, MediaSource, Message, Role};
 use serde_json::{Map, Value, json};
 
@@ -95,19 +94,6 @@ pub(super) fn read_media(p: &Value) -> Option<Content> {
         true => Content::Image(media),
         false => Content::Document(media),
     })
-}
-
-/// The media type and source of a URL: the data of a `data:` URL, else the
-/// URL, of type `fallback`.
-fn source_url(url: &str, fallback: &str) -> Option<(String, MediaSource)> {
-    match url.strip_prefix("data:") {
-        Some(data) => {
-            let (mime, data) = data.split_once(";base64,")?;
-            let bytes = STANDARD.decode(data).ok()?;
-            Some((mime.into(), MediaSource::Bytes(bytes.into())))
-        }
-        None => Some((fallback.into(), MediaSource::Url(url.into()))),
-    }
 }
 
 /// The request's `instructions` and `input` as messages.

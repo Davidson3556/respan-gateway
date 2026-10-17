@@ -3,7 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { gatewayFetch, type RequestRecord } from "@/lib/api";
 import { readSse } from "@/lib/sse";
 import { queryKeys, useGatewayKey } from "@/hooks/queries";
-import { LiveModeContext, upsertRecord, type LiveMode } from "@/hooks/use-live-requests";
+import { historyOf, LiveModeContext, upsertRecord, type LiveMode } from "@/hooks/use-live-requests";
 
 const SILENCE_MS = 45_000;
 
@@ -36,7 +36,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
 
     const apply = (record: RequestRecord) => {
       queryClient.setQueryData<RequestRecord[]>(queryKeys.requests, (old) =>
-        upsertRecord(old ?? [], record),
+        upsertRecord(old ?? [], record, historyOf(queryClient)),
       );
       queryClient.setQueryData(queryKeys.request(record.id), record);
       refreshStats();

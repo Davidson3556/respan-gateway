@@ -19,20 +19,24 @@ use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use respan_gateway_core::futures::future::join_all;
-use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Provider, Response, async_trait};
+use respan_gateway_core::{
+    ClientContext, ErrorCode, Fault, Gateway, Plugin, Provider, Response, async_trait,
+};
 use respan_gateway_http::http::header::{self, HeaderName, HeaderValue};
 use respan_gateway_http::http::{self, HeaderMap, StatusCode};
 use respan_gateway_http::{Body, Completion, raw::Original};
+use respan_gateway_http_faults::Status;
 use respan_gateway_http_transport::reqwest;
 use respan_gateway_http_transport::{HttpTransport, unreachable};
 use respan_gateway_mcp::{Input, Output};
 use respan_gateway_mcp_http::{StdioTransport, StreamableHttp};
 use respan_gateway_plugin_routing::Model;
+use respan_gateway_plugin_tool_loop::ToolScope;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
 
-use crate::compose::{secret, valid_provider_name};
+use crate::compose::{key_source, secret, valid_provider_name};
 use crate::formats::{KnownFormat, kind};
 use crate::mcp_oauth::{OAuth, OAuthConfig};
 use crate::models::{Probe, Reach};
@@ -430,13 +434,6 @@ fn headers(owner: &str, headers: &IndexMap<String, String>) -> Result<HeaderMap,
     Ok(map)
 }
 
-fn key_source(value: &str) -> String {
-    match value.strip_prefix("env:") {
-        Some(var) => format!("env {var}"),
-        None => "config".to_owned(),
-    }
-}
-
 /// The file `program` names, or finds on the gateway's `PATH`, which a
 /// child is given. On Windows a program is also found with an extension of
 /// `PATHEXT` (`npx` is `npx.cmd`).
@@ -811,7 +808,9 @@ fn label(input: &Input) -> String {
     }
 }
 
-/// Targets a client of `/mcp/{name}` at the server `name`.
+/// Targets a client of `/mcp/{name}` at the server `name`. A key limited to
+/// some tools is refused there: a server's own endpoint offers all its
+/// tools, so such a key reaches them through `/mcp`, which holds it to them.
 #[derive(Debug)]
 pub struct McpRoute;
 
@@ -828,6 +827,14 @@ impl Plugin for McpRoute {
             .map(|request| respan_gateway_http::path::clean_path(request.uri().path()));
         let name = path.as_deref().and_then(|p| p.rsplit('/').next());
         let name = name.ok_or_else(|| Fault::not_found("no MCP server named"))?;
+        if cx.extensions().get::<ToolScope>().is_some() {
+            let message = format!(
+                "this key is limited to some tools, so it reaches MCP servers at /mcp, not /mcp/{name}"
+            );
+            return Err(Fault::new(message)
+                .with(ErrorCode("tools_limited".into()))
+                .with(Status(StatusCode::FORBIDDEN)));
+        }
         cx.set_target(name);
         Ok(None)
     }

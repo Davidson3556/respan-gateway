@@ -63,7 +63,7 @@ fn written(body: Value, edit: impl FnOnce(&mut Input)) -> Result<Value, Fault> {
 
 #[test]
 fn a_path_names_the_model_and_the_method() {
-    let call = |p: &str| call_of(&uri(p)).map(|(m, s)| (m.to_owned(), s.to_owned()));
+    let call = |p: &str| call_of(&uri(p)).map(|(m, s)| (m, s.to_owned()));
     assert_eq!(
         call("/v1beta/models/gemini-2.5-flash:generateContent"),
         Some(("gemini-2.5-flash".into(), "generateContent".into()))
@@ -71,6 +71,11 @@ fn a_path_names_the_model_and_the_method() {
     assert_eq!(
         call("/gw/v1beta/models/g:streamGenerateContent?alt=sse"),
         Some(("g".into(), "streamGenerateContent".into()))
+    );
+    // An escaped model name is unescaped, as a gateway's route names one.
+    assert_eq!(
+        call("/v1beta/models/openai%2Fgpt-4o:generateContent"),
+        Some(("openai/gpt-4o".into(), "generateContent".into()))
     );
     assert!(GeminiGenerate::streams(&uri(
         "/v1beta/models/g:streamGenerateContent?alt=sse"
@@ -617,4 +622,28 @@ fn a_gemini_3_turns_first_call_without_a_signature_takes_the_placeholder() {
 
     let parts = &signed_for("models/gemini-2.5-flash")["contents"][1]["parts"];
     assert!(parts[0].get("thoughtSignature").is_none(), "{parts}");
+}
+
+/// Writes each value as one event whose data spans two lines.
+struct TwoLines;
+
+impl respan_gateway_http::Encoder<Output> for TwoLines {
+    fn encode(&mut self, _: &Output, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+        out.push(respan_gateway_sse::event(None, "{\"a\":\n1}").into());
+        Ok(())
+    }
+}
+
+#[test]
+fn a_json_array_element_joins_the_data_lines_of_its_event() {
+    let mut array = JsonArray::new(Box::new(TwoLines));
+    let mut out = BytesMut::new();
+    for _ in 0..2 {
+        array
+            .encode_into(&Output::Finish(Finish::Stop), &mut out)
+            .expect("written");
+    }
+    array.end_into(&Ok(()), &mut out).expect("ended");
+    let elements: Value = serde_json::from_slice(&out).expect("one JSON array");
+    assert_eq!(elements, json!([{ "a": 1 }, { "a": 1 }]));
 }

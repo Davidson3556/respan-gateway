@@ -10,10 +10,12 @@ use crate::{Extensions, Result};
 
 pub(crate) const PANICKED: &str = "a plugin or format panicked";
 
-/// `f`, with a panic an internal fault.
-pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+/// `f`, with a panic an internal fault ([`Fault::panicked`]): a plugin's
+/// or format's code is run so a panic in it fails its exchange, not the
+/// gateway.
+pub fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    caught.unwrap_or_else(|_| Err(Fault::internal(PANICKED)))
+    caught.unwrap_or_else(|_| Err(Fault::panicked()))
 }
 
 /// Who a fault is on, which decides what follows it in any protocol: who
@@ -171,6 +173,11 @@ impl Fault {
     /// A bug, coded `internal`.
     pub fn internal(message: impl Into<String>) -> Self {
         Self::of(FaultKind::Gateway, message).coded("internal")
+    }
+
+    /// A plugin or format that panicked: [`internal`](Self::internal).
+    pub fn panicked() -> Self {
+        Self::internal(PANICKED)
     }
 
     fn coded(self, code: &'static str) -> Self {

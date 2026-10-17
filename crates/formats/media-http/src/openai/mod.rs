@@ -32,14 +32,16 @@ pub use speech::OpenAiSpeech;
 pub use transcriptions::OpenAiTranscriptions;
 pub use videos::OpenAiVideos;
 
-use crate::edge::{bind_provider, kept, sends};
+use crate::edge::{bind_provider, sends};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use respan_gateway_conversation::{Media, MediaSource, Usage};
-use respan_gateway_conversation_http::fields::{merge_missing, rest_of, set, unix_now};
+use respan_gateway_conversation_http::fields::{
+    self, kept, merge_missing, native_of, rest_of, set, unix_now,
+};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_conversation_http::{Schema, read_provider_error};
-use respan_gateway_core::{Connection, Details, ErrorCode, Fault, NativeFields, NativeValue};
+use respan_gateway_core::{Connection, ErrorCode, Fault, NativeValue};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{
@@ -205,11 +207,7 @@ fn bytes_of(media: &Media) -> Option<&Bytes> {
 
 /// A 400 for a request whose field `param` `what`, as OpenAI words one.
 fn invalid(param: &str, what: &str) -> Fault {
-    let mut details = Map::new();
-    details.insert("param".into(), param.into());
-    Fault::bad_request(format!("'{param}' {what}"))
-        .with(ErrorCode("invalid_request_error".into()))
-        .with(Details(details))
+    fields::invalid(param, what).with(ErrorCode("invalid_request_error".into()))
 }
 
 /// A 400 for a request without the field `param`.
@@ -262,11 +260,6 @@ fn is_true(v: Option<&Value>) -> bool {
         Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
         _ => false,
     }
-}
-
-/// `fields` as the native of a value of `format`: none if empty.
-fn native_of(format: &str, fields: Map<String, Value>) -> Option<NativeFields> {
-    (!fields.is_empty()).then(|| NativeFields::new(format, fields))
 }
 
 /// `seconds` as JSON: a whole number as one, as OpenAI writes it.

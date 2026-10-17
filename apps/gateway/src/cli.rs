@@ -517,13 +517,15 @@ fn write_config(path: &Path, text: &str, private: bool) -> std::io::Result<()> {
     #[cfg(unix)]
     if private {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
             .open(path)?;
+        // `mode` is a new file's alone: an older one may be readable by others.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         return file.write_all(text.as_bytes());
     }
     let _ = private;

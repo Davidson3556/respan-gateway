@@ -187,7 +187,7 @@ impl<T, D: Decoder<T>> Decoder<T> for Whole<D> {
     fn decode(&mut self, raw: Bytes, _: &mut Vec<T>) -> Result<(), Fault> {
         self.size += raw.len();
         if let Some(limit) = self.limit.filter(|&limit| self.size > limit) {
-            return Err(respan_gateway_sse::over_limit(limit));
+            return Err(respan_gateway_http_faults::over_limit(limit));
         }
         self.held.push(raw);
         Ok(())

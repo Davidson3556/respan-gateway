@@ -19,7 +19,7 @@ is the kind's types alone, depending only on `respan-gateway-core`,
 `Usage` is the token counts a provider reports: input, output, and the
 cached, cache-write and reasoning counts that are parts of them. A count
 of 0 is one the provider did not report. A format refuses usage it cannot
-write, such as cache writes in OpenAI Chat.
+write, such as cache writes in Gemini.
 
 A reply is a sequence of events, the same for a stream and a whole body, and
 an `Output` is one such event, not a whole reply: `Output::Start`, then for each content block a `BlockStart`, its `Delta`s and a

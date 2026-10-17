@@ -134,14 +134,24 @@ impl Model {
 
     /// Whether it is known to lack `need`, a capability or what it reads,
     /// by any name a vendor gives it (`vision` is an image, `pdf` a
-    /// document); a model whose list says neither lacks nothing known.
+    /// document). Each is judged only by a list that said some of its
+    /// kind: one that names no capability lacks none, and likewise for
+    /// what it reads.
     pub fn lacks(&self, need: &str) -> bool {
-        if self.capabilities.is_empty() && self.input_modalities.is_empty() {
-            return false;
-        }
-        let can = Capability::parse(need).is_some_and(|c| self.capabilities.contains(&c));
-        let reads = Modality::parse(need).is_some_and(|m| self.input_modalities.contains(&m));
-        !(can || reads)
+        let known = |said: bool, has: bool| !said || has;
+        let can = Capability::parse(need).map(|c| {
+            known(
+                !self.capabilities.is_empty(),
+                self.capabilities.contains(&c),
+            )
+        });
+        let reads = Modality::parse(need).map(|m| {
+            known(
+                !self.input_modalities.is_empty(),
+                self.input_modalities.contains(&m),
+            )
+        });
+        [can, reads].contains(&Some(false)) && !(can == Some(true) || reads == Some(true))
     }
 }
 
@@ -266,9 +276,14 @@ mod tests {
         model.reads(Modality::Document);
         assert!(!model.lacks("pdf"));
         assert!(model.lacks("vision"));
-        assert!(model.lacks("tools"));
+        assert!(!model.lacks("tools"), "no capability said: lacks none");
         model.can(Capability::Tools);
         assert!(!model.lacks("function_calling"));
+        assert!(model.lacks("reasoning"));
+        let mut gemini = Model::new("g");
+        gemini.can(Capability::Reasoning);
+        assert!(!gemini.lacks("vision"), "no modality said: reads any");
+        assert!(gemini.lacks("tools"));
     }
 
     #[test]

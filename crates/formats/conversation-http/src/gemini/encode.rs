@@ -2,13 +2,14 @@
 
 use crate::is_inert;
 use crate::schema::{
-    Gate, Schema, block_fields, check_usage, merge_fields, own_fields, unwritable_content,
+    Gate, Schema, arguments_object, block_fields, check_usage, merge_fields, merge_into,
+    own_fields, unwritable_content, unwritable_native,
 };
 use respan_gateway_conversation::{Block, Delta, Finish, Output, Start, Usage};
 use respan_gateway_core::{Fault, NativeValue};
 use respan_gateway_http::Encoder;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_sse::event;
+use respan_gateway_sse::{event, event_data};
 use serde_json::{Map, Value, json};
 
 use super::request::is_synthetic;
@@ -29,10 +30,11 @@ impl JsonArray {
         }
     }
 
-    /// The elements in `frames`, the SSE events `inner` wrote.
+    /// The elements in `frames`, the SSE events `inner` wrote, each its
+    /// `data` lines joined.
     fn elements(&mut self, frames: &[u8], out: &mut BytesMut) {
         let text = String::from_utf8_lossy(frames);
-        for data in text.split("\n\n").filter_map(|f| f.strip_prefix("data: ")) {
+        for data in text.split("\n\n").filter_map(|f| event_data(f.as_bytes())) {
             out.extend_from_slice(if self.began { b",\n" } else { b"[" });
             self.began = true;
             out.extend_from_slice(data.as_bytes());
@@ -79,13 +81,7 @@ pub(super) fn part_of(kind: &Block, text: &str) -> Result<Value, Fault> {
         Block::Text => json!({ "text": text }),
         Block::Reasoning => json!({ "text": text, "thought": true }),
         Block::ToolCall { id, name } => {
-            let args = match text.trim() {
-                "" => json!({}),
-                text => serde_json::from_str::<Value>(text)
-                    .ok()
-                    .filter(Value::is_object)
-                    .ok_or_else(unwritable_content)?,
-            };
+            let args = arguments_object(text).map_err(|_| unwritable_content())?;
             let mut call = json!({ "name": name, "args": args });
             if !is_synthetic(id) {
                 call["id"] = id.as_str().into();
@@ -115,11 +111,7 @@ impl ResponseFields {
     pub(super) fn add(&mut self, raw: &Value) -> bool {
         let extend = |into: &mut Map<String, Value>| {
             if let Some(fields) = raw["fields"].as_object() {
-                let mut all = Value::Object(std::mem::take(into));
-                merge_fields(&mut all, fields);
-                if let Value::Object(all) = all {
-                    *into = all;
-                }
+                merge_into(into, fields);
             }
         };
         match raw["type"].as_str() {
@@ -405,6 +397,9 @@ impl EventStream {
                 }
             }
             Output::Native(NativeValue { format, value: raw }) if is_inert(format, raw) => {}
+            Output::Native(NativeValue { format, value: raw }) => {
+                return Err(unwritable_native(format, raw));
+            }
             _ => return Err(unwritable_content()),
         }
         Ok(())

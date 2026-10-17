@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use respan_gateway_conversation::{Assembled, Content, Input, Output, Role};
+use respan_gateway_conversation::{Assembled, Content, Input, Message, Output, Role};
 use respan_gateway_core::{
     ClientContext, Fault, Filter, Plugin, ProviderContext, Response, Result, async_trait,
 };
@@ -238,7 +238,7 @@ struct CallState {
     /// Whether it is of the conversation kind: a call to a model.
     chat: bool,
     model: Option<String>,
-    prompt: Vec<Message>,
+    prompt: Vec<SpanMessage>,
     /// The tools offered: name, description, and parameters as JSON.
     tools: Vec<(String, Option<String>, String)>,
     said: Assembled,
@@ -345,7 +345,7 @@ impl Plugin for Calls {
             }
             Ok(())
         })?;
-        px.filter(Said(call))
+        px.filter(Said { call, content })
     }
 
     async fn on_provider_end(&self, px: &ProviderContext, end: &Result<()>) {
@@ -422,13 +422,19 @@ fn rpc(px: &mut ProviderContext, call: Call, content: bool) -> Result<()> {
     })
 }
 
-/// Folds what a model said, for its span.
-struct Said(Call);
+/// Folds what a model said, for its span: without content, only which
+/// model it was and its usage.
+struct Said {
+    call: Call,
+    content: bool,
+}
 
 impl Filter<Output> for Said {
     fn edit(&mut self, output: Output, out: &mut Vec<Output>) -> Result<()> {
-        // What cannot be folded only goes unrecorded.
-        let _ = self.0.0.lock().said.push(&output);
+        if self.content || matches!(output, Output::Start(_) | Output::Usage(_)) {
+            // What cannot be folded only goes unrecorded.
+            let _ = self.call.0.lock().said.push(&output);
+        }
         out.push(output);
         Ok(())
     }
@@ -583,7 +589,7 @@ fn role(role: &Role) -> String {
 /// One message of a span, as OpenLLMetry writes it: its role and text, the
 /// tools it called, and the call it answers if it is a tool's.
 #[derive(Debug, Clone, Default, PartialEq)]
-struct Message {
+struct SpanMessage {
     role: String,
     content: String,
     /// Each call's id, tool and arguments (JSON text).
@@ -592,7 +598,7 @@ struct Message {
     answers: Option<String>,
 }
 
-impl Message {
+impl SpanMessage {
     /// Its attributes under `at`, such as `gen_ai.prompt.0`.
     fn attrs(&self, at: &str, attrs: &mut Vec<Value>) {
         attrs.push(attr(&format!("{at}.role"), &self.role));
@@ -613,19 +619,19 @@ impl Message {
 
 /// A message as the span's messages: each tool's result its own `tool`
 /// message, then the message's text and calls, if it has any.
-fn messages_of(message: &respan_gateway_conversation::Message) -> Vec<Message> {
-    let mut said: Vec<Message> = (message.content.iter())
+fn messages_of(message: &Message) -> Vec<SpanMessage> {
+    let mut said: Vec<SpanMessage> = (message.content.iter())
         .filter_map(|c| match c {
-            Content::ToolResult { id, content, .. } => Some(Message {
+            Content::ToolResult { id, content, .. } => Some(SpanMessage {
                 role: "tool".into(),
                 content: text(content),
                 answers: Some(id.clone()),
-                ..Message::default()
+                ..SpanMessage::default()
             }),
             _ => None,
         })
         .collect();
-    let own = Message {
+    let own = SpanMessage {
         role: role(&message.role),
         content: text(&message.content),
         calls: calls(&message.content),
@@ -653,7 +659,7 @@ fn calls(content: &[Content]) -> Vec<(String, String, String)> {
 }
 
 /// A message's text, with a mark for each medium; its tool calls and
-/// results are said apart ([`Message`]).
+/// results are said apart ([`SpanMessage`]).
 fn text(content: &[Content]) -> String {
     let part = |c: &Content| match c {
         Content::Text { text, .. } => text.clone(),
@@ -667,8 +673,8 @@ fn text(content: &[Content]) -> String {
 }
 
 /// What a model said: its text and its tool calls.
-fn reply(said: &Assembled) -> Message {
-    Message {
+fn reply(said: &Assembled) -> SpanMessage {
+    SpanMessage {
         role: "assistant".into(),
         content: said.text(),
         calls: calls(&said.replay()),
@@ -721,10 +727,17 @@ impl Poster {
         }
     }
 
-    async fn post(&self, spans: Vec<Value>) {
-        if spans.is_empty() {
-            return;
+    /// Posts `spans`, [`BATCH`] at a time.
+    async fn post(&self, mut spans: Vec<Value>) {
+        while !spans.is_empty() {
+            let rest = spans.split_off(spans.len().min(BATCH));
+            self.send(spans).await;
+            spans = rest;
         }
+    }
+
+    /// Posts `spans` as one batch, and notes how that went.
+    async fn send(&self, spans: Vec<Value>) {
         let count = spans.len() as u64;
         let body = json!({ "resourceSpans": [{
             "resource": { "attributes": [attr("service.name", &self.service)] },
@@ -801,10 +814,10 @@ mod tests {
             error: None,
             chat: true,
             model: Some("gpt-4o-mini".into()),
-            prompt: vec![Message {
+            prompt: vec![SpanMessage {
                 role: "user".into(),
                 content: "Say hi".into(),
-                ..Message::default()
+                ..SpanMessage::default()
             }],
             tools: Vec::new(),
             said,
@@ -909,20 +922,19 @@ mod tests {
 
     #[test]
     fn tool_calls_and_their_results_are_said_as_openllmetry_says_them() {
-        use respan_gateway_conversation::Message as Chat;
-        let mut asked = Chat::new(Role::Assistant, "Looking.");
+        let mut asked = Message::new(Role::Assistant, "Looking.");
         asked.content.push(Content::tool_call(
             "call_1",
             "files__read",
             r#"{"path":"a"}"#,
         ));
-        let mut answered = Chat::new(Role::User, "");
+        let mut answered = Message::new(Role::User, "");
         answered.content = vec![Content::tool_result(
             "call_1",
             vec![Content::from("hi")],
             false,
         )];
-        let prompt: Vec<Message> = [asked, answered].iter().flat_map(messages_of).collect();
+        let prompt: Vec<SpanMessage> = [asked, answered].iter().flat_map(messages_of).collect();
         let mut said = Assembled::default();
         for output in [
             Output::Start(Start::new("r", "m")),

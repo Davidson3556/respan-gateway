@@ -833,3 +833,21 @@ async fn body_limits_can_differ_by_route_before_decoding() {
         assert_eq!(response.status(), expected, "{path}");
     }
 }
+
+#[tokio::test]
+async fn an_upgrade_to_websocket_among_others_is_a_session() {
+    use respan_gateway_http::http_body_util::BodyExt;
+    let app = router(openai_gateway("http://127.0.0.1:9"));
+    // No key: a session the WebSocket edge refuses, not a plain request.
+    let req = http::Request::get("/v1/chat/completions")
+        .header("upgrade", "websocket, h2c")
+        .header("connection", "Upgrade")
+        .body(axum::body::Body::empty())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let resp = tower::ServiceExt::oneshot(app, req)
+        .await
+        .unwrap_or_else(|e| match e {});
+    assert_eq!(resp.status(), 400);
+    let body = resp.into_body().collect().await.map(|b| b.to_bytes());
+    assert_eq!(body.ok().as_deref(), Some(&b"bad_request"[..]));
+}

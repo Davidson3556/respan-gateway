@@ -7,15 +7,8 @@
 
 use bytes::{Bytes, BytesMut};
 use respan_gateway_core::Fault;
+use respan_gateway_http_faults::over_limit;
 use serde_json::Value;
-
-/// The fault of a provider's answer that holds more than `limit` bytes at
-/// once: an event, or a whole body.
-pub fn over_limit(limit: usize) -> Fault {
-    Fault::upstream(format!(
-        "the provider's answer is over the limit of {limit} bytes"
-    ))
-}
 
 /// The byte order mark a stream may start with, which is no part of its
 /// first line (HTML, 9.2.6).

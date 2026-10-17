@@ -1,7 +1,7 @@
 //! Client input and its one response handoff.
 
+use super::Written;
 use super::writer::Writer;
-use super::{PANICKED, Written, guarded};
 use crate::codec::{self, decode_one};
 use crate::rules::{bodiless, error_head, outgoing, plain_response, strip_hops};
 use crate::{
@@ -19,8 +19,8 @@ use http::request::Parts as RequestHead;
 use http::response::Parts as ResponseHead;
 use http_body_util::BodyExt;
 use parking_lot::Mutex;
-use respan_gateway_core::Gateway;
 use respan_gateway_core::{Connection, ErrorCode, EventSink, EventStream, Extensions, Fault};
+use respan_gateway_core::{Gateway, guarded};
 use respan_gateway_http_faults::Status;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -266,7 +266,7 @@ impl ClientIo {
                                 Some(fault) => fallback.refusal(fault),
                                 // A panicking format may have left its error
                                 // writer unusable too: it goes as plain text.
-                                None => fallback.unwritable(Fault::internal(PANICKED)),
+                                None => fallback.unwritable(Fault::panicked()),
                             }
                         }
                     }
@@ -416,7 +416,7 @@ impl<T: 'static> Client<T> {
     fn unwritable(&mut self, fault: Fault) {
         self.writer.drop_encoder();
         self.writer.end(Err(fault.clone()), None);
-        let mut response = plain_response(&fault);
+        let mut response = plain_response(&fault, fault.message());
         response.extensions_mut().insert(Unwritten);
         if let Some((_, _, completion)) = self.unopened.take() {
             self.reply.slot.lock().publish((response, completion));
@@ -438,7 +438,7 @@ impl<T: 'static> Client<T> {
                 let error = &self.reply.error;
                 let request = &self.reply.request;
                 let Ok(bytes) = guarded(|| Ok(error(&fault, request, &mut head))) else {
-                    self.unwritable(Fault::internal(PANICKED));
+                    self.unwritable(Fault::panicked());
                     return;
                 };
                 bytes
@@ -475,7 +475,7 @@ impl<T> Drop for Client<T> {
         if self.unopened.is_some() && slot.committed && slot.sender.is_some() {
             let fault = Fault::abandoned();
             let end = futures::future::ready(Err(fault.clone())).boxed();
-            slot.publish((plain_response(&fault), end));
+            slot.publish((plain_response(&fault, fault.message()), end));
         }
     }
 }
@@ -628,14 +628,14 @@ fn depart(
     };
     match resp {
         Err(fault) if fault.code() == "not_found" => {
-            let text = format!("no format served accepts {method} {path}");
-            plain_response(&Fault::not_found(text))
+            let fault = Fault::not_found(format!("no format served accepts {method} {path}"));
+            plain_response(&fault, fault.message())
         }
-        Err(fault) => plain_response(&fault),
+        Err(fault) => plain_response(&fault, fault.message()),
         Ok(resp) if resp.status() == StatusCode::SWITCHING_PROTOCOLS && !live => {
             // RFC 9110 15.2.2: a 101 only to a request that asked.
             let asked = "a 101 to a request that did not ask to switch protocols";
-            plain_response(&Fault::internal(asked))
+            plain_response(&Fault::internal(asked), asked)
         }
         Ok(resp) => {
             let (mut head, mut body) = resp.into_parts();

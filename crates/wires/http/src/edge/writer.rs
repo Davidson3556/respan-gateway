@@ -10,9 +10,9 @@ use std::task::{Context, Poll, Waker};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::{FutureExt, Stream, StreamExt};
-use respan_gateway_core::Fault;
+use respan_gateway_core::{Fault, guarded};
 
-use super::{end_encoder, guarded};
+use super::end_encoder;
 use crate::{Completion, Encoder, Frames};
 
 #[derive(Default)]

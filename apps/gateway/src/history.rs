@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde::Deserialize;
 
 use crate::config::Config;
@@ -151,10 +152,13 @@ pub struct Filter {
     pub provider: Option<String>,
     /// The name of the client key.
     pub client: Option<String>,
-    /// A substring of the model, any case.
     pub model: Option<String>,
-    /// An RFC 3339 time, or its date: only requests started at or after it.
-    pub since: Option<String>,
+    /// Free text, matched in any case against the model and the path.
+    pub q: Option<String>,
+    /// An RFC 3339 time, or its date (midnight UTC): only requests started
+    /// at or after it.
+    #[serde(default, deserialize_with = "since")]
+    pub since: Option<DateTime<Utc>>,
 }
 
 impl Filter {
@@ -162,20 +166,37 @@ impl Filter {
         let is = |want: &Option<String>, have: Option<&str>| {
             want.as_deref().is_none_or(|w| have == Some(w))
         };
+        let model = r.model.as_deref().unwrap_or_default();
         is(&self.kind, r.kind.as_deref())
             && is(&self.client, r.client.as_deref())
             && is(&self.provider, r.provider.as_deref())
+            && is(&self.model, r.model.as_deref())
             && self.status.as_deref().is_none_or(|s| status_is(s, r))
-            && self.model.as_deref().is_none_or(|m| {
-                let model = r.model.as_deref().unwrap_or_default();
-                model.to_lowercase().contains(&m.to_lowercase())
+            && self.q.as_deref().map(str::trim).is_none_or(|q| {
+                let q = q.to_lowercase();
+                model.to_lowercase().contains(&q) || r.path.to_lowercase().contains(&q)
             })
-            // The times share one fixed-width UTC format, so text orders them.
-            && self
-                .since
-                .as_deref()
-                .is_none_or(|t| r.started_at.as_str() >= t)
+            && self.since.is_none_or(|since| {
+                DateTime::parse_from_rfc3339(&r.started_at).is_ok_and(|at| at >= since)
+            })
     }
+}
+
+/// `since`: an RFC 3339 time, or a date, which means its midnight UTC.
+fn since<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<DateTime<Utc>>, D::Error> {
+    let Some(text) = Option::<String>::deserialize(d)? else {
+        return Ok(None);
+    };
+    let time = DateTime::parse_from_rfc3339(&text)
+        .map(|t| t.with_timezone(&Utc))
+        .or_else(|_| {
+            NaiveDate::parse_from_str(&text, "%Y-%m-%d")
+                .map(|d| d.and_time(NaiveTime::MIN).and_utc())
+        })
+        .map_err(|_| {
+            serde::de::Error::custom(format!("since: '{text}' is not an RFC 3339 time or date"))
+        })?;
+    Ok(Some(time))
 }
 
 fn status_is(want: &str, r: &RequestRecord) -> bool {

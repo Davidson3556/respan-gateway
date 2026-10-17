@@ -104,7 +104,7 @@ fn has_dot_segment(path: &str) -> bool {
 /// pass on: a hop's headers (RFC 9110 7.6.1) but `Upgrade`, which gets its
 /// `Connection: upgrade` (7.8); `Host`; `Expect`; conditions and ranges
 /// (13, 14); method overrides; `Accept-Encoding`, as the gateway decodes
-/// what it reads; and the gateway origin's `Cookie`, `Forwarded`, `Via`,
+/// no content coding, so asks for none; and the gateway origin's `Cookie`, `Forwarded`, `Via`,
 /// `X-Forwarded-*` and `X-Real-IP`, which plugins still see
 /// ([`Original`](crate::raw::Original)) and a call's [`CallHeaders`] may set.
 pub(crate) fn proxy_call(head: &mut http::request::Parts) {

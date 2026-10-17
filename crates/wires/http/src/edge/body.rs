@@ -43,6 +43,14 @@ impl Body {
         }
     }
 
+    /// A provider answer's body read whole, `upstream`
+    /// ([`over_limit`](respan_gateway_http_faults::over_limit)) past `limit`
+    /// bytes, or the fault it broke off with.
+    pub async fn read_answer(self, limit: usize) -> Result<Bytes, Fault> {
+        let over = || respan_gateway_http_faults::over_limit(limit);
+        crate::codec::collect(self, limit, over).await
+    }
+
     /// Whether its bytes come as a stream of frames rather than whole: how a
     /// call uploads. Not whether its input is live, one message per frame,
     /// which the adapter says ([`ClientIo::accept`](crate::ClientIo::accept)).

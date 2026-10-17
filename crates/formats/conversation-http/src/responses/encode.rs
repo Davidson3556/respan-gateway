@@ -6,6 +6,7 @@ use super::{
 use crate::is_inert;
 use crate::schema::{
     Gate, block_fields, check_usage, fits, merge_fields, merge_into, unix_now, unwritable_content,
+    unwritable_native,
 };
 use respan_gateway_conversation::{
     Assembled, AssembledItem, Block, Delta, Finish, Output, Start, Usage,
@@ -164,7 +165,9 @@ pub(super) fn whole(whole: &Assembled) -> Result<Value, Fault> {
                 }
             }
             AssembledItem::Native(NativeValue { format, value: raw }) if is_inert(format, raw) => {}
-            AssembledItem::Native(..) => return Err(unwritable_content()),
+            AssembledItem::Native(NativeValue { format, value: raw }) => {
+                return Err(unwritable_native(format, raw));
+            }
         }
     }
     let finish = whole.finish.as_ref().unwrap_or(&Finish::Stop);
@@ -639,6 +642,9 @@ impl Events {
                 }
             }
             Output::Native(NativeValue { format, value: raw }) if is_inert(format, raw) => {}
+            Output::Native(NativeValue { format, value: raw }) => {
+                return Err(unwritable_native(format, raw));
+            }
             _ => return Err(unwritable_content()),
         }
         Ok(())

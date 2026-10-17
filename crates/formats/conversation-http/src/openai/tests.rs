@@ -7,7 +7,7 @@ use respan_gateway_http::bytes::{Bytes, BytesMut};
 
 use crate::anthropic::AnthropicMessages;
 use crate::schema::Held;
-use respan_gateway_conversation::{Content, Message, Tool, ToolChoice};
+use respan_gateway_conversation::{Content, Media, MediaSource, Message, Tool, ToolChoice};
 use respan_gateway_core::NativeFields;
 use respan_gateway_core::{Details, ErrorCode};
 
@@ -920,6 +920,11 @@ fn tool_results_and_calls_are_written_as_openai_messages() {
             { "role": "user", "content": "and then?" },
         ]))
     );
+    // OpenAI's tool messages hold text alone.
+    let image = Content::Image(Media::new("image/png", MediaSource::Url("u".into())));
+    let mut shown = Message::new(Role::User, "");
+    shown.content = vec![Content::tool_result("c1", vec![image], false)];
+    assert!(OpenAiChat.encode_request(&Input::new([shown])).is_err());
     // OpenAI cannot say a call failed.
     let mut failed = Message::new(Role::User, "");
     failed.content = vec![Content::tool_result("c1", vec!["no".into()], true)];
@@ -1423,10 +1428,23 @@ fn reasoning_in_a_request_is_refused_and_anthropics_thinking() {
             native: None,
         },
     );
-    // OpenAI Chat has no field for it; Anthropic's thinking is.
+    // OpenAI Chat has no field for it; Anthropic, which refuses thinking it
+    // did not sign, leaves it out of an earlier turn.
     assert!(OpenAiChat.encode_request(&chat).is_err());
     let sent = AnthropicMessages.encode_request(&chat).map(Value::from);
-    let thinking = json!({ "type": "thinking", "thinking": "hm" });
+    assert_eq!(
+        sent.ok().map(|v| v["messages"][1]["content"].clone()),
+        Some(json!("ok"))
+    );
+    // Signed, it is Anthropic's thinking.
+    let mut signature = serde_json::Map::new();
+    signature.insert("signature".into(), "sig".into());
+    chat.messages[1].content[0] = Content::Reasoning {
+        text: "hm".into(),
+        native: Some(NativeFields::new(AnthropicMessages.name(), signature)),
+    };
+    let sent = AnthropicMessages.encode_request(&chat).map(Value::from);
+    let thinking = json!({ "type": "thinking", "thinking": "hm", "signature": "sig" });
     assert_eq!(
         sent.ok().map(|v| v["messages"][1]["content"][0].clone()),
         Some(thinking)

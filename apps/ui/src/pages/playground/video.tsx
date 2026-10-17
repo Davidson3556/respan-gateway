@@ -13,6 +13,7 @@ import { useNow } from "@/hooks/use-now";
 import { useObjectUrl } from "@/hooks/use-object-url";
 import { gatewayFetch, getJson, postJson } from "@/lib/api";
 import { formatMs } from "@/lib/format";
+import type { Json } from "@/lib/playground-apis";
 import { describeError } from "@/lib/query-client";
 import { videoApis, type VideoApi, type VideoJob } from "@/lib/video-apis";
 import { MediaLayout } from "./media-form";
@@ -21,27 +22,32 @@ import { RequestError } from "./request-error";
 import { SelectField } from "./select-field";
 import { submitOnModEnter } from "./submit-on-mod-enter";
 
-type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
-
 const POLL_MS = 2000;
 const done = (job: VideoJob | undefined) => job?.status === "completed" || job?.status === "failed";
 
-/** The job `created` made in `api`, polled until done, and its video once it is. */
-function useVideoJob(api: VideoApi, created: Json | undefined) {
-  const first = created && api.read(created);
+/** A job's creation: the answer, and the API that made it (the picker may have moved on since). */
+interface Created {
+  api: VideoApi;
+  answer: Json;
+}
+
+/** The job `created` made, polled until done, and its video once it is. */
+function useVideoJob(created: Created | undefined) {
+  const api = created?.api;
+  const first = created && created.api.read(created.answer);
   const job = useQuery({
-    queryKey: ["video", api.id, first?.id],
-    queryFn: ({ signal }) => getJson<Json>(api.poll(first!, created!), signal),
+    queryKey: ["video", api?.id, first?.id],
+    queryFn: ({ signal }) => getJson<Json>(api!.poll(first!, created!.answer), signal),
     enabled: !!first,
     // A failing poll (a 404 after a restart, say) is final: stop asking.
     refetchInterval: (q) =>
-      done(q.state.data && api.read(q.state.data)) || q.state.error ? false : POLL_MS,
+      done(q.state.data && api?.read(q.state.data)) || q.state.error ? false : POLL_MS,
   });
-  const answer = job.data ?? created;
-  const current = answer && api.read(answer);
+  const answer = job.data ?? created?.answer;
+  const current = answer && api?.read(answer);
   const content = useQuery({
-    queryKey: ["video-content", api.id, current?.id],
-    queryFn: async ({ signal }) => (await gatewayFetch(api.content(current!, answer!), { signal })).blob(),
+    queryKey: ["video-content", api?.id, current?.id],
+    queryFn: async ({ signal }) => (await gatewayFetch(api!.content(current!, answer!), { signal })).blob(),
     enabled: current?.status === "completed",
     staleTime: Infinity,
   });
@@ -128,13 +134,15 @@ export function VideoTab() {
   const [prompt, setPrompt] = useState("");
   const [seconds, setSeconds] = useState("4");
   const create = useMutation({
-    mutationFn: (request: { prompt: string; seconds: string }) => {
-      const { path, body } = api.api.create(choice.model, request.prompt, request.seconds);
+    mutationFn: async (request: { prompt: string; seconds: string }): Promise<Created> => {
+      const made = api.api;
+      const { path, body } = made.create(choice.model, request.prompt, request.seconds);
       // The job's creation, not its polls.
-      return call.track({ api: api.api.id, model: choice.model, path }, () => postJson<Json>(path, body));
+      const answer = await call.track({ api: made.id, model: choice.model, path }, () => postJson<Json>(path, body));
+      return { api: made, answer };
     },
   });
-  const { job, content, current } = useVideoJob(api.api, create.data);
+  const { job, content, current } = useVideoJob(create.data);
   const url = useObjectUrl(content.data);
   const submit = () => create.mutate({ prompt: prompt.trim(), seconds });
   const running = create.isPending || (!!current && !done(current) && !job.error);

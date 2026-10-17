@@ -433,6 +433,24 @@ pub struct Usage {
     pub output_audio_tokens: u64,
 }
 
+impl std::ops::AddAssign<&Usage> for Usage {
+    fn add_assign(&mut self, other: &Usage) {
+        self.tokens += &other.tokens;
+        self.input_audio_tokens = self
+            .input_audio_tokens
+            .saturating_add(other.input_audio_tokens);
+        self.output_audio_tokens = self
+            .output_audio_tokens
+            .saturating_add(other.output_audio_tokens);
+    }
+}
+
+impl std::ops::AddAssign for Usage {
+    fn add_assign(&mut self, other: Usage) {
+        *self += &other;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

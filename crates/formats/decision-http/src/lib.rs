@@ -12,11 +12,13 @@
 //! and `legend`. An answer of a type the kind has no form for is kept as
 //! the format's own and written back where it was.
 
-use respan_gateway_conversation_http::fields::{merge_missing, rest_of, set};
+use respan_gateway_conversation_http::fields::{
+    invalid, kept, merge_missing, native_of, rest_of, set,
+};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_conversation_http::{Schema, read_provider_error};
 use respan_gateway_core::Provider;
-use respan_gateway_core::{Connection, Details, ErrorCode, Fault, Format, NativeFields};
+use respan_gateway_core::{Connection, ErrorCode, Fault, Format};
 use respan_gateway_decision::{Answer, Ask, Input, Output, Question, Start, Usage, Verdict};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{CONTENT_TYPE, HeaderValue};
@@ -125,7 +127,7 @@ fn decode_request(raw: &[u8]) -> Result<Input, Fault> {
         Some(Value::String(model)) => Some(model),
         Some(_) => return Err(invalid("model", "must be a string")),
     };
-    input.native = native_of(map);
+    input.native = native_of(NAME, map);
     Ok(input)
 }
 
@@ -187,7 +189,7 @@ fn decode_question(id: String, v: Value) -> Result<Question, Fault> {
     };
     let mut question = Question::new(id, ask);
     question.instructions = q.remove("instructions").filter(|v| !v.is_null());
-    question.native = native_of(q);
+    question.native = native_of(NAME, q);
     Ok(question)
 }
 
@@ -220,14 +222,14 @@ fn encode_request(input: &Input) -> Result<Map<String, Value>, Fault> {
         v.insert("type".into(), kind.into());
         set(&mut v, "instructions", q.instructions.clone());
         set(&mut v, "criteria", criteria);
-        merge_missing(&mut v, &kept(&q.native)?);
+        merge_missing(&mut v, &kept(NAME, &q.native)?);
         questions.insert(q.id.clone(), v.into());
     }
     let mut v = Map::new();
     set(&mut v, "model", input.model.clone());
     v.insert("state".into(), input.state.clone());
     v.insert("questions".into(), questions.into());
-    merge_missing(&mut v, &kept(&input.native)?);
+    merge_missing(&mut v, &kept(NAME, &input.native)?);
     Ok(v)
 }
 
@@ -240,7 +242,7 @@ fn decode_response(raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
         )));
     };
     let mut start = Start::new(v["model"].as_str().map(Into::into));
-    start.native = native_of(rest_of(&v, &["model", "answers", "usage"]));
+    start.native = native_of(NAME, rest_of(&v, &["model", "answers", "usage"]));
     out.push(Output::Start(start));
     for (id, a) in answers {
         match decode_answer(id, a) {
@@ -299,7 +301,7 @@ fn decode_answer(id: &str, a: &Value) -> Option<Answer> {
     let mut answer = Answer::new(id, verdict);
     answer.confidence = number("confidence");
     let taken = [&["type", "confidence"], taken].concat();
-    answer.native = native_of(rest_of(a, &taken));
+    answer.native = native_of(NAME, rest_of(a, &taken));
     Some(answer)
 }
 
@@ -310,7 +312,7 @@ fn encode_response(events: &[Output]) -> Result<Bytes, Fault> {
         match event {
             Output::Start(start) => {
                 set(&mut body, "model", start.model.clone());
-                merge_missing(&mut body, &kept(&start.native)?);
+                merge_missing(&mut body, &kept(NAME, &start.native)?);
             }
             Output::Answer(answer) => {
                 answers.insert(answer.id.clone(), encode_answer(answer)?.into());
@@ -380,26 +382,8 @@ fn encode_answer(answer: &Answer) -> Result<Map<String, Value>, Fault> {
         }
     }
     set(&mut v, "confidence", answer.confidence);
-    merge_missing(&mut v, &kept(&answer.native)?);
+    merge_missing(&mut v, &kept(NAME, &answer.native)?);
     Ok(v)
-}
-
-/// `fields` as native fields of the format: none if empty.
-fn native_of(fields: Map<String, Value>) -> Option<NativeFields> {
-    (!fields.is_empty()).then(|| NativeFields::new(NAME, fields))
-}
-
-/// The fields of `native` to write: the format's own; another format's are
-/// refused, as only it knows what they mean.
-fn kept(native: &Option<NativeFields>) -> Result<Map<String, Value>, Fault> {
-    match native {
-        Some(n) if &*n.format == NAME => Ok(n.fields.clone()),
-        Some(n) if !n.is_empty() => Err(Fault::bad_request(format!(
-            "fields of format {} cannot be written in {NAME}",
-            n.format
-        ))),
-        _ => Ok(Map::new()),
-    }
 }
 
 /// `v` as JSON bytes.
@@ -407,13 +391,6 @@ fn to_bytes(v: &Map<String, Value>) -> Result<Bytes, Fault> {
     serde_json::to_vec(v)
         .map(Bytes::from)
         .map_err(|e| Fault::internal("a body could not be written").with_source(e))
-}
-
-/// A 400 for a request whose field `param` `what`.
-fn invalid(param: &str, what: &str) -> Fault {
-    let mut details = Map::new();
-    details.insert("param".into(), param.into());
-    Fault::bad_request(format!("'{param}' {what}")).with(Details(details))
 }
 
 /// A refusal in OpenAI's error schema, as Chat Completions writes it.

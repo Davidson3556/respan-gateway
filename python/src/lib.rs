@@ -569,14 +569,18 @@ impl Server {
 
 #[pymethods]
 impl Server {
-    /// Stops accepting, lets open responses finish (up to 30 s) and returns.
+    /// Stops accepting, lets open responses finish (up to 30 s) and returns;
+    /// Ctrl-C meanwhile cuts the wait short and drops the open responses.
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
         self.signal();
         let task = self.task.lock().take();
         let Some(task) = task else { return Ok(()) };
-        py.detach(|| runtime().block_on(task))
-            .map_err(gateway_error)?
-            .map_err(gateway_error)
+        let server = task.abort_handle();
+        wait(py, async move {
+            let served = task.await.map_err(|e| Failure::Error(e.to_string()))?;
+            served.map_err(|e| Failure::Error(e.to_string()))
+        })
+        .inspect_err(|_| server.abort())
     }
 
     /// `stop` without blocking: calls `done(None, error)` from another

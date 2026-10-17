@@ -69,17 +69,28 @@ pub(super) fn spend(budget: &mut usize, results: &mut [(String, Outcome, ToolRep
     }
 }
 
-/// `text` of at most `max` bytes, saying what was cut off.
+/// `text` of at most `max` bytes, saying what was cut off when that fits.
 pub(super) fn cut(text: String, max: usize) -> String {
     if text.len() <= max {
         return text;
     }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
-        end -= 1;
+    let boundary = |mut end| {
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        end
+    };
+    let mut end = boundary(max);
+    loop {
+        let marker = format!("\n[cut: {} more bytes]", text.len() - end);
+        if end + marker.len() <= max {
+            return format!("{}{marker}", &text[..end]);
+        }
+        let Some(room) = max.checked_sub(marker.len()) else {
+            return text[..boundary(max)].to_owned();
+        };
+        end = boundary(room);
     }
-    let omitted = text.len() - end;
-    format!("{}\n[cut: {omitted} more bytes]", &text[..end])
 }
 
 pub(super) fn limit(code: &'static str, message: String) -> Fault {
@@ -95,8 +106,12 @@ mod tests {
     #[test]
     fn an_answer_is_cut_at_a_character() {
         assert_eq!(cut("abc".into(), 3), "abc");
-        assert_eq!(cut("aéb".into(), 2), "a\n[cut: 3 more bytes]");
-        assert_eq!(cut("abcdef".into(), 4), "abcd\n[cut: 2 more bytes]");
+        assert_eq!(cut("aéb".into(), 2), "a");
+        assert_eq!(cut("abcdef".into(), 4), "abcd");
+        let long = "é".repeat(20);
+        let cut = cut(long, 30);
+        assert_eq!(cut, format!("{}\n[cut: 32 more bytes]", "é".repeat(4)));
+        assert!(cut.len() <= 30);
     }
 
     #[test]
@@ -114,10 +129,9 @@ mod tests {
         let mut budget = 6;
         spend(&mut budget, &mut results);
         assert_eq!(results[0].1.text, "aaaa");
-        assert!(
-            results[1].1.text.starts_with("bb\n[cut"),
-            "{}",
-            results[1].1.text
+        assert_eq!(
+            results[1].1.text, "bb",
+            "too little room to say what was cut"
         );
         assert!(results[2].1.text.contains("left out"));
         assert_eq!(results[1].2.bytes, results[1].1.text.len());
