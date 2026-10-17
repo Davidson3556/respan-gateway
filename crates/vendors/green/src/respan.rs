@@ -61,13 +61,14 @@ fn format_for(ask: &Ask, model: &Model) -> Option<&'static str> {
 /// Respan's Chat Completions: `provider_specific_fields`, on a choice or
 /// its message, what the vendor behind it said beyond the spec, only
 /// describes it; a model's reasoning comes as `reasoning_content`, read as
-/// reasoning for a client of another format.
+/// reasoning for a client of another format, and again as Claude's
+/// `thinking_blocks`, whose signatures only Anthropic reads back.
 #[derive(Debug, Clone, Copy)]
 pub struct Respan;
 
 impl Dialect for Respan {
     fn output(&self, call: &Call) -> Option<Box<dyn Filter<Output>>> {
-        chat::read(call, &["provider_specific_fields"], true)
+        chat::read(call, &["provider_specific_fields", "thinking_blocks"], true)
     }
 }
 
