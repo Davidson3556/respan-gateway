@@ -1,19 +1,51 @@
 # Contributing
 
-The project is pre-alpha, but its core is treated as half-frozen, like a
-release candidate (the other crates, the binary and the Python package
-may still change): changes to its contracts need a reason and tests.
+The project is pre-alpha, but its core (`crates/core`) is treated like a
+release candidate: a change to its contracts needs a reason, tests, and an
+update to the docs that describe it. The other crates, the binary and the
+Python package may still change freely.
 
-Before proposing a change to the core, read
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), the source of truth for the
-current architecture. Architectural changes must explain their rationale and
-update that document and the relevant tests together.
+## Architecture
+
+The crates are in layers. Each depends only on the layers above it:
+
+```
+            core                 the kernel and the plugin API; no HTTP, no vendors
+           /    \
+      kinds      wires           typed events per kind · bytes at the edges, no kind
+           \    /
+          formats                a kind over a wire: one spec each, naming no vendor
+             |
+          vendors                each vendor's URLs, formats and quirks
+             |
+   plugins · serve · apps/gateway · python · examples
+```
+
+The rules that keep it that way:
+
+- **Core knows no protocol.** No HTTP, provider, credential or message type.
+  It runs plugins and moves typed events with backpressure.
+- **A format is a spec, not a vendor.** What a vendor does beyond the spec
+  is its *dialect*, in `crates/vendors`, or data such as a key header. It is
+  never a plugin, and never a branch in a format.
+- **Plugins are compiled in** and use only public APIs. The binary composes
+  its plugins exactly as an outside author would. See [PLUGINS.md](PLUGINS.md).
+- **Policy belongs to applications.** Prices, billing stores, durable jobs
+  and tenant rules are the host's. `examples/` shows them without making them
+  supported APIs.
+
+Each crate's `README.md` documents its public contract.
+
+## Development
 
 With [`just`](https://github.com/casey/just): `just dev` runs the gateway and
 the UI with hot reload together (Ctrl-C stops both), `just run` builds the UI
 and runs the gateway serving it, `just mock` runs the UI against a fake
-gateway, and `just check` runs the checks below but the Python package's,
-which need a virtualenv. `just` lists them all.
+gateway, and `just check` runs every check below except the Python
+package's, which need a virtualenv. Run `just` with no arguments to list
+them all.
+
+## Checks
 
 Every change must pass the checks for the code it touches. Rust:
 
@@ -33,8 +65,7 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 ```
 
 Build the UI before the Rust binary if you want it embedded; without
-`apps/ui/dist` the binary serves a placeholder page. `pnpm mock` runs the UI
-against a fake gateway.
+`apps/ui/dist` the binary serves a placeholder page.
 
 The Python package (`python/`):
 
@@ -44,11 +75,46 @@ maturin develop   # in a virtualenv with pytest, openai and anthropic
 pytest
 ```
 
-`validation/` is outside the workspace and CI only compiles it
-(`cargo check --manifest-path validation/Cargo.toml --tests --bins`).
+## Tests
 
-See [testing](docs/TESTING.md) for suite ownership, focused commands, benchmarks,
-and optional tests that require external services or tools.
+The workspace suite needs no keys or network: providers are
+[`mockllm`](https://github.com/lihe07/mockllm) and strict in-code fakes
+(`tests/support/realtime/` for OpenAI Realtime and Gemini Live) over real
+sockets.
+
+| Where | What |
+|---|---|
+| `crates/*/src/` | Unit tests of private details |
+| `crates/*/tests/` | Public contracts: the kernel (`crates/core/tests`), translation and relay (`crates/formats/*/tests`), each vendor's quirks (`crates/vendors/{green,yellow}/tests`), routing and the tool loop (`crates/plugins/*/tests`) |
+| `apps/gateway/tests/` | The built binary end to end: chat, media, MCP, the tool loop, reload, the CLI, client keys, the admin API |
+| `examples/tests/cases/` | The examples' policies, run by each example target |
+| `tests/support/` | Helpers shared across packages, included by `#[path]` |
+| `validation/` | Live providers and external tools; outside the workspace |
+
+Focused runs:
+
+```bash
+cargo test -p respan-gateway --test e2e
+cargo test -p respan-gateway-conversation-http --test translate tools::
+cargo test -p respan-gateway-examples --example guardrail
+```
+
+Live tests make small paid requests, are ignored until selected, and skip
+when their key is missing:
+
+```bash
+OPENAI_API_KEY=... ANTHROPIC_API_KEY=... GEMINI_API_KEY=... \
+  cargo test --manifest-path validation/Cargo.toml --test live_providers -- --ignored
+```
+
+A vendor with a live test of its own is *green* (`crates/vendors/green`);
+the others are *yellow*, tested against fakes alone. CI compiles
+`validation/` but does not run it. See
+[`validation/README.md`](validation/README.md) for the other live and
+external-tool suites.
+
+Put a new test with the crate that owns the behavior, and name it for the
+behavior. Only local tests belong in the workspace.
 
 ## Releasing
 

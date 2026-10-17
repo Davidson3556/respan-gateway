@@ -5,7 +5,6 @@ with its test modules in [`tests/cases/`](tests/cases), grouped by the same topi
 Cargo discovers the four `tests/text_*.rs` integration suites automatically.
 Private source modules live in
 [`support/`](support) and shared library helpers remain in [`src/`](src).
-Use case numbers refer to [the use-case guide](../docs/use-cases.md).
 
 Run from the repository root (replace `wallet` with any target name below):
 
@@ -22,31 +21,31 @@ and do not need credentials or make paid requests.
 
 | Topic | Example | Demonstrates |
 | --- | --- | --- |
-| Policies | [admission](policies/admission.rs) | Weighted fair admission, deadlines and crash leases (use case 10). |
-| | [guardrail](policies/guardrail.rs) | Check every request and response against a term list (3). |
-| | [logging](policies/logging.rs) | Request logs and zero-retention tenants (11). |
-| | [media_caps](policies/media_caps.rs) | Image count and size caps, an audio upload cap and budget, and embedding tokens metered per key, over the media kinds (9). |
-| | [pii](policies/pii.rs) | Redaction and restoration across streaming text and tool calls (2). |
-| | [tenants](policies/tenants.rs) | Hot-reloaded tenant config and per-tenant keys (13). |
-| Routing | [batch_split](routing/batch_split.rs) | Bounded concurrent embedding chunks, retries and usage merge (4). |
-| | [fallback](routing/fallback.rs) | Retry, fallback, hedging and stall watchdogs (4, 6). |
-| | [judge](routing/judge.rs) | A model-selecting subrequest (5). |
-| | [models_merge](routing/models_merge.rs) | Merge provider model lists using their respective keys (4). |
+| Policies | [admission](policies/admission.rs) | Weighted fair admission, deadlines and crash leases. |
+| | [guardrail](policies/guardrail.rs) | Check every request and response against a term list. |
+| | [logging](policies/logging.rs) | Request logs and zero-retention tenants. |
+| | [media_caps](policies/media_caps.rs) | Image count and size caps, an audio upload cap and budget, and embedding tokens metered per key, over the media kinds. |
+| | [pii](policies/pii.rs) | Redaction and restoration across streaming text and tool calls. |
+| | [tenants](policies/tenants.rs) | Hot-reloaded tenant config and per-tenant keys. |
+| Routing | [batch_split](routing/batch_split.rs) | Bounded concurrent embedding chunks, retries and usage merge. |
+| | [fallback](routing/fallback.rs) | Retry, fallback, hedging and stall watchdogs. |
+| | [judge](routing/judge.rs) | A model-selecting subrequest. |
+| | [models_merge](routing/models_merge.rs) | Merge provider model lists using their respective keys. |
 | Billing | [billing](billing/billing.rs) | Price each call's usage into an application-owned store. |
-| | [cost_cap](billing/cost_cap.rs) | Reserve and settle a per-call cost cap (9). |
-| | [wallet](billing/wallet.rs) | Nested prepaid wallets and concurrent holds (9). |
-| Integrations | [attachments](integrations/attachments.rs) | Bounded PDF extraction, tenant-scoped cache and native fallback (1). |
+| | [cost_cap](billing/cost_cap.rs) | Reserve and settle a per-call cost cap. |
+| | [wallet](billing/wallet.rs) | Nested prepaid wallets and concurrent holds. |
+| Integrations | [attachments](integrations/attachments.rs) | Bounded PDF extraction, tenant-scoped cache and native fallback. |
 | | [custom_format](integrations/custom_format.rs) | Implement an embeddings protocol with `Format`. |
 | | [custom_transport](integrations/custom_transport.rs) | Bind an in-process model without HTTP bytes. |
-| | [mcp_proxy](integrations/mcp_proxy.rs) | MCP over streamable HTTP with a tool allow-list (7). |
-| Hosting | [embedded](hosting/embedded.rs) | Embed the gateway in another Rust service (14). |
-| | [local_proxy](hosting/local_proxy.rs) | Byte-exact pass-through proxy for Claude Code (12). |
-| Jobs | [jobs](jobs/jobs.rs) | SQLite-backed durable idempotency and crash leases (8). |
-| | [jobs_background](jobs/jobs_background.rs) | Durable background Responses, recovery, cancellation and webhook outbox (8). |
-| Realtime | [realtime](realtime/realtime.rs) | Metered Realtime text/audio, cancellation and output caps (7). |
-| | [gemini_live](realtime/gemini_live.rs) | Gemini Live text/audio turns, tools and shutdown (7). **Live credentials to run.** |
-| | [responses_ws](realtime/responses_ws.rs) | Responses WebSocket lanes, continuation and shutdown (7). **Live credentials to run.** |
-| | [tool_guard](realtime/tool_guard.rs) | A tool allow-list for any realtime session, here OpenAI Realtime clients on Gemini Live (1). **Live credentials to run.** |
+| | [mcp_proxy](integrations/mcp_proxy.rs) | MCP over streamable HTTP with a tool allow-list. |
+| Hosting | [embedded](hosting/embedded.rs) | Embed the gateway in another Rust service. |
+| | [local_proxy](hosting/local_proxy.rs) | Byte-exact pass-through proxy for Claude Code. |
+| Jobs | [jobs](jobs/jobs.rs) | SQLite-backed durable idempotency and crash leases. |
+| | [jobs_background](jobs/jobs_background.rs) | Durable background Responses, recovery, cancellation and webhook outbox. |
+| Realtime | [realtime](realtime/realtime.rs) | Metered Realtime text/audio, cancellation and output caps. |
+| | [gemini_live](realtime/gemini_live.rs) | Gemini Live text/audio turns, tools and shutdown. **Live credentials to run.** |
+| | [responses_ws](realtime/responses_ws.rs) | Responses WebSocket lanes, continuation and shutdown. **Live credentials to run.** |
+| | [tool_guard](realtime/tool_guard.rs) | A tool allow-list for any realtime session, here OpenAI Realtime clients on Gemini Live. **Live credentials to run.** |
 
 ## Billing policies
 

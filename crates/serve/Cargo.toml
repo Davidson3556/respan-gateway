@@ -34,5 +34,5 @@ respan-gateway-http.workspace = true
 respan-gateway-http-transport.workspace = true
 serde_json.workspace = true
 tower = { version = "0.5", features = ["util"] }
-mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
+mockllm = { git = "https://github.com/lihe07/mockllm", rev = "26cf441" }
 tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "time", "test-util"] }

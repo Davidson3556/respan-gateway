@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
 //! The respan-gateway kernel: a [`Gateway`] runs each request through its
-//! [`Plugin`]s and streams the [`Response`] back (`docs/ARCHITECTURE.md`).
+//! [`Plugin`]s and streams the [`Response`] back (`PLUGINS.md` is the guide).
 //!
 //! Formats open receive futures and prepare per-event outgoing sinks.
 //! [`EventStream`] implements [`futures::Stream`] and [`EventSink`] implements

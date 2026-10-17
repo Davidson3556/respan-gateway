@@ -18,4 +18,4 @@ live in `apps/gateway/tests/paths/support.rs`; private example helpers live in
 `examples/support/`.
 
 Changes to a shared module are checked through all consumers by the workspace
-commands in [the testing guide](../../docs/TESTING.md).
+commands in [CONTRIBUTING](../../CONTRIBUTING.md#checks).

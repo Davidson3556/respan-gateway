@@ -1,7 +1,8 @@
 # First-party plugins
 
 Each plugin is a crate of its own, built on the public core APIs. A gateway
-registers the ones it wants; they compose in registration order.
+registers the ones it wants; they compose in registration order. To
+write one, see the [plugin guide](../../PLUGINS.md).
 
 | Crate | Package | What it does |
 |---|---|---|

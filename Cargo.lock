@@ -1130,7 +1130,7 @@ dependencies = [
 [[package]]
 name = "mockllm"
 version = "0.0.0"
-source = "git+https://github.com/lihe07/mockllm?rev=4d4b194#4d4b1942ef8dc22c18f495f280109df1d621fdf6"
+source = "git+https://github.com/lihe07/mockllm?rev=26cf441#26cf441d60b2303b54c7b783033c272c54b50470"
 dependencies = [
  "axum",
  "base64 0.22.1",
