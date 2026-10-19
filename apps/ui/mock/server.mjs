@@ -94,7 +94,7 @@ const providers = [
   ),
 ];
 
-// MCP servers, as `mcp:` configures them and /ui/api/mcp lists them.
+// Tool servers, as `[tools]` configures them and /ui/api/mcp lists them.
 const mcpServers = [
   {
     name: "github",
@@ -123,6 +123,20 @@ const mcpServers = [
       { name: "read_file", description: "Read a file under the allowed directories.", read_only: true },
       { name: "list_directory", description: "List a directory's entries.", read_only: true },
       { name: "write_file", description: "Create or overwrite a file.", destructive: true },
+    ],
+  },
+  {
+    name: "search",
+    transport: "vendor",
+    target: "linkup (https://api.linkup.so)",
+    endpoint: "/mcp/search",
+    credentials: "gateway",
+    auth: "key (env LINKUP_API_KEY)",
+    labels: ["initialize", "tools/list", "tools/call search", "tools/call answer"],
+    tools: [
+      { name: "search", description: "Search the web with Linkup and get ranked sources." },
+      { name: "answer", description: "Answer a question from the web, with its sources." },
+      { name: "fetch", description: "Fetch a web page as markdown." },
     ],
   },
 ];

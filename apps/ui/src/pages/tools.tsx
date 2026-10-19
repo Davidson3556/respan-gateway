@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   Blocks,
   ChevronDown,
+  Globe,
   KeyRound,
   Layers,
   Plug,
@@ -26,13 +27,17 @@ import { api, type McpOverview, type McpServer, type McpTool } from "@/lib/api";
 import { formatCount, formatMs, formatPercent } from "@/lib/format";
 import { describeError } from "@/lib/query-client";
 
-const exampleConfig = `[mcp.github]
-url = "https://api.githubcopilot.com/mcp/"
+const exampleConfig = `[tools.github]
+url  = "https://api.githubcopilot.com/mcp/"
 auth = { bearer = "env:GITHUB_TOKEN" }
 
-[mcp.files]
+[tools.files]
 command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "."]`;
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+
+[tools.search]
+vendor = "linkup"
+key    = "env:LINKUP_API_KEY"`;
 
 const statusStyle: Record<McpServer["status"], string> = {
   idle: "text-muted-foreground",
@@ -138,7 +143,7 @@ function Tools({ server }: { server: McpServer }) {
 }
 
 function ServerCard({ server: s, overview }: { server: McpServer; overview: McpOverview }) {
-  const Transport = s.transport === "stdio" ? Terminal : Plug;
+  const Transport = s.transport === "stdio" ? Terminal : s.transport === "vendor" ? Globe : Plug;
   const inLoop = overview.tool_loop?.servers.includes(s.name);
   const inAggregate = overview.aggregate?.servers.includes(s.name);
   return (
@@ -192,22 +197,22 @@ function ServerCard({ server: s, overview }: { server: McpServer; overview: McpO
   );
 }
 
-export function McpPage() {
+export function ToolsPage() {
   const { data, isPending, error } = useMcpOverview();
   return (
     <div className="grid min-w-0 gap-6">
-      <PageHeader title="MCP"
-        description="Tool servers the gateway fronts behind its client keys: what each offers, how it signs in, and who uses it." />
+      <PageHeader title="Tools"
+        description="Tool servers the gateway fronts over MCP behind its client keys: MCP servers and tool vendors, what each offers, how it signs in, and who uses it." />
       {error && !data ? (
         <div role="alert" className="text-sm text-destructive">
-          <p>Couldn't load MCP servers</p>
+          <p>Couldn't load tool servers</p>
           <p>{describeError(error)}</p>
         </div>
       ) : isPending ? (
         <Skeleton className="h-48 w-full rounded-xl" />
       ) : !data?.servers.length ? (
-        <EmptyState icon={Blocks} title="No MCP servers">
-          <p>Add a server to gateway.toml, as mcp.json would: a <code>url</code>, or a <code>command</code> to run.</p>
+        <EmptyState icon={Blocks} title="No tool servers">
+          <p>Add one to gateway.toml under <code>[tools]</code>: an MCP server's <code>url</code> or <code>command</code>, as mcp.json would, or a tool <code>vendor</code>.</p>
           <CodeBlock className="w-full text-left" code={exampleConfig} />
         </EmptyState>
       ) : (

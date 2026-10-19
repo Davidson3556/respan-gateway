@@ -101,7 +101,7 @@ export function ProvidersPage() {
     <div className="grid gap-6">
       <PageHeader
         title="Providers"
-        description={<>Upstreams the gateway can call, what they speak and how they're doing. Tool servers are under <Link to="/mcp" className="underline">MCP</Link>.</>}
+        description={<>Upstreams the gateway can call, what they speak and how they're doing. Tool servers are under <Link to="/tools" className="underline">Tools</Link>.</>}
       />
       {isPending ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">

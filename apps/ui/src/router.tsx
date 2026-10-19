@@ -1,5 +1,5 @@
 import type { ComponentType } from "react";
-import { createBrowserRouter } from "react-router";
+import { Navigate, createBrowserRouter } from "react-router";
 import { AppLayout } from "@/components/layout/app-layout";
 import { NotFoundPage } from "@/pages/not-found";
 
@@ -21,7 +21,8 @@ export const routes = [
       { path: "playground", ...page(() => import("@/pages/playground"), "PlaygroundPage") },
       { path: "providers", ...page(() => import("@/pages/providers"), "ProvidersPage") },
       { path: "models", ...page(() => import("@/pages/models"), "ModelsPage") },
-      { path: "mcp", ...page(() => import("@/pages/mcp"), "McpPage") },
+      { path: "tools", ...page(() => import("@/pages/tools"), "ToolsPage") },
+      { path: "mcp", element: <Navigate to="/tools" replace /> },
       { path: "routes", ...page(() => import("@/pages/routes"), "RoutesPage") },
       { path: "config", ...page(() => import("@/pages/config"), "ConfigPage") },
       { path: "settings", ...page(() => import("@/pages/settings"), "SettingsPage") },
