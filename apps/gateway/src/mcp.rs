@@ -171,6 +171,13 @@ impl<'de> Deserialize<'de> for McpAuth {
 #[derive(Clone, Debug)]
 pub struct Program(String);
 
+impl Program {
+    /// The program, as configured.
+    pub fn name(&self) -> &str {
+        &self.0
+    }
+}
+
 impl<'de> Deserialize<'de> for Program {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Name;

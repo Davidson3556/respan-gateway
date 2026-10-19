@@ -90,10 +90,11 @@ enum Command {
         #[arg(long)]
         client_key: bool,
     },
-    /// MCP servers: log in to one a person must authorize
+    /// MCP servers: list them and whether the gateway can authenticate to
+    /// each, or log in to one a person must authorize
     Mcp {
         #[command(subcommand)]
-        command: McpCommand,
+        command: Option<McpCommand>,
     },
     /// Relay one vendor's whole API, with each client's own credentials
     ///
@@ -137,6 +138,7 @@ const EXAMPLES: &str = "Examples:
   respan-gateway check --online     ... and call each provider with its key, and list the tool loop's tools
   respan-gateway models             List the models the providers offer
   respan-gateway proxy --anthropic  Sit in front of Claude Code
+  respan-gateway mcp                List the MCP servers and whether each is authenticated
   respan-gateway mcp login linear   Log in to the MCP server [mcp.linear], once
 
 Environment (also read from the nearest .env in this directory or its parents):
@@ -241,8 +243,17 @@ where
             };
             (Ok(Config::proxy(vendor, url.as_deref())), check)
         }
+        Command::Mcp { command: None } => {
+            return match Config::discover(cli.config.as_deref()) {
+                Ok(config) => {
+                    println!("{}", crate::mcp_login::list(&config));
+                    SUCCESS
+                }
+                Err(e) => fail(&e.to_string()),
+            };
+        }
         Command::Mcp {
-            command: McpCommand::Login { name },
+            command: Some(McpCommand::Login { name }),
         } => {
             let config = match Config::discover(cli.config.as_deref()) {
                 Ok(config) => config,

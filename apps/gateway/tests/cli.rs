@@ -663,3 +663,47 @@ async fn yaml_is_not_discovered_or_accepted() {
     let out = run(&dir, &["check", "-c", "gateway.yaml"], &[]).await;
     assert!(!out.ok && out.stderr.contains("line 1"));
 }
+
+#[tokio::test]
+async fn mcp_lists_each_server_and_whether_it_is_authenticated() {
+    let dir = empty_dir();
+    std::fs::write(
+        dir.join("gateway.toml"),
+        r#"
+[mcp.linear]
+url = "https://mcp.linear.app/mcp"
+auth = "login"
+[mcp.notion]
+url = "https://mcp.notion.com/mcp"
+auth = "login"
+[mcp.github]
+url = "https://api.githubcopilot.com/mcp/"
+auth = { bearer = "env:GITHUB_TOKEN" }
+[mcp.open]
+url = "http://localhost:9000/mcp"
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join(".respan/mcp")).unwrap();
+    let login = r#"{"token_url":"https://x.test/token","client_id":"c","refresh_token":"r"}"#;
+    std::fs::write(dir.join(".respan/mcp/linear.json"), login).unwrap();
+
+    let out = run(&dir, &["mcp"], &[]).await;
+    assert!(out.ok, "{}", out.stderr);
+    let line = |name: &str| {
+        let found = out.stdout.lines().find(|l| l.trim_start().starts_with(name));
+        found.unwrap_or_else(|| panic!("no {name} in {}", out.stdout)).to_owned()
+    };
+    assert!(line("linear").contains("logged in (.respan/mcp/linear.json)"));
+    assert!(line("notion").contains("not logged in; run `respan-gateway mcp login notion`"));
+    assert!(line("github").contains("GITHUB_TOKEN is not set"));
+    assert!(line("open").ends_with("none"));
+
+    let out = run(&dir, &["mcp"], &[("GITHUB_TOKEN", "ghp_x")]).await;
+    assert!(line_of(&out.stdout, "github").contains("bearer (env GITHUB_TOKEN)"));
+}
+
+fn line_of(stdout: &str, name: &str) -> String {
+    let found = stdout.lines().find(|l| l.trim_start().starts_with(name));
+    found.unwrap_or_else(|| panic!("no {name} in {stdout}")).to_owned()
+}

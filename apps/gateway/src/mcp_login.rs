@@ -15,7 +15,7 @@
 //! offered, so a refresh token comes back: what the login keeps.
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine;
@@ -26,9 +26,12 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+use crate::compose::{key_source, secret};
 use crate::config::Config;
-use crate::mcp::McpAuth;
-use crate::mcp_oauth::{Login, logins_dir, save};
+use crate::logging::paint;
+use crate::mcp::{McpAuth, McpConfig};
+use crate::mcp_oauth::{Login, OAuth, logins_dir, save};
+use crate::vendors::origin;
 
 /// How long a person has to approve.
 const APPROVAL: Duration = Duration::from_secs(10 * 60);
@@ -116,6 +119,85 @@ pub async fn login(config: &Config, name: &str) -> Result<PathBuf, String> {
         println!("Set `auth = \"login\"` on [mcp.{name}] for the gateway to use it.");
     }
     Ok(path)
+}
+
+/// What `respan-gateway mcp` prints: each server of `config`, what it
+/// reaches, and whether the gateway can authenticate to it, from the config,
+/// the environment and the saved logins alone (no server is called).
+pub fn list(config: &Config) -> String {
+    if config.mcp.is_empty() {
+        return format!(
+            "No MCP servers in {}; add an [mcp.<name>] block.",
+            config.source()
+        );
+    }
+    let logins = logins_dir(config.source());
+    let rows: Vec<_> = config
+        .mcp
+        .iter()
+        .map(|(name, c)| {
+            let saved = logins.join(format!("{name}.json"));
+            let (target, (ok, auth)) = match (&c.url, &c.command) {
+                (Some(url), _) => (origin(url.trim()).to_owned(), http_auth(name, c, &saved)),
+                (None, Some(program)) => (
+                    format!("stdio: {}", program.name()),
+                    (true, "none (a child process)".to_owned()),
+                ),
+                (None, None) => (
+                    "-".to_owned(),
+                    (false, "needs a `url` or a `command`".to_owned()),
+                ),
+            };
+            (name.as_str(), target, ok, auth)
+        })
+        .collect();
+    let name_width = rows.iter().map(|r| r.0.len()).max().unwrap_or(0);
+    let target_width = rows.iter().map(|r| r.1.len()).max().unwrap_or(0);
+    let mut out = format!("MCP servers in {}:", config.source());
+    for (name, target, ok, auth) in rows {
+        let style = if ok { "32" } else { "33" };
+        out.push_str(&format!(
+            "\n  {name:<name_width$}  {target:<target_width$}  {}",
+            paint(&auth, style, false)
+        ));
+    }
+    out
+}
+
+/// Whether the gateway can authenticate to the HTTP server `name`, and how,
+/// or what to do.
+fn http_auth(name: &str, c: &McpConfig, saved: &Path) -> (bool, String) {
+    let (ok, mut said) = match &c.auth {
+        Some(McpAuth::Login) => {
+            let read = std::fs::read_to_string(saved).map_err(|e| e.kind());
+            let login = read.map(|text| serde_json::from_str::<Login>(&text).is_ok());
+            let run = format!("run `respan-gateway mcp login {name}`");
+            match login {
+                Ok(true) => (true, format!("logged in ({})", saved.display())),
+                Ok(false) => (false, format!("login unreadable; {run}")),
+                Err(std::io::ErrorKind::NotFound) => (false, format!("not logged in; {run}")),
+                Err(e) => (
+                    false,
+                    format!("login at {} unreadable ({e}); {run}", saved.display()),
+                ),
+            }
+        }
+        Some(McpAuth::Bearer(key)) => match secret("bearer", key) {
+            Ok(_) => (true, format!("bearer ({})", key_source(key))),
+            Err(e) => (false, e.message().to_owned()),
+        },
+        Some(McpAuth::OAuth(o)) => match OAuth::new("oauth", o) {
+            Ok(o) => (true, format!("oauth {}", o.grant())),
+            Err(e) => (false, e.message().to_owned()),
+        },
+        Some(McpAuth::Forward) => (true, "forwarded (each client's own)".to_owned()),
+        None if c.headers.is_empty() => (true, "none".to_owned()),
+        None => (true, "headers".to_owned()),
+    };
+    if !matches!(c.auth, Some(McpAuth::Login)) && saved.is_file() {
+        said.push_str("; a login is saved, used with `auth = \"login\"`");
+    }
+    (ok, said)
 }
 
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
