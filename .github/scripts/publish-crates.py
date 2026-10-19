@@ -1,5 +1,8 @@
 """Publish every workspace crate whose version is not on crates.io yet.
 
+`--allow-dirty` lets in the built UI copied into apps/gateway/ui-dist/, which
+git ignores but the crate carries; a release checks out a clean tree.
+
 Crates go up in dependency order, so each finds the ones it needs. A crate
 whose version is already there is skipped, which makes a rerun safe and lets
 each crate keep its own version: bump one, and only it is published. When
@@ -83,7 +86,7 @@ def wait_for_rate_limit(output):
 def publish(name, version):
     while True:
         result = subprocess.run(
-            ["cargo", "publish", "-p", name, "--locked"],
+            ["cargo", "publish", "-p", name, "--locked", "--allow-dirty"],
             capture_output=True,
             text=True,
         )
@@ -113,7 +116,7 @@ def main():
         # Packages and builds every crate as published, resolving the ones not
         # on crates.io yet against each other.
         subprocess.run(
-            ["cargo", "package", "--locked"] + [arg for n, _ in todo for arg in ("-p", n)],
+            ["cargo", "package", "--locked", "--allow-dirty"] + [arg for n, _ in todo for arg in ("-p", n)],
             check=True,
         )
         return
