@@ -1,10 +1,35 @@
-# Respan Gateway example. Copy to gateway.toml and run `respan-gateway`.
-# Needs OPENAI_API_KEY, ANTHROPIC_API_KEY and LINKUP_API_KEY.
-# All settings: docs/configuration.md
+# Respan Gateway example config.
+#   cp gateway.example.toml gateway.toml
+#   export OPENAI_API_KEY=... ANTHROPIC_API_KEY=... LINKUP_API_KEY=...
+#   respan-gateway check && respan-gateway
+# Secrets are written "env:NAME". Every setting: docs/configuration.md
+# Reloads on SIGHUP, POST /ui/api/reload, or a file change with --watch.
+
+# ─── Server ──────────────────────────────────────────────────────────
 
 listen = "127.0.0.1:8080"
-# client_keys = [{ name = "app", key = "env:APP_KEY" }]   # required beyond localhost
+log    = "text"                    # text | json | off
+ui     = true                      # web UI and admin API at /ui/
 
+# body_limit       = "32MiB"
+# ws_message_limit = "16MiB"
+# shutdown_grace   = "30s"
+
+# Client keys: required to listen beyond localhost. Providers never see them.
+# client_keys = [
+#   { name = "app", key = "env:APP_KEY" },
+#   { name = "ops", key = "env:OPS_KEY", admin = true },            # admin API
+#   { name = "bot", key = "env:BOT_KEY", tools = ["search__*"] },   # only these tools
+# ]
+
+# Web pages on other origins that may call the gateway.
+[cors]
+origins = ["http://localhost:3000"]
+
+
+# ─── Providers ───────────────────────────────────────────────────────
+# A vendor knows its URLs and formats. The first provider of a kind is its
+# default; clients can also name one: "anthropic/claude-haiku-5-5".
 
 [providers.openai]
 vendor = "openai"
@@ -14,29 +39,110 @@ key    = "env:OPENAI_API_KEY"
 vendor = "anthropic"
 key    = "env:ANTHROPIC_API_KEY"
 
+# [providers.gemini]
+# vendor = "gemini"
+# key    = "env:GEMINI_API_KEY"
 
-# Clients ask for "smart": Claude first, then GPT.
+# [providers.groq]                 # also: deepseek, openrouter, xai, mistral,
+# vendor = "groq"                  # together, fireworks, azure, cloudflare, ...
+# key    = "env:GROQ_API_KEY"
+
+# [providers.ollama]
+# vendor   = "ollama"
+# base_url = "http://localhost:11434"
+
+# Any OpenAI-compatible endpoint:
+# [providers.local]
+# formats  = ["openai-chat"]
+# base_url = "http://localhost:8000/v1"
+
+
+# ─── Routes ──────────────────────────────────────────────────────────
+# A model name clients ask for, and where it goes. Without a route, a model
+# goes to the provider that lists it. See where one goes:
+# GET /ui/api/routes/explain?model=smart
+
+# Fallback: Claude, then GPT, each tried twice.
 [routes.smart]
-to    = ["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"]
-tries = 2
+to      = ["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"]
+tries   = 2
+backoff = "250ms"
+
+# Race them: the second starts if the first is 200 ms late.
+[routes.fast]
+to    = ["openai/gpt-6-luna", "anthropic/claude-haiku-5-5"]
+hedge = "200ms"
+
+# The cheapest of the candidates that can call tools.
+[routes.cheap]
+to    = ["openai/gpt-6-luna", "anthropic/claude-haiku-5-5"]
+pick  = "cheapest"                 # first | cheapest | fastest | weighted | random
+needs = ["tools"]
+
+# A glob: every "claude-*" model to Anthropic, as asked.
+[routes."claude-*"]
+to = "anthropic/{model}"
+
+# Only for some client keys (needs named client_keys):
+# [routes.internal]
+# to   = "openai/gpt-6-luna"
+# when = { clients = ["ops"] }
 
 
-# An MCP server, run as a command.
+# ─── Tools ───────────────────────────────────────────────────────────
+# Each tool server is served over MCP at /mcp/{name}.
+
+# A tool vendor: an HTTP API served as MCP tools (linkup, tinyfish).
+[tools.search]
+vendor = "linkup"                  # key from LINKUP_API_KEY
+
+# An MCP server run as a command, one child per session.
 [tools.files]
 command = "npx"
 args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
-# Linkup's search API, as MCP tools.
-[tools.search]
-vendor = "linkup"
+# An MCP server over HTTP.
+# [tools.github]
+# url  = "https://api.githubcopilot.com/mcp/"
+# auth = { bearer = "env:GITHUB_TOKEN" }   # or "login", "forward", { oauth = { ... } }
+
+# [tools.web]
+# vendor = "tinyfish"              # key from TINYFISH_API_KEY
 
 # Every server at /mcp, tools named server__tool.
 [plugins.mcp_aggregate]
+deny = ["files__write*", "files__move*"]
 
-# Any chat model can use the tools; the gateway runs the calls.
+# Any chat model, any client, can use the tools: the gateway runs the calls.
 [plugins.tool_loop]
-deny = ["files__write*"]
+allow     = ["search__*", "files__read*", "files__list*"]
+max_steps = 8
+# servers = ["search"]             # every server /mcp fronts if unset
+# models  = ["gpt-", "claude-"]    # every chat model if unset
 
 
-# [plugins.respan]                     # a trace per request in Respan
-# key = "env:RESPAN_API_KEY"
+# ─── Prices ──────────────────────────────────────────────────────────
+# Read from each provider's model list. Declare or override one, in $ per
+# million tokens (or per second of audio):
+
+[models."openai/my-finetune"]
+pricing = { input = 1.0, output = 2.0, cached_input = 0.5 }
+
+
+# ─── State and history ───────────────────────────────────────────────
+
+# previous_response_id with every provider, kept in memory. On by default.
+[plugins.responses]
+keep = "1h"
+
+# Requests kept for the web UI's log.
+[plugins.request_log]
+history = 1000
+
+
+# ─── Observability ───────────────────────────────────────────────────
+
+# A trace per request in Respan.
+# [plugins.respan]
+# key     = "env:RESPAN_API_KEY"
+# content = true                   # include messages and replies
