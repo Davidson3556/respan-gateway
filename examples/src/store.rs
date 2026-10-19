@@ -13,6 +13,9 @@ use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior};
 #[derive(Clone, Debug)]
 pub struct Database(Arc<Mutex<Connection>>);
 
+/// How long an open or a transaction waits for another connection's lock.
+const WAIT: Duration = Duration::from_secs(2);
+
 /// Keep storage diagnostics in the fault's source, not its public message.
 pub fn sql(error: rusqlite::Error) -> Fault {
     Fault::internal("the store could not complete its transaction").with_source(error)
@@ -53,7 +56,7 @@ impl Database {
         // Competing first opens can return BUSY immediately while one connection
         // switches the file to WAL, without using SQLite's busy timeout. Retry
         // only that startup operation, for no longer than the transaction wait.
-        let until = Instant::now() + Duration::from_millis(250);
+        let until = Instant::now() + WAIT;
         loop {
             let remaining = until.saturating_duration_since(Instant::now());
             connection
@@ -76,9 +79,7 @@ impl Database {
                 Err(error) => return Err(sql(error)),
             }
         }
-        connection
-            .busy_timeout(Duration::from_millis(250))
-            .map_err(sql)?;
+        connection.busy_timeout(WAIT).map_err(sql)?;
         connection
             .pragma_update(None, "foreign_keys", true)
             .map_err(sql)?;
@@ -148,7 +149,7 @@ mod tests {
             .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
             .map_err(sql)?;
         assert_eq!(mode, "wal");
-        assert_eq!(wait, 250);
+        assert_eq!(u128::from(wait), WAIT.as_millis());
         Ok(())
     }
 
@@ -224,9 +225,8 @@ mod tests {
                 if matches!(error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
         ));
         assert!(
-            start.elapsed() >= Duration::from_millis(200)
-                && start.elapsed() < Duration::from_millis(750),
-            "startup retries exceeded the shared 250 ms budget: {error}"
+            start.elapsed() >= WAIT - Duration::from_millis(50) && start.elapsed() < WAIT * 3,
+            "startup retries exceeded the shared {WAIT:?} budget: {error}"
         );
         blocker.execute_batch("ROLLBACK").map_err(sql)?;
         drop(blocker);
