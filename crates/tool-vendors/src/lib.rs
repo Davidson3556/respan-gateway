@@ -1,6 +1,9 @@
 #![warn(missing_docs)]
-//! The tool vendors: HTTP APIs offered as tools, a module each. [`ALL`]
-//! lists them; [`find`] looks one up by its id.
+//! The tool vendors: HTTP APIs offered as tools, in two tiers, each a
+//! crate: green (`respan-gateway-tool-vendors-green`), maintained and
+//! verified end to end against their live APIs, and yellow
+//! (`respan-gateway-tool-vendors-yellow`), maintained but not verified end
+//! to end. [`ALL`] lists them; [`find`] looks one up by its id.
 //!
 //! - [`linkup`]: Linkup's web search, sourced answers and page fetches
 //!   (`search`, `answer`, `fetch`), its key from `LINKUP_API_KEY`.
@@ -9,9 +12,13 @@
 
 pub use respan_gateway_tool_vendor_kit::*;
 
-mod args;
-pub mod linkup;
-pub mod tinyfish;
+pub use respan_gateway_tool_vendors_yellow::{linkup, tinyfish};
+
+/// The green tool vendors: maintained, and verified end to end.
+pub const GREEN: &[&ToolVendor] = respan_gateway_tool_vendors_green::ALL;
+
+/// The yellow tool vendors: maintained, not verified end to end.
+pub const YELLOW: &[&ToolVendor] = respan_gateway_tool_vendors_yellow::ALL;
 
 /// Every tool vendor.
 pub const ALL: &[&ToolVendor] = &[&linkup::VENDOR, &tinyfish::VENDOR];
@@ -26,6 +33,16 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use std::collections::HashSet;
+
+    #[test]
+    fn every_vendor_is_in_one_tier() {
+        let tiers: Vec<_> = GREEN.iter().chain(YELLOW).map(|v| v.id).collect();
+        let all: Vec<_> = ALL.iter().map(|v| v.id).collect();
+        assert_eq!(tiers.len(), all.len(), "{tiers:?} {all:?}");
+        for id in &all {
+            assert!(tiers.contains(id), "{id} is in no tier");
+        }
+    }
 
     #[test]
     fn vendors_are_well_formed() {

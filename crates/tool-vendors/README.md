@@ -2,18 +2,27 @@
 
 `respan-gateway-tool-vendors` is the HTTP APIs the gateway offers as MCP
 tools, though none of them speaks MCP: where each is, how it takes a key,
-and its tools. `ALL` lists them; `find(id)` is one, and the binary's
-`[tools.<name>] vendor = "<id>"` serves it as an MCP server in process, its
-tools named `<name>__<tool>` like any other server's.
+and its tools. `ALL` lists them (`GREEN` and `YELLOW` by tier); `find(id)`
+is one, and the binary's `[tools.<name>] vendor = "<id>"` serves it as an
+MCP server in process, its tools named `<name>__<tool>` like any other
+server's.
 
 [`kit/`](kit) (`respan-gateway-tool-vendor-kit`) is what they are built of:
 a vendor is a `ToolVendor` (its id, key, base URL and `Tools`), and
-`ToolServer` serves one. Each vendor is one file in `src/`.
+`ToolServer` serves one, and `args` reads a call's arguments.
 
-| Vendor | Id | Key | Tools |
-| --- | --- | --- | --- |
-| [Linkup](https://linkup.so) | `linkup` | `LINKUP_API_KEY` (bearer) | `search`, `answer`, `fetch` |
-| [TinyFish](https://tinyfish.ai) | `tinyfish` | `TINYFISH_API_KEY` (`X-API-Key`) | `search`, `fetch`, `run_agent` |
+Each vendor is one file in a tier's crate, as the model vendors are:
+
+- **green** ([`green/`](green), `respan-gateway-tool-vendors-green`):
+  maintained, and verified end to end against the vendor's live API. None
+  is yet.
+- **yellow** ([`yellow/`](yellow), `respan-gateway-tool-vendors-yellow`):
+  maintained, but not verified end to end. A vendor moves to green once it is.
+
+| Vendor | Id | Tier | Key | Tools |
+| --- | --- | --- | --- | --- |
+| [Linkup](https://linkup.so) | `linkup` | yellow | `LINKUP_API_KEY` (bearer) | `search`, `answer`, `fetch` |
+| [TinyFish](https://tinyfish.ai) | `tinyfish` | yellow | `TINYFISH_API_KEY` (`X-API-Key`) | `search`, `fetch`, `run_agent` |
 
 - `linkup`, at `https://api.linkup.so/v1`: `search` is `POST /search` for
   ranked sources, `answer` the same for a written answer with its sources,

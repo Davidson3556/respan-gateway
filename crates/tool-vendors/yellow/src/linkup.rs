@@ -2,12 +2,12 @@
 //! fetches, from its API at `https://api.linkup.so/v1` (`POST /search`,
 //! `POST /fetch`), the key as a bearer token.
 
-use crate::args::{
+use async_trait::async_trait;
+use respan_gateway_tool_vendor_kit::args::{
     object, optional_bool, optional_date, optional_enum, optional_int, optional_str_list, pretty,
     required_str,
 };
-use crate::{Api, KeyIn, ToolError, ToolSpec, ToolVendor, Tools};
-use async_trait::async_trait;
+use respan_gateway_tool_vendor_kit::{Api, KeyIn, ToolError, ToolSpec, ToolVendor, Tools};
 use serde_json::{Map, Value, json};
 
 /// Linkup.

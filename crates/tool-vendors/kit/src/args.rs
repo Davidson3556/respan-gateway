@@ -5,7 +5,7 @@ use crate::ToolError;
 use serde_json::{Map, Value};
 
 /// The arguments as an object; none at all is an empty one.
-pub(crate) fn object(arguments: &Value) -> Result<&Map<String, Value>, ToolError> {
+pub fn object(arguments: &Value) -> Result<&Map<String, Value>, ToolError> {
     static EMPTY: std::sync::OnceLock<Map<String, Value>> = std::sync::OnceLock::new();
     match arguments {
         Value::Object(map) => Ok(map),
@@ -15,15 +15,12 @@ pub(crate) fn object(arguments: &Value) -> Result<&Map<String, Value>, ToolError
 }
 
 /// The non-empty string `key`, which must be there.
-pub(crate) fn required_str<'a>(
-    args: &'a Map<String, Value>,
-    key: &str,
-) -> Result<&'a str, ToolError> {
+pub fn required_str<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a str, ToolError> {
     optional_str(args, key)?.ok_or_else(|| ToolError::new(format!("`{key}` is required")))
 }
 
 /// The string `key`, if there and not empty.
-pub(crate) fn optional_str<'a>(
+pub fn optional_str<'a>(
     args: &'a Map<String, Value>,
     key: &str,
 ) -> Result<Option<&'a str>, ToolError> {
@@ -36,7 +33,7 @@ pub(crate) fn optional_str<'a>(
 }
 
 /// The string `key`, if there, one of `allowed`.
-pub(crate) fn optional_enum<'a>(
+pub fn optional_enum<'a>(
     args: &'a Map<String, Value>,
     key: &str,
     allowed: &[&str],
@@ -51,10 +48,7 @@ pub(crate) fn optional_enum<'a>(
 }
 
 /// The boolean `key`, if there.
-pub(crate) fn optional_bool(
-    args: &Map<String, Value>,
-    key: &str,
-) -> Result<Option<bool>, ToolError> {
+pub fn optional_bool(args: &Map<String, Value>, key: &str) -> Result<Option<bool>, ToolError> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(b)) => Ok(Some(*b)),
@@ -63,7 +57,7 @@ pub(crate) fn optional_bool(
 }
 
 /// The integer `key`, if there, within `min..=max`.
-pub(crate) fn optional_int(
+pub fn optional_int(
     args: &Map<String, Value>,
     key: &str,
     min: u64,
@@ -86,7 +80,7 @@ pub(crate) fn optional_int(
 
 /// The list of strings `key`, if there and not empty. A single string is a
 /// list of one.
-pub(crate) fn optional_str_list(
+pub fn optional_str_list(
     args: &Map<String, Value>,
     key: &str,
 ) -> Result<Option<Vec<String>>, ToolError> {
@@ -109,7 +103,7 @@ pub(crate) fn optional_str_list(
 }
 
 /// The date `key`, if there, as `YYYY-MM-DD`.
-pub(crate) fn optional_date<'a>(
+pub fn optional_date<'a>(
     args: &'a Map<String, Value>,
     key: &str,
 ) -> Result<Option<&'a str>, ToolError> {
@@ -133,7 +127,7 @@ pub(crate) fn optional_date<'a>(
 }
 
 /// `value` as indented JSON.
-pub(crate) fn pretty(value: &Value) -> String {
+pub fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 

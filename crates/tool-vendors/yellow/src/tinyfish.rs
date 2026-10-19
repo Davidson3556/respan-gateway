@@ -5,12 +5,12 @@
 //! key in `X-API-Key`. The base URL is the agent's; search and fetch are on
 //! hosts of their own, called by absolute URL.
 
-use crate::args::{
+use async_trait::async_trait;
+use respan_gateway_tool_vendor_kit::args::{
     object, optional_bool, optional_date, optional_enum, optional_int, optional_str,
     optional_str_list, pretty, required_str,
 };
-use crate::{Api, KeyIn, ToolError, ToolSpec, ToolVendor, Tools};
-use async_trait::async_trait;
+use respan_gateway_tool_vendor_kit::{Api, KeyIn, ToolError, ToolSpec, ToolVendor, Tools};
 use serde_json::{Map, Value, json};
 
 /// TinyFish.

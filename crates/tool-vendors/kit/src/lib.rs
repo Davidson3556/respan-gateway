@@ -8,6 +8,7 @@
 //! tools too.
 
 mod api;
+pub mod args;
 mod server;
 
 pub use api::{Api, ToolError};

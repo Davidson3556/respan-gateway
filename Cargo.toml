@@ -11,6 +11,8 @@ members = [
     "crates/vendors/yellow",
     "crates/vendors",
     "crates/tool-vendors/kit",
+    "crates/tool-vendors/green",
+    "crates/tool-vendors/yellow",
     "crates/tool-vendors",
     "crates/serve",
     "apps/gateway",
@@ -59,6 +61,8 @@ respan-gateway-vendors-yellow = { path = "crates/vendors/yellow", version = "0.1
 respan-gateway-vendors = { path = "crates/vendors", version = "0.1.0" }
 respan-gateway-serve = { path = "crates/serve", version = "0.1.0" }
 respan-gateway-tool-vendor-kit = { path = "crates/tool-vendors/kit", version = "0.1.0" }
+respan-gateway-tool-vendors-green = { path = "crates/tool-vendors/green", version = "0.1.0" }
+respan-gateway-tool-vendors-yellow = { path = "crates/tool-vendors/yellow", version = "0.1.0" }
 respan-gateway-tool-vendors = { path = "crates/tool-vendors", version = "0.1.0" }
 respan-gateway-plugin-mcp-router = { path = "crates/plugins/mcp-router", version = "0.1.0" }
 async-trait = "0.1"

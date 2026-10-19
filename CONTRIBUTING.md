@@ -43,6 +43,7 @@ Each crate's `README.md` documents its public contract.
 | `crates/wires/` | Bytes at both edges: HTTP, SSE, WebSocket, the Reqwest transport |
 | `crates/formats/` | A kind over a wire, one spec each, naming no vendor |
 | `crates/vendors/` | Every vendor, a file each, in `green/` or `yellow/` |
+| `crates/tool-vendors/` | Every tool vendor (an HTTP API as MCP tools), a file each, in `green/` or `yellow/` |
 | `crates/plugins/` | First-party plugins: routing, tool loop, pricing, Respan traces, … |
 | `crates/sdk/` | What plugins, vendors and hosts share: model cards and prices |
 | `crates/serve/` | Hosting: one Axum router for HTTP and WebSocket |
