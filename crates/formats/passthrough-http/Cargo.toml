@@ -18,5 +18,3 @@ futures.workspace = true
 respan-gateway-core.workspace = true
 respan-gateway-http.workspace = true
 
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }

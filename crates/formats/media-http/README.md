@@ -89,9 +89,3 @@ at `https://generativelanguage.googleapis.com/v1beta` with the key in
   operation's `error`, or, filtered, a response of
   `raiMediaFilteredReasons`; a refusal is Google's `{"error": {code,
   message, status}}`. Veo reports no progress: an operation is done or not.
-
-## Tests
-
-The suite under `tests/` relays each kind through its format to strict
-local fakes of OpenAI's media endpoints and of Veo (`tests/support/`), which
-refuse what the real APIs refuse.

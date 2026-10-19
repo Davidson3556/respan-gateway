@@ -16,7 +16,7 @@ as an HTTP transport.
   `text/event-stream` to receive those independent server messages.
   `.serving(names)` serves clients at `{path}/{name}` for each of `names`
   and nowhere else, so one gateway can front several servers; the caller
-  routes by name (the binary's `mcp:` section does).
+  routes by name (the binary's `[mcp.<name>]` tables do).
 - `StdioTransport::new(program, args)`: an MCP server run as a child
   process per session. `send(Request<Body>)` returns a native response and
   optional write completion; `.connect()` supplies the provider factory.
@@ -40,7 +40,7 @@ as an HTTP transport.
   longer waited for.
 
 Used by: [mcp_proxy](../../../examples/integrations/mcp_proxy.rs) and the
-binary's `mcp:` servers.
+binary's `[mcp.<name>]` servers.
 
 Messages are validated as JSON-RPC envelopes before they can settle a
 request. Invalid HTTP provider messages fail `upstream`; stray or malformed
@@ -66,13 +66,3 @@ fail upstream. GET resumption can receive replies from earlier POSTs.
 JSON-only clients and JSON-RPC batches remain supported for compatibility.
 MCP 2025-06-18 clients send one message per POST and advertise both JSON
 and SSE; batch support is an extension for earlier clients.
-
-The opt-in tests use the pinned official MCP server over stdio and HTTP:
-
-```bash
-cargo test --manifest-path validation/Cargo.toml --test reference_server -- --ignored
-```
-
-They require Node.js/npm and download `@modelcontextprotocol/server-everything`.
-The HTTP check launches the resolved Node entry point directly, then kills
-and reaps it after the test.

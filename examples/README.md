@@ -1,23 +1,19 @@
 # Examples
 
-Runnable examples are grouped by topic below. Each is an explicit Cargo target
-with its test modules in [`tests/cases/`](tests/cases), grouped by the same topics.
-Cargo discovers the four `tests/text_*.rs` integration suites automatically.
-Private source modules live in
-[`support/`](support) and shared library helpers remain in [`src/`](src).
+Runnable examples are grouped by topic below. Each is an explicit Cargo target.
+Private source modules live in [`support/`](support) and shared library
+helpers remain in [`src/`](src).
 
 Run from the repository root (replace `wallet` with any target name below):
 
 ```bash
 cargo run -p respan-gateway-examples --example wallet
-cargo test -p respan-gateway-examples --all-targets
-cargo test -p respan-gateway-examples --example wallet
+cargo build -p respan-gateway-examples --examples
 ```
 
-Most examples run offline with scripted/local providers. **`gemini_live` and
-`responses_ws` are live-provider servers:** running them needs credentials and
-can incur provider charges; their automated tests use local scripted sockets
-and do not need credentials or make paid requests.
+Most examples run offline with scripted/local providers. **`gemini_live`,
+`responses_ws` and `tool_guard` are live-provider servers:** running them needs
+credentials and can incur provider charges.
 
 | Topic | Example | Demonstrates |
 | --- | --- | --- |
@@ -56,27 +52,25 @@ attempt before sending, prices the typed `Usage`, and settles once; the
 and idempotent settlement in memory, **not** durable charging or recovery.
 Register accounting last so it observes provider outputs before earlier filters
 can reject them. Unsent calls and uncut provider refusals cost nothing; sent
-calls cut off or lacking complete usage cost at least their reserve. The wallet
-target also runs ledger, accounting, wire and atomic tally tests.
+calls cut off or lacking complete usage cost at least their reserve.
 
 ## Live provider runs
 
 ```bash
 OPENAI_API_KEY=... MODEL=... MODEL_INPUT_LIMIT=... cargo run -p respan-gateway-examples --example responses_ws
 GEMINI_API_KEY=... MODEL=... MODEL_INPUT_LIMIT=... cargo run -p respan-gateway-examples --example gemini_live
+GEMINI_API_KEY=... ALLOWED_TOOLS=... cargo run -p respan-gateway-examples --example tool_guard
 ```
 
-These bind localhost ports 8081 and 8082 respectively. Choose the actual
+These bind localhost ports 8081, 8082 and 8083 respectively. Choose the actual
 model's full input-context bound for `MODEL_INPUT_LIMIT`; other models are
 refused. Gemini audio clients must send `realtimeInput.activityStart` before
 audio input; automatic activity detection is disabled. Ctrl-C closes active
 sessions and awaits billing hooks. The realtime audio policy does not redact
 speech; its text-PII mode refuses opaque audio.
-Live-provider interoperability is not established by the local protocol tests.
 
 Private [text support](support/text.rs) is shared by guardrail, PII and
-realtime; the four `text_*` integration test targets cover its reader, tool JSON
-and split-escape behavior.
+realtime.
 
 ## Remaining gaps
 

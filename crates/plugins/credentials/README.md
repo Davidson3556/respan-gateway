@@ -21,4 +21,3 @@ let gateway = gateway
 It sets the call's `CallHeaders`, so a plugin registered after it that sets
 them too (a tenant's key, say) has the last word. `Relay` forwards a client's
 key on its own calls already; this is for a gateway that routes without it.
-([tests](tests/credentials.rs))

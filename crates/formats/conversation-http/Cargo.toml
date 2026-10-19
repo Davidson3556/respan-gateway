@@ -23,10 +23,4 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-parking_lot.workspace = true
-respan-gateway-plugin-relay.workspace = true
-futures.workspace = true
-mockllm = { git = "https://github.com/lihe07/mockllm", rev = "26cf441" }
 respan-gateway-http.workspace = true
-respan-gateway-http-transport.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "sync", "test-util"] }

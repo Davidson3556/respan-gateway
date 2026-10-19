@@ -20,7 +20,7 @@ use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::{sink, stream};
 use respan_gateway_core::{Connection, EventSink, EventStream, Fault, Format, Gateway, Provider};
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 
@@ -102,7 +102,3 @@ async fn main() -> Result<(), Fault> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/integrations/custom_transport.rs"]
-mod tests;

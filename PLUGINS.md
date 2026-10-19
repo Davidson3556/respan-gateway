@@ -503,8 +503,6 @@ Then cover what makes a plugin hard to get right: streamed and whole
 responses, a client of another format (send to `/v1/messages` too), a
 provider's error, the client leaving mid-stream (`on_client_end` gets
 `Abandoned`), and the order relative to the plugins you expect it beside.
-The tests under [`examples/tests/cases/`](examples/tests/cases) do all of
-these.
 
 ## Adding a plugin to the binary
 
@@ -535,8 +533,8 @@ one:
    [`crates/plugins/README.md`](crates/plugins/README.md), and a `README.md`
    in the crate.
 6. **Test it.** Unit-test the plugin in its crate with a small `Gateway` and
-   `mockllm`. Add an end-to-end case under `apps/gateway/tests/` that
-   configures it from TOML and runs the binary.
+   `mockllm`, and add a case to `apps/gateway/src/compose/tests.rs` that
+   configures it from TOML.
 
 ## Further reading
 
@@ -547,7 +545,7 @@ one:
   [`respan`](crates/plugins/respan),
   [`routing`](crates/plugins/routing),
   [`tool-loop`](crates/plugins/tool-loop).
-- [`examples/`](examples/README.md), runnable and tested: guardrails, PII
+- [`examples/`](examples/README.md), runnable: guardrails, PII
   redaction across streams, billing and wallets, admission control, durable
   jobs, realtime policies.
 - [`crates/core/README.md`](crates/core/README.md) and the rustdoc on

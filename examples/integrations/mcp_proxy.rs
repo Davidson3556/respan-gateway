@@ -26,7 +26,7 @@ use respan_gateway_mcp as mcp;
 use respan_gateway_mcp::{Input, Output};
 use respan_gateway_mcp_http::{SESSION, StdioTransport, StreamableHttp};
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 
@@ -294,7 +294,3 @@ async fn main() -> Result<(), Fault> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/integrations/mcp_proxy.rs"]
-mod tests;

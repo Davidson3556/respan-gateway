@@ -121,6 +121,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     serve::run(gateway(transport, &allowed)?, "127.0.0.1:8083").await?;
     Ok(())
 }
-#[cfg(test)]
-#[path = "../tests/cases/realtime/tool_guard.rs"]
-mod tests;

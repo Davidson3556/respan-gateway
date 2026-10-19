@@ -17,13 +17,5 @@ respan-gateway-core.workspace = true
 tokio = { workspace = true, features = ["time", "macros"] }
 
 [dev-dependencies]
-parking_lot.workspace = true
-respan-gateway-conversation.workspace = true
-respan-gateway-conversation-http.workspace = true
-respan-gateway-http.workspace = true
-respan-gateway-http-transport.workspace = true
-respan-gateway-passthrough-http.workspace = true
-mockllm = { git = "https://github.com/lihe07/mockllm", rev = "26cf441" }
 futures.workspace = true
-serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }

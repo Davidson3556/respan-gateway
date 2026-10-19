@@ -39,13 +39,12 @@ request of its own, hours apart. A job's `id` is the provider's, opaque to
 the gateway: a client gives it back as a path segment, and a follow-up
 (`Retrieve`, `Content`, `Remix`, `Delete`, read by `Input::job_id()`) must
 reach the provider that made the job. Nothing in the request says which but
-the id's spelling, so a gateway routes follow-ups by it: OpenAI Videos' ids
-start `video_` (OpenAI's own API was removed on 2026-09-24; a compatible
-provider's), Veo's `veo_`, and one router serves both, reading
-`i.model().or(i.job_id())` with glob rules for `video_*` and `veo*`. Two deployments of one vendor share a
-spelling: a gateway that has them keeps which made each job, or wraps the
-ids in its own, signed, naming the deployment, within the vendor's length
-limits (use case 8), and unwraps them before the call.
+the id's spelling: OpenAI Videos' ids start `video_` (OpenAI's own API was
+removed on 2026-09-24; a compatible provider's), Veo's `veo_`.
+`video::VideoJobs`, registered after the router, sends each follow-up (and
+a `List` after one) to its job's provider by that spelling. Providers that
+spell ids alike, such as two deployments of one vendor, have their ids
+wrapped on the way out as `<provider>~<id>`, and unwrapped before the call.
 
 Some providers serve a finished job's content only at the URLs the job
 names (`Job::videos`), as Veo does: `video::LocateContent`, given those

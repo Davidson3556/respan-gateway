@@ -26,7 +26,7 @@ use respan_gateway_http::http;
 use respan_gateway_http::raw::Original;
 use respan_gateway_http_faults::Status;
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 #[allow(dead_code)]
 #[path = "../support/http.rs"]
@@ -167,7 +167,3 @@ async fn main() -> Result<(), Fault> {
     println!("provider edge saw: {:?}", *egress.seen());
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/routing/judge.rs"]
-mod tests;

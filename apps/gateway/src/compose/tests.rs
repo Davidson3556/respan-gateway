@@ -1,9 +1,37 @@
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
-use respan_gateway_http::http::StatusCode;
+use respan_gateway_http::Body;
+use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::http::{self, StatusCode};
+use respan_gateway_http::http_body_util::BodyExt;
 
-use super::http_helpers::{post, read_whole, serve};
 use super::*;
 use crate::App;
+
+/// Hand `req` to `gateway` as an HTTP server does: whole.
+async fn serve(
+    gateway: &Gateway,
+    req: http::Request<Body>,
+) -> (
+    http::Response<Body>,
+    futures::future::BoxFuture<'static, Result<(), Fault>>,
+) {
+    respan_gateway_http::handle(gateway, req, 32 << 20).await
+}
+
+fn post(path: &str, body: impl Into<Bytes>) -> http::Request<Body> {
+    let mut req = http::Request::new(Body::full(body));
+    *req.method_mut() = http::Method::POST;
+    *req.uri_mut() = path.parse().unwrap_or_else(|e| panic!("path {path}: {e}"));
+    req
+}
+
+async fn read_whole(
+    resp: http::Response<Body>,
+) -> (StatusCode, http::HeaderMap, Result<Bytes, Fault>) {
+    let (parts, body) = resp.into_parts();
+    let body = BodyExt::collect(body).await.map(|b| b.to_bytes());
+    (parts.status, parts.headers, body)
+}
 
 /// The gateway of `text`, its plugins included.
 fn resolve(text: &str) -> Result<Gateway, String> {

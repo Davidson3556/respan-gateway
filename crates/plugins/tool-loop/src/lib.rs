@@ -118,7 +118,7 @@ pub trait Toolbox: Send + Sync + 'static {
 pub struct Step(pub u32);
 
 /// A mark for the calls a [`Toolbox`] makes through the gateway to run a
-/// tool (put it on them with [`Call::with_extension`]), so a plugin can tell
+/// tool (put it on them with [`Call::with_extension`](respan_gateway_core::Call::with_extension)), so a plugin can tell
 /// them from the request's own provider calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolHop;

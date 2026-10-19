@@ -1,4 +1,4 @@
-//! Bounded Poppler conversion shared by the example and external validation.
+//! Bounded Poppler conversion for the attachments example.
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use respan_gateway_core::{ErrorCode, Fault};

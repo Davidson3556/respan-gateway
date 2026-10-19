@@ -22,7 +22,6 @@ and what vendors share. The vendors themselves are
   taking the key as the format does, over HTTP or, for a session,
   WebSocket. `models` lists its models; `client` is a client of it, at its
   first API's base URL with its key, for any call of its own.
-
 - `FORMATS` and `format`: every spec's format, as a provider of no vendor
   speaks it, and a format by name as a vendor speaks it or as its spec has
   it.

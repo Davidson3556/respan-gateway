@@ -5,7 +5,7 @@ one core provider per format it `Speaks`, `Rule`s and a default target. Of the p
 the candidates of a rule named exactly its model, else the provider its
 model names as `provider/model` (sent as `model`), else the candidates of
 the first glob rule (`llama-*`) that matches, else the provider whose listing
-names it (`Catalog::lists`; of several, the first added), else the target
+names it (in the `Catalog`; of several, the first added), else the target
 if it serves the kind, else the first that does; then that provider's core
 provider of the format it sends the model in (`Routes::format_for`, by the
 request's `Ask` and the model's card), else of the client's format, else
@@ -24,7 +24,7 @@ asked for), ordered by its `Pick`: `First`, `Cheapest` (by each model's
 `Price` in the routes' `Catalog`, input plus three times output), `Fastest` (by the router's own
 `Stats` of each candidate's time to a response; unknown or stale ones are
 tried), `Weighted` or `Random`. Its `needs` passes over candidates whose
-model is known to lack one (`Model::lacks`); one the catalog says nothing of is
+model is known to lack one (the SDK's `Model::lacks`); one the catalog says nothing of is
 kept. The `Catalog` is the SDK's, shared with the host
 (`Routes::with_catalog`, `Routes::catalog`). A
 candidate that failed its last 3 calls within 30 s goes last. The router

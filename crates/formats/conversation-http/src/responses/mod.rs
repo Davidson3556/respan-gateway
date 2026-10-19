@@ -8,7 +8,7 @@
 //! (`input_text`, `input_image` and `input_file` parts), an assistant's
 //! function calls and reasoning, and function call outputs as the results of
 //! a user message. Consecutive items of an assistant are one assistant
-//! message ([`request`] says how an item's own fields are kept). Function
+//! message (`request` says how an item's own fields are kept). Function
 //! tools, `tool_choice`, `parallel_tool_calls`, `max_output_tokens`,
 //! `temperature`, `top_p`, `user`, `text.format` and `reasoning` (its `effort`,
 //! and a `summary` of `auto`) are the kind's.
@@ -38,9 +38,9 @@
 //!   response's own fields, such as the settings it echoes, in its `native`;
 //!   those a later event changes are one [`Output::Native`]
 //!   `{"type": "response_fields", "fields": {..}}`.
-//! - A message's output text is a [`Block::Text`] (one per content part), a
-//!   `function_call` a [`Block::ToolCall`] named by its `call_id`, and a
-//!   `reasoning` item a [`Block::Reasoning`] of its summary, whose parts are
+//! - A message's output text is a [`Block::Text`](respan_gateway_conversation::Block::Text) (one per content part), a
+//!   `function_call` a [`Block::ToolCall`](respan_gateway_conversation::Block::ToolCall) named by its `call_id`, and a
+//!   `reasoning` item a [`Block::Reasoning`](respan_gateway_conversation::Block::Reasoning) of its summary, whose parts are
 //!   joined as paragraphs. Blocks are numbered in the order they open;
 //!   `output_index`, `content_index`, `summary_index` and `sequence_number`
 //!   are not the kind's, and are written anew.

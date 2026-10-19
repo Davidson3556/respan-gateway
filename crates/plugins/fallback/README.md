@@ -30,8 +30,8 @@ after commitment.
 - `Attempt` (extension on each call): its `index()`, `Role`, and `head()`,
   how long its response took to open.
 
-For HTTP, explicitly pass `respan_gateway_http::rules::retryable` as the classifier.
-HTTP's `watchdog(transport, head, idle)` lives in the HTTP protocol module; it bounds a
+For HTTP, explicitly pass `respan_gateway_http_faults::retryable` as the classifier.
+HTTP's `respan_gateway_http::call::watchdog(send, head, idle)` bounds a
 transport's head wait and polled per-frame body gaps. Other transports can
 choose a different classifier without importing HTTP.
 

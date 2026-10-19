@@ -1,7 +1,6 @@
 #![warn(missing_docs)]
-//! The yellow vendors, one module each: maintained, their quirks tested
-//! against fakes of their APIs, but not verified end to end against the
-//! live ones. A vendor moves to green with a live test of its own.
+//! The yellow vendors, one module each: maintained, but not verified end
+//! to end against their live APIs. A vendor moves to green once it is.
 
 pub mod azure;
 pub mod cloudflare;

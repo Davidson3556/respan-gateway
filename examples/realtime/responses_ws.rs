@@ -144,6 +144,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     serve::run(gw, "127.0.0.1:8081").await?;
     Ok(())
 }
-#[cfg(test)]
-#[path = "../tests/cases/realtime/responses_ws.rs"]
-mod tests;

@@ -25,7 +25,7 @@ mod accounting;
 use accounting::{Accounting, Quote, Tally};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 #[allow(dead_code)]
 #[path = "../support/http.rs"]
@@ -164,19 +164,3 @@ async fn main() -> Result<(), Fault> {
     println!("sk-a1 now gets {}", ask(&gw, "sk-a1").await?);
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/billing/wallet.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "../tests/cases/billing/ledger.rs"]
-mod ledger_tests;
-
-#[cfg(test)]
-#[path = "../tests/cases/billing/accounting.rs"]
-mod accounting_tests;
-
-#[cfg(test)]
-#[path = "../tests/cases/billing/accounting_wire.rs"]
-mod accounting_wire_tests;

@@ -27,7 +27,7 @@ use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{self as h, All, ClientIo, ProviderIo, Whole};
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
@@ -287,7 +287,3 @@ async fn main() -> Result<(), Fault> {
     println!("usage:    {usage:?}");
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/integrations/custom_format.rs"]
-mod tests;

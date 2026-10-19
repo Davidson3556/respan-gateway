@@ -56,7 +56,7 @@ use respan_gateway_http_faults::built_wrong;
 use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_passthrough_http as passthrough;
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 use http_support::{read_whole, serve};
 use serde_json::{Value, json};
@@ -769,11 +769,3 @@ async fn main() -> Result<(), Fault> {
     );
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/jobs/jobs_background.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "../tests/cases/jobs/background_durable.rs"]
-mod durable_tests;

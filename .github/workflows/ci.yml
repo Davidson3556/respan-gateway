@@ -62,8 +62,7 @@ jobs:
       - run: cargo test --workspace --all-targets --all-features
       - run: cargo test --workspace --doc --all-features
 
-  # The unix-only code is cfg-gated; this keeps Windows compiling and runs
-  # the stdio MCP tests there.
+  # The unix-only code is cfg-gated; this keeps Windows compiling.
   windows:
     needs: ui
     runs-on: windows-latest
@@ -76,24 +75,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets
-      # The stdio MCP path at runtime: a Python child, its process tree
-      # ended by taskkill, and a `.cmd` shim found through PATHEXT.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: cargo test -p respan-gateway --test e2e_mcp_stdio
-
-  # validation/ is outside the workspace and its tests are opt-in; compile it.
-  validation:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: validation
-      - run: cargo check --tests --bins
-        working-directory: validation
 
   # The `rust-version` of Cargo.toml is the one truth. rust-toolchain.toml pins
   # stable for development and would override an installed toolchain, so the

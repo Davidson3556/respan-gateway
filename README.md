@@ -22,8 +22,7 @@ translating between OpenAI, Anthropic and Gemini APIs on the way.
 It ships as a single binary with a web UI built in, as a Python package,
 and as a set of Rust crates.
 
-> **Status: pre-alpha.** The core and the formats are tested against
-> strict fakes of each vendor. APIs around the core may still change.
+> **Status: pre-alpha.** APIs around the core may still change.
 
 ## Quickstart
 
@@ -85,11 +84,10 @@ check, and the web UI is at [localhost:8080/ui/](http://localhost:8080/ui/).
 | Way | How |
 |---|---|
 | Release binary | Linux, macOS and Windows builds, with the web UI built in, on each [GitHub release](https://github.com/respanai/respan-gateway/releases) |
-| Docker | `docker run -p 8080:8080 -e OPENAI_API_KEY -e RESPAN_CLIENT_KEYS=sk-gw-change-me ghcr.io/respanai/respan-gateway` |
 | Python | `pip install respan-gateway`, the same gateway in process (see [`python/`](python/README.md)) |
 | Cargo | `cargo install --git https://github.com/respanai/respan-gateway respan-gateway` |
 
-No release is tagged yet, so the binary, Docker image and PyPI package
+No release is tagged yet, so the binary and PyPI package
 are not published; until the first tag, build from source.
 
 To build from a checkout, build the UI first so it is embedded:
@@ -105,6 +103,7 @@ respan-gateway init              Write a commented gateway.toml (-p groq enables
                                  --client-key generates a client key and prints it once)
 respan-gateway check [--online]  Show what a config serves; --online also calls each provider
 respan-gateway models            List every provider's models
+respan-gateway mcp               List the MCP servers and whether each is authenticated
 respan-gateway mcp login <name>  Log in once to an MCP server that needs a person to approve
 respan-gateway proxy --anthropic|--openai
                                  Sit in front of Claude Code or Codex, relaying the vendor's
@@ -122,6 +121,7 @@ environment wins over `.env`.
 | `PORT` | The port to listen on, on every address, for hosts that assign one |
 | `RESPAN_CLIENT_KEYS` | Client keys, comma separated |
 | `RESPAN_LOG` | `text`, `json` or `off` (`--log`) |
+| `RESPAN_COLOR` | `auto`, `always` or `never` (`--color`) |
 | `RESPAN_<VENDOR>_BASE_URL` | Move a vendor's base URL when there is no config file |
 
 ## Configuration
@@ -304,14 +304,14 @@ your own plugins, start with the [plugin guide](PLUGINS.md) and the runnable
 | `crates/kinds/` | Event types per kind: `conversation`, `media`, `decision`, `realtime`, `mcp` |
 | `crates/wires/` | Bytes at both edges: HTTP, SSE, WebSocket, the Reqwest transport |
 | `crates/formats/` | A kind over a wire, one spec each, naming no vendor |
-| `crates/vendors/` | Every vendor, a file each; `green/` is verified live, `yellow/` against fakes |
+| `crates/vendors/` | Every vendor, a file each, in `green/` or `yellow/` |
 | `crates/plugins/` | First-party plugins: routing, tool loop, pricing, Respan traces, … |
+| `crates/sdk/` | What plugins, vendors and hosts share: model cards and prices |
 | `crates/serve/` | Hosting: one Axum router for HTTP and WebSocket |
 | `apps/gateway/` | The binary: config, composition, client keys, request log, admin API |
 | `apps/ui/` | The web UI (React), embedded in the binary |
 | `python/` | The PyPI package, a PyO3 extension over `apps/gateway` |
-| `examples/` | Runnable, tested policies: billing, guardrails, PII, admission, jobs, … |
-| `validation/` | Opt-in tests against live providers and external tools |
+| `examples/` | Runnable policies: billing, guardrails, PII, admission, jobs, … |
 
 [CONTRIBUTING.md](CONTRIBUTING.md) explains how to build, test and release.
 

@@ -1,4 +1,4 @@
-//! HTTP requests and body collection for integration tests.
+//! Requests to a gateway in process, and their bodies collected.
 
 use futures::StreamExt;
 use respan_gateway_core::{Fault, futures};
@@ -7,7 +7,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 
-/// The most bytes of one message a test's adapter and transports hold.
+/// The most bytes of one message an example's adapter and transports hold.
 pub const LIMIT: usize = 32 << 20;
 
 /// Hand `req` to `gateway` as an HTTP server does: whole, up to [`LIMIT`].

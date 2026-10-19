@@ -26,5 +26,4 @@ closer.close(&gateway).await;
 
 Register it before any plugin that routes MCP requests by path. A session is
 reached by its unguessable id alone. Give none of its servers a client's credentials:
-the sessions are the gateway's. Used by the binary's `plugins: mcp_aggregate`
-(its end-to-end tests are `apps/gateway/tests/e2e_mcp_aggregate.rs`).
+the sessions are the gateway's. Used by the binary's `[plugins.mcp_aggregate]`.

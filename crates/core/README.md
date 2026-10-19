@@ -38,7 +38,9 @@ protocols and adapters all depend on it directly.
 Core defines no request/event kinds or `Format` implementations. Each kind
 names its pair `Input` / `Output`, in the crate that owns it:
 [`respan-gateway-conversation`](../kinds/conversation/README.md),
-[`respan-gateway-realtime`](../kinds/realtime/README.md), and
+[`respan-gateway-realtime`](../kinds/realtime/README.md),
+[`respan-gateway-decision`](../kinds/decision/README.md),
+[`respan-gateway-media`](../kinds/media/README.md) (one kind per operation), and
 [`respan-gateway-mcp`](../kinds/mcp/README.md) (envelopes around its JSON-RPC
 `Message`). Direction is
 gateway-wide: `Input` travels from client to provider, `Output` from

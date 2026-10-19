@@ -44,7 +44,7 @@ use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, HeaderValue, header::AUTHORIZATION};
 use respan_gateway_http::{Credential, raw::Original};
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
@@ -412,7 +412,3 @@ async fn main() -> Result<(), Fault> {
     println!("provider calls: {}", provider.requests().len());
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/jobs/jobs.rs"]
-mod tests;

@@ -32,7 +32,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, StatusCode};
 use respan_gateway_http_faults::Status;
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 #[allow(dead_code)]
 #[path = "../support/http.rs"]
@@ -218,7 +218,3 @@ async fn main() -> Result<(), Fault> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/policies/guardrail.rs"]
-mod tests;

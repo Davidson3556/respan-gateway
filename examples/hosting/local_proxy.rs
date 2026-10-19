@@ -29,7 +29,7 @@ use std::sync::Arc;
 use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_serve::router;
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 
@@ -168,9 +168,5 @@ const STREAM: &[&str] = &[
     "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
     "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
 ];
-
-#[cfg(test)]
-#[path = "../tests/cases/hosting/local_proxy.rs"]
-mod tests;
 
 use respan_gateway_plugin_relay::Relay;

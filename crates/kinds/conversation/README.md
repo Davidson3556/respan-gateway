@@ -42,8 +42,7 @@ Tools are typed too: a request's `Tool`s and `ToolChoice`, an assistant's
 `Block::ToolCall`, whose arguments stream as `Delta::Arguments` of JSON text.
 `Message::text` exposes typed text, explicitly skipping tool calls and other
 content; `Message::is_plain` checks for a known role, text parts and no message
-native fields. Text-part native fields are allowed. Holdback, JSON-text rewriting and placeholders remain
-private example support, not public promises.
+native fields. Text-part native fields are allowed.
 
 What the kind has no form for stays as the format that decoded it has it, in optional
 `NativeFields` (a mandatory format ID and its fields) on an `Input`, `Message`, `Tool`

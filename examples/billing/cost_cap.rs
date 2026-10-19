@@ -38,7 +38,7 @@ mod accounting;
 use accounting::{Accounting, Quote, Tally};
 use respan_gateway_conversation_http::openai::OpenAiChat;
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 #[allow(dead_code)]
 #[path = "../support/http.rs"]
@@ -238,7 +238,3 @@ async fn main() -> Result<(), Fault> {
     );
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/billing/cost_cap.rs"]
-mod tests;

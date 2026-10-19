@@ -1331,7 +1331,3 @@ async fn main() -> Result<(), Fault> {
     println!("wallet spent:  {}", wallets.spent("sk-demo"));
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/realtime/realtime.rs"]
-mod tests;

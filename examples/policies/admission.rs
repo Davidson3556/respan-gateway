@@ -38,7 +38,7 @@ use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFT
 use respan_gateway_http::raw::Original;
 use respan_gateway_http_faults::Status;
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
@@ -249,7 +249,3 @@ async fn main() -> Result<(), Fault> {
     drop(held);
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/policies/admission.rs"]
-mod tests;

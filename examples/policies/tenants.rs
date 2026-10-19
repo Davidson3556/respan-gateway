@@ -29,7 +29,7 @@ use respan_gateway_http::{Credential, call::CallHeaders};
 use respan_gateway_http_faults::Status;
 use respan_gateway_http_transport::HttpTransport;
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 
@@ -167,7 +167,3 @@ async fn main() -> Result<(), Fault> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/policies/tenants.rs"]
-mod tests;

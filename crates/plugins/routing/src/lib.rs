@@ -7,7 +7,7 @@
 //!    sent `model`;
 //! 3. the candidates of the first glob [`Rule`] that matches, such as
 //!    `llama-*`;
-//! 4. the provider whose model listing names it ([`Catalog::lists`]); of
+//! 4. the provider whose model listing names it (in the [`Catalog`]); of
 //!    several, the first added;
 //! 5. the kind's default: the target if it serves the kind, else the first
 //!    provider that does.

@@ -31,7 +31,7 @@ use respan_gateway_http::{ClientIo, ProviderIo};
 use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_passthrough_http as passthrough;
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 use http_support::{read_whole, serve};
 use parking_lot::Mutex;
@@ -262,7 +262,3 @@ async fn main() -> Result<(), Fault> {
     println!("{status} {}", String::from_utf8_lossy(&body?));
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/routing/models_merge.rs"]
-mod tests;

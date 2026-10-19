@@ -30,7 +30,7 @@ const GEMINI: &str = "https://api.respan.ai/api/google/gemini/v1beta";
 const CATALOG: &str = "https://www.respan.ai/api/gateway-models";
 
 /// Respan. Its Chat Completions serves every model it lists; each of its
-/// other formats only its own vendor's ([`format_for`]).
+/// other formats only its own vendor's (`format_for`).
 pub const VENDOR: Vendor = Vendor {
     id: "respan",
     key_env: &["RESPAN_API_KEY"],

@@ -1,8 +1,8 @@
 # respan gateway UI
 
 The web dashboard served by the gateway binary at `/ui/`: live requests,
-providers, routes, and a playground for chat, images, transcription, speech
-and video through the gateway's own `/v1` endpoints. A React SPA (Vite,
+providers, routes, and a playground for chat, realtime, images,
+transcription, speech, embeddings and video through the gateway's own `/v1` endpoints. A React SPA (Vite,
 TypeScript, React Router, TanStack Query, Tailwind and shadcn/ui) that talks
 only to the admin API under `/ui/api` and the standard `/v1` endpoints.
 
@@ -35,7 +35,7 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 `pnpm build` writes `dist/` (not committed). The gateway embeds `dist/` at
 compile time and serves it under `/ui/`, with `index.html` for any `/ui/*`
 path that is not a file, so build the UI before building the binary. Config
-`ui: false` turns it off. When the gateway has client keys, the dashboard asks
+`ui = false` turns it off. When the gateway has client keys, the dashboard asks
 for one and sends it as `Authorization: Bearer` on every call; it is stored in
 `localStorage` under `respan.gatewayKey`.
 

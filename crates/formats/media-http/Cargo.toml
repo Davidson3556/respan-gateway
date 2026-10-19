@@ -28,9 +28,4 @@ respan-gateway-media.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-parking_lot.workspace = true
-axum.workspace = true
 respan-gateway-http.workspace = true
-respan-gateway-http-transport.workspace = true
-respan-gateway-plugin-routing.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }

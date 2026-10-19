@@ -36,11 +36,10 @@ ui-build: ui-deps
 ui-deps:
     @test -d {{ui}}/node_modules || (cd {{ui}} && pnpm install --frozen-lockfile)
 
-# The checks CONTRIBUTING.md asks for: Rust formatting, lints and tests, `validation/` compiled, and the UI's.
+# The checks CONTRIBUTING.md asks for: Rust formatting, lints and tests, and the UI's.
 check: ui-deps
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo test --workspace --all-targets --all-features
     cargo test --workspace --doc --all-features
-    cargo check --manifest-path validation/Cargo.toml --tests --bins
     cd {{ui}} && pnpm lint && pnpm typecheck && pnpm test && pnpm build

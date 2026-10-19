@@ -2,7 +2,7 @@
 //! The vendors, in two tiers, each a crate: green
 //! (`respan-gateway-vendors-green`), maintained and verified end to end
 //! against their live APIs, and yellow (`respan-gateway-vendors-yellow`),
-//! maintained and tested against fakes but not verified end to end. Each
+//! maintained but not verified end to end. Each
 //! vendor is a module of its tier's crate, here by its name: where it is,
 //! how it takes a key, and the formats it speaks, a [`Vendor`]. [`ALL`]
 //! lists them. [`Vendor::provider`] makes a provider of one
@@ -11,8 +11,7 @@
 //!
 //! A quirk is a vendor's deployment departing from a spec it speaks; its
 //! module handles it, as data or as its dialect of the spec's format
-//! (`respan_gateway_conversation_http::dialect`), and tests it in its
-//! crate's `tests/<id>.rs` by a test named for it. What a spec's own vendor
+//! (`respan_gateway_conversation_http::dialect`). What a spec's own vendor
 //! does, as Gemini's signatures or OpenAI Realtime's transcription model,
 //! is the spec's, in its format.
 

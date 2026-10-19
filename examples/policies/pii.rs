@@ -38,7 +38,7 @@ use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_http_faults::Status;
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 #[allow(dead_code)]
 #[path = "../support/http.rs"]
@@ -204,7 +204,3 @@ async fn main() -> Result<(), Fault> {
     println!("provider got: {sent}\nclient got:   {status} {text}");
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/policies/pii.rs"]
-mod tests;

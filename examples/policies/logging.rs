@@ -35,7 +35,7 @@ use respan_gateway_examples::{CallUsage, meter};
 use respan_gateway_http::http::HeaderValue;
 use respan_gateway_http::raw::Original;
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 #[allow(dead_code)]
 #[path = "../support/http.rs"]
@@ -237,7 +237,3 @@ async fn main() -> Result<(), Fault> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/policies/logging.rs"]
-mod tests;

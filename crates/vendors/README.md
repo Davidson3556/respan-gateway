@@ -6,12 +6,10 @@ it is, how it takes a key, and the formats it speaks, as it speaks them.
 file in its tier's crate:
 
 - [`green/`](green) (`respan-gateway-vendors-green`): maintained, and
-  verified end to end against the vendor's live API by the validation
-  package's live tests (`validation/tests/live_*.rs`). A test of the crate
-  checks each green vendor has one, named `real_<id>_...`.
-- [`yellow/`](yellow) (`respan-gateway-vendors-yellow`): maintained, and
-  tested against fakes of its API, but not verified end to end. A yellow
-  vendor becomes green with a live test of its own.
+  verified end to end against the vendor's live API.
+- [`yellow/`](yellow) (`respan-gateway-vendors-yellow`): maintained, but
+  not verified end to end against the vendor's live API. A yellow vendor
+  becomes green once it is.
 
 [`kit/`](kit) (`respan-gateway-vendor-kit`) is what they are built of and
 share. This crate puts them together (`ALL`, `GREEN`, `YELLOW`, `find`),
@@ -58,15 +56,13 @@ What a spec says, and what its own vendor does, such as Anthropic's key in
 `x-api-key`, OpenAI Realtime's transcription model or Gemini's thought
 signatures in `generateContent`, is the spec's, in its format
 (`AnthropicMessages`, `OpenAiRealtime`, `GeminiGenerate`), not a quirk. Each quirk
-is described where its file handles it, and tested in
-its crate's `tests/<vendor>.rs` by a test named for it.
+is described where its file handles it.
 
 A vendor is one file in its tier's crate, a line in that crate's `ALL`, and
 one in this crate's `ALL` and module list. A provider of no vendor speaks
 each spec as it is: it takes its key as the spec's format does, at the
 base URL its config gives.
 
-<!-- table -->
 | Vendor | Tier | Formats |
 |---|---|---|
 | `openai` | green | `openai-chat`, `openai-responses`, `openai-realtime`, `responses-ws`, `openai-images`, `openai-transcriptions`, `openai-speech`, `openai-embeddings` |
@@ -85,9 +81,9 @@ base URL its config gives.
 | `typesafe` | green | `typesafe-systemone` |
 | `cloudflare` | yellow | `openai-chat`, `openai-embeddings` |
 | `respan` | green | `openai-chat`, `openai-responses`, `anthropic-messages`, `gemini-generate` |
-<!-- /table -->
 
-The table is written from `ALL`: `BLESS=1 cargo test -p respan-gateway-vendors --test registry`.
+The table is kept by hand: a vendor added to `ALL`, or a format added to a
+vendor, is a row or an entry here too.
 
 ## Base URLs
 

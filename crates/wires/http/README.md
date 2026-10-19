@@ -3,8 +3,8 @@
 `respan-gateway-http` connects native HTTP messages to core's streams and sinks.
 It is a wire: it knows no kind. It is for format authors; plugins need only
 core and a kind. The conversation formats live in
-`respan-gateway-conversation`, MCP's in `respan-gateway-mcp`; WebSockets are
-`respan-gateway-ws`, on top of this crate.
+`respan-gateway-conversation-http`, MCP's in `respan-gateway-mcp-http`;
+WebSockets are `respan-gateway-ws`, on top of this crate.
 
 A format implements core directly in two orientations:
 
@@ -204,7 +204,7 @@ Reqwest backend, `HttpTransport`, is `respan-gateway-http-transport`'s, and
 supplies a `.connect()` convenience.
 Backends can share connection pools; each factory invocation owns a fresh
 attempt. A transport prepares a call with `prepare_call` against a base URL
-`base_url` checked; the binding has already stripped what a proxy must not
+that `base_url` checked; the binding has already stripped what a proxy must not
 pass on, so a custom transport cannot forward it by omission.
 
 `Some(completion)` reports outgoing writing independently of the response:

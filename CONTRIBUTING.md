@@ -77,44 +77,21 @@ pytest
 
 ## Tests
 
-The workspace suite needs no keys or network: providers are
-[`mockllm`](https://github.com/lihe07/mockllm) and strict in-code fakes
-(`tests/support/realtime/` for OpenAI Realtime and Gemini Live) over real
-sockets.
-
-| Where | What |
-|---|---|
-| `crates/*/src/` | Unit tests of private details |
-| `crates/*/tests/` | Public contracts: the kernel (`crates/core/tests`), translation and relay (`crates/formats/*/tests`), each vendor's quirks (`crates/vendors/{green,yellow}/tests`), routing and the tool loop (`crates/plugins/*/tests`) |
-| `apps/gateway/tests/` | The built binary end to end: chat, media, MCP, the tool loop, reload, the CLI, client keys, the admin API |
-| `examples/tests/cases/` | The examples' policies, run by each example target |
-| `tests/support/` | Helpers shared across packages, included by `#[path]` |
-| `validation/` | Live providers and external tools; outside the workspace |
+The tests are unit tests, in `#[cfg(test)]` modules beside the code they
+test, and the Python package's `pytest` suite. `just check` runs the Rust
+and UI ones. They need no keys or network: where a test needs a provider,
+it is [`mockllm`](https://github.com/lihe07/mockllm), a scripted fake of
+the OpenAI, Anthropic and Gemini APIs, over a real socket.
 
 Focused runs:
 
 ```bash
-cargo test -p respan-gateway --test e2e
-cargo test -p respan-gateway-conversation-http --test translate tools::
-cargo test -p respan-gateway-examples --example guardrail
+cargo test -p respan-gateway --lib compose::
+cargo test -p respan-gateway-conversation-http --lib anthropic::
 ```
 
-Live tests make small paid requests, are ignored until selected, and skip
-when their key is missing:
-
-```bash
-OPENAI_API_KEY=... ANTHROPIC_API_KEY=... GEMINI_API_KEY=... \
-  cargo test --manifest-path validation/Cargo.toml --test live_providers -- --ignored
-```
-
-A vendor with a live test of its own is *green* (`crates/vendors/green`);
-the others are *yellow*, tested against fakes alone. CI compiles
-`validation/` but does not run it. See
-[`validation/README.md`](validation/README.md) for the other live and
-external-tool suites.
-
-Put a new test with the crate that owns the behavior, and name it for the
-behavior. Only local tests belong in the workspace.
+Put a new test beside the code that owns the behavior, and name it for the
+behavior. A test must not need keys or the network.
 
 ## Releasing
 
@@ -124,13 +101,7 @@ Tag `vX.Y.Z` on `main` and push the tag. Two workflows run (and call `ci.yml`):
   version and runs `ci.yml`; nothing is published if either fails. It builds
   the binary (web UI embedded) for Linux x86_64 and aarch64 (native runners),
   macOS aarch64 and x86_64, and Windows x86_64, and attaches them with a
-  `SHA256SUMS` file to a GitHub release. It also pushes the Docker image,
-  `linux/amd64` and `linux/arm64`, to `ghcr.io/<owner>/respan-gateway` (tags
-  `X.Y.Z`, `X.Y`, `latest`) with the built-in `GITHUB_TOKEN`: each
-  architecture's image is assembled from its natively built binary
-  (`--target prebuilt` of the `Dockerfile`; no emulation) and the two are
-  merged into one manifest. After the first push, make the package public in
-  the repository's package settings if it should be pullable without login.
+  `SHA256SUMS` file to a GitHub release.
 - `python.yml` builds the UI, then abi3 wheels (Linux, macOS, Windows; UI
   embedded) and the sdist (no UI: it builds with the placeholder page), tests
   the wheels, and, once `ci.yml` passes too, publishes them to PyPI.

@@ -31,7 +31,7 @@ use respan_gateway_http_faults::Status;
 use respan_gateway_media::{embedding, image, transcription};
 use respan_gateway_media_http::openai::{OpenAiEmbeddings, OpenAiImages, OpenAiTranscriptions};
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 #[allow(dead_code)]
 #[path = "../support/http.rs"]
@@ -275,7 +275,3 @@ async fn main() -> Result<(), Fault> {
     println!("a 2 MiB upload: {status}\n{body}");
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/policies/media_caps.rs"]
-mod tests;

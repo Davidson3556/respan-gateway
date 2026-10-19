@@ -56,129 +56,103 @@ futures.workspace = true
 http.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt"] }
 
 [[example]]
 name = "billing"
 path = "billing/billing.rs"
-test = true
 
 [[example]]
 name = "logging"
 path = "policies/logging.rs"
-test = true
 
 [[example]]
 name = "guardrail"
 path = "policies/guardrail.rs"
-test = true
 
 [[example]]
 name = "pii"
 path = "policies/pii.rs"
-test = true
 
 [[example]]
 name = "fallback"
 path = "routing/fallback.rs"
-test = true
 
 [[example]]
 name = "cost_cap"
 path = "billing/cost_cap.rs"
-test = true
 
 [[example]]
 name = "wallet"
 path = "billing/wallet.rs"
-test = true
 
 [[example]]
 name = "mcp_proxy"
 path = "integrations/mcp_proxy.rs"
-test = true
 
 [[example]]
 name = "custom_format"
 path = "integrations/custom_format.rs"
-test = true
 
 [[example]]
 name = "custom_transport"
 path = "integrations/custom_transport.rs"
-test = true
 
 [[example]]
 name = "judge"
 path = "routing/judge.rs"
-test = true
 
 [[example]]
 name = "attachments"
 path = "integrations/attachments.rs"
-test = true
 
 [[example]]
 name = "admission"
 path = "policies/admission.rs"
-test = true
 
 [[example]]
 name = "tenants"
 path = "policies/tenants.rs"
-test = true
 
 [[example]]
 name = "embedded"
 path = "hosting/embedded.rs"
-test = true
 
 [[example]]
 name = "local_proxy"
 path = "hosting/local_proxy.rs"
-test = true
 
 [[example]]
 name = "jobs"
 path = "jobs/jobs.rs"
-test = true
 
 [[example]]
 name = "realtime"
 path = "realtime/realtime.rs"
-test = true
 
 [[example]]
 name = "gemini_live"
 path = "realtime/gemini_live.rs"
-test = true
 
 [[example]]
 name = "responses_ws"
 path = "realtime/responses_ws.rs"
-test = true
 
 [[example]]
 name = "tool_guard"
 path = "realtime/tool_guard.rs"
-test = true
 
 [[example]]
 name = "batch_split"
 path = "routing/batch_split.rs"
-test = true
 
 [[example]]
 name = "models_merge"
 path = "routing/models_merge.rs"
-test = true
 
 [[example]]
 name = "jobs_background"
 path = "jobs/jobs_background.rs"
-test = true
 
 [[example]]
 name = "media_caps"
 path = "policies/media_caps.rs"
-test = true

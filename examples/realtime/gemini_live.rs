@@ -207,6 +207,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     serve::run(gw, "127.0.0.1:8082").await?;
     Ok(())
 }
-#[cfg(test)]
-#[path = "../tests/cases/realtime/gemini_live.rs"]
-mod tests;

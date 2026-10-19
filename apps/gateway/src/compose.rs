@@ -521,9 +521,4 @@ fn one_header(provider: &str, name: HeaderName, value: &str) -> Result<HeaderMap
 }
 
 #[cfg(test)]
-#[allow(dead_code, unused_imports)]
-#[path = "../../../tests/support/http.rs"]
-mod http_helpers;
-
-#[cfg(test)]
 mod tests;

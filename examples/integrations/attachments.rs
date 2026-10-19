@@ -66,7 +66,7 @@ use respan_gateway_http_transport::HttpTransport;
 use respan_gateway_passthrough_http as passthrough;
 use respan_gateway_plugin_fallback::{Backoff, Until, first_success};
 #[allow(dead_code)]
-#[path = "../../tests/support/http.rs"]
+#[path = "../support/request.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
@@ -708,7 +708,3 @@ async fn main() -> Result<(), Fault> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "../tests/cases/integrations/attachments.rs"]
-mod tests;

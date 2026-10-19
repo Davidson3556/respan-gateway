@@ -14,8 +14,9 @@ events.
   binding on both edges, which a format's `Format` implementations call
   (`bind_client`, `bind_provider`). `decode_*`/`encode_*` convert finite
   values; `read_*`/`write_*` bind lazy event streams to a body.
-- `Decoder`: a format's decoder of one response into events, driven over
-  SSE, holding a response's start until its first content.
+- `Schema::Decoding`: a format's decoder (a `respan_gateway_http::Decoder`)
+  of one streamed response into events, holding a response's start until
+  its first content.
 - `StreamResponse(bool)`: a call extension choosing whether the provider is
   asked to stream; without it the call follows the client's request.
 
@@ -46,7 +47,7 @@ appeared, so a relay in this format sends it back and a plugin can read it
 `{"response": {..}}`; a choice's and its message's or delta's as a native
 `{"choices": [..]}`; usage's own as a native `{"usage": {..}}`. A vendor's
 departures from the spec, such as reasoning in `reasoning_content`, are its
-plugins' in the [providers crate](../../providers/README.md), which read
+plugins' in the [vendors crate](../../vendors/README.md), which read
 these. Reasoning has no field in this format, and is refused, as is media
 in a tool result.
 
@@ -172,9 +173,3 @@ read in either case and written in lower case.
 A response that made tool calls finishes as tool use when the provider says
 `stop` (as OpenAI does when `tool_choice` forces a function, and Gemini
 always, and Responses when `completed`); Anthropic says `tool_use` itself.
-
-## Tests
-
-The suites under `tests/` drive the kernel's relay through these formats and
-translate between them. A vendor's quirks are tested in the providers
-crate.

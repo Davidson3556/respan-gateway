@@ -1043,12 +1043,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lazy_static"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
-
-[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1186,15 +1180,6 @@ name = "ndk-context"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
-
-[[package]]
-name = "nu-ansi-term"
-version = "0.50.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
-dependencies = [
- "windows-sys 0.61.2",
-]
 
 [[package]]
 name = "num-traits"
@@ -1602,7 +1587,6 @@ dependencies = [
  "mockllm",
  "moka",
  "parking_lot",
- "percent-encoding",
  "reqwest",
  "respan-gateway-conversation",
  "respan-gateway-conversation-http",
@@ -1638,7 +1622,6 @@ dependencies = [
  "sha2",
  "terminal_size",
  "tokio",
- "tokio-tungstenite",
  "toml",
  "tower",
  "uuid",
@@ -1659,20 +1642,14 @@ name = "respan-gateway-conversation-http"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "futures",
- "mockllm",
- "parking_lot",
  "percent-encoding",
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-faults",
- "respan-gateway-http-transport",
- "respan-gateway-plugin-relay",
  "respan-gateway-sse",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -1746,7 +1723,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -1759,22 +1735,14 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "mockllm",
  "parking_lot",
  "percent-encoding",
- "respan-gateway-conversation",
- "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http-faults",
- "respan-gateway-http-transport",
- "respan-gateway-passthrough-http",
- "respan-gateway-plugin-relay",
- "respan-gateway-plugin-routing",
  "respan-gateway-sse",
  "serde",
  "serde_json",
  "tokio",
- "tower",
  "url",
 ]
 
@@ -1824,7 +1792,6 @@ dependencies = [
  "respan-gateway-http-faults",
  "respan-gateway-http-transport",
  "respan-gateway-mcp",
- "respan-gateway-plugin-relay",
  "respan-gateway-sse",
  "serde_json",
  "tokio",
@@ -1845,24 +1812,19 @@ dependencies = [
 name = "respan-gateway-media-http"
 version = "0.1.0"
 dependencies = [
- "axum",
  "base64 0.22.1",
  "form_urlencoded",
  "futures",
  "multer",
- "parking_lot",
  "percent-encoding",
  "respan-gateway-conversation",
  "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-faults",
- "respan-gateway-http-transport",
  "respan-gateway-media",
- "respan-gateway-plugin-routing",
  "respan-gateway-sse",
  "serde_json",
- "tokio",
  "uuid",
 ]
 
@@ -1875,21 +1837,14 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-faults",
- "tokio",
 ]
 
 [[package]]
 name = "respan-gateway-plugin-credentials"
 version = "0.1.0"
 dependencies = [
- "futures",
- "mockllm",
- "respan-gateway-conversation",
- "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-http-transport",
- "tokio",
 ]
 
 [[package]]
@@ -1897,16 +1852,8 @@ name = "respan-gateway-plugin-fallback"
 version = "0.1.0"
 dependencies = [
  "futures",
- "mockllm",
- "parking_lot",
- "respan-gateway-conversation",
- "respan-gateway-conversation-http",
  "respan-gateway-core",
- "respan-gateway-http",
  "respan-gateway-http-faults",
- "respan-gateway-http-transport",
- "respan-gateway-passthrough-http",
- "serde_json",
  "tokio",
 ]
 
@@ -1931,14 +1878,11 @@ name = "respan-gateway-plugin-pricing"
 version = "0.1.0"
 dependencies = [
  "respan-gateway-conversation",
- "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-decision",
- "respan-gateway-http",
  "respan-gateway-media",
  "respan-gateway-realtime",
  "respan-gateway-sdk",
- "tokio",
 ]
 
 [[package]]
@@ -1967,16 +1911,13 @@ dependencies = [
 name = "respan-gateway-plugin-responses"
 version = "0.1.0"
 dependencies = [
- "mockllm",
  "moka",
  "parking_lot",
  "respan-gateway-conversation",
  "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-http-transport",
  "serde_json",
- "tokio",
  "uuid",
 ]
 
@@ -1984,21 +1925,13 @@ dependencies = [
 name = "respan-gateway-plugin-routing"
 version = "0.1.0"
 dependencies = [
- "futures",
  "getrandom 0.3.4",
- "mockllm",
  "parking_lot",
  "respan-gateway-conversation",
- "respan-gateway-conversation-http",
  "respan-gateway-core",
- "respan-gateway-http",
- "respan-gateway-http-transport",
- "respan-gateway-passthrough-http",
  "respan-gateway-plugin-fallback",
  "respan-gateway-sdk",
  "serde",
- "serde_json",
- "tokio",
  "wildmatch",
 ]
 
@@ -2007,14 +1940,11 @@ name = "respan-gateway-plugin-tool-loop"
 version = "0.1.0"
 dependencies = [
  "futures",
- "mockllm",
  "parking_lot",
  "respan-gateway-conversation",
- "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-http-faults",
- "respan-gateway-http-transport",
  "respan-gateway-realtime",
  "serde_json",
  "tokio",
@@ -2052,7 +1982,6 @@ dependencies = [
 name = "respan-gateway-realtime-ws"
 version = "0.1.0"
 dependencies = [
- "axum",
  "base64 0.22.1",
  "form_urlencoded",
  "parking_lot",
@@ -2061,11 +1990,8 @@ dependencies = [
  "respan-gateway-http",
  "respan-gateway-http-faults",
  "respan-gateway-realtime",
- "respan-gateway-serve",
  "respan-gateway-ws",
  "serde_json",
- "tokio",
- "tokio-tungstenite",
 ]
 
 [[package]]
@@ -2088,21 +2014,10 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "mockllm",
- "parking_lot",
- "reqwest",
- "respan-gateway-conversation",
- "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-http-faults",
- "respan-gateway-http-transport",
- "respan-gateway-passthrough-http",
- "respan-gateway-plugin-relay",
  "respan-gateway-ws",
- "serde_json",
  "tokio",
- "tower",
 ]
 
 [[package]]
@@ -2139,7 +2054,6 @@ dependencies = [
 name = "respan-gateway-vendors"
 version = "0.1.0"
 dependencies = [
- "parking_lot",
  "respan-gateway-vendor-kit",
  "respan-gateway-vendors-green",
  "respan-gateway-vendors-yellow",
@@ -2149,67 +2063,39 @@ dependencies = [
 name = "respan-gateway-vendors-green"
 version = "0.1.0"
 dependencies = [
- "axum",
- "base64 0.22.1",
- "chrono",
- "parking_lot",
  "respan-gateway-conversation",
  "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-decision-http",
- "respan-gateway-http",
  "respan-gateway-media-http",
- "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
- "respan-gateway-serve",
  "respan-gateway-vendor-kit",
  "serde_json",
- "tokio",
- "tokio-tungstenite",
 ]
 
 [[package]]
 name = "respan-gateway-vendors-yellow"
 version = "0.1.0"
 dependencies = [
- "axum",
- "base64 0.22.1",
- "chrono",
- "parking_lot",
  "respan-gateway-conversation",
  "respan-gateway-conversation-http",
  "respan-gateway-core",
- "respan-gateway-http",
  "respan-gateway-media-http",
- "respan-gateway-realtime",
- "respan-gateway-serve",
  "respan-gateway-vendor-kit",
  "serde_json",
- "tokio",
- "tokio-tungstenite",
 ]
 
 [[package]]
 name = "respan-gateway-ws"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "axum",
  "bytes",
  "futures",
  "http",
- "mockllm",
- "parking_lot",
  "reqwest",
- "respan-gateway-conversation",
- "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-http-faults",
- "respan-gateway-http-transport",
- "respan-gateway-passthrough-http",
  "respan-gateway-plugin-relay",
- "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
  "respan-gateway-serve",
  "rustls",
@@ -2217,7 +2103,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
- "tower",
 ]
 
 [[package]]
@@ -2278,9 +2163,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
@@ -2515,15 +2400,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sharded-slab"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
-dependencies = [
- "lazy_static",
-]
-
-[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2683,15 +2559,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
-]
-
-[[package]]
-name = "thread_local"
-version = "1.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
-dependencies = [
- "cfg-if",
 ]
 
 [[package]]
@@ -2896,32 +2763,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
- "valuable",
-]
-
-[[package]]
-name = "tracing-log"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
-dependencies = [
- "log",
- "once_cell",
- "tracing-core",
-]
-
-[[package]]
-name = "tracing-subscriber"
-version = "0.3.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
-dependencies = [
- "nu-ansi-term",
- "sharded-slab",
- "smallvec",
- "thread_local",
- "tracing-core",
- "tracing-log",
 ]
 
 [[package]]
@@ -3000,12 +2841,6 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
 ]
-
-[[package]]
-name = "valuable"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vcpkg"

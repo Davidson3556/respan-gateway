@@ -34,8 +34,7 @@ text). What the model said goes back in the next step as the kind holds it,
 reasoning and native fields included (a signed Anthropic `thinking` block, a
 Gemini `thoughtSignature`); native events of later steps are renumbered with
 their blocks. The timeout fails the request with `tool_loop_timeout`, a 504.
-Used by the binary's `tool_loop:` section, with MCP servers as the tools
-([tests](tests/tool_loop.rs)).
+Used by the binary's `[plugins.tool_loop]`, with MCP servers as the tools.
 
 A live session (the realtime kind) gets the same tools: they are added to
 each configuration of the session that sets tools, and a call of one is run
@@ -44,5 +43,5 @@ respond. The client sees neither the call, nor its answer, nor a response
 that said nothing else; what a format says of the call only in its own
 events (OpenAI's items and argument deltas) is left out with it, as is any
 object naming one of the gateway's tools or carrying one of its calls' ids.
-Its `scope` sees no model (`None`): a host reads a session's from its
+Its `when` predicate sees no model (`None`): a host reads a session's from its
 extensions.

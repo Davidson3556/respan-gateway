@@ -42,8 +42,7 @@ session through `serve`, and `stop` closes every open session 1001, for a
 graceful shutdown.
 
 Both edges pump a session with the same code. Any other format on the HTTP
-wire works with the transport and the adapter: the tests relay through
-`passthrough` too.
+wire works with the transport and the adapter, such as `passthrough`.
 
 ## The transport
 
@@ -77,8 +76,7 @@ wire works with the transport and the adapter: the tests relay through
 - **Backpressure holds.** A frame moves from a socket to the next only as the
   next side takes it: one frame in flight per hop, plus the sockets' own
   buffers. A client that does not read stalls the provider after about 6 MiB,
-  and a provider that does not read stalls the client after about 7 MiB
-  (`tests/backpressure.rs`).
+  and a provider that does not read stalls the client after about 7 MiB.
 - **Keep-alive, no idle limit**: a peer quiet for `ping_after` while read is
   pinged, and quiet that long again is gone, on both edges. A quiet session
   whose peers answer pings lasts; a limit on its length is a plugin's, and
@@ -86,9 +84,7 @@ wire works with the transport and the adapter: the tests relay through
 - **`wss` uses the system's root certificates** and the `aws-lc-rs` provider,
   named in the code because the workspace's dependencies enable both `ring`
   and `aws-lc-rs`, which makes rustls's own choice panic. Proxies are the
-  environment's, as for `HttpTransport`. The opt-in
-  `validation/tests/live_ws.rs` checks TLS sessions against Gemini Live
-  and OpenAI Realtime; each requires a valid key with model access.
+  environment's, as for `HttpTransport`.
 - No reconnection or session resumption.
 
 ## Design notes
