@@ -142,6 +142,10 @@ fn retired(config: &Config) -> Result<(), Fault> {
              `max_backoff` and `until` are the route's too",
         ),
         (
+            config.mcp.is_some(),
+            "mcp is now tools: `[tools.github]` is `[tools.github]`, with the same fields",
+        ),
+        (
             config.prices.is_some(),
             "prices are now each model's own: `[prices.\"gpt-4o\"]` is \
              `[models.\"openai/gpt-4o\"]` with `pricing = { input = 2.5, output = 10 }`",

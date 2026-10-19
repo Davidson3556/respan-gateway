@@ -124,7 +124,7 @@ enum McpCommand {
     /// code, or in a browser), and save the login beside the config, in
     /// `.respan/mcp/<name>.json`, for `auth = "login"`
     Login {
-        /// The server, as `[mcp.<name>]` names it
+        /// The server, as `[tools.<name>]` names it
         name: String,
     },
 }
@@ -139,7 +139,7 @@ const EXAMPLES: &str = "Examples:
   respan-gateway models             List the models the providers offer
   respan-gateway proxy --anthropic  Sit in front of Claude Code
   respan-gateway mcp                List the MCP servers and whether each is authenticated
-  respan-gateway mcp login linear   Log in to the MCP server [mcp.linear], once
+  respan-gateway mcp login linear   Log in to the MCP server [tools.linear], once
 
 Environment (also read from the nearest .env in this directory or its parents):
   OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, ...

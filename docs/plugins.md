@@ -528,8 +528,8 @@ one:
    come first; plugins that route or edit the request come next; plugins that
    answer the request themselves (the tool loop, then `Dispatch`, which runs
    a route's fallbacks) come after those; and pricing comes last.
-5. **Document it.** Add a commented block to
-   [`gateway.example.toml`](../gateway.example.toml), a row to
+5. **Document it.** Add its settings to
+   [`docs/configuration.md`](configuration.md), a row to
    [`crates/plugins/README.md`](../crates/plugins/README.md), and a `README.md`
    in the crate.
 6. **Test it.** Unit-test the plugin in its crate with a small `Gateway` and

@@ -43,7 +43,7 @@ class OAuthConfig(TypedDict, total=False):
 class McpAggregateConfig(TypedDict, total=False):
     """One MCP endpoint, /mcp, that fronts the `mcp` servers as a single server."""
 
-    servers: List[str]  # the `mcp` servers fronted; all but auth "forward" ones if unset
+    servers: List[str]  # the tool servers fronted; all but auth "forward" ones if unset
     allow: List[str]  # tool names "server__tool", "*" for any characters; all if unset
     deny: List[str]  # never offered; wins over `allow`
 
@@ -77,9 +77,9 @@ class McpConfig(TypedDict, total=False):
 
 
 class ToolLoopConfig(TypedDict, total=False):
-    """The tool loop: the gateway runs the tools of `mcp` servers inside chat requests."""
+    """The tool loop: the gateway runs the tools of tool servers inside chat requests."""
 
-    servers: List[str]  # the `mcp` servers whose tools are offered; all but auth "forward" ones if unset
+    servers: List[str]  # the tool servers whose tools are offered; all but auth "forward" ones if unset
     allow: List[str]  # tool names as the model has them, "github__*"; all if unset
     deny: List[str]  # never offered; wins over `allow`
     models: List[str]  # model prefixes the loop applies to; every chat model if unset
@@ -229,6 +229,6 @@ class GatewayConfig(TypedDict, total=False):
     ws_message_limit: Union[int, str]  # bytes, or a size such as "16MiB"
     models: Dict[str, ModelConfig]  # by "provider/model": laid over its provider's list
     shutdown_grace: Union[int, float, str]  # seconds, or "30s", "2m", "500ms"
-    mcp: Dict[str, McpConfig]
+    tools: Dict[str, McpConfig]  # tool servers by name: an MCP `url` or `command`, or a tool `vendor`
     cors: CorsConfig
     ui: bool  # False also turns off the admin API behind models()/requests()/providers()

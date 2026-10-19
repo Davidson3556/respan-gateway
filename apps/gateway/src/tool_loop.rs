@@ -1,4 +1,4 @@
-//! The tool loop of the binary: `plugins.tool_loop` in the config names `mcp` servers
+//! The tool loop of the binary: `plugins.tool_loop` in the config names tool servers
 //! whose tools the gateway offers to the model in chat requests and live
 //! sessions and runs for it ([`respan_gateway_plugin_tool_loop`] is the loop; this is the tools).
 //!
@@ -48,7 +48,7 @@ const CLOSING: Duration = Duration::from_secs(10);
 const DEFAULT_CACHE: Duration = Duration::from_secs(300);
 
 /// The servers whose tools `tool_loop` offers: those it names, or every
-/// `mcp` server that takes no client's credentials, as `/mcp` fronts them.
+/// server that takes no client's credentials, as `/mcp` fronts them.
 pub fn servers(tool_loop: &ToolLoopConfig, servers: &[McpServer]) -> Vec<String> {
     match &tool_loop.servers {
         Some(listed) => listed.clone(),
@@ -58,8 +58,8 @@ pub fn servers(tool_loop: &ToolLoopConfig, servers: &[McpServer]) -> Vec<String>
     }
 }
 
-/// Checks `plugins.tool_loop` against the servers: every tool server is an
-/// `mcp` server that is served, and takes no client's credentials.
+/// Checks `plugins.tool_loop` against the servers: every tool server is a tool
+/// server that is served, and takes no client's credentials.
 pub fn check(
     tool_loop: &ToolLoopConfig,
     servers: &[McpServer],
@@ -70,7 +70,7 @@ pub fn check(
     if names.is_empty() {
         return Err(bad(match tool_loop.servers {
             Some(_) => "`servers` names no mcp server".into(),
-            None => "no mcp server to offer tools of; add one under `mcp` (a server with \
+            None => "no mcp server to offer tools of; add one under `tools` (a server with \
                      `auth = \"forward\"` cannot be used)"
                 .into(),
         }));

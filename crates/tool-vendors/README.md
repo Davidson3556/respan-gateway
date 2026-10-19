@@ -3,7 +3,7 @@
 `respan-gateway-tool-vendors` is the HTTP APIs the gateway offers as MCP
 tools, though none of them speaks MCP: where each is, how it takes a key,
 and its tools. `ALL` lists them; `find(id)` is one, and the binary's
-`[mcp.<name>] vendor = "<id>"` serves it as an MCP server in process, its
+`[tools.<name>] vendor = "<id>"` serves it as an MCP server in process, its
 tools named `<name>__<tool>` like any other server's.
 
 [`kit/`](kit) (`respan-gateway-tool-vendor-kit`) is what they are built of:

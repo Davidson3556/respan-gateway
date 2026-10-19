@@ -42,13 +42,12 @@ const PAGE: &str = include_str!("mcp_login.html");
 /// Logs in to server `name` of `config` and saves the login; where it is.
 pub async fn login(config: &Config, name: &str) -> Result<PathBuf, String> {
     let server = config
-        .mcp
+        .tools
         .get(name)
         .ok_or_else(|| format!("no mcp server '{name}' in {}", config.source()))?;
-    let url = server
-        .url
-        .as_deref()
-        .ok_or_else(|| format!("mcp '{name}' runs a `command`; only a `url` is logged in to"))?;
+    let url = server.url.as_deref().ok_or_else(|| {
+        format!("tool server '{name}' runs a `command`; only a `url` is logged in to")
+    })?;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -116,7 +115,7 @@ pub async fn login(config: &Config, name: &str) -> Result<PathBuf, String> {
     save(&path, &login)
         .map_err(|e| format!("the login could not be saved to {}: {e}", path.display()))?;
     if !matches!(server.auth, Some(McpAuth::Login)) {
-        println!("Set `auth = \"login\"` on [mcp.{name}] for the gateway to use it.");
+        println!("Set `auth = \"login\"` on [tools.{name}] for the gateway to use it.");
     }
     Ok(path)
 }
@@ -125,15 +124,15 @@ pub async fn login(config: &Config, name: &str) -> Result<PathBuf, String> {
 /// reaches, and whether the gateway can authenticate to it, from the config,
 /// the environment and the saved logins alone (no server is called).
 pub fn list(config: &Config) -> String {
-    if config.mcp.is_empty() {
+    if config.tools.is_empty() {
         return format!(
-            "No MCP servers in {}; add an [mcp.<name>] block.",
+            "No MCP servers in {}; add an [tools.<name>] block.",
             config.source()
         );
     }
     let logins = logins_dir(config.source());
     let rows: Vec<_> = config
-        .mcp
+        .tools
         .iter()
         .map(|(name, c)| {
             let saved = logins.join(format!("{name}.json"));

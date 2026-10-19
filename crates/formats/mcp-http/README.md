@@ -16,7 +16,7 @@ as an HTTP transport.
   `text/event-stream` to receive those independent server messages.
   `.serving(names)` serves clients at `{path}/{name}` for each of `names`
   and nowhere else, so one gateway can front several servers; the caller
-  routes by name (the binary's `[mcp.<name>]` tables do).
+  routes by name (the binary's `[tools.<name>]` tables do).
 - `StdioTransport::new(program, args)`: an MCP server run as a child
   process per session. `send(Request<Body>)` returns a native response and
   optional write completion; `.connect()` supplies the provider factory.
@@ -40,7 +40,7 @@ as an HTTP transport.
   longer waited for.
 
 Used by: [mcp_proxy](../../../examples/integrations/mcp_proxy.rs) and the
-binary's `[mcp.<name>]` servers.
+binary's `[tools.<name>]` servers.
 
 Messages are validated as JSON-RPC envelopes before they can settle a
 request. Invalid HTTP provider messages fail `upstream`; stray or malformed

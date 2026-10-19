@@ -42,7 +42,7 @@ arrives. `arequest` and `astream` are the asyncio versions.
 
 Each kind is an OpenAI endpoint the gateway serves when a provider speaks its
 format (`openai-images`, `openai-transcriptions`, `openai-speech`,
-`openai-embeddings`, `openai-videos`; see `gateway.example.toml`), and works
+`openai-embeddings`, `openai-videos`; see `docs/configuration.md`), and works
 through the same client:
 
 ```python

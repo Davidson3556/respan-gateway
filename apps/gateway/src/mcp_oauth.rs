@@ -1,4 +1,4 @@
-//! OAuth for an HTTP MCP server, machine to machine: `oauth` on an `mcp`
+//! OAuth for an HTTP MCP server, machine to machine: `oauth` on a tool
 //! server has the gateway get its own access token from a token endpoint and
 //! send it as `Authorization: Bearer`, the way `key` sends a fixed one.
 //!
@@ -109,7 +109,7 @@ pub fn save(path: &Path, login: &Login) -> std::io::Result<()> {
     std::fs::rename(temp, path)
 }
 
-/// `auth = { oauth = { .. } }` of an `mcp` server: the gateway's own client.
+/// `auth = { oauth = { .. } }` of a tool server: the gateway's own client.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthConfig {

@@ -1,18 +1,19 @@
-# MCP
+# Tools
 
-The gateway fronts [MCP](https://modelcontextprotocol.io) servers behind the
-same client keys as everything else, serving each at `/mcp/{name}`:
+Each `[tools.<name>]` is a tool server: an [MCP](https://modelcontextprotocol.io)
+server, or a tool vendor's HTTP API. The gateway fronts them behind the same
+client keys as everything else, serving each over MCP at `/mcp/{name}`:
 
 ```toml
-[mcp.github]                            # HTTP upstream
+[tools.github]                          # HTTP upstream
 url = "https://api.githubcopilot.com/mcp/"
 auth = { bearer = "env:GITHUB_TOKEN" }
 
-[mcp.files]                             # stdio upstream, a child per client session
+[tools.files]                           # stdio upstream, a child per client session
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
 
-[mcp.linear]                            # A server a person must approve once
+[tools.linear]                          # A server a person must approve once
 url = "https://mcp.linear.app/mcp"
 auth = "login"                          # Run: respan-gateway mcp login linear
 ```
@@ -38,10 +39,10 @@ A tool vendor is an HTTP API that is not an MCP server, such as
 process:
 
 ```toml
-[mcp.search]
+[tools.search]
 vendor = "linkup"                       # Key from LINKUP_API_KEY
 
-[mcp.tinyfish]
+[tools.tinyfish]
 vendor = "tinyfish"
 key = "env:MY_TINYFISH_KEY"             # Default: TINYFISH_API_KEY
 # base_url = "https://..."              # Default: the vendor's own

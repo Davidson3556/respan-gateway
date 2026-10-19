@@ -246,11 +246,15 @@ pub struct Config {
     /// own model names, then the kind's default.
     #[serde(default)]
     pub routes: IndexMap<String, RouteConfig>,
-    /// MCP servers by name, each served to clients at `/mcp/{name}`: a
-    /// streamable-HTTP `url`, or a stdio `command`. Name `mcp` in `formats`
-    /// if that lists formats.
+    /// Tool servers by name, each served to clients over MCP at
+    /// `/mcp/{name}`: an MCP server at a streamable-HTTP `url` or run as a
+    /// `command`, or a tool `vendor`'s HTTP API. Name `mcp` in `formats` if
+    /// that lists formats.
     #[serde(default)]
-    pub mcp: IndexMap<String, McpConfig>,
+    pub tools: IndexMap<String, McpConfig>,
+    /// Retired: `tools`. Refused with how.
+    #[serde(default)]
+    pub mcp: Option<serde::de::IgnoredAny>,
     /// Which web pages may call the gateway from a browser; none if unset.
     pub cors: Option<CorsConfig>,
     /// The compiled-in plugins, each configured under its name. The gateway
@@ -284,7 +288,8 @@ impl Default for Config {
             providers: IndexMap::new(),
             formats: None,
             routes: IndexMap::new(),
-            mcp: IndexMap::new(),
+            tools: IndexMap::new(),
+            mcp: None,
             plugins: PluginsConfig::default(),
             cors: None,
             source: Source::Inline,
@@ -345,7 +350,7 @@ pub struct PluginsConfig {
     /// Retired: a route's `hedge`. Refused with how.
     #[serde(default)]
     pub hedge: Option<serde::de::IgnoredAny>,
-    /// Run tools of `mcp` servers inside chat requests; off if unset.
+    /// Run tools of tool servers inside chat requests; off if unset.
     pub tool_loop: Option<ToolLoopConfig>,
     /// Keep the conversation state a client or provider cannot: Responses
     /// translated to another provider's format, so a client's
@@ -356,7 +361,7 @@ pub struct PluginsConfig {
     pub responses: ResponsesConfig,
     /// Send each request to Respan as a trace; off if unset.
     pub respan: Option<RespanConfig>,
-    /// One MCP endpoint, `/mcp`, that fronts the `mcp` servers as a single
+    /// One MCP endpoint, `/mcp`, that fronts the tool servers as a single
     /// server (tools and prompts as `{server}__{name}`); off if unset.
     pub mcp_aggregate: Option<AggregateConfig>,
     /// The request history the web UI and admin API read; always on.
@@ -563,13 +568,13 @@ pub struct CorsConfig {
     pub origins: Vec<String>,
 }
 
-/// The tool loop: the gateway offers the tools of `mcp` servers to the
+/// The tool loop: the gateway offers the tools of tool servers to the
 /// model and runs the ones it calls, so a client that knows nothing of MCP
 /// gets answers that used them.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolLoopConfig {
-    /// The `mcp` servers whose tools the gateway offers and runs, as
+    /// The tool servers whose tools the gateway offers and runs, as
     /// `<server>__<tool>`; every one that takes no client's credentials
     /// if unset, as `/mcp` fronts them.
     pub servers: Option<Vec<String>>,
@@ -677,7 +682,7 @@ impl Config {
     /// is in the environment (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...;
     /// Ollama if `OLLAMA_HOST` is set). `RESPAN_<VENDOR>_BASE_URL` moves a
     /// vendor's base URL. `Err` if there is none. Each tool vendor whose
-    /// key is there (`LINKUP_API_KEY`, ...) is an `mcp` server of its name,
+    /// key is there (`LINKUP_API_KEY`, ...) is a tool server of its name,
     /// and `/mcp` fronts them; the tool loop stays off.
     pub fn from_env() -> Result<Config, Error> {
         let detected = vendors::detected();
@@ -696,19 +701,19 @@ impl Config {
                 (vendor.id.to_owned(), provider)
             })
             .collect::<IndexMap<String, ProviderConfig>>();
-        // Each tool vendor with its key in the environment, an `mcp`
-        // server of its name, unless a provider has the name.
-        let mcp: IndexMap<String, McpConfig> = (respan_gateway_tool_vendors::ALL.iter())
+        // Each tool vendor with its key in the environment, a tool server
+        // of its name, unless a provider has the name.
+        let tools: IndexMap<String, McpConfig> = (respan_gateway_tool_vendors::ALL.iter())
             .filter(|v| v.key_from_env().is_some() && !providers.contains_key(v.id))
             .map(|v| (v.id.to_owned(), McpConfig::tool_vendor(v.id)))
             .collect();
         let mut plugins = PluginsConfig::default();
-        if !mcp.is_empty() {
+        if !tools.is_empty() {
             plugins.mcp_aggregate = Some(AggregateConfig::default());
         }
         Ok(Config {
             providers,
-            mcp,
+            tools,
             plugins,
             source: Source::Environment,
             ..Config::default()
@@ -1016,7 +1021,7 @@ vendor = "anthropic"
     #[test]
     fn debug_shows_no_secret() {
         let config = Config::parse(
-            "client_keys = [\"bare-secret\", { name = \"ops\", key = \"named-secret\", admin = true }]\nproviders = { a = { vendor = \"openai\", key = \"prov-secret\", base_url = \"https://user:url-secret@h.test/v1?k=q-secret\" }, b = { formats = \"openai-chat\", base_url = \"http://b.test\", auth = { type = \"bearer\", key = \"auth-secret\" } } }\nmcp = { m = { command = \"npx\", args = [\"--token\", \"arg-secret\"], env = { T = \"env-secret\" } }, h = { url = \"https://h.test/mcp/tok-in-path\", headers = { x-k = \"mcp-secret\" }, auth = { oauth = { token_url = \"https://o.test/t\", client_id = \"cid\", client_secret = \"oauth-secret\" } } }, b = { url = \"https://b.test/mcp\", auth = { bearer = \"bearer-secret\" } } }\n",
+            "client_keys = [\"bare-secret\", { name = \"ops\", key = \"named-secret\", admin = true }]\nproviders = { a = { vendor = \"openai\", key = \"prov-secret\", base_url = \"https://user:url-secret@h.test/v1?k=q-secret\" }, b = { formats = \"openai-chat\", base_url = \"http://b.test\", auth = { type = \"bearer\", key = \"auth-secret\" } } }\ntools = { m = { command = \"npx\", args = [\"--token\", \"arg-secret\"], env = { T = \"env-secret\" } }, h = { url = \"https://h.test/mcp/tok-in-path\", headers = { x-k = \"mcp-secret\" }, auth = { oauth = { token_url = \"https://o.test/t\", client_id = \"cid\", client_secret = \"oauth-secret\" } } }, b = { url = \"https://b.test/mcp\", auth = { bearer = \"bearer-secret\" } } }\n",
         )
         .unwrap_or_else(|e| panic!("{e}"));
         let shown = format!("{config:?}");
@@ -1205,11 +1210,11 @@ vendor = "anthropic"
             "client_keys = \"sk-secret-1\"\n",
             "providers = { p = { vendor = \"openai\", key = [\"sk-secret-1\"] } }\n",
             "providers = { p = { vendor = \"openai\", auth = \"sk-secret-1\" } }\n",
-            "mcp = { m = { command = \"x\", env = \"sk-secret-1\" } }\n",
-            "mcp = { m = { command = \"x\", args = \"sk-secret-1\" } }\n",
-            "mcp = { m = { url = \"http://h.test\", headers = \"sk-secret-1\" } }\n",
-            "mcp = { m = { url = \"http://h.test\", auth = \"sk-secret-1\" } }\n",
-            "mcp = { m = { url = \"http://h.test\", auth = { bearer = [\"sk-secret-1\"] } } }\n",
+            "tools = { m = { command = \"x\", env = \"sk-secret-1\" } }\n",
+            "tools = { m = { command = \"x\", args = \"sk-secret-1\" } }\n",
+            "tools = { m = { url = \"http://h.test\", headers = \"sk-secret-1\" } }\n",
+            "tools = { m = { url = \"http://h.test\", auth = \"sk-secret-1\" } }\n",
+            "tools = { m = { url = \"http://h.test\", auth = { bearer = [\"sk-secret-1\"] } } }\n",
             "log = \"sk-secret-1\"\n",
             "providers = { p = { vendor = \"openai\", auth = { type = \"sk-secret-1\", key = \"k\" } } }\n",
         ] {

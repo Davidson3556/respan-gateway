@@ -106,8 +106,8 @@ on a public address.
   providers, client keys, routing, pricing and conversation state.
 - [Vendors](docs/vendors.md): every built-in vendor, its tier, key, formats
   and base URL.
-- [MCP](docs/mcp.md): MCP servers, tool vendors (Linkup, TinyFish), the merged `/mcp` endpoint and the tool loop.
-- [`gateway.example.toml`](gateway.example.toml): every setting.
+- [Tools](docs/mcp.md): MCP servers and tool vendors (Linkup, TinyFish) under `[tools]`, the merged `/mcp` endpoint and the tool loop.
+- [`gateway.example.toml`](gateway.example.toml): a short example to start from.
 
 ## Supported APIs
 

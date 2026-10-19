@@ -102,7 +102,7 @@ pub fn compose(
     }
     let keys = clients(&config.client_keys)?;
     let rules = crate::rules::rules(config, &upstreams, &keys, formats)?;
-    if upstreams.is_empty() && config.mcp.is_empty() {
+    if upstreams.is_empty() && config.tools.is_empty() {
         return Err(Fault::config(
             "providers: none configured; add one, such as `[providers.openai]` with `vendor = 'openai'`",
         ));
@@ -318,7 +318,7 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
     for format in &names {
         if format_named(formats, format, &owner)?.kind == kind::MCP {
             return Err(bad(
-                "mcp servers are configured under `mcp`, not `providers`".into(),
+                "MCP servers are configured under `tools`, not `providers`".into(),
             ));
         }
     }

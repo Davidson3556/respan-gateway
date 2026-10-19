@@ -2,8 +2,8 @@
 
 The gateway runs without a config file: every vendor whose key is in the
 environment becomes a provider. A config file adds client keys, routes,
-custom providers, prices, plugins and MCP servers.
-[`gateway.example.toml`](../gateway.example.toml) documents every setting.
+custom providers, prices, plugins and tool servers.
+[`gateway.example.toml`](../gateway.example.toml) is a short example to start from.
 
 ## Command line
 
@@ -136,7 +136,8 @@ it in memory for `keep` (default 1 hour). A Chat client's reasoning between
 tool calls is kept the same way when OpenAI's Responses API serves it.
 `[plugins.responses] enabled = false` turns this off.
 
-## MCP
+## Tools
 
-MCP servers, tool vendors (`[mcp.<name>] vendor = "linkup"`), the `/mcp`
-endpoint that merges them, and the tool loop are in [mcp.md](mcp.md).
+Tool servers (`[tools.<name>]`: MCP servers and tool vendors such as
+Linkup), the `/mcp` endpoint that merges them, and the tool loop are in
+[mcp.md](mcp.md).

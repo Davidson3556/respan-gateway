@@ -48,7 +48,7 @@ def test_a_full_typed_config_parses() -> None:
             "fast": {"to": ["openai", "custom"], "pick": "fastest", "hedge": "200ms", "until": "end"},
             "llama-*": {"to": "custom"},
         },
-        "mcp": {
+        "tools": {
             "remote": {
                 "url": "http://127.0.0.1:9/mcp",
                 "auth": {"bearer": "fake"},

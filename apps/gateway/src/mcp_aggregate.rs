@@ -1,7 +1,7 @@
 //! `plugins.mcp_aggregate` in the config turns on `/mcp`, which fronts the
-//! `mcp` servers it names (all of them if it names none) as a single server
+//! tool servers it names (all of them if it names none) as a single server
 //! ([`respan_gateway_plugin_mcp_aggregate`]). This is its config, checked
-//! against the `mcp` servers.
+//! against the tool servers.
 
 use respan_gateway_core::Fault;
 use respan_gateway_plugin_mcp_aggregate::Aggregate;
@@ -14,7 +14,7 @@ use crate::mcp::McpServer;
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AggregateConfig {
-    /// The `mcp` servers behind `/mcp`, in the order lists show them. All
+    /// The tool servers behind `/mcp`, in the order lists show them. All
     /// of the servers that take no client's credentials, if unset.
     pub servers: Option<Vec<String>>,
     /// The tools offered, by their names `{server}__{tool}`, with `*` for
@@ -26,7 +26,7 @@ pub struct AggregateConfig {
     pub deny: Vec<String>,
 }
 
-/// The servers behind `/mcp`, checked: each is an `mcp` server, named
+/// The servers behind `/mcp`, checked: each is a tool server, named
 /// once, and none passes on a client's credentials (the servers' sessions
 /// are the gateway's own).
 pub fn check(config: &AggregateConfig, servers: &[McpServer]) -> Result<Vec<String>, Fault> {
@@ -39,7 +39,7 @@ pub fn check(config: &AggregateConfig, servers: &[McpServer]) -> Result<Vec<Stri
     };
     if names.is_empty() {
         return Err(bad(
-            "no mcp server to front; list some under `mcp` (a server with \
+            "no mcp server to front; list some under `tools` (a server with \
              `auth = \"forward\"` cannot be fronted)"
                 .into(),
         ));

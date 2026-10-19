@@ -1,4 +1,4 @@
-//! MCP servers behind the gateway: `mcp` in the config names them, and
+//! MCP servers behind the gateway: `tools` in the config names them, and
 //! clients reach each one over streamable HTTP at `/mcp/{name}`, behind the
 //! gateway's client keys. An upstream is a streamable-HTTP server (`url`) or
 //! a child process speaking MCP on stdio (`command`); either way its
@@ -46,7 +46,7 @@ const MOUNT: &str = "/mcp";
 /// The most client sessions, so child processes, one server holds at once.
 const SESSIONS: usize = 32;
 
-/// One MCP server, as `gateway.toml` writes it under `mcp`, in the fields
+/// One MCP server, as `gateway.toml` writes it under `tools`, in the fields
 /// MCP clients' `mcp.json` use, so an entry copies across: a `url`
 /// (streamable HTTP) with its `headers` and `auth`, or a `command` (stdio)
 /// with its `args`, `env` and `cwd`.
@@ -311,7 +311,7 @@ pub fn servers(
     config
         .iter()
         .map(|(name, c)| {
-            let bad = |e: &str| Fault::config(format!("mcp '{name}': {e}"));
+            let bad = |e: &str| Fault::config(format!("tool server '{name}': {e}"));
             if !valid_provider_name(name) || name.chars().all(|c| c == '.') {
                 return Err(bad("a name is letters, digits, '_', '.' and '-' alone"));
             }
@@ -327,7 +327,7 @@ fn server(name: &str, c: &McpConfig, logins: &std::path::Path) -> Result<McpServ
     if let Some(id) = &c.vendor {
         return vendor_server(name, c, id);
     }
-    let owner = format!("mcp '{name}'");
+    let owner = format!("tool server '{name}'");
     let bad = |e: &str| Fault::config(format!("{owner}: {e}"));
     if c.base_url.is_some() {
         return Err(bad(
@@ -463,7 +463,7 @@ fn server(name: &str, c: &McpConfig, logins: &std::path::Path) -> Result<McpServ
 /// A `vendor` server: the tool vendor, its key (its own variable's if
 /// `key` is unset) and any `base_url`, and nothing of a `url` or `command`.
 fn vendor_server(name: &str, c: &McpConfig, id: &str) -> Result<McpServer, Fault> {
-    let owner = format!("mcp '{name}'");
+    let owner = format!("tool server '{name}'");
     let bad = |e: &str| Fault::config(format!("{owner}: {e}"));
     if c.url.is_some() || c.command.is_some() {
         return Err(bad("set one of `vendor`, `url` and `command`"));

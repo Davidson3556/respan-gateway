@@ -1,164 +1,42 @@
-# Respan Gateway
-# Copy to gateway.toml, set OPENAI_API_KEY, then run:
-#   respan-gateway check
-#   respan-gateway
-# Or generate a starter from your environment: respan-gateway init
+# Respan Gateway example. Copy to gateway.toml and run `respan-gateway`.
+# Needs OPENAI_API_KEY, ANTHROPIC_API_KEY and LINKUP_API_KEY.
+# All settings: docs/configuration.md
 
-# ── Server ────────────────────────────────────────────────────────────
-# Root settings must stay above the first [table].
 listen = "127.0.0.1:8080"
-log = "text"                      # text | json | off (request logs only)
-ui = true                         # Web UI at http://127.0.0.1:8080/ui/
+# client_keys = [{ name = "app", key = "env:APP_KEY" }]   # required beyond localhost
 
-# Require a client key before listening beyond localhost.
-# Keys are consumed by the gateway; providers never receive them.
-# client_keys = ["env:GATEWAY_KEY"]
-# Or use named keys with permissions:
-# client_keys = [
-#   { name = "ops", key = "env:OPS_KEY", admin = true },
-#   { name = "app", key = "env:APP_KEY", admin = false },
-#   { name = "bot", key = "env:BOT_KEY", tools = ["github__search_*"] },  # MCP at /mcp only
-# ]
-# body_limit = "32MiB"
-# ws_message_limit = "16MiB"
-# shutdown_grace = "30s"
-# formats = ["openai-chat", "anthropic-messages"]  # Otherwise auto-detected
 
-# ── Providers ─────────────────────────────────────────────────────────
-# A vendor supplies its URL, formats, and model routing.
-# The first provider serving a kind is its default. You can also address
-# any provider explicitly: openai/gpt-6-luna, groq/openai/gpt-oss-20b.
-# Keep secrets in environment variables or .env, referenced as env:NAME.
 [providers.openai]
 vendor = "openai"
-key = "env:OPENAI_API_KEY"
+key    = "env:OPENAI_API_KEY"
 
-# Uncomment a whole block to enable another provider.
-# [providers.anthropic]
-# vendor = "anthropic"
-# key = "env:ANTHROPIC_API_KEY"
+[providers.anthropic]
+vendor = "anthropic"
+key    = "env:ANTHROPIC_API_KEY"
 
-# [providers.groq]
-# vendor = "groq"
-# key = "env:GROQ_API_KEY"
 
-# [providers.ollama]
-# vendor = "ollama"
-# base_url = "http://localhost:11434"
+# Clients ask for "smart": Claude first, then GPT.
+[routes.smart]
+to    = ["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"]
+tries = 2
 
-# Each format at a base URL of its own, as a vendor whose formats are at
-# different URLs (Gemini) needs to be moved:
-# [providers.gemini]
-# vendor = "gemini"
-# formats = { gemini-generate = "https://proxy.example.com/v1beta", openai-chat = "https://proxy.example.com/v1beta/openai" }
 
-# A custom OpenAI-compatible endpoint:
-# [providers.backup]
-# formats = ["openai-chat"]
-# base_url = "https://example.com/v1"
-# key = "env:BACKUP_API_KEY"
+# An MCP server, run as a command.
+[tools.files]
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
-# ── Routing and resilience ────────────────────────────────────────────
-# A request's model goes to: a route of that exact name; else `provider/model`
-# (sent `model`); else the first glob route it matches; else the provider
-# whose model list has it (of several, the first configured); else the
-# kind's default. A route
-# whose candidates don't serve the request's kind, or whose `when` doesn't
-# match, is skipped. Name only configured providers.
-# [plugins.routing]
-# default = "openai"               # The default provider of each kind it serves
-# listings = true                  # Read each provider's model list at start and every 10 min
+# Linkup's search API, as MCP tools.
+[tools.search]
+vendor = "linkup"
 
-# Routes by the model name clients ask for; exact names are listed in
-# GET /v1/models. A candidate is "provider", "provider/model", or
-# "provider/{model}" ({model} is the name asked for); one or a list.
-# [routes.smart]
-# to = ["anthropic/claude-haiku-5-5", { target = "openai/gpt-6-luna", weight = 3 }]
-# pick = "first"                   # first | cheapest | fastest | weighted | random
-# needs = ["tools"]                # From the provider's model listing; unknown is kept
-# when = { clients = ["ops"], kinds = ["chat"] }   # Client key names, kinds; all if unset
-# fallback = true                  # Try the next candidate when one fails
-# hedge = "200ms"                  # Race them instead, each this long after the last
-# tries = 2                        # Per candidate, including retries; 1 to 10
-# backoff = "250ms"                # Doubled after each retry
-# max_backoff = "10s"
-# until = "head"                   # head | end (buffers the whole response)
+# Every server at /mcp, tools named server__tool.
+[plugins.mcp_aggregate]
 
-# A glob, sent to groq as asked:
-# [routes."llama-*"]
-# to = "groq"
+# Any chat model can use the tools; the gateway runs the calls.
+[plugins.tool_loop]
+deny = ["files__write*"]
 
-# ── Respan observability ───────────────────────────────────────────────
-# Each request a trace in Respan: a span per call to a model (model, tokens,
-# and its messages and reply unless content = false) or to a tool server.
-# [plugins.respan]
+
+# [plugins.respan]                     # a trace per request in Respan
 # key = "env:RESPAN_API_KEY"
-# content = true                   # Send messages and replies
-# service = "respan-gateway"       # The traces' service.name
-
-# ── Conversation state a client or provider cannot keep ───────────────
-# On by default, in memory, per client key: a Responses client's
-# `previous_response_id` with any provider, and a Chat client's reasoning
-# between tool calls with OpenAI's Responses.
-# [plugins.responses]
-# enabled = false                  # Turn it off
-# keep = "1h"                      # How long what is kept is kept
-
-# ── Request history and pricing ───────────────────────────────────────
-# [plugins.request_log]
-# history = 1000                   # Requests retained in memory
-
-# Models you declare, by provider/model: laid over what the provider's
-# list says of each, or all that is known of one it does not list. Its
-# pricing (dollars per million tokens, or per second of audio) prices each
-# call to it. These are example values, not a current vendor price list.
-# [models."openai/my-model"]
-# pricing = { input = 1.0, output = 2.0, cached_input = 0.5 }
-# display_name = "My model"
-# context_window = 128000
-# capabilities = ["tools", "reasoning"]
-# [models."openai/whisper-1"]
-# pricing = { input = 0, output = 0, per_second = 0.0001 }   # By the second of audio
-
-# ── MCP servers and tools ─────────────────────────────────────────────
-# [mcp.github]
-# url = "https://api.githubcopilot.com/mcp/"
-# auth = { bearer = "env:GITHUB_TOKEN" }  # Or "login" (`respan-gateway mcp login github`),
-#                                         # "forward", { oauth = { .. } }, or headers = { .. }
-
-# [mcp.files]
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-
-# A tool vendor: an HTTP API's tools, served as an MCP server in process.
-# [mcp.search]
-# vendor = "linkup"                       # Or "tinyfish"
-# key = "env:LINKUP_API_KEY"              # The vendor's own variable if unset
-# base_url = "https://api.linkup.so/v1"   # The vendor's own if unset
-
-# Combine servers at /mcp; tool names become server__tool.
-# [plugins.mcp_aggregate]
-# servers = ["github", "files"]
-# allow = ["github__search_*", "files__read*"]
-# deny = ["files__write*"]
-
-# Let chat requests call tools using the servers' credentials.
-# [plugins.tool_loop]
-# servers = ["github"]                      # Every server /mcp would front if unset
-# allow = ["github__search_*"]
-# max_steps = 8
-# timeout = "5m"
-# tool_timeout = "60s"
-# tool_list_ttl = "5m"
-# parallel = 4
-# max_result = "64KiB"
-# max_results = "256KiB"
-
-# ── Browser access ────────────────────────────────────────────────────
-# [cors]
-# origins = ["https://app.example.com"]
-
-# Reload: --watch, SIGHUP, or POST /ui/api/reload.
-# Existing requests finish on the old config. Changing listen needs a restart.
-# Precedence: --config / RESPAN_CONFIG, gateway.toml, then environment providers.
-# Config files and admin edits use TOML only.

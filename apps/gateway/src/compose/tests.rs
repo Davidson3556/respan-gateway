@@ -165,6 +165,10 @@ async fn the_example_config_routes_by_model_both_ways() {
                 ])),
             );
     }
+    // Its tool servers and tool plugins, which this does not exercise.
+    let table = config.as_table_mut().expect("example");
+    table.remove("tools");
+    table.remove("plugins");
     let text = toml::to_string(&config).expect("example");
     let gateway = resolve(&text).unwrap_or_else(|e| panic!("gateway: {e}"));
 
@@ -774,6 +778,9 @@ fn bad_routes_and_retired_settings_are_errors() {
         let said = resolve(&text).err().unwrap_or_default();
         assert!(said.contains(now), "{text}\n{said}");
     }
+    let text = format!("{TWO}[mcp.files]\ncommand = \"npx\"\n");
+    let said = resolve(&text).err().unwrap_or_default();
+    assert!(said.contains("`[tools.github]`"), "{text}\n{said}");
 }
 
 #[tokio::test]

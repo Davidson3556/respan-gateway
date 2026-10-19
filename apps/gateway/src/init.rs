@@ -127,7 +127,7 @@ pub fn starter(chosen: &[Chosen], client_key: Option<&str>) -> String {
     }
     for vendor in tools {
         let id = quote(vendor.id);
-        text.push_str(&format!("\n[mcp.{}]\nvendor = {id}\n", vendor.id));
+        text.push_str(&format!("\n[tools.{}]\nvendor = {id}\n", vendor.id));
     }
     text.push_str("\n# Add providers and optional plugins using gateway.example.toml.\n");
     text

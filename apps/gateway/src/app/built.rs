@@ -63,7 +63,7 @@ impl Built {
         let mut formats = formats();
         let providers: Vec<&str> = config.providers.keys().map(String::as_str).collect();
         let logins = crate::mcp_oauth::logins_dir(config.source());
-        let mcp = mcp::servers(&config.mcp, &providers, &logins)?;
+        let mcp = mcp::servers(&config.tools, &providers, &logins)?;
         if !mcp.is_empty() {
             formats.push(mcp::known(
                 mcp.clone(),
