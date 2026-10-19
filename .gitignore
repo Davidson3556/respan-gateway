@@ -11,3 +11,4 @@ __pycache__/
 *.so
 *.egg-info/
 .pytest_cache/
+*.sqlite3
