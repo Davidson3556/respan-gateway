@@ -39,7 +39,7 @@ describe("ChatTab", () => {
     expect(await screen.findByText(/7 → 2 tokens/)).toBeInTheDocument();
     expect(screen.getByText("Hi")).toBeInTheDocument();
     expect(sentJson(calls, "POST /v1/chat/completions")).toMatchObject({
-      model: "gpt-4o-mini",
+      model: "gpt-6-luna",
       stream: true,
       messages: [{ role: "user", content: "Hi" }],
     });

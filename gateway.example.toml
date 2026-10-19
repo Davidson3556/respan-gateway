@@ -27,7 +27,7 @@ ui = true                         # Web UI at http://127.0.0.1:8080/ui/
 # ── Providers ─────────────────────────────────────────────────────────
 # A vendor supplies its URL, formats, and model routing.
 # The first provider serving a kind is its default. You can also address
-# any provider explicitly: openai/gpt-4o-mini, groq/llama-3.3-70b-versatile.
+# any provider explicitly: openai/gpt-6-luna, groq/openai/gpt-oss-20b.
 # Keep secrets in environment variables or .env, referenced as env:NAME.
 [providers.openai]
 vendor = "openai"
@@ -73,7 +73,7 @@ key = "env:OPENAI_API_KEY"
 # GET /v1/models. A candidate is "provider", "provider/model", or
 # "provider/{model}" ({model} is the name asked for); one or a list.
 # [routes.smart]
-# to = ["anthropic/claude-opus-4-1", { target = "openai/gpt-5", weight = 3 }]
+# to = ["anthropic/claude-haiku-5-5", { target = "openai/gpt-6-luna", weight = 3 }]
 # pick = "first"                   # first | cheapest | fastest | weighted | random
 # needs = ["tools"]                # From the provider's model listing; unknown is kept
 # when = { clients = ["ops"], kinds = ["chat"] }   # Client key names, kinds; all if unset

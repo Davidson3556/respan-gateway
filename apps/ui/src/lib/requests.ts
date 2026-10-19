@@ -14,7 +14,7 @@ export function curlExample(origin: string, withKey: boolean): string {
     `curl ${origin}/v1/chat/completions \\`,
     ...(withKey ? [`  -H "Authorization: Bearer $GATEWAY_KEY" \\`] : []),
     `  -H "content-type: application/json" \\`,
-    `  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'`,
+    `  -d '{"model":"gpt-6-luna","messages":[{"role":"user","content":"hi"}]}'`,
   ].join("\n");
 }
 

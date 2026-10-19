@@ -292,7 +292,7 @@ impl Plugin for Judge {
             chat.messages.last().map(Message::text).unwrap_or_default()
         );
         let mut ask = Input::new([Message::new(Role::User, question)]);
-        ask.model = Some("gpt-4o-mini".into());
+        ask.model = Some("gpt-6-luna".into());
         let mut verdict = String::new();
         let mut outputs = cx.call("openai").with_input(ask).await?.outputs::<Output>();
         while let Some(event) = outputs.next().await {
@@ -490,7 +490,7 @@ async fn requests_reach_the_provider_cold() {
     let reply = reqwest::Client::new()
         .post(url)
         .header("content-type", "application/json")
-        .body(r#"{"model":"gpt-4o-mini","temperature":1.2,"messages":[{"role":"user","content":"hi"}]}"#)
+        .body(r#"{"model":"gpt-6-luna","temperature":1.2,"messages":[{"role":"user","content":"hi"}]}"#)
         .send().await.unwrap()
         .text().await.unwrap();
 

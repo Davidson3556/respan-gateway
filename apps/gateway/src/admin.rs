@@ -435,8 +435,8 @@ async fn mcp_tools(
 ///   "rules": [{ "name": "smart", "glob": false, "pick": "first",
 ///     "needs": [], "clients": [], "kinds": [], "fallback": true,
 ///     "hedge_ms": null, "tries": 1,
-///     "to": [{ "target": "anthropic/claude-opus-4-1", "provider": "anthropic",
-///       "model": "claude-opus-4-1", "weight": 1,
+///     "to": [{ "target": "anthropic/claude-haiku-5-5", "provider": "anthropic",
+///       "model": "claude-haiku-5-5", "weight": 1,
 ///       "price": { "input": 15, "output": 75 },
 ///       "seen": { "latency_ms": 840.2, "error_rate": 0, "calls": 12,
 ///         "failures": 0, "cooling": false } }] }] }

@@ -1,6 +1,6 @@
 //! Fallback, hedging and stalls (use cases 4 and 6), as the router's routes:
-//! `gpt-4o` retries OpenAI as `Retry-After` asks, then falls back to Claude,
-//! a provider of another format sent its own model name; `gpt-4o-fast` races
+//! `gpt-6-luna` retries OpenAI as `Retry-After` asks, then falls back to Claude,
+//! a provider of another format sent its own model name; `gpt-6-luna-fast` races
 //! a second deployment started 200 ms later. A `watchdog` fails OpenAI when its head
 //! takes over 2 s or its stream goes silent for 1 s. A stream that fails after
 //! its first content reached the client is never retried. Not built here:
@@ -31,16 +31,19 @@ use http_support::{post, read_whole, serve};
 #[path = "../support/http.rs"]
 mod provider_support;
 
-/// The routes: `gpt-4o` falls back from OpenAI, tried twice, to Claude;
-/// `gpt-4o-fast` races OpenAI and `openai-eu`, started 200 ms later. Each
+/// The routes: `gpt-6-luna` falls back from OpenAI, tried twice, to Claude;
+/// `gpt-6-luna-fast` races OpenAI and `openai-eu`, started 200 ms later. Each
 /// answer is judged at its first content; `Until::End` would hold each
 /// whole.
 fn routes() -> Routes {
     let to = |candidates: &[&str]| candidates.iter().map(|c| Candidate::parse(c)).collect();
-    let mut fallback = Rule::new("gpt-4o", to(&["openai", "anthropic/claude-sonnet-4-5"]));
+    let mut fallback = Rule::new("gpt-6-luna", to(&["openai", "anthropic/claude-haiku-5-5"]));
     fallback.backoff = Backoff::new(2, Duration::from_millis(250), Duration::from_secs(5));
     fallback.until = Until::content(Output::is_content);
-    let mut hedge = Rule::new("gpt-4o-fast", to(&["openai/gpt-4o", "openai-eu/gpt-4o"]));
+    let mut hedge = Rule::new(
+        "gpt-6-luna-fast",
+        to(&["openai/gpt-6-luna", "openai-eu/gpt-6-luna"]),
+    );
     hedge.hedge = Some(Duration::from_millis(200));
     hedge.until = Until::content(Output::is_content);
     let speaks = |format: &str, internal: &str| {
@@ -97,7 +100,8 @@ type Replies = Vec<(Fake, Answer)>;
 
 /// A streamed chat request.
 fn chat() -> http::Request<Body> {
-    let body = r#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+    let body =
+        r#"{"model":"gpt-6-luna","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
     post("/v1/chat/completions", body)
 }
 
@@ -184,7 +188,7 @@ fn openai(text: &str, cut: bool) -> Answer {
 
 fn anthropic() -> Answer {
     provider_support::sse(&[
-        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-haiku-5-5\",\"content\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n",
         "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
         "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi from Claude\"}}\n\n",
         "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
@@ -220,9 +224,9 @@ async fn stalled_then_fallback() -> Run {
 }
 
 async fn slow_whole_answer() -> Run {
-    let ok = r#"{"id":"c","model":"gpt-4o","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"an essay"}}]}"#;
+    let ok = r#"{"id":"c","model":"gpt-6-luna","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"an essay"}}]}"#;
     let replies = vec![(Fake::OpenAi, Answer::raw(ok))];
-    let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"write an essay"}]}"#;
+    let body = r#"{"model":"gpt-6-luna","messages":[{"role":"user","content":"write an essay"}]}"#;
     let name = "OpenAI's whole answer takes 1.5 s: within the head bound, not cut";
     let req = post("/v1/chat/completions", body);
     run(name, Duration::from_millis(1500), req, replies).await
@@ -233,7 +237,7 @@ async fn hedged() -> Run {
     let replies = vec![(Fake::OpenAi, late), (Fake::Europe, fast)];
     let name = "Hedged: OpenAI takes 900 ms; openai-eu starts 200 ms in and wins";
     let body =
-        r#"{"model":"gpt-4o-fast","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        r#"{"model":"gpt-6-luna-fast","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
     let req = post("/v1/chat/completions", body);
     run(name, Duration::from_millis(900), req, replies).await
 }

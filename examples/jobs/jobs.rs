@@ -31,8 +31,6 @@ use parking_lot::Mutex;
 use respan_gateway_core::ErrorCode;
 use respan_gateway_examples::LIMIT;
 use sha2::{Digest, Sha256};
-#[cfg(test)]
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use mockllm::FakeOpenAi;
@@ -114,47 +112,6 @@ trait Store: Send + Sync + 'static {
     }
     fn heartbeat(&self) -> Option<std::time::Duration> {
         None
-    }
-}
-
-/// In memory: each key's result, `None` while it runs. Keeps every result
-/// forever; a real store expires them.
-#[derive(Default)]
-#[cfg(test)]
-struct Memory(Mutex<HashMap<Key, watch::Sender<Option<Replies>>>>);
-
-#[async_trait]
-#[cfg(test)]
-impl Store for Memory {
-    async fn claim(&self, key: &Key) -> Result<Claim, Fault> {
-        loop {
-            let mut result = {
-                let mut all = self.0.lock();
-                match all.get(key) {
-                    Some(running) => running.subscribe(),
-                    None => {
-                        all.insert(key.clone(), watch::channel(None).0);
-                        return Ok(Claim::Run(0, None));
-                    }
-                }
-            };
-            // `Err` if the run was released: claim again.
-            if let Ok(Some(done)) = result.wait_for(Option::is_some).await.map(|r| r.clone()) {
-                return Ok(Claim::Done(done));
-            }
-        }
-    }
-
-    async fn finish(&self, key: &Key, _owner: u64, result: Option<Replies>) -> Result<(), Fault> {
-        let mut all = self.0.lock();
-        if let Some(done) = result {
-            if let Some(run) = all.get(key) {
-                run.send_replace(Some(done));
-            }
-        } else {
-            all.remove(key);
-        }
-        Ok(())
     }
 }
 
@@ -381,7 +338,7 @@ const STREAM: &[&str] = &[
 ];
 
 const BODY: &str =
-    r#"{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+    r#"{"model":"gpt-6-luna","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
 
 /// A request with idempotency key `key` from the tenant whose credential is `token`.
 fn keyed(token: &'static str, key: &'static str, body: &'static str) -> http::Request<Body> {

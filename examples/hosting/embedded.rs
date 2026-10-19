@@ -57,7 +57,7 @@ async fn ask(
     prompt: &str,
 ) -> Result<(http::StatusCode, Bytes, Result<(), Fault>), Fault> {
     let body = serde_json::json!({
-        "model": "gpt-4o-mini",
+        "model": "gpt-6-luna",
         "messages": [{"role": "user", "content": prompt}],
     });
     let (head, ()) = http::Request::post("/v1/chat/completions")
@@ -102,4 +102,4 @@ async fn main() -> Result<(), Fault> {
     Ok(())
 }
 
-const ANSWER: &str = r#"{"id":"c1","object":"chat.completion","model":"gpt-4o-mini","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#;
+const ANSWER: &str = r#"{"id":"c1","object":"chat.completion","model":"gpt-6-luna","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#;

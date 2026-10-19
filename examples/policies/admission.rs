@@ -223,7 +223,7 @@ fn gateway(
 }
 
 fn request(label: &'static str, tier: &'static str) -> http::Request<respan_gateway_http::Body> {
-    let body = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}"#;
+    let body = r#"{"model":"gpt-6-luna","messages":[{"role":"user","content":"hi"}]}"#;
     let mut req = post("/v1/chat/completions", body);
     req.headers_mut()
         .insert("x-tier", HeaderValue::from_static(tier));

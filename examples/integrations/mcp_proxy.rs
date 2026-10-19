@@ -158,11 +158,6 @@ impl McpServer {
         });
         Self { url, seen, task }
     }
-
-    #[cfg(test)]
-    fn requests(&self) -> Vec<(Value, Option<String>)> {
-        self.seen.lock().clone()
-    }
 }
 
 impl Drop for McpServer {

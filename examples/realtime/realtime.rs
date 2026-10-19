@@ -1127,15 +1127,6 @@ impl Plugin for Vet {
 #[derive(Clone, Default)]
 struct Outcomes(Arc<Mutex<Vec<Result<(), Fault>>>>);
 
-impl Outcomes {
-    #[cfg(test)]
-    fn only(&self) -> Result<(), Fault> {
-        let mut all = self.0.lock().clone();
-        assert_eq!(all.len(), 1, "expected exactly one end: {all:?}");
-        all.remove(0)
-    }
-}
-
 #[async_trait]
 impl Plugin for Outcomes {
     async fn on_client_end(&self, _cx: &ClientContext, end: &Result<(), Fault>) {

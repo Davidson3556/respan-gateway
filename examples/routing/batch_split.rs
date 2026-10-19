@@ -27,8 +27,6 @@
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Provider, Response, async_trait};
-#[cfg(test)]
-use respan_gateway_http::http::StatusCode;
 use respan_gateway_http_faults::retryable;
 use respan_gateway_plugin_fallback::{Backoff, Until, first_success};
 #[allow(dead_code)]

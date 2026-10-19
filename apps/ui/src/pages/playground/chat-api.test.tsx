@@ -35,7 +35,7 @@ describe("ChatTab API selector", () => {
               id: "r_9",
               started_at: new Date().toISOString(),
               format: "anthropic-messages",
-              model: "gpt-4o-mini",
+              model: "gpt-6-luna",
               provider: "openai",
               status: 200,
               steps: [

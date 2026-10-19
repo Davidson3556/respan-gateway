@@ -36,6 +36,22 @@ The rules that keep it that way:
 
 Each crate's `README.md` documents its public contract.
 
+| Path | What it is |
+|---|---|
+| `crates/core/` | The kernel and the plugin API: typed event streams, hooks, lifecycles, faults |
+| `crates/kinds/` | Event types per kind: `conversation`, `media`, `decision`, `realtime`, `mcp` |
+| `crates/wires/` | Bytes at both edges: HTTP, SSE, WebSocket, the Reqwest transport |
+| `crates/formats/` | A kind over a wire, one spec each, naming no vendor |
+| `crates/vendors/` | Every vendor, a file each, in `green/` or `yellow/` |
+| `crates/plugins/` | First-party plugins: routing, tool loop, pricing, Respan traces, … |
+| `crates/sdk/` | What plugins, vendors and hosts share: model cards and prices |
+| `crates/serve/` | Hosting: one Axum router for HTTP and WebSocket |
+| `apps/gateway/` | The binary: config, composition, client keys, request log, admin API |
+| `apps/ui/` | The web UI (React), embedded in the binary |
+| `python/` | The PyPI package, a PyO3 extension over `apps/gateway` |
+| `examples/` | Runnable policies: billing, guardrails, PII, admission, jobs, … |
+| `docs/` | User docs: configuration and MCP |
+
 ## Development
 
 With [`just`](https://github.com/casey/just): `just dev` runs the gateway and

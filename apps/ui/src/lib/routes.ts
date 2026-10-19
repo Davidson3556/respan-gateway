@@ -24,7 +24,7 @@ export function shares(rule: RouteRule): number[] {
 
 /** A route's TOML, as a starting point. */
 export const EXAMPLE_ROUTES = `[routes.smart]
-to = ["anthropic/claude-sonnet-4-5", "openai/gpt-4.1"]
+to = ["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"]
 pick = "cheapest"
 
 [routes."llama-*"]

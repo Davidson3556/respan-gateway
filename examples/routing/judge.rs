@@ -21,8 +21,6 @@ use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, Provider, ProviderContext, Response, async_trait,
 };
-#[cfg(test)]
-use respan_gateway_http::http;
 use respan_gateway_http::raw::Original;
 use respan_gateway_http_faults::Status;
 #[allow(dead_code)]

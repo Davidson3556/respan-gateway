@@ -441,7 +441,7 @@ type Client = dyn Fn(&ClientContext) -> Option<String> + Send + Sync;
 ///     .provider("openai", vec![speaks("openai-chat", "openai")])
 ///     .provider("anthropic", vec![speaks("anthropic-messages", "anthropic")])
 ///     .target("openai");
-/// let route = routes.route(CHAT, "openai-chat", Some("anthropic/claude-sonnet-4-5"));
+/// let route = routes.route(CHAT, "openai-chat", Some("anthropic/claude-haiku-5-5"));
 /// assert_eq!(route.map(|r| r.internal).as_deref(), Some("anthropic"));
 /// let routing = Routing::new(Arc::new(routes))
 ///     .format("openai-chat", CHAT, Model::of(Input::model, Input::set_model));

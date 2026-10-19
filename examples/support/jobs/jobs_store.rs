@@ -21,11 +21,6 @@ impl Sqlite {
     pub(super) fn open(path: impl AsRef<Path>) -> Result<Self, Fault> {
         Database::open(path).map(|db| Self(db, LEASE))
     }
-
-    #[cfg(test)]
-    pub(super) fn with_lease(path: impl AsRef<Path>, lease: Duration) -> Result<Self, Fault> {
-        Database::open(path).map(|db| Self(db, lease))
-    }
 }
 
 fn deadline(expires: i64, lease: Duration) -> Instant {

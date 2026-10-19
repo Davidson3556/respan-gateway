@@ -13,7 +13,7 @@ def main(gw: rg.Gateway) -> int:
         print("serving at", server.url)
         reply = httpx.post(
             server.url + "/v1/chat/completions",
-            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Say hi."}]},
+            json={"model": "gpt-6-luna", "messages": [{"role": "user", "content": "Say hi."}]},
             timeout=60,
         )
         print(reply.status_code, reply.json()["choices"][0]["message"]["content"])

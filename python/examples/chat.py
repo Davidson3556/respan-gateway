@@ -6,7 +6,7 @@
 import respan_gateway as rg
 
 
-def main(gw: rg.Gateway, model: str = "gpt-4o-mini") -> str:
+def main(gw: rg.Gateway, model: str = "gpt-6-luna") -> str:
     client = gw.openai()
     reply = client.chat.completions.create(model=model, messages=[{"role": "user", "content": "Say hi."}])
     text = reply.choices[0].message.content or ""

@@ -198,11 +198,6 @@ impl LocalModels {
     fn answer(&self, answer: (StatusCode, String)) {
         self.answers.lock().push_back(answer);
     }
-
-    #[cfg(test)]
-    fn requests(&self) -> Vec<(String, String, String)> {
-        self.seen.lock().clone()
-    }
 }
 
 impl Drop for LocalModels {

@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// What Claude Code sends: a subscription token, a beta header, and fields
 /// the gateway has never heard of, spaced as the client spaced them.
-const REQUEST: &str = r#"{"model":"claude-sonnet-4-5", "max_tokens":1024,"stream":true,
+const REQUEST: &str = r#"{"model":"claude-haiku-5-5", "max_tokens":1024,"stream":true,
  "messages":[{"role":"user","content":"hi"}],
  "thinking":{"type":"enabled","budget_tokens":2048}, "future_field":[1, 2.50]}"#;
 
@@ -160,7 +160,7 @@ fn request() -> http::Request<respan_gateway_http::Body> {
 
 /// A stream with an event type and a field no format knows.
 const STREAM: &[&str] = &[
-    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n",
+    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-haiku-5-5\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n",
     "event: brand_new_event\ndata: {\"type\":\"brand_new_event\",\"x\":1}\n\n",
     "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\",\"citations_v9\":[]}}\n\n",
     "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",

@@ -47,7 +47,7 @@ let speaks = |format: &str, internal: &str| Speaks {
 };
 let mut smart = Rule::new(
     "smart",
-    vec![Candidate::parse("anthropic/claude-opus-4-1"), Candidate::parse("openai/gpt-5")],
+    vec![Candidate::parse("anthropic/claude-haiku-5-5"), Candidate::parse("openai/gpt-6-luna")],
 );
 smart.pick = Pick::Cheapest;
 let routes = Routes::new()

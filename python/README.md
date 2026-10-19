@@ -24,7 +24,7 @@ with rg.Gateway() as gw:             # from OPENAI_API_KEY, ANTHROPIC_API_KEY, G
 
     # A Claude model through the OpenAI SDK is translated to Anthropic.
     reply = client.chat.completions.create(
-        model="claude-sonnet-4-5", messages=[{"role": "user", "content": "hi"}]
+        model="claude-haiku-5-5", messages=[{"role": "user", "content": "hi"}]
     )
 ```
 
@@ -138,7 +138,7 @@ arguments: from `./gateway.toml` if it exists, else from the environment:
 every vendor whose key is set (`OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, ...) becomes a
 provider, models route by name (`claude-*` to Anthropic, `gemini-*` to
-Gemini, or explicitly `groq/llama-3.3-70b-versatile`), and
+Gemini, or explicitly `groq/openai/gpt-oss-20b`), and
 `RESPAN_<VENDOR>_BASE_URL` points one elsewhere.
 
 ## Development

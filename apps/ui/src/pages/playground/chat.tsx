@@ -147,7 +147,7 @@ function Message({
 }
 
 export function ChatTab() {
-  const choice = useModelChoice("chat", "gpt-4o-mini");
+  const choice = useModelChoice("chat", "gpt-6-luna");
   const { data: providers } = useProviders();
   const apiChoice = useApiChoice("chat", chatApis);
   const selected = apiChoice.api;

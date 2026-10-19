@@ -676,11 +676,6 @@ impl ResponsesServer {
             .push_back((status, body.to_owned()));
     }
 
-    #[cfg(test)]
-    fn requests(&self) -> Vec<Recorded> {
-        self.state.lock().requests.clone()
-    }
-
     fn transport(&self) -> Result<HttpTransport, Fault> {
         HttpTransport::new(&self.base)
     }

@@ -78,13 +78,6 @@ use tokio::time::Instant;
 /// How many texts the memo keeps, across tenants.
 const MEMO_SIZE: usize = 1024;
 
-/// Stands in for a real extractor: slow, blocking work on untrusted bytes.
-#[cfg(test)]
-fn fake_pdf_to_text(base64: &str) -> Result<String, Fault> {
-    std::thread::sleep(Duration::from_millis(20));
-    Ok(format!("[text of a {}-byte PDF]", base64.len() * 3 / 4))
-}
-
 #[path = "../support/attachments/pdf.rs"]
 mod pdf_converter;
 use pdf_converter::{extract_pdf_with, too_large};
@@ -147,9 +140,6 @@ struct NoContent;
 
 struct PdfToText {
     text_only: &'static [&'static str],
-    /// Tests inject a blocking extractor; normal use runs a killable process.
-    #[cfg(test)]
-    convert: fn(&str) -> Result<String, Fault>,
     budget: Duration,
     /// The largest PDF read, in base64 bytes.
     max: usize,
@@ -181,8 +171,6 @@ impl PdfToText {
             .await?;
         Ok(Self {
             text_only,
-            #[cfg(test)]
-            convert: fake_pdf_to_text,
             budget: Duration::from_secs(10),
             max: 72 << 20,
             cache,
@@ -261,19 +249,7 @@ impl PdfToText {
         } else {
             0
         };
-        let work = async {
-            #[cfg(test)]
-            {
-                let convert = self.convert;
-                tokio::task::spawn_blocking(move || convert(&base64))
-                    .await
-                    .map_err(|e| Fault::internal("the PDF converter panicked").with_source(e))?
-            }
-            #[cfg(not(test))]
-            {
-                extract_pdf_with("pdftotext", &base64, self.max).await
-            }
-        };
+        let work = extract_pdf_with("pdftotext", &base64, self.max);
         let text: Arc<str> = tokio::time::timeout_at(until, work)
             .await
             .map_err(|_| too_slow())??
@@ -541,16 +517,6 @@ impl FileServer {
             task,
         }
     }
-
-    #[cfg(test)]
-    fn answer(&self, status: StatusCode, body: impl Into<Vec<u8>>) {
-        self.answers.lock().push_back((status, body.into()));
-    }
-
-    #[cfg(test)]
-    fn requests(&self) -> Vec<(String, String)> {
-        self.requests.lock().clone()
-    }
 }
 
 impl Drop for FileServer {
@@ -599,7 +565,7 @@ fn gateway(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
         .plugin(Fallback))
 }
 
-const REQUEST: &str = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":[{"type":"text","text":"Summarise this."},{"type":"file","file":{"filename":"q3.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjcKJcfsj6IKMSAwIG9iago="}}]}]}"#;
+const REQUEST: &str = r#"{"model":"gpt-6-luna","messages":[{"role":"user","content":[{"type":"text","text":"Summarise this."},{"type":"file","file":{"filename":"q3.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjcKJcfsj6IKMSAwIG9iago="}}]}]}"#;
 const OK: &str = r#"{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"Revenue is up."}}]}"#;
 
 async fn send(gw: &Gateway, tenant: &'static str, body: &str) -> StatusCode {

@@ -10,10 +10,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const OUTPUT: Amount = 1_024;
-// Deployment quote: choose a model whose entire billed input fits this bound.
-// Provider-side caches and instructions are covered too, unlike a byte estimate.
-#[cfg(test)]
-pub const QUOTE: Amount = 128_000 + OUTPUT;
 pub const SESSION_MAX: Duration = Duration::from_secs(1_800);
 
 pub struct Budget {
