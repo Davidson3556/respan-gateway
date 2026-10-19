@@ -29,7 +29,7 @@ The rules that keep it that way:
   is its *dialect*, in `crates/vendors`, or data such as a key header. It is
   never a plugin, and never a branch in a format.
 - **Plugins are compiled in** and use only public APIs. The binary composes
-  its plugins exactly as an outside author would. See [PLUGINS.md](PLUGINS.md).
+  its plugins exactly as an outside author would. See [docs/plugins.md](docs/plugins.md).
 - **Policy belongs to applications.** Prices, billing stores, durable jobs
   and tenant rules are the host's. `examples/` shows them without making them
   supported APIs.
@@ -50,7 +50,7 @@ Each crate's `README.md` documents its public contract.
 | `apps/ui/` | The web UI (React), embedded in the binary |
 | `python/` | The PyPI package, a PyO3 extension over `apps/gateway` |
 | `examples/` | Runnable policies: billing, guardrails, PII, admission, jobs, … |
-| `docs/` | User docs: configuration and MCP |
+| `docs/` | User docs: configuration, vendors, MCP and plugins |
 
 ## Development
 

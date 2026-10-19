@@ -15,6 +15,7 @@ use respan_gateway_media::video::{LocateContent, VideoJobs};
 use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_plugin_credentials::ClientCredentials;
 use respan_gateway_plugin_mcp_aggregate::{Aggregate, Closer as AggregateCloser};
+use respan_gateway_plugin_mcp_router::McpRouter;
 use respan_gateway_plugin_relay::Relay;
 use respan_gateway_plugin_routing::{Dispatch, Routing};
 use respan_gateway_ws::Limits;
@@ -25,7 +26,7 @@ use crate::admin::{self, Admin};
 use crate::auth::{self, ClientKeys, Cors, LocalOnly};
 use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{KnownFormat, formats, kind};
-use crate::mcp::{self, McpRoute};
+use crate::mcp;
 use crate::mcp_aggregate;
 use crate::models::{self, Models};
 use crate::requests::{self, Recorder, RequestLog};
@@ -233,7 +234,8 @@ fn with_plugins(
             .filter(|e| e.format == "anthropic-messages")
             .map(|e| e.internal.clone())
             .collect();
-        tool_loop::plugin(config, move |provider| flags.contains(provider))
+        let servers = tool_loop::servers(config, &plan.mcp);
+        tool_loop::plugin(config, servers, move |provider| flags.contains(provider))
     });
     let gateway = match &tool_loop {
         Some((_, closer)) => gateway.plugin(closer.plugin()),
@@ -256,7 +258,7 @@ fn with_plugins(
         Some(aggregate) => gateway.plugin(aggregate),
         None => gateway,
     };
-    let gateway = gateway.plugin(McpRoute);
+    let gateway = gateway.plugin(McpRouter);
     let gateway = gateway.plugin(video_jobs(plan, formats)).plugin(locate);
     // A provider without a key of its own gets the client's.
     let keyless = plan.upstreams.iter().filter(|u| !u.own_key);

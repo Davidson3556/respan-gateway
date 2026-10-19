@@ -59,7 +59,7 @@ whole body: `Start`, then for each content block a `BlockStart`, its
 `Delta`s (`Text`, `Arguments` or `Reasoning`) and a `BlockEnd`, with `Usage`
 and `Finish` among them. Anything the kind has no form for travels as
 `Native`, in its format's own JSON. The
-[conversation kind's README](crates/kinds/conversation/README.md) describes
+[conversation kind's README](../crates/kinds/conversation/README.md) describes
 the types in full.
 
 ## Setup
@@ -228,9 +228,9 @@ Things to know about filters:
 - **A word can be split across deltas** (`"sec"`, `"ret"`). A real redactor
   holds back text that might be the start of a match and releases it later.
   Override `Filter::end` to flush what it held when the stream ends. The
-  `Holdback` in [`examples/support/text.rs`](examples/support/text.rs) does
-  this, and the [guardrail](examples/policies/guardrail.rs) and
-  [PII](examples/policies/pii.rs) examples use it.
+  `Holdback` in [`examples/support/text.rs`](../examples/support/text.rs) does
+  this, and the [guardrail](../examples/policies/guardrail.rs) and
+  [PII](../examples/policies/pii.rs) examples use it.
 - **Filters are synchronous.** For work that must wait, such as a remote
   classifier or a deadline, wrap the stream instead: `cx.wrap(|events:
   EventStream<Output>| ...)` replaces the stream with one of your own.
@@ -462,7 +462,7 @@ Add more providers, in any format, and route between them with
 `cx.set_target`, or register the first-party `Routing` plugin
 (`respan-gateway-plugin-routing`). The vendor kit (`crates/vendors/kit`) can
 build a provider from a vendor's name and key, as the binary does. The
-[embedded example](examples/hosting/embedded.rs) runs a gateway in process
+[embedded example](../examples/hosting/embedded.rs) runs a gateway in process
 with no HTTP server at all.
 
 ### In this repository's binary
@@ -529,8 +529,8 @@ one:
    answer the request themselves (the tool loop, then `Dispatch`, which runs
    a route's fallbacks) come after those; and pricing comes last.
 5. **Document it.** Add a commented block to
-   [`gateway.example.toml`](gateway.example.toml), a row to
-   [`crates/plugins/README.md`](crates/plugins/README.md), and a `README.md`
+   [`gateway.example.toml`](../gateway.example.toml), a row to
+   [`crates/plugins/README.md`](../crates/plugins/README.md), and a `README.md`
    in the crate.
 6. **Test it.** Unit-test the plugin in its crate with a small `Gateway` and
    `mockllm`, and add a case to `apps/gateway/src/compose/tests.rs` that
@@ -539,15 +539,15 @@ one:
 ## Further reading
 
 - The first-party plugins, smallest first:
-  [`credentials`](crates/plugins/credentials),
-  [`relay`](crates/plugins/relay),
-  [`pricing`](crates/plugins/pricing),
-  [`respan`](crates/plugins/respan),
-  [`routing`](crates/plugins/routing),
-  [`tool-loop`](crates/plugins/tool-loop).
-- [`examples/`](examples/README.md), runnable: guardrails, PII
+  [`credentials`](../crates/plugins/credentials),
+  [`relay`](../crates/plugins/relay),
+  [`pricing`](../crates/plugins/pricing),
+  [`respan`](../crates/plugins/respan),
+  [`routing`](../crates/plugins/routing),
+  [`tool-loop`](../crates/plugins/tool-loop).
+- [`examples/`](../examples/README.md), runnable: guardrails, PII
   redaction across streams, billing and wallets, admission control, durable
   jobs, realtime policies.
-- [`crates/core/README.md`](crates/core/README.md) and the rustdoc on
+- [`crates/core/README.md`](../crates/core/README.md) and the rustdoc on
   `Plugin`, `ClientContext`, `ProviderContext`, `Call` and `Response`, the
   contract in full.

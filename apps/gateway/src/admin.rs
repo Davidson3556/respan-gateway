@@ -148,7 +148,7 @@ impl Admin {
             mcp,
             tool_loop: (config.plugins.tool_loop.as_ref()).map(|t| {
                 let filter = ToolFilter::new(t.allow.clone(), t.deny.clone());
-                (t.servers.clone(), filter)
+                (crate::tool_loop::servers(t, &plan.mcp), filter)
             }),
             aggregate: (config.plugins.mcp_aggregate.as_ref())
                 .zip(aggregate)

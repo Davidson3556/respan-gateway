@@ -570,8 +570,9 @@ pub struct CorsConfig {
 #[serde(deny_unknown_fields)]
 pub struct ToolLoopConfig {
     /// The `mcp` servers whose tools the gateway offers and runs, as
-    /// `<server>__<tool>`.
-    pub servers: Vec<String>,
+    /// `<server>__<tool>`; every one that takes no client's credentials
+    /// if unset, as `/mcp` fronts them.
+    pub servers: Option<Vec<String>>,
     /// Which of their tools are offered, as the model names them
     /// (`<server>__<tool>`), `*` standing for any characters, such as
     /// `github__search_*`; all of them if unset or empty.
@@ -675,7 +676,9 @@ impl Config {
     /// A configuration with no file: a provider for every vendor whose key
     /// is in the environment (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...;
     /// Ollama if `OLLAMA_HOST` is set). `RESPAN_<VENDOR>_BASE_URL` moves a
-    /// vendor's base URL. `Err` if there is none.
+    /// vendor's base URL. `Err` if there is none. Each tool vendor whose
+    /// key is there (`LINKUP_API_KEY`, ...) is an `mcp` server of its name,
+    /// and `/mcp` fronts them; the tool loop stays off.
     pub fn from_env() -> Result<Config, Error> {
         let detected = vendors::detected();
         if detected.is_empty() {
@@ -692,9 +695,21 @@ impl Config {
                 };
                 (vendor.id.to_owned(), provider)
             })
+            .collect::<IndexMap<String, ProviderConfig>>();
+        // Each tool vendor with its key in the environment, an `mcp`
+        // server of its name, unless a provider has the name.
+        let mcp: IndexMap<String, McpConfig> = (respan_gateway_tool_vendors::ALL.iter())
+            .filter(|v| v.key_from_env().is_some() && !providers.contains_key(v.id))
+            .map(|v| (v.id.to_owned(), McpConfig::tool_vendor(v.id)))
             .collect();
+        let mut plugins = PluginsConfig::default();
+        if !mcp.is_empty() {
+            plugins.mcp_aggregate = Some(AggregateConfig::default());
+        }
         Ok(Config {
             providers,
+            mcp,
+            plugins,
             source: Source::Environment,
             ..Config::default()
         })
@@ -1220,7 +1235,7 @@ vendor = "anthropic"
             .plugins
             .tool_loop
             .unwrap_or_else(|| panic!("tool_loop"));
-        assert_eq!(tool_loop.servers, ["github"]);
+        assert_eq!(tool_loop.servers, Some(vec!["github".to_owned()]));
         assert_eq!(tool_loop.allow, ["github__*"]);
         assert_eq!(tool_loop.deny, ["github__delete_*"]);
         assert_eq!(tool_loop.tool_list_ttl, Some(Duration::from_secs(60)));

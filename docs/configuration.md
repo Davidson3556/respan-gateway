@@ -80,8 +80,7 @@ A provider is a `vendor` with its key, or any compatible endpoint given
 `formats` and a `base_url`. The vendors are `openai`, `anthropic`, `gemini`,
 `respan`, `typesafe`, `groq`, `deepseek`, `openrouter`, `xai`, `mistral`,
 `together`, `fireworks`, `ollama`, `azure`, `vllm` and `cloudflare`. Each
-vendor's URLs, formats and quirks are in
-[`crates/vendors`](../crates/vendors/README.md).
+vendor's tier, key, formats and base URL are in [Vendors](vendors.md).
 
 ## Client keys
 
@@ -139,5 +138,5 @@ tool calls is kept the same way when OpenAI's Responses API serves it.
 
 ## MCP
 
-MCP servers, the `/mcp` endpoint that merges them, and the tool loop are in
-[mcp.md](mcp.md).
+MCP servers, tool vendors (`[mcp.<name>] vendor = "linkup"`), the `/mcp`
+endpoint that merges them, and the tool loop are in [mcp.md](mcp.md).

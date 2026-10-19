@@ -19,19 +19,16 @@ use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use respan_gateway_core::futures::future::join_all;
-use respan_gateway_core::{
-    ClientContext, ErrorCode, Fault, Gateway, Plugin, Provider, Response, async_trait,
-};
+use respan_gateway_core::{Fault, Gateway, Provider};
 use respan_gateway_http::http::header::{self, HeaderName, HeaderValue};
 use respan_gateway_http::http::{self, HeaderMap, StatusCode};
-use respan_gateway_http::{Body, Completion, raw::Original};
-use respan_gateway_http_faults::Status;
+use respan_gateway_http::{Body, Completion};
 use respan_gateway_http_transport::reqwest;
 use respan_gateway_http_transport::{HttpTransport, unreachable};
 use respan_gateway_mcp::{Input, Output};
 use respan_gateway_mcp_http::{StdioTransport, StreamableHttp};
 use respan_gateway_plugin_routing::Model;
-use respan_gateway_plugin_tool_loop::ToolScope;
+use respan_gateway_tool_vendors::{ToolServer, ToolVendor};
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
@@ -76,9 +73,15 @@ pub struct McpConfig {
     pub env: IndexMap<String, String>,
     /// The directory it runs in.
     pub cwd: Option<PathBuf>,
+    /// A tool vendor's id, such as `linkup`: an HTTP API whose tools the
+    /// gateway serves as an MCP server in process.
+    pub vendor: Option<String>,
+    /// A tool vendor's key, literal or `env:NAME`; its own variable if
+    /// unset. On a `url` or `command`, a retired field, refused with how.
+    pub key: Option<String>,
+    /// A tool vendor's base URL, if not its own.
+    pub base_url: Option<String>,
     // The fields this block once had, refused with how to write them now.
-    #[serde(default)]
-    key: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     oauth: Option<serde::de::IgnoredAny>,
     #[serde(default)]
@@ -91,7 +94,18 @@ impl std::fmt::Debug for McpConfig {
         f.debug_struct("McpConfig")
             // Its origin alone: a path can hold a token (`/mcp/<token>`).
             .field("url", &self.url.as_deref().map(origin))
+            .field("vendor", &self.vendor)
             .finish_non_exhaustive()
+    }
+}
+
+impl McpConfig {
+    /// The tool vendor `id`, with its key from the environment.
+    pub fn tool_vendor(id: &str) -> Self {
+        Self {
+            vendor: Some(id.to_owned()),
+            ..Self::default()
+        }
     }
 }
 
@@ -230,25 +244,34 @@ pub enum Transport {
         env: Vec<(String, String)>,
         cwd: Option<PathBuf>,
     },
+    /// A tool vendor, served in process.
+    Vendor {
+        vendor: &'static ToolVendor,
+        key: String,
+        /// Its base URL, if not its own.
+        base: Option<String>,
+    },
 }
 
 // What it reaches and runs are not printed beyond `target`: a URL, an
-// argument, the environment and the headers can hold tokens.
+// argument, the environment, the headers and a key can hold tokens.
 impl std::fmt::Debug for Transport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Http { origin, .. } => write!(f, "Http({origin})"),
             Self::Stdio { program, .. } => write!(f, "Stdio({})", program.display()),
+            Self::Vendor { vendor, .. } => write!(f, "Vendor({})", vendor.id),
         }
     }
 }
 
 impl McpServer {
-    /// `http` or `stdio`.
+    /// `http`, `stdio` or `vendor`.
     pub fn transport_label(&self) -> &'static str {
         match self.transport {
             Transport::Http { .. } => "http",
             Transport::Stdio { .. } => "stdio",
+            Transport::Vendor { .. } => "vendor",
         }
     }
 
@@ -264,6 +287,10 @@ impl McpServer {
                 let name = Path::new(program).file_name();
                 name.map_or(program, |n| n.to_str().unwrap_or(program))
                     .to_owned()
+            }
+            Transport::Vendor { vendor, base, .. } => {
+                let base = base.as_deref().unwrap_or(vendor.base_url);
+                format!("{} ({})", vendor.id, origin(base))
             }
         }
     }
@@ -297,8 +324,16 @@ pub fn servers(
 }
 
 fn server(name: &str, c: &McpConfig, logins: &std::path::Path) -> Result<McpServer, Fault> {
+    if let Some(id) = &c.vendor {
+        return vendor_server(name, c, id);
+    }
     let owner = format!("mcp '{name}'");
     let bad = |e: &str| Fault::config(format!("{owner}: {e}"));
+    if c.base_url.is_some() {
+        return Err(bad(
+            "`base_url` is for a `vendor`; a `url` is the whole endpoint",
+        ));
+    }
     let moved = [
         (
             c.key.is_some(),
@@ -425,6 +460,79 @@ fn server(name: &str, c: &McpConfig, logins: &std::path::Path) -> Result<McpServ
     })
 }
 
+/// A `vendor` server: the tool vendor, its key (its own variable's if
+/// `key` is unset) and any `base_url`, and nothing of a `url` or `command`.
+fn vendor_server(name: &str, c: &McpConfig, id: &str) -> Result<McpServer, Fault> {
+    let owner = format!("mcp '{name}'");
+    let bad = |e: &str| Fault::config(format!("{owner}: {e}"));
+    if c.url.is_some() || c.command.is_some() {
+        return Err(bad("set one of `vendor`, `url` and `command`"));
+    }
+    let other = !c.headers.is_empty()
+        || c.auth.is_some()
+        || !c.args.is_empty()
+        || !c.env.is_empty()
+        || c.cwd.is_some()
+        || c.oauth.is_some()
+        || c.forward_auth.is_some();
+    if other {
+        return Err(bad(
+            "a `vendor` takes `key` and `base_url` alone, not `headers`, `auth`, \
+             `args`, `env` or `cwd`",
+        ));
+    }
+    let Some(vendor) = find_tool_vendor(id) else {
+        let known: Vec<&str> = respan_gateway_tool_vendors::ALL
+            .iter()
+            .map(|v| v.id)
+            .collect();
+        return Err(bad(&format!(
+            "unknown tool vendor '{id}'; the tool vendors are [{}]",
+            known.join(", ")
+        )));
+    };
+    let key = match &c.key {
+        Some(key) => Some(key.clone()),
+        None => crate::vendors::key_from_env(vendor.key_env),
+    };
+    let (key, key_from) = match key {
+        Some(key) => (secret(&format!("{owner}: key"), &key)?, key_source(&key)),
+        None if vendor.key_env.is_empty() => (String::new(), "none".to_owned()),
+        None => {
+            return Err(bad(&format!(
+                "tool vendor '{id}' needs a key: set {} or `key`",
+                vendor.key_env.join(" or ")
+            )));
+        }
+    };
+    let base = match &c.base_url {
+        Some(url) => {
+            let url = url.trim().trim_end_matches('/');
+            HttpTransport::new(origin(url))
+                .map_err(|e| bad(&format!("base_url: {}", e.message())))?;
+            Some(url.to_owned())
+        }
+        None => None,
+    };
+    Ok(McpServer {
+        name: name.to_owned(),
+        own_key: !key.is_empty(),
+        transport: Transport::Vendor { vendor, key, base },
+        key_from,
+        forward_auth: false,
+        oauth: None,
+    })
+}
+
+/// The tool vendor `id`; in tests, also one of their own.
+fn find_tool_vendor(id: &str) -> Option<&'static ToolVendor> {
+    #[cfg(test)]
+    if id == tests::FAKE.id {
+        return Some(&tests::FAKE);
+    }
+    respan_gateway_tool_vendors::find(id)
+}
+
 /// `headers`, each value literal or `env:NAME`, marked sensitive: a header
 /// of a server is as likely a key as not.
 fn headers(owner: &str, headers: &IndexMap<String, String>) -> Result<HeaderMap, Fault> {
@@ -527,6 +635,9 @@ async fn probe_one(server: &McpServer) -> Reach {
             env,
             cwd,
         } => probe_stdio(command, program, env, cwd.as_deref()).await,
+        // Served in process: there is nothing to reach until a tool is
+        // called, which would spend the vendor's credits.
+        Transport::Vendor { .. } => Reach::Reachable,
     }
 }
 
@@ -746,6 +857,15 @@ fn register(
                     child.connect(),
                 ))?
             }
+            Transport::Vendor { vendor, key, base } => {
+                let api = vendor.api(key.clone(), base.as_deref());
+                let server = ToolServer::new(vendor, api);
+                gateway.provider(Provider::new(
+                    name,
+                    StreamableHttp::new("/"),
+                    server.connect(limit),
+                ))?
+            }
         };
     }
     gateway.client::<Input, Output, _>(client.clone())
@@ -815,38 +935,6 @@ fn label(input: &Input) -> String {
     }
 }
 
-/// Targets a client of `/mcp/{name}` at the server `name`. A key limited to
-/// some tools is refused there: a server's own endpoint offers all its
-/// tools, so such a key reaches them through `/mcp`, which holds it to them.
-#[derive(Debug)]
-pub struct McpRoute;
-
-#[async_trait]
-impl Plugin for McpRoute {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if cx.format() != FORMAT {
-            return Ok(None);
-        }
-        let path = cx
-            .extensions()
-            .get::<Original>()
-            .and_then(|wire| wire.get())
-            .map(|request| respan_gateway_http::path::clean_path(request.uri().path()));
-        let name = path.as_deref().and_then(|p| p.rsplit('/').next());
-        let name = name.ok_or_else(|| Fault::not_found("no MCP server named"))?;
-        if cx.extensions().get::<ToolScope>().is_some() {
-            let message = format!(
-                "this key is limited to some tools, so it reaches MCP servers at /mcp, not /mcp/{name}"
-            );
-            return Err(Fault::new(message)
-                .with(ErrorCode("tools_limited".into()))
-                .with(Status(StatusCode::FORBIDDEN)));
-        }
-        cx.set_target(name);
-        Ok(None)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,6 +944,77 @@ mod tests {
             toml::from_str(text).map_err(|e| e.to_string())?;
         servers(&config, &["openai"], std::path::Path::new(".respan/mcp"))
             .map_err(|e| e.message().to_owned())
+    }
+
+    /// A tool vendor of the tests' own, with no tools.
+    pub(super) static FAKE: ToolVendor = ToolVendor {
+        id: "fake-tools",
+        key_env: &["RESPAN_TEST_NO_SUCH_TOOL_KEY"],
+        key_in: respan_gateway_tool_vendors::KeyIn::Bearer,
+        base_url: "https://tools.test/v1",
+        tools: &NoTools,
+    };
+
+    struct NoTools;
+
+    #[respan_gateway_core::async_trait]
+    impl respan_gateway_tool_vendors::Tools for NoTools {
+        fn list(&self) -> &'static [respan_gateway_tool_vendors::ToolSpec] {
+            &[]
+        }
+        async fn call(
+            &self,
+            _: &respan_gateway_tool_vendors::Api,
+            name: &str,
+            _: serde_json::Value,
+        ) -> Result<String, respan_gateway_tool_vendors::ToolError> {
+            Err(respan_gateway_tool_vendors::ToolError::new(format!(
+                "no tool {name}"
+            )))
+        }
+    }
+
+    #[test]
+    fn a_server_is_a_tool_vendor() {
+        let ok = parse("s = { vendor = \"fake-tools\", key = \"sk-t0ken\" }")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(ok[0].transport_label(), "vendor");
+        assert_eq!(ok[0].target(), "fake-tools (https://tools.test)");
+        assert!(ok[0].own_key && !ok[0].forward_auth);
+        assert_eq!(ok[0].key_from, "config");
+        assert!(!format!("{:?}", ok[0]).contains("sk-t0ken"));
+        let moved = parse(
+            "s = { vendor = \"fake-tools\", key = \"k\", base_url = \"http://local.test:9/v1/\" }",
+        );
+        let moved = moved.unwrap_or_else(|e| panic!("{e}"));
+        let Transport::Vendor { base, key, .. } = &moved[0].transport else {
+            panic!("vendor")
+        };
+        assert_eq!(
+            (base.as_deref(), key.as_str()),
+            (Some("http://local.test:9/v1"), "k")
+        );
+    }
+
+    #[test]
+    fn tool_vendor_mistakes_are_named() {
+        let said = |text: &str| parse(text).err().unwrap_or_default();
+        assert!(
+            said("s = { vendor = \"nope\", key = \"k\" }").contains("unknown tool vendor 'nope'")
+        );
+        assert!(
+            said("s = { vendor = \"fake-tools\", key = \"k\", url = \"http://h.test\" }")
+                .contains("one of `vendor`, `url` and `command`")
+        );
+        assert!(
+            said("s = { vendor = \"fake-tools\", key = \"k\", headers = { x = \"y\" } }")
+                .contains("`key` and `base_url` alone")
+        );
+        assert!(said("s = { vendor = \"fake-tools\" }").contains("RESPAN_TEST_NO_SUCH_TOOL_KEY"));
+        assert!(
+            said("s = { url = \"http://h.test\", base_url = \"http://x.test\" }")
+                .contains("for a `vendor`")
+        );
     }
 
     #[test]

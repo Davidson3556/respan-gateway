@@ -44,7 +44,7 @@ impl Built {
         let servers: Vec<String> = (self.plan.mcp.iter())
             .map(|s| {
                 let (name, kind, at) = (&s.name, s.transport_label(), s.endpoint());
-                format!("{name:<w$}  {kind:<5}  {at}", w = width.unwrap_or_default())
+                format!("{name:<w$}  {kind:<6}  {at}", w = width.unwrap_or_default())
             })
             .collect();
         if !servers.is_empty() {

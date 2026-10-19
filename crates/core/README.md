@@ -46,4 +46,4 @@ names its pair `Input` / `Output`, in the crate that owns it:
 gateway-wide: `Input` travels from client to provider, `Output` from
 provider to client. Use a crate alias when working with several kinds.
 
-See the [plugin guide](../../PLUGINS.md) for how to write a plugin on it.
+See the [plugin guide](../../docs/plugins.md) for how to write a plugin on it.

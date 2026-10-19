@@ -61,8 +61,8 @@ class McpAuth(TypedDict, total=False):
 
 class McpConfig(TypedDict, total=False):
     """One MCP server, served at /mcp/{name}, in the fields of an `mcp.json`:
-    an HTTP `url` (with `headers`, `auth`) or a stdio `command` (with `args`,
-    `env`, `cwd`)."""
+    an HTTP `url` (with `headers`, `auth`), a stdio `command` (with `args`,
+    `env`, `cwd`), or a tool `vendor` (with `key`, `base_url`)."""
 
     url: str  # a streamable-HTTP endpoint
     headers: Dict[str, str]  # values literal or "env:NAME"; all treated as secrets
@@ -71,12 +71,15 @@ class McpConfig(TypedDict, total=False):
     args: List[str]  # its arguments
     env: Dict[str, str]  # values literal or "env:NAME"
     cwd: str
+    vendor: str  # a tool vendor's id, such as "linkup" or "tinyfish"
+    key: str  # a tool vendor's key, literal or "env:NAME"; its own variable if unset
+    base_url: str  # a tool vendor's base URL, if not its own
 
 
 class ToolLoopConfig(TypedDict, total=False):
     """The tool loop: the gateway runs the tools of `mcp` servers inside chat requests."""
 
-    servers: List[str]  # the `mcp` servers whose tools are offered
+    servers: List[str]  # the `mcp` servers whose tools are offered; all but auth "forward" ones if unset
     allow: List[str]  # tool names as the model has them, "github__*"; all if unset
     deny: List[str]  # never offered; wins over `allow`
     models: List[str]  # model prefixes the loop applies to; every chat model if unset

@@ -138,6 +138,7 @@ pub fn list(config: &Config) -> String {
         .map(|(name, c)| {
             let saved = logins.join(format!("{name}.json"));
             let (target, (ok, auth)) = match (&c.url, &c.command) {
+                _ if c.vendor.is_some() => vendor_auth(c),
                 (Some(url), _) => (origin(url.trim()).to_owned(), http_auth(name, c, &saved)),
                 (None, Some(program)) => (
                     format!("stdio: {}", program.name()),
@@ -162,6 +163,35 @@ pub fn list(config: &Config) -> String {
         ));
     }
     out
+}
+
+/// A tool vendor's target, and whether it has its key (it needs no login).
+fn vendor_auth(c: &McpConfig) -> (String, (bool, String)) {
+    let id = c.vendor.as_deref().unwrap_or_default();
+    let target = format!("vendor: {id}");
+    let Some(vendor) = respan_gateway_tool_vendors::find(id) else {
+        return (target, (false, format!("unknown tool vendor '{id}'")));
+    };
+    let key = match &c.key {
+        Some(key) => key
+            .strip_prefix("env:")
+            .map_or(Some("key (config)".to_owned()), |var| {
+                std::env::var(var)
+                    .is_ok_and(|v| !v.trim().is_empty())
+                    .then(|| format!("key (env {var})"))
+            }),
+        None => crate::vendors::key_from_env(vendor.key_env)
+            .map(|k| format!("key ({})", k.replacen(':', " ", 1))),
+    };
+    let wanted = || match &c.key {
+        Some(key) => format!("set {}", key.strip_prefix("env:").unwrap_or("`key`")),
+        None => format!("set {}", vendor.key_env.join(" or ")),
+    };
+    match key {
+        Some(key) => (target, (true, key)),
+        None if c.key.is_none() && vendor.key_env.is_empty() => (target, (true, "none".to_owned())),
+        None => (target, (false, wanted())),
+    }
 }
 
 /// Whether the gateway can authenticate to the HTTP server `name`, and how,

@@ -120,6 +120,15 @@ pub fn starter(chosen: &[Chosen], client_key: Option<&str>) -> String {
             text.push_str(&format!("base_url = {}\n", quote(url)));
         }
     }
+    let tools = respan_gateway_tool_vendors::ALL.iter();
+    let tools: Vec<_> = tools.filter(|v| v.key_from_env().is_some()).collect();
+    if !tools.is_empty() {
+        text.push_str("\n# Tool vendors: HTTP APIs served as MCP servers at /mcp/<name>.\n");
+    }
+    for vendor in tools {
+        let id = quote(vendor.id);
+        text.push_str(&format!("\n[mcp.{}]\nvendor = {id}\n", vendor.id));
+    }
     text.push_str("\n# Add providers and optional plugins using gateway.example.toml.\n");
     text
 }

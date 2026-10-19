@@ -82,8 +82,8 @@ export interface Provider {
 /** An MCP server the gateway fronts, served to clients at `endpoint`. */
 export interface McpServer {
   name: string;
-  transport: "http" | "stdio";
-  /** Only the origin of an HTTP server's URL, or the program a stdio server runs (never its path, query or arguments). */
+  transport: "http" | "stdio" | "vendor";
+  /** Only the origin of an HTTP server's URL, the program a stdio server runs (never its path, query or arguments), or a tool vendor's id and origin. */
   target: string;
   /** Where clients reach it, such as `/mcp/github`. */
   endpoint: string;

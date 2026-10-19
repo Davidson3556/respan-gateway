@@ -2,7 +2,7 @@
 
 Each plugin is a crate of its own, built on the public core APIs. A gateway
 registers the ones it wants; they compose in registration order. To
-write one, see the [plugin guide](../../PLUGINS.md).
+write one, see the [plugin guide](../../docs/plugins.md).
 
 | Crate | Package | What it does |
 |---|---|---|
@@ -12,6 +12,7 @@ write one, see the [plugin guide](../../PLUGINS.md).
 | [`tool-loop`](tool-loop/README.md) | `respan-gateway-plugin-tool-loop` | `ToolLoop` runs tools inside chat requests, for every chat format; `ToolFilter` and `ToolScope` say which tools are offered |
 | [`credentials`](credentials/README.md) | `respan-gateway-plugin-credentials` | `ClientCredentials` sends a client's own key to the named providers that have none, of the client's format |
 | [`mcp-aggregate`](mcp-aggregate/README.md) | `respan-gateway-plugin-mcp-aggregate` | `Aggregate` fronts many MCP servers as one at `/mcp` |
+| [`mcp-router`](mcp-router/README.md) | `respan-gateway-plugin-mcp-router` | `McpRouter` targets an MCP client of `/mcp/{name}` at the server `name` |
 | [`respan`](respan/README.md) | `respan-gateway-plugin-respan` | `Respan` sends each request to Respan as a trace: a span per call to a model or tool server |
 | [`pricing`](pricing/README.md) | `respan-gateway-plugin-pricing` | `Pricing` charges each call to a provider at its price for the model sent, as its usage is reported |
 | [`responses`](responses/README.md) | `respan-gateway-plugin-responses` | `Responses` keeps the conversation state a client or provider cannot: Responses' `previous_response_id` with any provider, and a Chat client's reasoning between tool calls with OpenAI's Responses |

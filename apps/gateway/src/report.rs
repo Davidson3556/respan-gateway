@@ -52,7 +52,8 @@ pub fn check(config: &Config, plan: &Plan, formats: &[KnownFormat], listen: Sock
     }
 
     if let Some(tool_loop) = &config.plugins.tool_loop {
-        let mut about = vec![format!("tools of {}", tool_loop.servers.join(", "))];
+        let servers = crate::tool_loop::servers(tool_loop, &plan.mcp);
+        let mut about = vec![format!("tools of {}", servers.join(", "))];
         for (label, patterns) in [("allow", &tool_loop.allow), ("deny", &tool_loop.deny)] {
             if !patterns.is_empty() {
                 about.push(format!("  {label:<7} {}", patterns.join(", ")));

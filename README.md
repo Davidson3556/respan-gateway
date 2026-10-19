@@ -17,7 +17,7 @@ translating between OpenAI, Anthropic and Gemini APIs on the way.
 - **Observability.** A live request log and web UI, per-call pricing, and
   traces sent to [Respan](https://respan.ai).
 - **Extensible.** Every feature above is a plugin built on one public Rust
-  API. See the [plugin guide](PLUGINS.md).
+  API. See the [plugin guide](docs/plugins.md).
 
 > **Status: pre-alpha.** APIs around the core may still change.
 
@@ -104,7 +104,9 @@ on a public address.
 
 - [Configuration](docs/configuration.md): the command line, environment,
   providers, client keys, routing, pricing and conversation state.
-- [MCP](docs/mcp.md): MCP servers, the merged `/mcp` endpoint and the tool loop.
+- [Vendors](docs/vendors.md): every built-in vendor, its tier, key, formats
+  and base URL.
+- [MCP](docs/mcp.md): MCP servers, tool vendors (Linkup, TinyFish), the merged `/mcp` endpoint and the tool loop.
 - [`gateway.example.toml`](gateway.example.toml): every setting.
 
 ## Supported APIs
@@ -118,8 +120,8 @@ on a public address.
 
 **Vendors:** OpenAI, Anthropic, Gemini, Respan, TypeSafe, Groq, DeepSeek,
 OpenRouter, xAI, Mistral, Together, Fireworks, Ollama, Azure, vLLM and
-Cloudflare, plus any compatible endpoint. Details are in
-[`crates/vendors`](crates/vendors/README.md); translation details are in each
+Cloudflare, plus any compatible endpoint; see [Vendors](docs/vendors.md)
+for their tiers, keys and formats. Translation details are in each
 format's README, for [chat](crates/formats/conversation-http/README.md),
 [media](crates/formats/media-http/README.md) and
 [realtime](crates/formats/realtime-ws/README.md).
@@ -128,7 +130,7 @@ format's README, for [chat](crates/formats/conversation-http/README.md),
 
 The binary is a library, `respan_gateway`: `App::new(config)?.router()`
 returns an `axum::Router`. To build your own gateway from the crates, start
-with the [plugin guide](PLUGINS.md) and the [`examples/`](examples/README.md).
+with the [plugin guide](docs/plugins.md) and the [`examples/`](examples/README.md).
 
 ## Contributing
 

@@ -1554,6 +1554,9 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -1604,6 +1607,7 @@ dependencies = [
  "respan-gateway-plugin-credentials",
  "respan-gateway-plugin-fallback",
  "respan-gateway-plugin-mcp-aggregate",
+ "respan-gateway-plugin-mcp-router",
  "respan-gateway-plugin-pricing",
  "respan-gateway-plugin-relay",
  "respan-gateway-plugin-respan",
@@ -1614,6 +1618,7 @@ dependencies = [
  "respan-gateway-realtime-ws",
  "respan-gateway-sdk",
  "respan-gateway-serve",
+ "respan-gateway-tool-vendors",
  "respan-gateway-vendors",
  "respan-gateway-ws",
  "serde",
@@ -1874,6 +1879,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "respan-gateway-plugin-mcp-router"
+version = "0.1.0"
+dependencies = [
+ "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-http-faults",
+ "respan-gateway-mcp-http",
+ "respan-gateway-plugin-tool-loop",
+]
+
+[[package]]
 name = "respan-gateway-plugin-pricing"
 version = "0.1.0"
 dependencies = [
@@ -2028,6 +2044,31 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-http-faults",
  "serde_json",
+]
+
+[[package]]
+name = "respan-gateway-tool-vendor-kit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "http",
+ "reqwest",
+ "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-mcp",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "respan-gateway-tool-vendors"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "respan-gateway-tool-vendor-kit",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

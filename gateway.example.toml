@@ -130,6 +130,12 @@ key = "env:OPENAI_API_KEY"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
+# A tool vendor: an HTTP API's tools, served as an MCP server in process.
+# [mcp.search]
+# vendor = "linkup"                       # Or "tinyfish"
+# key = "env:LINKUP_API_KEY"              # The vendor's own variable if unset
+# base_url = "https://api.linkup.so/v1"   # The vendor's own if unset
+
 # Combine servers at /mcp; tool names become server__tool.
 # [plugins.mcp_aggregate]
 # servers = ["github", "files"]
@@ -138,7 +144,7 @@ key = "env:OPENAI_API_KEY"
 
 # Let chat requests call tools using the servers' credentials.
 # [plugins.tool_loop]
-# servers = ["github"]
+# servers = ["github"]                      # Every server /mcp would front if unset
 # allow = ["github__search_*"]
 # max_steps = 8
 # timeout = "5m"

@@ -1,0 +1,18 @@
+[package]
+name = "respan-gateway-plugin-mcp-router"
+description = "Routes an MCP client's request to the MCP server its path names."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+respan-gateway-core.workspace = true
+respan-gateway-http.workspace = true
+respan-gateway-http-faults.workspace = true
+respan-gateway-mcp-http.workspace = true
+respan-gateway-plugin-tool-loop.workspace = true

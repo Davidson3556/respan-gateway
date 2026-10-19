@@ -47,6 +47,17 @@ const CLOSING: Duration = Duration::from_secs(10);
 /// How long a server's tool list is kept unless the config says.
 const DEFAULT_CACHE: Duration = Duration::from_secs(300);
 
+/// The servers whose tools `tool_loop` offers: those it names, or every
+/// `mcp` server that takes no client's credentials, as `/mcp` fronts them.
+pub fn servers(tool_loop: &ToolLoopConfig, servers: &[McpServer]) -> Vec<String> {
+    match &tool_loop.servers {
+        Some(listed) => listed.clone(),
+        None => (servers.iter().filter(|s| !s.forward_auth))
+            .map(|s| s.name.clone())
+            .collect(),
+    }
+}
+
 /// Checks `plugins.tool_loop` against the servers: every tool server is an
 /// `mcp` server that is served, and takes no client's credentials.
 pub fn check(
@@ -55,15 +66,21 @@ pub fn check(
     serving_mcp: bool,
 ) -> Result<(), Fault> {
     let bad = |e: String| Fault::config(format!("plugins: tool_loop: {e}"));
-    if tool_loop.servers.is_empty() {
-        return Err(bad("`servers` names no mcp server".into()));
+    let names = self::servers(tool_loop, servers);
+    if names.is_empty() {
+        return Err(bad(match tool_loop.servers {
+            Some(_) => "`servers` names no mcp server".into(),
+            None => "no mcp server to offer tools of; add one under `mcp` (a server with \
+                     `auth = \"forward\"` cannot be used)"
+                .into(),
+        }));
     }
     let known = || {
         let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
         names.join(", ")
     };
-    for (i, name) in tool_loop.servers.iter().enumerate() {
-        if tool_loop.servers[..i].contains(name) {
+    for (i, name) in names.iter().enumerate() {
+        if names[..i].contains(name) {
             return Err(bad(format!("servers: '{name}' is listed twice")));
         }
         let Some(server) = servers.iter().find(|s| s.name == *name) else {
@@ -114,17 +131,18 @@ pub fn check(
     Ok(())
 }
 
-/// The loop, with the tools of the servers `tool_loop` names. Which requests it
+/// The loop, with the tools of `servers` ([`servers`]). Which requests it
 /// applies to: chat requests and live sessions of a model `tool_loop.models`
 /// names (all, if it names none), unless the client sends
 /// `x-respan-tool-loop: off`.
 pub fn plugin(
     tool_loop: &ToolLoopConfig,
+    servers: Vec<String>,
     anthropic: impl Fn(&str) -> bool + Send + Sync + 'static,
 ) -> (ToolLoop, Closer) {
     let filter = ToolFilter::new(tool_loop.allow.clone(), tool_loop.deny.clone());
     let ttl = tool_loop.tool_list_ttl.unwrap_or(DEFAULT_CACHE);
-    let tools = McpTools::new(tool_loop.servers.clone(), ttl, filter);
+    let tools = McpTools::new(servers, ttl, filter);
     let closer = Closer(tools.shared.clone());
     let prefixes = tool_loop.models.clone();
     let mut plugin = ToolLoop::new(tools)
@@ -667,5 +685,23 @@ mod tests {
         );
         let structured = render(&json!({ "content": [], "structuredContent": { "n": 1 } }));
         assert_eq!(structured, Outcome::ok("{\"n\":1}"));
+    }
+
+    #[test]
+    fn without_servers_the_loop_uses_every_server_it_can() {
+        let mcp: indexmap::IndexMap<String, crate::mcp::McpConfig> = toml::from_str(
+            "a = { url = \"http://a.test\" }\nb = { url = \"http://b.test\", auth = \"forward\" }\nc = { url = \"http://c.test\" }",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let mcp = crate::mcp::servers(&mcp, &[], std::path::Path::new(".respan/mcp"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let config: ToolLoopConfig = toml::from_str("").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(servers(&config, &mcp), ["a", "c"]);
+        assert!(check(&config, &mcp, true).is_ok());
+        let none = check(&config, &mcp[1..2], true).err();
+        assert!(none.is_some_and(|e| e.message().contains("no mcp server")));
+        let listed: ToolLoopConfig =
+            toml::from_str("servers = [\"c\"]").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(servers(&listed, &mcp), ["c"]);
     }
 }
