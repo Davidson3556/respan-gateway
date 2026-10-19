@@ -94,7 +94,8 @@ to = "anthropic/{model}"
 
 # A tool vendor: an HTTP API served as MCP tools (linkup, tinyfish).
 [tools.search]
-vendor = "linkup"                  # key from LINKUP_API_KEY
+vendor = "linkup"
+key    = "env:LINKUP_API_KEY"
 
 # An MCP server run as a command, one child per session.
 [tools.files]
@@ -107,7 +108,8 @@ args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 # auth = { bearer = "env:GITHUB_TOKEN" }   # or "login", "forward", { oauth = { ... } }
 
 # [tools.web]
-# vendor = "tinyfish"              # key from TINYFISH_API_KEY
+# vendor = "tinyfish"
+# key    = "env:TINYFISH_API_KEY"
 
 # Every server at /mcp, tools named server__tool.
 [plugins.mcp_aggregate]
