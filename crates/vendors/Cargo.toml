@@ -1,12 +1,11 @@
 [package]
 name = "respan-gateway-vendors"
 description = "The vendors, green and yellow: where each is, how it takes a key, and the formats it speaks, its dialects of a spec among them."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [lints]
 workspace = true

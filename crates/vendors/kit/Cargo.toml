@@ -1,12 +1,11 @@
 [package]
 name = "respan-gateway-vendor-kit"
 description = "A vendor as a template, and a provider of it: its formats at their base URLs, its key and its model list; and what vendors share."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [lints]
 workspace = true

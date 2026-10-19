@@ -1,12 +1,11 @@
 [package]
 name = "respan-gateway-media-http"
 description = "The media kinds over HTTP: OpenAI Images, Audio Transcriptions, Speech, Videos and Embeddings, and Google's Veo."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [lints]
 workspace = true

@@ -1,12 +1,11 @@
 [package]
 name = "respan-gateway-plugin-fallback"
 description = "First-party toolkit: retry, fallback and race over provider attempts."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [lints]
 workspace = true

@@ -111,20 +111,41 @@ behavior. A test must not need keys or the network.
 
 ## Releasing
 
-Tag `vX.Y.Z` on `main` and push the tag. Two workflows run (and call `ci.yml`):
+Each crate has its own version, in its `Cargo.toml`. A release is named for
+`respan-gateway` (`apps/gateway`), whose version the Python package
+(`python/Cargo.toml`) shares. To release:
 
-- `release.yml` first checks that the tag equals the `Cargo.toml` workspace
-  version and runs `ci.yml`; nothing is published if either fails. It builds
-  the binary (web UI embedded) for Linux x86_64 and aarch64 (native runners),
-  macOS aarch64 and x86_64, and Windows x86_64, and attaches them with a
-  `SHA256SUMS` file to a GitHub release.
+1. Bump the version of each crate that changed (and the `version` of its
+   entry in the root `Cargo.toml`'s `[workspace.dependencies]` when the change
+   is breaking). Bump `apps/gateway` and `python` together.
+2. Tag `vX.Y.Z`, the gateway's new version, on `main` and push the tag.
+
+Two workflows run (and call `ci.yml`):
+
+- `release.yml` checks that the tag equals the gateway's and the Python
+  package's versions and runs `ci.yml`; nothing is published if either
+  fails. It builds the binary (web UI embedded) for Linux x86_64 and aarch64
+  (native runners), macOS aarch64 and x86_64, and Windows x86_64, and
+  attaches them with a `SHA256SUMS` file to a GitHub release, which the
+  install scripts download. Then it publishes to crates.io, in dependency
+  order, every crate whose version is not there yet
+  (`.github/scripts/publish-crates.py`), with the built UI copied into
+  `apps/gateway/ui-dist/` so `cargo install respan-gateway` has it. When
+  crates.io rate-limits new crates, the job waits; a rerun skips what is
+  already published.
 - `python.yml` builds the UI, then abi3 wheels (Linux, macOS, Windows; UI
   embedded) and the sdist (no UI: it builds with the placeholder page), tests
   the wheels, and, once `ci.yml` passes too, publishes them to PyPI.
 
-PyPI uses trusted publishing, so no token is stored. **One-time setup by the
-owner**, before the first tag: on pypi.org, add a *pending publisher* for the
-project `respan-gateway` (Account settings, Publishing) with the owner and
-repository name, workflow `python.yml`, and environment `pypi`; then create
-the `pypi` environment in the repository's settings (optionally requiring a
-reviewer). Keep the version in `Cargo.toml` and the tag in step.
+Run `release.yml` by hand (workflow_dispatch) for a dry run: it builds
+everything and packages the crates, and publishes nothing.
+
+**One-time setup by the owner**, before the first tag:
+
+- crates.io: create an API token with the `publish-new` and `publish-update`
+  scopes and save it as the repository secret `CARGO_REGISTRY_TOKEN`.
+- PyPI uses trusted publishing, so no token is stored: on pypi.org, add a
+  *pending publisher* for the project `respan-gateway` (Account settings,
+  Publishing) with the owner and repository name, workflow `python.yml`,
+  and environment `pypi`; then create the `pypi` environment in the
+  repository's settings (optionally requiring a reviewer).

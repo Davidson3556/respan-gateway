@@ -33,10 +33,10 @@ curl -fsSL https://raw.githubusercontent.com/respanai/respan-gateway/main/instal
 irm https://raw.githubusercontent.com/respanai/respan-gateway/main/install.ps1 | iex
 ```
 
-It is a single binary with the web UI built in. It also comes as a Python
-package (`pip install respan-gateway`, see [`python/`](python/README.md)),
-from `cargo install --git https://github.com/respanai/respan-gateway respan-gateway`,
-and on each [GitHub release](https://github.com/respanai/respan-gateway/releases).
+It is a single binary with the web UI built in. It also comes from
+`cargo install respan-gateway`, as a Python package
+(`pip install respan-gateway`, see [`python/`](python/README.md)), and on
+each [GitHub release](https://github.com/respanai/respan-gateway/releases).
 
 No release is tagged yet, so until the first tag, build from source: build
 the UI with `cd apps/ui && pnpm install && pnpm build`, then run

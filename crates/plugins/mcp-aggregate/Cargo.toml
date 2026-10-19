@@ -1,12 +1,11 @@
 [package]
 name = "respan-gateway-plugin-mcp-aggregate"
 description = "First-party plugin: one MCP endpoint fronting many MCP servers as a single server."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [lints]
 workspace = true

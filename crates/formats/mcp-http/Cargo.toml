@@ -1,12 +1,11 @@
 [package]
 name = "respan-gateway-mcp-http"
 description = "MCP over HTTP: the streamable-HTTP format, and a stdio server as a transport."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [lints]
 workspace = true
@@ -24,7 +23,7 @@ tokio = { workspace = true, features = ["process", "io-util", "sync", "rt", "mac
 
 [dev-dependencies]
 respan-gateway-http.workspace = true
-respan-gateway-http-transport.workspace = true
+respan-gateway-http-transport = { path = "../../wires/http-transport" }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time", "test-util"] }
 
 # Signals a stdio server's process group, which tokio cannot.

@@ -12,3 +12,4 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 *.sqlite3
+apps/gateway/ui-dist/

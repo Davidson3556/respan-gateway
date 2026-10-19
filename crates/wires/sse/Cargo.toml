@@ -1,12 +1,11 @@
 [package]
 name = "respan-gateway-sse"
 description = "Server-sent events as bytes: an incremental event splitter, and events and comments written so no value can forge a field."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [lints]
 workspace = true

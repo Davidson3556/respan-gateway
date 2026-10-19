@@ -1,6 +1,8 @@
-//! Embeds the web UI (`apps/ui/dist`) in the binary: writes a table of its
-//! files, each `include_bytes!`, to `$OUT_DIR/ui_assets.rs`. Without a
-//! built UI, the table holds one page that says how to build it.
+//! Embeds the web UI in the binary: writes a table of its files, each
+//! `include_bytes!`, to `$OUT_DIR/ui_assets.rs`. The UI is `ui-dist/` in this
+//! crate, where a release copies it so the published crate carries it, or
+//! else `apps/ui/dist` in a checkout. Without either, the table holds one
+//! page that says how to build it.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -24,9 +26,18 @@ cargo build -p respan-gateway</pre>
 fn main() {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default());
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap_or_default());
-    let dist = manifest.join("../ui/dist");
+    let bundled = manifest.join("ui-dist");
+    let dist = if bundled.join("index.html").is_file() {
+        bundled
+    } else {
+        manifest.join("../ui/dist")
+    };
     // Watch the nearest folder that exists, so building the UI later
     // rebuilds the gateway.
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest.join("ui-dist").display()
+    );
     let watched = [dist.clone(), manifest.join("../ui"), manifest.join("..")];
     if let Some(watched) = watched.iter().find(|p| p.exists()) {
         println!("cargo:rerun-if-changed={}", watched.display());

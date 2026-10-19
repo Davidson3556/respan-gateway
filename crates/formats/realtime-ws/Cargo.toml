@@ -1,12 +1,11 @@
 [package]
 name = "respan-gateway-realtime-ws"
 description = "The realtime kind over WebSocket: a session of JSON events."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [lints]
 workspace = true

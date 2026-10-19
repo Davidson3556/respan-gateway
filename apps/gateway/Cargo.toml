@@ -1,12 +1,16 @@
 [package]
 name = "respan-gateway"
 description = "An LLM gateway with a neutral core and compiled-in plugins."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+readme = "../../README.md"
+keywords = ["llm", "gateway", "openai", "anthropic", "gemini"]
+categories = ["web-programming::http-server", "command-line-utilities"]
+# `ui-dist/` is git-ignored: a release copies the built UI there to publish it.
+include = ["src/**", "build.rs", "ui-dist/**"]
 
 [lints]
 workspace = true

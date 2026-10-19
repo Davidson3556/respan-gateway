@@ -1,12 +1,11 @@
 [package]
 name = "respan-gateway-http"
 description = "Native HTTP bindings and stream/sink helpers for protocol authors."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [lints]
 workspace = true

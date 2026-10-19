@@ -1,12 +1,11 @@
 [package]
 name = "respan-gateway-conversation-http"
 description = "The conversation kind over HTTP: OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Gemini generateContent."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [lints]
 workspace = true

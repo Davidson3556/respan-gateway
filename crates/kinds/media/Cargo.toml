@@ -1,12 +1,11 @@
 [package]
 name = "respan-gateway-media"
 description = "The media kinds: images, transcription, speech, video and embeddings."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [lints]
 workspace = true

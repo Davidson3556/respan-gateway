@@ -1,12 +1,12 @@
 [package]
 name = "respan-gateway-examples"
 description = "Runnable examples: how to build the use cases on the public core and protocol APIs."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+publish = false
 
 [lints]
 workspace = true
@@ -34,18 +34,18 @@ rusqlite = { version = "0.32.1", features = ["bundled"] }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
-respan-gateway-plugin-relay.workspace = true
-respan-gateway-plugin-routing.workspace = true
+respan-gateway-plugin-relay = { path = "../crates/plugins/relay" }
+respan-gateway-plugin-routing = { path = "../crates/plugins/routing" }
 sha2 = "0.10"
 hmac = "0.12"
 getrandom = "0.3"
 reqwest.workspace = true
 respan-gateway-http.workspace = true
-respan-gateway-http-transport.workspace = true
-respan-gateway-mcp.workspace = true
-respan-gateway-mcp-http.workspace = true
-respan-gateway-ws.workspace = true
-respan-gateway-serve.workspace = true
+respan-gateway-http-transport = { path = "../crates/wires/http-transport" }
+respan-gateway-mcp = { path = "../crates/kinds/mcp" }
+respan-gateway-mcp-http = { path = "../crates/formats/mcp-http" }
+respan-gateway-ws = { path = "../crates/wires/ws" }
+respan-gateway-serve = { path = "../crates/serve" }
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "26cf441" }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 async-trait.workspace = true

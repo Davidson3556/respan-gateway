@@ -132,6 +132,9 @@ jobs:
     permissions:
       id-token: write
     steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the package version
+        run: test "${GITHUB_REF_NAME}" = "v$(sed -n 's/^version = "\(.*\)"/\1/p' python/Cargo.toml | head -n 1)"
       - uses: actions/download-artifact@v4
         with:
           pattern: "{wheel-*,sdist}"
