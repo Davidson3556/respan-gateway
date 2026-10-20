@@ -1,6 +1,6 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { McpOverview, McpServer, McpTools } from "@/lib/api";
 import { json, renderApp, serve } from "@/test/render";
 import { ToolsPage } from "./tools";
@@ -16,6 +16,7 @@ const github: McpServer = {
   requests: 10,
   errors: 1,
   avg_latency_ms: 80,
+  enabled: true,
 };
 
 const files: McpServer = {
@@ -40,8 +41,8 @@ const overview: McpOverview = {
 
 const tools: McpTools = {
   tools: [
-    { name: "search_issues", title: null, description: "Searches issues.", read_only: true, destructive: null, tool_loop: true, aggregate: true },
-    { name: "delete_repo", title: null, description: null, read_only: null, destructive: true, tool_loop: false, aggregate: true },
+    { name: "search_issues", title: null, description: "Searches issues.", read_only: true, destructive: null, tool_loop: true, aggregate: true, enabled: true },
+    { name: "delete_repo", title: null, description: null, read_only: null, destructive: true, tool_loop: false, aggregate: true, enabled: true },
   ],
   took_ms: 412,
   asked_at: "2026-10-13T09:30:00Z",
@@ -89,6 +90,35 @@ describe("ToolsPage", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Tools/ }));
     expect(await screen.findByText(/refused the gateway's credentials/)).toBeInTheDocument();
     expect(screen.getByText("respan-gateway mcp login github")).toBeInTheDocument();
+  });
+
+  it("turns a server off and on, in the gateway's memory", async () => {
+    const calls = serve({
+      "GET /ui/api/mcp": () => json(overview),
+      "PUT /ui/api/mcp/github": () => new Response(null, { status: 204 }),
+    });
+    renderApp(<ToolsPage />);
+    const toggle = await screen.findByRole("switch", { name: "Serve github" });
+    expect(toggle).toBeChecked();
+    await userEvent.click(toggle);
+    const put = calls.find((c) => c.key === "PUT /ui/api/mcp/github");
+    expect(put?.init.body).toBe(JSON.stringify({ enabled: false }));
+  });
+
+  it("turns one tool off, and puts the switch back if the gateway refuses", async () => {
+    const calls = serve({
+      "GET /ui/api/mcp": () => json(overview),
+      "GET /ui/api/mcp/github/tools": () => json(tools),
+      "PUT /ui/api/mcp/github/tools/delete_repo": () =>
+        json({ error: { type: "forbidden", message: "an admin key is needed" } }, 403),
+    });
+    renderApp(<ToolsPage />);
+    await userEvent.click((await screen.findAllByRole("button", { name: /Tools/ }))[0]);
+    const toggle = await screen.findByRole("switch", { name: "Offer delete_repo" });
+    await userEvent.click(toggle);
+    const put = calls.find((c) => c.key === "PUT /ui/api/mcp/github/tools/delete_repo");
+    expect(put?.init.body).toBe(JSON.stringify({ enabled: false }));
+    await vi.waitFor(() => expect(toggle).toBeChecked());
   });
 
   it("teaches how to add a server when there are none", async () => {

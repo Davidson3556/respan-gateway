@@ -253,10 +253,11 @@ impl Run {
 }
 
 impl Run {
-    /// Whether the client may be offered, and may call, the tool `name`
-    /// (`{server}__{tool}`): within `allow` and `deny` and its key's scope.
-    pub(super) fn offers(&self, name: &str) -> bool {
+    /// Whether the client may be offered, and may call, the tool `tool` of
+    /// `server`, named `name` (`{server}__{tool}`): within `allow` and
+    /// `deny` and its key's scope, and not switched off.
+    pub(super) fn offers(&self, server: &str, tool: &str, name: &str) -> bool {
         let scoped = self.scope.as_ref().is_none_or(|s| s.offers(name));
-        scoped && self.inner.filter.offers(name)
+        scoped && self.inner.filter.offers(name) && self.inner.switches.offers(server, tool)
     }
 }

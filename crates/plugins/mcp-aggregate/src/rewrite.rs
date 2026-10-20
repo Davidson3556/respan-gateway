@@ -14,7 +14,7 @@ pub(super) fn by_name(tool: bool) -> impl Fn(&Run, &mut Value) -> Result<String,
             |name: &str| format!("unknown {} '{name}'", if tool { "tool" } else { "prompt" });
         let name = params["name"].as_str().unwrap_or_default().to_owned();
         let (server, own) = split(&run.inner.servers, &name).ok_or_else(|| unknown(&name))?;
-        if tool && !run.offers(&name) {
+        if tool && !run.offers(server, own, &name) {
             return Err(unknown(&name));
         }
         let (server, own) = (server.to_owned(), own.to_owned());
@@ -205,6 +205,32 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_tool_switched_off_is_neither_listed_nor_called() {
+        use respan_gateway_plugin_tool_loop::{ToolFilter, ToolSwitches};
+        use std::sync::Arc;
+        let switches = Arc::new(ToolSwitches::default());
+        let aggregate = crate::Aggregate::with_switches(
+            names(&["gh"]),
+            ToolFilter::default(),
+            switches.clone(),
+        );
+        let run = Run {
+            inner: aggregate.0.clone(),
+            calls: Arc::default(),
+            scope: None,
+        };
+        let listed = |tool: &str| run.namespaced("gh", "tools", json!({ "name": tool }));
+        let called =
+            |tool: &str| by_name(true)(&run, &mut json!({ "name": format!("gh__{tool}") }));
+        assert!(listed("search").is_some() && called("search").is_ok());
+        switches.set_tool("gh", "search", false);
+        assert!(listed("search").is_none() && called("search").is_err());
+        assert!(listed("read").is_some() && called("read").is_ok());
+        switches.set_server("gh", false);
+        assert!(listed("read").is_none() && called("read").is_err());
     }
 
     #[test]

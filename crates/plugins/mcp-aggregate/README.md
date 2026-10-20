@@ -7,6 +7,8 @@ server behind it, opened with the client's and ended with it.
 
 - Tools and prompts are named `{server}__{name}`; a `ToolFilter` says which
   tools are offered, and a request's `ToolScope` limits it further.
+  `Aggregate::with_switches` takes a shared `ToolSwitches` too: a server or
+  tool turned off there is neither listed nor callable, at once.
 - Resources keep their URIs under `mcp://{server}/{uri}`.
 - Lists are merged in the order the servers are given, with a cursor that
   pages the servers that have more.

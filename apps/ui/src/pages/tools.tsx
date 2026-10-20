@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Blocks,
   ChevronDown,
@@ -13,6 +13,7 @@ import {
   UserRound,
 } from "lucide-react";
 import { useState } from "react";
+import { toast } from "sonner";
 import { Link } from "react-router";
 import { CodeBlock } from "@/components/code-block";
 import { CopyButton } from "@/components/copy-button";
@@ -22,8 +23,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { useMcpOverview, useMcpTools } from "@/hooks/queries";
-import { api, type McpOverview, type McpServer, type McpTool } from "@/lib/api";
+import { api, type McpOverview, type McpServer, type McpTool, type McpTools } from "@/lib/api";
 import { formatCount, formatMs, formatPercent } from "@/lib/format";
 import { describeError } from "@/lib/query-client";
 
@@ -54,10 +56,40 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ToolRow({ tool }: { tool: McpTool }) {
+/**
+ * Turns `server` (or one of its tools) on or off in the gateway's memory:
+ * shown at once, put back if the gateway refuses.
+ */
+function useSwitch(server: string, tool?: string) {
+  const client = useQueryClient();
+  const key = tool === undefined ? ["mcp-overview"] : ["mcp-tools", server];
+  const set = (enabled: boolean) => (data: McpOverview | McpTools | undefined) => {
+    if (!data) return data;
+    if ("servers" in data) {
+      return { ...data, servers: data.servers.map((s) => (s.name === server ? { ...s, enabled } : s)) };
+    }
+    return { ...data, tools: data.tools.map((t) => (t.name === tool ? { ...t, enabled } : t)) };
+  };
+  return useMutation({
+    mutationFn: (enabled: boolean) =>
+      tool === undefined ? api.setServerEnabled(server, enabled) : api.setToolEnabled(server, tool, enabled),
+    onMutate: (enabled) => client.setQueryData(key, set(enabled)),
+    onError: (error, enabled) => {
+      client.setQueryData(key, set(!enabled));
+      toast.error(`Couldn't turn ${tool ?? server} ${enabled ? "on" : "off"}`, { description: describeError(error) });
+    },
+    onSettled: () => client.invalidateQueries({ queryKey: key }),
+  });
+}
+
+function ToolRow({ server, tool }: { server: McpServer; tool: McpTool }) {
+  const toggle = useSwitch(server.name, tool.name);
   return (
-    <li className="grid gap-1 px-5 py-3">
+    <li className={`grid gap-1 px-5 py-3 ${tool.enabled && server.enabled ? "" : "opacity-60"}`}>
       <div className="flex flex-wrap items-center gap-2">
+        <Switch size="sm" checked={tool.enabled} disabled={!server.enabled}
+          onCheckedChange={(on) => toggle.mutate(on)}
+          aria-label={`Offer ${tool.name}`} title={server.enabled ? undefined : `${server.name} is off`} />
         <code className="text-sm font-medium">{tool.name}</code>
         {tool.title && tool.title !== tool.name && <span className="text-sm text-muted-foreground">{tool.title}</span>}
         <span className="ml-auto flex flex-wrap gap-1.5">
@@ -134,7 +166,7 @@ function Tools({ server }: { server: McpServer }) {
           <div className="grid gap-2 px-5 pb-4"><Skeleton className="h-10" /><Skeleton className="h-10" /></div>
         ) : data.tools.length ? (
           <ul className="divide-y border-t" aria-label={`Tools of ${server.name}`}>
-            {data.tools.map((t) => <ToolRow key={t.name} tool={t} />)}
+            {data.tools.map((t) => <ToolRow key={t.name} server={server} tool={t} />)}
           </ul>
         ) : <p className="px-5 pb-4 text-sm text-muted-foreground">It lists no tools.</p>
       )}
@@ -146,8 +178,9 @@ function ServerCard({ server: s, overview }: { server: McpServer; overview: McpO
   const Transport = s.transport === "stdio" ? Terminal : s.transport === "vendor" ? Globe : Plug;
   const inLoop = overview.tool_loop?.servers.includes(s.name);
   const inAggregate = overview.aggregate?.servers.includes(s.name);
+  const toggle = useSwitch(s.name);
   return (
-    <Card className="min-w-0 gap-0 overflow-hidden py-0">
+    <Card className={`min-w-0 gap-0 overflow-hidden py-0 ${s.enabled ? "" : "opacity-70"}`}>
       <div className="grid gap-4 p-5">
         <div className="flex flex-wrap items-start gap-3">
           <span aria-hidden className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand">
@@ -156,15 +189,19 @@ function ServerCard({ server: s, overview }: { server: McpServer; overview: McpO
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
               <h2 className="text-base font-semibold">{s.name}</h2>
-              <span className={`text-xs ${statusStyle[s.status]}`}>{s.status}</span>
+              {s.enabled
+                ? <span className={`text-xs ${statusStyle[s.status]}`}>{s.status}</span>
+                : <span className="text-xs text-muted-foreground">off</span>}
             </div>
             <p className="truncate font-mono text-xs text-muted-foreground" title={s.target}>
               {s.transport === "stdio" ? "runs " : ""}{s.target}
             </p>
           </div>
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             {inLoop && <Badge variant="secondary" className="font-normal"><Repeat aria-hidden />tool loop</Badge>}
             {inAggregate && <Badge variant="secondary" className="font-normal"><Layers aria-hidden />/mcp</Badge>}
+            <Switch checked={s.enabled} onCheckedChange={(on) => toggle.mutate(on)} className="ml-1"
+              aria-label={`Serve ${s.name}`} title="Until the gateway restarts" />
           </div>
         </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_repeat(3,minmax(0,0.7fr))]">

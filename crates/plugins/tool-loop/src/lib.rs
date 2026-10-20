@@ -60,7 +60,7 @@ use respan_gateway_core::{ClientContext, Fault, Plugin, Response, async_trait};
 use serde_json::Value;
 use tokio::time::{Instant, timeout};
 
-pub use filter::{ToolFilter, ToolScope};
+pub use filter::{ToolFilter, ToolScope, ToolSwitches};
 use steps::{Phase, Run, advance};
 
 /// What a tool said.

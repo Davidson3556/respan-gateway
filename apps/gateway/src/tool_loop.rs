@@ -30,7 +30,7 @@ use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, Method};
 use respan_gateway_mcp::{Input, Message, Output, PROTOCOL, RpcError, answer};
 use respan_gateway_plugin_tool_loop::{
-    Outcome, ToolFilter, ToolHop, ToolLoop, ToolScope, Toolbox, Tools,
+    Outcome, ToolFilter, ToolHop, ToolLoop, ToolScope, ToolSwitches, Toolbox, Tools,
 };
 use respan_gateway_realtime_ws::SessionModel;
 use serde_json::{Value, json};
@@ -131,18 +131,20 @@ pub fn check(
     Ok(())
 }
 
-/// The loop, with the tools of `servers` ([`servers`]). Which requests it
+/// The loop, with the tools of `servers` ([`servers`]) that `switches`
+/// leaves on, as it is at each list and call. Which requests it
 /// applies to: chat requests and live sessions of a model `tool_loop.models`
 /// names (all, if it names none), unless the client sends
 /// `x-respan-tool-loop: off`.
 pub fn plugin(
     tool_loop: &ToolLoopConfig,
     servers: Vec<String>,
+    switches: Arc<ToolSwitches>,
     anthropic: impl Fn(&str) -> bool + Send + Sync + 'static,
 ) -> (ToolLoop, Closer) {
     let filter = ToolFilter::new(tool_loop.allow.clone(), tool_loop.deny.clone());
     let ttl = tool_loop.tool_list_ttl.unwrap_or(DEFAULT_CACHE);
-    let tools = McpTools::new(servers, ttl, filter);
+    let tools = McpTools::new(servers, ttl, filter, switches);
     let closer = Closer(tools.shared.clone());
     let prefixes = tool_loop.models.clone();
     let mut plugin = ToolLoop::new(tools)
@@ -287,6 +289,8 @@ struct Shared {
     servers: Vec<Server>,
     ttl: Duration,
     filter: ToolFilter,
+    /// The servers and tools turned off, applied to the cached lists.
+    switches: Arc<ToolSwitches>,
     /// The next JSON-RPC id, unique across every session.
     next_id: AtomicU64,
 }
@@ -311,7 +315,12 @@ struct Opened {
 }
 
 impl McpTools {
-    fn new(servers: Vec<String>, ttl: Duration, filter: ToolFilter) -> Self {
+    fn new(
+        servers: Vec<String>,
+        ttl: Duration,
+        filter: ToolFilter,
+        switches: Arc<ToolSwitches>,
+    ) -> Self {
         let servers = servers
             .into_iter()
             .map(|name| Server {
@@ -324,6 +333,7 @@ impl McpTools {
                 servers,
                 ttl,
                 filter,
+                switches,
                 next_id: AtomicU64::new(1),
             }),
         }
@@ -355,6 +365,9 @@ impl Toolbox for Servers {
         let mut names = self.names.lock();
         let mut offered = Vec::new();
         for listed in all.into_iter().flatten() {
+            if !self.shared.switches.offers(&listed.server, &listed.tool) {
+                continue;
+            }
             if !self
                 .scope
                 .as_ref()
@@ -376,6 +389,7 @@ impl Toolbox for Servers {
             let names = self.names.lock();
             names.get(name).cloned()
         };
+        let known = known.filter(|(server, tool)| self.shared.switches.offers(server, tool));
         let Some((server, tool)) = known else {
             return Outcome::error(format!("there is no tool '{name}'"));
         };

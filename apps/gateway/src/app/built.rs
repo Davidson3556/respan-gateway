@@ -29,7 +29,7 @@ use crate::formats::{KnownFormat, formats, kind};
 use crate::mcp;
 use crate::mcp_aggregate;
 use crate::models::{self, Models};
-use crate::requests::{self, Recorder, RequestLog};
+use crate::requests::{self, Recorder};
 use crate::tool_loop;
 use crate::{Config, Error};
 
@@ -113,7 +113,7 @@ impl Built {
         };
         let fronted = aggregate.clone();
         let (gateway, closer, aggregate) =
-            with_plugins(gateway, &config, aggregate, &plan, &formats, &process.log);
+            with_plugins(gateway, &config, aggregate, &plan, &formats, process);
         let gateway = match respan_calls {
             Some(calls) => gateway.plugin(calls),
             None => gateway,
@@ -210,8 +210,9 @@ fn with_plugins(
     aggregate: Option<Vec<String>>,
     plan: &Plan,
     formats: &[KnownFormat],
-    log: &Arc<RequestLog>,
+    process: &Process,
 ) -> Plugins {
+    let (log, switches) = (&process.log, &process.switches);
     let names: HashMap<String, String> = plan
         .upstreams
         .iter()
@@ -235,14 +236,17 @@ fn with_plugins(
             .map(|e| e.internal.clone())
             .collect();
         let servers = tool_loop::servers(config, &plan.mcp);
-        tool_loop::plugin(config, servers, move |provider| flags.contains(provider))
+        let anthropic = move |provider: &str| flags.contains(provider);
+        tool_loop::plugin(config, servers, switches.clone(), anthropic)
     });
     let gateway = match &tool_loop {
         Some((_, closer)) => gateway.plugin(closer.plugin()),
         None => gateway,
     };
     let aggregate = match (&config.plugins.mcp_aggregate, aggregate) {
-        (Some(config), Some(servers)) => Some(mcp_aggregate::aggregate(config, servers)),
+        (Some(config), Some(servers)) => {
+            Some(mcp_aggregate::aggregate(config, servers, switches.clone()))
+        }
         _ => None,
     };
     let aggregate_closer = aggregate.as_ref().map(Aggregate::closer);
@@ -258,7 +262,7 @@ fn with_plugins(
         Some(aggregate) => gateway.plugin(aggregate),
         None => gateway,
     };
-    let gateway = gateway.plugin(McpRouter);
+    let gateway = gateway.plugin(McpRouter::with_switches(switches.clone()));
     let gateway = gateway.plugin(video_jobs(plan, formats)).plugin(locate);
     // A provider without a key of its own gets the client's.
     let keyless = plan.upstreams.iter().filter(|u| !u.own_key);

@@ -81,3 +81,15 @@ max_steps = 8
 A tool's description and output are untrusted input to the model. Offer
 only tools from servers you trust, and use `deny` to keep destructive ones
 out. A client can opt one request out with `x-respan-tool-loop: off`.
+
+## Turning tools off
+
+The web UI's Tools page turns a server or a single tool off and on while
+the gateway runs, as does the admin API: `PUT /ui/api/mcp/{server}` or
+`PUT /ui/api/mcp/{server}/tools/{tool}` with `{"enabled": false}` (or
+`true`). A tool turned off, or every tool of a server turned off, is
+neither offered nor run by `/mcp` and the tool loop, from their next list
+or call. A server turned off also refuses clients at `/mcp/{server}`
+(`403 tool_server_off`); a single tool turned off is still reached there,
+since that endpoint relays the server as it is. The switches are held in
+memory only: a config reload keeps them, a restart turns everything back on.

@@ -6,6 +6,9 @@
 //! limited to some tools (a request carrying a [`ToolScope`]) is refused
 //! there with `403 tools_limited`: a server's own endpoint offers all its
 //! tools, so such a key reaches them through `/mcp`, which holds it to them.
+//! A server turned off in its [`ToolSwitches`] is refused with `403
+//! tool_server_off`; a tool turned off is not, since the endpoint relays the
+//! server as it is.
 //!
 //! Register it after `respan-gateway-plugin-mcp-aggregate`'s `Aggregate`,
 //! which answers `/mcp` itself; this plugin would otherwise take `/mcp` for
@@ -18,12 +21,22 @@ use respan_gateway_http::path::clean_path;
 use respan_gateway_http::raw::Original;
 use respan_gateway_http_faults::Status;
 use respan_gateway_mcp_http::FORMAT;
-use respan_gateway_plugin_tool_loop::ToolScope;
+use respan_gateway_plugin_tool_loop::{ToolScope, ToolSwitches};
+use std::sync::Arc;
 
 /// Targets a client of `/mcp/{name}` at the server `name`, refusing a key
-/// limited to some tools. See the [crate docs](crate).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct McpRouter;
+/// limited to some tools or a server turned off. See the [crate docs](crate).
+#[derive(Debug, Clone, Default)]
+pub struct McpRouter {
+    switches: Arc<ToolSwitches>,
+}
+
+impl McpRouter {
+    /// Refusing the servers `switches` turns off.
+    pub fn with_switches(switches: Arc<ToolSwitches>) -> Self {
+        Self { switches }
+    }
+}
 
 /// The server a request path names: the last segment of the cleaned path.
 pub fn server_name(path: &str) -> Option<String> {
@@ -48,6 +61,12 @@ impl Plugin for McpRouter {
             );
             return Err(Fault::new(message)
                 .with(ErrorCode("tools_limited".into()))
+                .with(Status(StatusCode::FORBIDDEN)));
+        }
+        if !self.switches.server_on(&name) {
+            let message = format!("the tool server '{name}' is turned off");
+            return Err(Fault::new(message)
+                .with(ErrorCode("tool_server_off".into()))
                 .with(Status(StatusCode::FORBIDDEN)));
         }
         cx.set_target(name);

@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use respan_gateway_core::Gateway;
 use respan_gateway_core::futures::FutureExt;
+use respan_gateway_plugin_tool_loop::ToolSwitches;
 use tokio::sync::watch;
 
 use super::Built;
@@ -61,6 +62,9 @@ pub(crate) struct Process {
     pub started: std::time::Instant,
     /// When the config was last reloaded.
     pub reloaded_at: Mutex<Option<SystemTime>>,
+    /// The tool servers and tools turned off from the admin API: in memory
+    /// only, so kept across reloads and lost on a restart.
+    pub switches: Arc<ToolSwitches>,
     pub(super) reload: OnceLock<Box<Reload>>,
 }
 

@@ -15,7 +15,8 @@
 //! - **Tools and prompts** are named `{server}__{name}`; a call is sent to
 //!   the server with the name it knows. A [`ToolFilter`] says which tools
 //!   are offered, by that name, and a request's [`ToolScope`] limits it
-//!   further.
+//!   further. A server or tool turned off in its [`ToolSwitches`] is not
+//!   offered either, from the next list or call on.
 //! - **Resources** keep their URIs under the server's: `mcp://{server}/{uri}`
 //!   (a template likewise). Nothing is looked up: the URI says the server.
 //!   URIs inside tool and prompt results are given the prefix too, so what
@@ -57,7 +58,7 @@ use respan_gateway_core::{ClientContext, Fault, Plugin, Response, async_trait};
 use respan_gateway_http::raw::Original;
 use respan_gateway_mcp::{Input, Message, Output, PROTOCOL};
 use respan_gateway_mcp_http::FORMAT;
-use respan_gateway_plugin_tool_loop::{ToolFilter, ToolScope};
+use respan_gateway_plugin_tool_loop::{ToolFilter, ToolScope, ToolSwitches};
 use run::Run;
 use serde_json::Value;
 use session::Inner;
@@ -93,9 +94,19 @@ impl Aggregate {
     /// Front `servers`, core providers of the MCP format, in the order lists
     /// show them, offering the tools `filter` offers.
     pub fn new(servers: Vec<String>, filter: ToolFilter) -> Self {
+        Self::with_switches(servers, filter, Arc::default())
+    }
+
+    /// Like [`new`](Self::new), withholding too what `switches` turns off.
+    pub fn with_switches(
+        servers: Vec<String>,
+        filter: ToolFilter,
+        switches: Arc<ToolSwitches>,
+    ) -> Self {
         Self(Arc::new(Inner {
             servers,
             filter,
+            switches,
             sessions: moka::sync::Cache::builder()
                 .time_to_idle(IDLE)
                 .max_capacity(SESSIONS)

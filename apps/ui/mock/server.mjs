@@ -94,6 +94,17 @@ const providers = [
   ),
 ];
 
+// What the web UI turned off: "server" or "server/tool". In memory, as the gateway keeps it.
+const switchedOff = new Set();
+
+/** PUT `{ enabled }`: turns `id` on or off. */
+const toggle = (id) => async (req, res) => {
+  const { enabled } = JSON.parse((await readBody(req)).toString() || "{}");
+  if (enabled === false) switchedOff.add(id);
+  else switchedOff.delete(id);
+  res.writeHead(204).end();
+};
+
 // Tool servers, as `[tools]` configures them and /ui/api/mcp lists them.
 const mcpServers = [
   {
@@ -1097,7 +1108,7 @@ const routesTable = {
         const { name, transport, target, endpoint, credentials, auth } = server;
         const stats = providerStats(name);
         const status = !stats.requests ? "idle" : stats.errors === stats.requests ? "failing" : "ok";
-        return { name, transport, target, endpoint, credentials, auth, ...stats, status };
+        return { name, transport, target, endpoint, credentials, auth, ...stats, status, enabled: !switchedOff.has(name) };
       }),
       // As `plugins.tool_loop` and `plugins.mcp_aggregate` configure them.
       tool_loop: { servers: ["github"] },
@@ -1112,10 +1123,15 @@ const routesTable = {
           title: null, read_only: null, destructive: null, ...t,
           tool_loop: server.name === "github" && !t.destructive,
           aggregate: true,
+          enabled: !switchedOff.has(`${server.name}/${t.name}`),
         })),
         took_ms: between(200, 900),
         asked_at: new Date().toISOString(),
       }), 300),
+  ])),
+  ...Object.fromEntries(mcpServers.flatMap((server) => [
+    [`PUT /ui/api/mcp/${server.name}`, toggle(server.name)],
+    ...server.tools.map((t) => [`PUT /ui/api/mcp/${server.name}/tools/${t.name}`, toggle(`${server.name}/${t.name}`)]),
   ])),
   "GET /ui/api/routes": (_req, res) => json(res, 200, routes),
   "GET /ui/api/routes/explain": (req, res) => {

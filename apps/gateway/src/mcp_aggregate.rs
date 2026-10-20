@@ -5,8 +5,9 @@
 
 use respan_gateway_core::Fault;
 use respan_gateway_plugin_mcp_aggregate::Aggregate;
-use respan_gateway_plugin_tool_loop::ToolFilter;
+use respan_gateway_plugin_tool_loop::{ToolFilter, ToolSwitches};
 use serde::Deserialize;
+use std::sync::Arc;
 
 use crate::mcp::McpServer;
 
@@ -82,8 +83,13 @@ pub fn check_patterns(key: &str, patterns: &[String]) -> Result<(), String> {
     }
 }
 
-/// The aggregate of `servers` (checked by [`check`]) under `config`'s filter.
-pub fn aggregate(config: &AggregateConfig, servers: Vec<String>) -> Aggregate {
+/// The aggregate of `servers` (checked by [`check`]) under `config`'s filter
+/// and `switches`.
+pub fn aggregate(
+    config: &AggregateConfig,
+    servers: Vec<String>,
+    switches: Arc<ToolSwitches>,
+) -> Aggregate {
     let filter = ToolFilter::new(config.allow.clone(), config.deny.clone());
-    Aggregate::new(servers, filter)
+    Aggregate::with_switches(servers, filter, switches)
 }

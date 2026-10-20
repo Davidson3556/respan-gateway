@@ -16,7 +16,7 @@ use respan_gateway_mcp::Output;
 use serde_json::Value;
 
 use super::{ROOT, Run};
-use respan_gateway_plugin_tool_loop::ToolFilter;
+use respan_gateway_plugin_tool_loop::{ToolFilter, ToolSwitches};
 
 /// How long ending the sessions may take.
 const CLOSING: Duration = Duration::from_secs(10);
@@ -25,6 +25,8 @@ pub(super) struct Inner {
     /// The servers, in the order lists show them.
     pub(super) servers: Vec<String>,
     pub(super) filter: ToolFilter,
+    /// The servers and tools turned off.
+    pub(super) switches: Arc<ToolSwitches>,
     /// The client sessions, each kept until idle for [`IDLE`](super::IDLE),
     /// at most [`SESSIONS`](super::SESSIONS), the least recently used
     /// dropped first.

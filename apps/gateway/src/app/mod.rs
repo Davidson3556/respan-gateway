@@ -87,6 +87,7 @@ impl App {
             started_at: SystemTime::now(),
             started: std::time::Instant::now(),
             reloaded_at: Mutex::new(None),
+            switches: Arc::default(),
             reload: OnceLock::new(),
         });
         let built = Built::new(config, &process)?;

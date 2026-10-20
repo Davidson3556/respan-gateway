@@ -1,4 +1,9 @@
-//! Which tools are offered, by name, with `*` for any characters.
+//! Which tools are offered, by name, with `*` for any characters, and
+//! which are switched off.
+
+use std::collections::HashSet;
+
+use parking_lot::RwLock;
 
 /// Which tools are offered: those `allow` names (all, if it names none) but
 /// not those `deny` names, by the name the model has. A pattern is a name,
@@ -38,6 +43,57 @@ impl ToolScope {
     /// Whether the tool `name` is within the scope.
     pub fn offers(&self, name: &str) -> bool {
         self.0.iter().any(|p| glob(p, name))
+    }
+}
+
+/// Tool servers and tools turned off while the gateway runs, held in memory
+/// only. Share one through an [`Arc`](std::sync::Arc) with whatever offers
+/// tools; a switch takes effect at once. Everything is on until turned off.
+#[derive(Debug, Default)]
+pub struct ToolSwitches(RwLock<Off>);
+
+#[derive(Debug, Default)]
+struct Off {
+    servers: HashSet<String>,
+    /// A server's tools, by their own names.
+    tools: HashSet<(String, String)>,
+}
+
+impl ToolSwitches {
+    /// Turn the server `name` on or off.
+    pub fn set_server(&self, name: &str, on: bool) {
+        let servers = &mut self.0.write().servers;
+        match on {
+            true => servers.remove(name),
+            false => servers.insert(name.to_owned()),
+        };
+    }
+
+    /// Turn the tool `tool` (its own name) of `server` on or off.
+    pub fn set_tool(&self, server: &str, tool: &str, on: bool) {
+        let key = (server.to_owned(), tool.to_owned());
+        let tools = &mut self.0.write().tools;
+        match on {
+            true => tools.remove(&key),
+            false => tools.insert(key),
+        };
+    }
+
+    /// Whether the server `name` is on.
+    pub fn server_on(&self, name: &str) -> bool {
+        !self.0.read().servers.contains(name)
+    }
+
+    /// Whether the tool `tool` of `server` is on, by its own switch.
+    pub fn tool_on(&self, server: &str, tool: &str) -> bool {
+        let key = (server.to_owned(), tool.to_owned());
+        !self.0.read().tools.contains(&key)
+    }
+
+    /// Whether the tool `tool` of `server` is offered: it and its server
+    /// are on.
+    pub fn offers(&self, server: &str, tool: &str) -> bool {
+        self.server_on(server) && self.tool_on(server, tool)
     }
 }
 
@@ -82,5 +138,21 @@ mod tests {
         assert!(!ToolScope::new(Vec::new()).offers("gh__search"));
         let scope = ToolScope::new(vec!["gh__*".to_owned()]);
         assert!(scope.offers("gh__search") && !scope.offers("fs__read"));
+    }
+
+    #[test]
+    fn a_tool_is_offered_while_it_and_its_server_are_on() {
+        let switches = ToolSwitches::default();
+        assert!(switches.offers("gh", "search"));
+        switches.set_tool("gh", "search", false);
+        assert!(!switches.tool_on("gh", "search") && !switches.offers("gh", "search"));
+        assert!(switches.offers("gh", "read") && switches.offers("fs", "search"));
+        switches.set_server("gh", false);
+        assert!(!switches.server_on("gh") && !switches.offers("gh", "read"));
+        assert!(switches.server_on("gh__x") && switches.offers("gh__x", "read"));
+        switches.set_server("gh", true);
+        assert!(switches.offers("gh", "read") && !switches.offers("gh", "search"));
+        switches.set_tool("gh", "search", true);
+        assert!(switches.offers("gh", "search"));
     }
 }

@@ -93,6 +93,8 @@ export interface McpServer {
   auth?: string;
   /** `idle` before a request, `failing` if every one failed, else `ok`. */
   status: "idle" | "ok" | "failing";
+  /** Off: refused at `endpoint`, and none of its tools offered at `/mcp` or by the tool loop. In memory: a restart turns it on. */
+  enabled: boolean;
   requests: number;
   errors: number;
   avg_latency_ms: number | null;
@@ -116,6 +118,8 @@ export interface McpTool {
   tool_loop: boolean;
   /** Whether `/mcp` offers it. */
   aggregate: boolean;
+  /** Off: neither `/mcp` nor the tool loop offers it. In memory: a restart turns it on. */
+  enabled: boolean;
 }
 
 export interface McpTools {
@@ -424,6 +428,15 @@ export async function postJson<T>(path: string, body: unknown, signal?: AbortSig
   return (await res.json()) as T;
 }
 
+/** PUT `body` as JSON, for an answer with no body. */
+export async function putJson(path: string, body: unknown): Promise<void> {
+  await gatewayFetch(path, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export const api = {
   config: (signal?: AbortSignal) => getJson<ConfigView>("/ui/api/config", signal),
   overview: (signal?: AbortSignal) => getJson<Overview>("/ui/api/overview", signal),
@@ -432,6 +445,12 @@ export const api = {
   mcpOverview: (signal?: AbortSignal) => getJson<McpOverview>("/ui/api/mcp", signal),
   mcpTools: (name: string, refresh: boolean, signal?: AbortSignal) =>
     getJson<McpTools>(`/ui/api/mcp/${encodeURIComponent(name)}/tools${refresh ? "?refresh=true" : ""}`, signal),
+  /** Turn a tool server on or off, in the gateway's memory. */
+  setServerEnabled: (name: string, enabled: boolean) =>
+    putJson(`/ui/api/mcp/${encodeURIComponent(name)}`, { enabled }),
+  /** Turn one of a server's tools on or off, in the gateway's memory. */
+  setToolEnabled: (server: string, tool: string, enabled: boolean) =>
+    putJson(`/ui/api/mcp/${encodeURIComponent(server)}/tools/${encodeURIComponent(tool)}`, { enabled }),
   routes: (signal?: AbortSignal) => getJson<Routes>("/ui/api/routes", signal),
   explain: (ask: { model: string; kind: string; client?: string }, signal?: AbortSignal) => {
     const query = new URLSearchParams({ model: ask.model, kind: ask.kind });

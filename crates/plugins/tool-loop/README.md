@@ -28,7 +28,9 @@ let gateway = gateway.plugin(Routing::new(routes)).plugin(tool_loop);
 Each model call carries `Step(n)` in its extensions; a runner that
 calls tools through the gateway marks those calls with `ToolHop` so
 other plugins can tell them apart. A request's `ToolScope` limits the tools
-offered further; one that names none offers none. `ToolLoop::flag_errors_for` says which
+offered further; one that names none offers none. `ToolSwitches` turns
+servers and tools off and on while the gateway runs, for a `Tools` to
+consult. `ToolLoop::flag_errors_for` says which
 providers can be sent a result flagged as a failure (others get `Error: `
 text). What the model said goes back in the next step as the kind holds it,
 reasoning and native fields included (a signed Anthropic `thinking` block, a

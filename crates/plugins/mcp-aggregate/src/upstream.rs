@@ -91,8 +91,9 @@ impl Run {
     pub(super) fn namespaced(&self, server: &str, field: &str, mut item: Value) -> Option<Value> {
         match field {
             "tools" | "prompts" => {
-                let name = format!("{server}{SEP}{}", item["name"].as_str()?);
-                if field == "tools" && !self.offers(&name) {
+                let own = item["name"].as_str()?;
+                let name = format!("{server}{SEP}{own}");
+                if field == "tools" && !self.offers(server, own, &name) {
                     return None;
                 }
                 item["name"] = json!(name);

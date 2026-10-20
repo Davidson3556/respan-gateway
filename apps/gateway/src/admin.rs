@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
 use axum::middleware::from_fn_with_state;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -177,7 +178,12 @@ pub fn router(admin: Arc<Admin>, keys: Arc<ClientKeys>) -> Router {
         .route("/ui/api/overview", get(overview))
         .route("/ui/api/providers", get(providers))
         .route("/ui/api/mcp", get(mcp))
+        .route("/ui/api/mcp/{name}", get(not_found).put(switch_server))
         .route("/ui/api/mcp/{name}/tools", get(mcp_tools))
+        .route(
+            "/ui/api/mcp/{name}/tools/{tool}",
+            get(not_found).put(switch_tool),
+        )
         .route("/ui/api/routes", get(routes))
         .route("/ui/api/routes/explain", get(explain))
         .route("/ui/api/requests", get(requests))
@@ -315,8 +321,9 @@ async fn providers(State(admin): State<Arc<Admin>>) -> Json<Value> {
 /// `GET /ui/api/mcp`: each MCP server (`name`, `transport` (`http` or
 /// `stdio`), `target` (an HTTP server's origin or a stdio server's program name, no path, arguments or environment), `endpoint` (where clients reach
 /// it), `credentials` (`gateway`, `client` or `none`)), its `requests`,
-/// `errors`, `avg_latency_ms`, and `status`: `idle` before a request,
-/// `failing` if every request failed, else `ok`.
+/// `errors`, `avg_latency_ms`, `status`: `idle` before a request,
+/// `failing` if every request failed, else `ok`; and `enabled`, whether it
+/// is switched on ([`switch_server`]).
 async fn mcp(State(admin): State<Arc<Admin>>) -> Json<Value> {
     let servers: Vec<Value> = admin
         .mcp
@@ -330,6 +337,8 @@ async fn mcp(State(admin): State<Arc<Admin>>) -> Json<Value> {
             s["requests"] = stats.requests.into();
             s["errors"] = stats.errors.into();
             s["avg_latency_ms"] = stats.avg_latency_ms().into();
+            let name = s["name"].as_str().unwrap_or_default();
+            s["enabled"] = admin.process.switches.server_on(name).into();
             s["status"] = match (stats.requests, stats.errors) {
                 (0, _) => "idle",
                 (r, e) if r == e => "failing",
@@ -362,12 +371,13 @@ struct Fresh {
 /// `GET /ui/api/mcp/{name}/tools[?refresh=true]`: the tools server `name`
 /// lists now, asked through the gateway as a client asks (a stdio server
 /// is started for it), each with whether the tool loop and the `/mcp`
-/// aggregate offer it; kept a minute.
+/// aggregate offer it by their config, and whether it is switched on
+/// (`enabled`, [`switch_tool`]); kept a minute, the switches read now.
 ///
 /// ```json
 /// { "tools": [{ "name": "read_file", "title": null, "description": "..",
 ///     "read_only": true, "destructive": null,
-///     "tool_loop": true, "aggregate": false }],
+///     "tool_loop": true, "aggregate": false, "enabled": true }],
 ///   "took_ms": 812, "asked_at": "2026-10-13T09:30:00Z" }
 /// ```
 ///
@@ -385,7 +395,7 @@ async fn mcp_tools(
     if q.refresh != Some(true)
         && let Some(listed) = admin.tools.get(&name)
     {
-        return Json(listed).into_response();
+        return Json(switched(&admin, &name, listed)).into_response();
     }
     let started = Instant::now();
     let asked = tokio::time::timeout(
@@ -422,8 +432,82 @@ async fn mcp_tools(
         "took_ms": started.elapsed().as_millis() as u64,
         "asked_at": rfc3339(std::time::SystemTime::now()),
     });
-    admin.tools.insert(name, listed.clone());
-    Json(listed).into_response()
+    admin.tools.insert(name.clone(), listed.clone());
+    Json(switched(&admin, &name, listed)).into_response()
+}
+
+/// `listed`, the tools of server `name`, each with whether it is on now.
+fn switched(admin: &Admin, name: &str, mut listed: Value) -> Value {
+    let tools = listed["tools"].as_array_mut().into_iter().flatten();
+    for tool in tools {
+        let own = tool["name"].as_str().unwrap_or_default();
+        tool["enabled"] = admin.process.switches.tool_on(name, own).into();
+    }
+    listed
+}
+
+/// The body of a switch: `{ "enabled": false }`.
+#[derive(Debug, Deserialize)]
+struct Switch {
+    enabled: bool,
+}
+
+/// Sets the switch `set` with what `body` says, for the server `name`:
+/// `204`; an unknown server `404`, a body that says nothing `400`.
+fn switch(
+    admin: &Admin,
+    name: &str,
+    body: Result<Json<Switch>, JsonRejection>,
+    set: impl FnOnce(bool),
+) -> Response {
+    if !admin.mcp.iter().any(|s| s["name"] == name) {
+        let message = format!("no MCP server named '{name}'");
+        return auth::error(StatusCode::NOT_FOUND, "not_found_error", &message);
+    }
+    match body {
+        Ok(Json(Switch { enabled })) => {
+            set(enabled);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(why) => auth::error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &format!(
+                "the body is `{{\"enabled\": true|false}}`: {}",
+                why.body_text()
+            ),
+        ),
+    }
+}
+
+/// `PUT /ui/api/mcp/{name}` with `{ "enabled": false }` turns the tool
+/// server `name` off (`true` on again): the tool loop and `/mcp` offer none
+/// of its tools, and `/mcp/{name}` refuses its clients (`403
+/// tool_server_off`). `204`; an unknown server `404`. In memory only: kept
+/// across reloads, lost on a restart.
+async fn switch_server(
+    State(admin): State<Arc<Admin>>,
+    Path(name): Path<String>,
+    body: Result<Json<Switch>, JsonRejection>,
+) -> Response {
+    let switches = &admin.process.switches;
+    switch(&admin, &name, body, |on| switches.set_server(&name, on))
+}
+
+/// `PUT /ui/api/mcp/{name}/tools/{tool}` with `{ "enabled": false }` turns
+/// the tool `tool` (its own name) of server `name` off (`true` on again):
+/// the tool loop and `/mcp` neither offer it nor call it; `/mcp/{name}`,
+/// which relays the server as it is, still does. `204`; an unknown server
+/// `404` (any tool name may be switched). In memory only, as a server's.
+async fn switch_tool(
+    State(admin): State<Arc<Admin>>,
+    Path((name, tool)): Path<(String, String)>,
+    body: Result<Json<Switch>, JsonRejection>,
+) -> Response {
+    let switches = &admin.process.switches;
+    switch(&admin, &name, body, |on| {
+        switches.set_tool(&name, &tool, on)
+    })
 }
 
 /// `GET /ui/api/routes`: the formats served, each kind's default, the
@@ -737,5 +821,76 @@ fn content_type(name: &str) -> &'static str {
         "txt" => "text/plain; charset=utf-8",
         "wasm" => "application/wasm",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{Method, Request};
+    use respan_gateway_http::http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    use crate::App;
+
+    const TOOLS: &str = "[tools]\na = { url = \"http://a.test/mcp\" }\n";
+
+    async fn send(app: &App, method: Method, path: &str, body: &str) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .body(Body::from(body.to_owned()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let response = app.router().oneshot(request).await;
+        let response = response.unwrap_or_else(|never| match never {});
+        let status = response.status();
+        let bytes = response.into_body().collect().await;
+        let bytes = bytes.map(|b| b.to_bytes()).unwrap_or_default();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_server_switched_off_stays_off_across_a_reload_and_is_refused() {
+        let config = || Config::parse(TOOLS).unwrap_or_else(|e| panic!("{e}"));
+        let app = App::new(config())
+            .unwrap_or_else(|e| panic!("{e}"))
+            .reload_from(move || Ok(config()));
+        let enabled = |listed: &Value| listed["servers"][0]["enabled"].clone();
+        let (_, listed) = send(&app, Method::GET, "/ui/api/mcp", "").await;
+        assert_eq!(enabled(&listed), json!(true));
+
+        let off = r#"{"enabled": false}"#;
+        let (status, _) = send(&app, Method::PUT, "/ui/api/mcp/a", off).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = send(&app, Method::PUT, "/ui/api/mcp/nope", off).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(&app, Method::PUT, "/ui/api/mcp/a", "{}").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = send(&app, Method::PUT, "/ui/api/mcp/a/tools/x", off).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = send(&app, Method::GET, "/ui/api/mcp/a", "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        assert!(app.reload().is_ok());
+        let (_, listed) = send(&app, Method::GET, "/ui/api/mcp", "").await;
+        assert_eq!(enabled(&listed), json!(false));
+        let hello = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
+        let (status, refused) = send(&app, Method::POST, "/mcp/a", &hello.to_string()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+        assert_eq!(
+            refused["error"]["data"]["code"], "tool_server_off",
+            "{refused}"
+        );
+
+        let on = r#"{"enabled": true}"#;
+        let (status, _) = send(&app, Method::PUT, "/ui/api/mcp/a", on).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, listed) = send(&app, Method::GET, "/ui/api/mcp", "").await;
+        assert_eq!(enabled(&listed), json!(true));
     }
 }
