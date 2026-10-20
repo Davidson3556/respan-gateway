@@ -6,8 +6,6 @@ SDKs (no socket, no server), run it as a local server, or use the same
 command line as the Rust binary. The gateway is the Rust one, compiled into a
 native extension (`abi3`, Python 3.10+).
 
-> **Status: pre-alpha**, like the gateway itself.
-
 ## Install
 
 ```bash

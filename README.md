@@ -21,8 +21,6 @@ translating between OpenAI, Anthropic and Gemini APIs on the way.
 - **Extensible.** Every feature above is a plugin built on one public Rust
   API. See the [plugin guide](docs/plugins.md).
 
-> **Status: pre-alpha.** APIs around the core may still change.
-
 ## Install
 
 ```bash

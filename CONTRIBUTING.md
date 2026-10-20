@@ -1,6 +1,6 @@
 # Contributing
 
-The project is pre-alpha, but its core (`crates/core`) is treated like a
+The core (`crates/core`) is treated like a
 release candidate: a change to its contracts needs a reason, tests, and an
 update to the docs that describe it. The other crates, the binary and the
 Python package may still change freely.
