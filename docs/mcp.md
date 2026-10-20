@@ -51,8 +51,8 @@ key = "env:MY_TINYFISH_KEY"             # Default: TINYFISH_API_KEY
 A `vendor` entry takes `key` (literal or `env:NAME`) and `base_url` alone.
 Its tools are reached like any server's: at `/mcp/{name}`, at `/mcp` as
 `{name}__{tool}` (`search__search`, `tinyfish__run_agent`), and in the tool
-loop. The [tool vendors' README](../crates/tool-vendors/README.md) lists them
-and their tools.
+loop. [Tool vendors](tool-vendors.md) lists them,
+their tiers and their tools.
 
 Without a `gateway.toml`, each tool vendor whose key is in the environment
 (`LINKUP_API_KEY`, `TINYFISH_API_KEY`) is a server named after it, and `/mcp`
