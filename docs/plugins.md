@@ -228,9 +228,9 @@ Things to know about filters:
 - **A word can be split across deltas** (`"sec"`, `"ret"`). A real redactor
   holds back text that might be the start of a match and releases it later.
   Override `Filter::end` to flush what it held when the stream ends. The
-  `Holdback` in [`examples/support/text.rs`](../examples/support/text.rs) does
-  this, and the [guardrail](../examples/policies/guardrail.rs) and
-  [PII](../examples/policies/pii.rs) examples use it.
+  [guardrail](../examples/guardrail.rs) example's `Holdback` does this, and
+  the [PII](../examples/pii.rs) example holds back a split placeholder the
+  same way.
 - **Filters are synchronous.** For work that must wait, such as a remote
   classifier or a deadline, wrap the stream instead: `cx.wrap(|events:
   EventStream<Output>| ...)` replaces the stream with one of your own.
@@ -462,7 +462,7 @@ Add more providers, in any format, and route between them with
 `cx.set_target`, or register the first-party `Routing` plugin
 (`respan-gateway-plugin-routing`). The vendor kit (`crates/vendors/kit`) can
 build a provider from a vendor's name and key, as the binary does. The
-[embedded example](../examples/hosting/embedded.rs) runs a gateway in process
+[embedded example](../examples/embedded.rs) runs a gateway in process
 with no HTTP server at all.
 
 ### In this repository's binary

@@ -1,82 +1,60 @@
 # Examples
 
-Runnable examples are grouped by topic below. Each is an explicit Cargo target.
-Private source modules live in [`support/`](support) and shared library
-helpers remain in [`src/`](src).
-
-Run from the repository root (replace `wallet` with any target name below):
+Runnable examples of building on the gateway's crates. Each is one
+self-contained file under 1,000 lines: read it top to bottom. Its first
+comment says what it shows and what to look for in its output.
 
 ```bash
-cargo run -p respan-gateway-examples --example wallet
-cargo build -p respan-gateway-examples --examples
+cargo run -p respan-gateway-examples --example billing
 ```
 
-Most examples run offline with scripted/local providers. **`gemini_live`,
-`responses_ws` and `tool_guard` are live-provider servers:** running them needs
-credentials and can incur provider charges.
+Every example runs offline against a scripted provider in the same process,
+except the three marked **live**, which need real credentials and cost
+provider usage.
 
-| Topic | Example | Demonstrates |
+| Topic | Example | Shows |
 | --- | --- | --- |
-| Policies | [admission](policies/admission.rs) | Weighted fair admission, deadlines and crash leases. |
-| | [guardrail](policies/guardrail.rs) | Check every request and response against a term list. |
-| | [logging](policies/logging.rs) | Request logs and zero-retention tenants. |
-| | [media_caps](policies/media_caps.rs) | Image count and size caps, an audio upload cap and budget, and embedding tokens metered per key, over the media kinds. |
-| | [pii](policies/pii.rs) | Redaction and restoration across streaming text and tool calls. |
-| | [tenants](policies/tenants.rs) | Hot-reloaded tenant config and per-tenant keys. |
-| Routing | [batch_split](routing/batch_split.rs) | Bounded concurrent embedding chunks, retries and usage merge. |
-| | [fallback](routing/fallback.rs) | Retry, fallback, hedging and stall watchdogs. |
-| | [judge](routing/judge.rs) | A model-selecting subrequest. |
-| | [models_merge](routing/models_merge.rs) | Merge provider model lists using their respective keys. |
-| Billing | [billing](billing/billing.rs) | Price each call's usage into an application-owned store. |
-| | [cost_cap](billing/cost_cap.rs) | Reserve and settle a per-call cost cap. |
-| | [wallet](billing/wallet.rs) | Nested prepaid wallets and concurrent holds. |
-| Integrations | [attachments](integrations/attachments.rs) | Bounded PDF extraction, tenant-scoped cache and native fallback. |
-| | [custom_format](integrations/custom_format.rs) | Implement an embeddings protocol with `Format`. |
-| | [custom_transport](integrations/custom_transport.rs) | Bind an in-process model without HTTP bytes. |
-| | [mcp_proxy](integrations/mcp_proxy.rs) | MCP over streamable HTTP with a tool allow-list. |
-| Hosting | [embedded](hosting/embedded.rs) | Embed the gateway in another Rust service. |
-| | [local_proxy](hosting/local_proxy.rs) | Byte-exact pass-through proxy for Claude Code. |
-| Jobs | [jobs](jobs/jobs.rs) | SQLite-backed durable idempotency and crash leases. |
-| | [jobs_background](jobs/jobs_background.rs) | Durable background Responses, recovery, cancellation and webhook outbox. |
-| Realtime | [realtime](realtime/realtime.rs) | Metered Realtime text/audio, cancellation and output caps. |
-| | [gemini_live](realtime/gemini_live.rs) | Gemini Live text/audio turns, tools and shutdown. **Live credentials to run.** |
-| | [responses_ws](realtime/responses_ws.rs) | Responses WebSocket lanes, continuation and shutdown. **Live credentials to run.** |
-| | [tool_guard](realtime/tool_guard.rs) | A tool allow-list for any realtime session, here OpenAI Realtime clients on Gemini Live. **Live credentials to run.** |
+| Policies | [guardrail](guardrail.rs) | A term list checks every call's input and every response, streamed or not. |
+| | [pii](pii.rs) | E-mail addresses hidden from the model and restored in the reply, across stream deltas and tool calls. |
+| | [logging](logging.rs) | Request logs through a sink you choose; no prompts or replies for zero-retention tenants. |
+| | [admission](admission.rs) | Requests wait in a weighted fair queue before any provider call; past their deadline, 429. |
+| | [tenants](tenants.rs) | Tenant config edited while the gateway runs, each tenant's own provider key on its calls. |
+| | [media_caps](media_caps.rs) | Caps and per-key metering over images, transcriptions and embeddings. |
+| Billing | [billing](billing.rs) | Each call priced from your own table, held on a prepaid wallet before it and settled after, output capped. |
+| Routing | [fallback](fallback.rs) | Retries, fallback, hedging and stall watchdogs, as routes. |
+| | [judge](judge.rs) | A plugin that asks a small model whether a request is hard, then picks the model. |
+| | [batch_split](batch_split.rs) | One embeddings batch split into bounded concurrent calls, each retried, merged into one answer. |
+| | [models_merge](models_merge.rs) | `GET /v1/models` merged from every provider's list, each called with its own key. |
+| Integrations | [attachments](attachments.rs) | A PDF becomes text for a text-only model; its fallback that reads PDFs gets the document. |
+| | [custom_format](custom_format.rs) | A new protocol, OpenAI embeddings, added by writing its kind and `Format`. |
+| | [custom_transport](custom_transport.rs) | A model in this process reached as a provider, with no HTTP. |
+| | [mcp_proxy](mcp_proxy.rs) | MCP clients over streamable HTTP through the gateway, with a tool allow-list. |
+| Hosting | [embedded](embedded.rs) | The gateway as a library inside another Rust service. |
+| | [local_proxy](local_proxy.rs) | A local proxy for Claude Code, passing on its credentials, headers and unknown fields. |
+| Jobs | [jobs](jobs.rs) | Durable idempotency in SQLite: a retry, a duplicate or a restart reuses the first run's result. |
+| | [background_jobs](background_jobs.rs) | Durable background Responses jobs: submit, poll, cancel, and recovery after a crash. |
+| Realtime | [realtime](realtime.rs) | An OpenAI Realtime session, metered and capped, text and audio. |
+| | [gemini_live](gemini_live.rs) | Gemini Live with each turn paid for up front, tools and shutdown. **Live.** |
+| | [responses_ws](responses_ws.rs) | Responses over WebSocket: named lanes, continuation and per-turn billing. **Live.** |
+| | [tool_guard](tool_guard.rs) | A tool allow-list for any realtime session: OpenAI Realtime clients on Gemini Live. **Live.** |
 
-## Billing policies
-
-Billing is application code, not a supported public or first-party plugin API.
-The private [accounting](support/billing/accounting.rs) module quotes each
-attempt before sending, prices the typed `Usage`, and settles once; the
-[ledger](support/billing/ledger.rs) demonstrates atomic nested-account holds
-and idempotent settlement in memory, **not** durable charging or recovery.
-Register accounting last so it observes provider outputs before earlier filters
-can reject them. Unsent calls and uncut provider refusals cost nothing; sent
-calls cut off or lacking complete usage cost at least their reserve.
-
-## Live provider runs
+## Live and real-world runs
 
 ```bash
-OPENAI_API_KEY=... MODEL=... MODEL_INPUT_LIMIT=... cargo run -p respan-gateway-examples --example responses_ws
-GEMINI_API_KEY=... MODEL=... MODEL_INPUT_LIMIT=... cargo run -p respan-gateway-examples --example gemini_live
-GEMINI_API_KEY=... ALLOWED_TOOLS=... cargo run -p respan-gateway-examples --example tool_guard
+GEMINI_API_KEY=... MODEL=gemini-live-2.5-flash MODEL_INPUT_LIMIT=1048576 \
+  cargo run -p respan-gateway-examples --example gemini_live      # :8082
+OPENAI_API_KEY=... MODEL=gpt-4.1-mini MODEL_INPUT_LIMIT=1047576 \
+  cargo run -p respan-gateway-examples --example responses_ws     # :8081
+GEMINI_API_KEY=... ALLOWED_TOOLS=get_weather,get_time \
+  cargo run -p respan-gateway-examples --example tool_guard       # :8083
 ```
 
-These bind localhost ports 8081, 8082 and 8083 respectively. Choose the actual
-model's full input-context bound for `MODEL_INPUT_LIMIT`; other models are
-refused. Gemini audio clients must send `realtimeInput.activityStart` before
-audio input; automatic activity detection is disabled. Ctrl-C closes active
-sessions and awaits billing hooks. The realtime audio policy does not redact
-speech; its text-PII mode refuses opaque audio.
+Some offline examples take an option to run against the real thing:
+`mcp_proxy -- --stdio PROGRAM [ARGS...]` fronts a real MCP server,
+`local_proxy -- --serve 127.0.0.1:8080` listens for Claude Code, and
+`PDFTOTEXT=1` makes `attachments` use Poppler's `pdftotext`.
 
-Private [text support](support/text.rs) is shared by guardrail, PII and
-realtime.
-
-## Remaining gaps
-
-Streaming background Responses, arbitrary body-ID mapping, tenant-wide job
-content deletion/expiry and signed file-upload ownership need application
-work. Background multimodal inputs need provider-specific quotes; caller-owned
-scheduling and provider idempotency are required for crash-safe job recovery.
-Provider-hosted tools without an equivalent in the other chat format are
-refused.
+Policies such as prices, wallets, queues and job stores are application
+code: these examples show how to build them on the public APIs, not
+supported APIs of their own. Each keeps its state in memory or a temporary
+SQLite file.
