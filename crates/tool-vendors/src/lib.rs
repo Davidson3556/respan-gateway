@@ -45,11 +45,10 @@
 
 pub use respan_gateway_tool_vendor_kit::*;
 
-pub use respan_gateway_tool_vendors_green::linkup;
-pub use respan_gateway_tool_vendors_yellow::{
-    apify, browserbase, cloudinary, context7, daytona, e2b, elevenlabs, reducto, tavily, tinyfish,
-    zep,
+pub use respan_gateway_tool_vendors_green::{
+    apify, browserbase, cloudinary, context7, daytona, linkup, reducto, tavily, tinyfish, zep,
 };
+pub use respan_gateway_tool_vendors_yellow::{e2b, elevenlabs};
 
 /// The green tool vendors: maintained, and verified end to end.
 pub const GREEN: &[&ToolVendor] = respan_gateway_tool_vendors_green::ALL;

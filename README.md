@@ -1,3 +1,5 @@
+![Respan Gateway](docs/assets/respan-gateway-banner.png)
+
 # Respan Gateway
 
 One endpoint for every LLM vendor. Point any official SDK at the gateway,

@@ -2067,6 +2067,7 @@ dependencies = [
  "async-trait",
  "respan-gateway-tool-vendor-kit",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2076,7 +2077,6 @@ dependencies = [
  "async-trait",
  "respan-gateway-tool-vendor-kit",
  "serde_json",
- "tokio",
 ]
 
 [[package]]

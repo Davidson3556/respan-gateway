@@ -29,23 +29,23 @@ are:
 
 | | Vendor | For | `vendor` | Key | Tools |
 |:-:|---|---|---|---|---|
-| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tool-vendors/linkup-dark.svg"><img src="assets/tool-vendors/linkup.svg" width="20" height="20" alt=""></picture> | [Linkup](https://linkup.so) | Search | `linkup` | `LINKUP_API_KEY` | `search`, `answer`, `fetch` |
-
-## 🟡 Yellow
-
-| | Vendor | For | `vendor` | Key | Tools |
-|:-:|---|---|---|---|---|
 | <img src="assets/tool-vendors/apify.svg" width="20" height="20" alt=""> | [Apify](https://apify.com) | Web scraping | `apify` | `APIFY_TOKEN` or `APIFY_API_TOKEN` | `search_actors`, `run_actor`, `get_run_items`, `browse_web` |
 | <img src="assets/tool-vendors/browserbase.svg" width="20" height="20" alt=""> | [Browserbase](https://browserbase.com) | Browser automation | `browserbase` | `BROWSERBASE_API_KEY` | `search`, `fetch`, `run_agent`, `get_agent_run`, `stop_agent_run`, `live_view` |
 | <img src="assets/tool-vendors/cloudinary.svg" width="20" height="20" alt=""> | [Cloudinary](https://cloudinary.com) | Image and video | `cloudinary` | `CLOUDINARY_URL` | `upload`, `search`, `get_asset`, `delivery_url`, `delete_asset` |
 | <img src="assets/tool-vendors/context7.svg" width="20" height="20" alt=""> | [Context7](https://context7.com) | Coding docs | `context7` | `CONTEXT7_API_KEY` | `resolve_library_id`, `query_docs`, `search_docs` |
 | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tool-vendors/daytona-dark.png"><img src="assets/tool-vendors/daytona.png" width="20" height="20" alt=""></picture> | [Daytona](https://daytona.io) | Code sandbox | `daytona` | `DAYTONA_API_KEY` | `create_sandbox`, `list_sandboxes`, `delete_sandbox`, `run_command`, `run_code`, `write_file` |
-| <img src="assets/tool-vendors/e2b.png" width="20" height="20" alt=""> | [E2B](https://e2b.dev) | Code execution | `e2b` | `E2B_API_KEY` | `run_code`, `list_sandboxes`, `kill_sandbox` |
-| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tool-vendors/elevenlabs-dark.svg"><img src="assets/tool-vendors/elevenlabs.svg" width="20" height="20" alt=""></picture> | [ElevenLabs](https://elevenlabs.io) | Voice | `elevenlabs` | `ELEVENLABS_API_KEY` | `text_to_speech`, `search_voices`, `speech_to_text`, `sound_effect` |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tool-vendors/linkup-dark.svg"><img src="assets/tool-vendors/linkup.svg" width="20" height="20" alt=""></picture> | [Linkup](https://linkup.so) | Search | `linkup` | `LINKUP_API_KEY` | `search`, `answer`, `fetch` |
 | <img src="assets/tool-vendors/reducto.svg" width="20" height="20" alt=""> | [Reducto](https://reducto.ai) | Document parsing | `reducto` | `REDUCTO_API_KEY` | `parse_document`, `extract_fields`, `split_document` |
 | <img src="assets/tool-vendors/tavily.svg" width="20" height="20" alt=""> | [Tavily](https://tavily.com) | Search | `tavily` | `TAVILY_API_KEY` | `search`, `extract`, `crawl`, `map_site` |
 | <img src="assets/tool-vendors/tinyfish.png" width="20" height="20" alt=""> | [TinyFish](https://tinyfish.ai) | Search and browser agent | `tinyfish` | `TINYFISH_API_KEY` | `search`, `fetch`, `run_agent` |
 | <img src="assets/tool-vendors/zep.png" width="20" height="20" alt=""> | [Zep](https://getzep.com) | Memory | `zep` | `ZEP_API_KEY` | `search`, `get_graph_context`, `get_thread_context`, `add_messages`, `add_data` |
+
+## 🟡 Yellow
+
+| | Vendor | For | `vendor` | Key | Tools |
+|:-:|---|---|---|---|---|
+| <img src="assets/tool-vendors/e2b.png" width="20" height="20" alt=""> | [E2B](https://e2b.dev) | Code execution | `e2b` | `E2B_API_KEY` | `run_code`, `list_sandboxes`, `kill_sandbox` |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tool-vendors/elevenlabs-dark.svg"><img src="assets/tool-vendors/elevenlabs.svg" width="20" height="20" alt=""></picture> | [ElevenLabs](https://elevenlabs.io) | Voice | `elevenlabs` | `ELEVENLABS_API_KEY` | `text_to_speech`, `search_voices`, `speech_to_text`, `sound_effect` |
 
 These tables are kept by hand: a vendor added to `ALL` in
 [`crates/tool-vendors`](../crates/tool-vendors/README.md), or a tool added
