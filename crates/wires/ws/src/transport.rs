@@ -1,6 +1,6 @@
 //! [`WsTransport`]: a provider reached over WebSocket.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use respan_gateway_core::futures::{FutureExt, Stream, StreamExt, stream};
@@ -19,6 +19,7 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 use crate::Limits;
 use crate::session::{Edge, inbound, pump};
 use respan_gateway_http::rules::header_tokens;
+use respan_gateway_http_transport::{Network, reqwest};
 
 /// How long a provider has to answer the upgrade: as long as reaching it
 /// may take.
@@ -101,10 +102,11 @@ impl WsTransport {
     /// A transport to `base_url`: `ws` or `wss`
     /// ([`base_url`](respan_gateway_http::call::base_url)), else `Err` with
     /// `config`. It takes [`Limits::default`], gives the provider 10 s to
-    /// answer the upgrade, and shares one client, until told otherwise.
+    /// answer the upgrade, and connects through [`Network::shared`], until
+    /// told otherwise.
     pub fn new(base_url: impl Into<String>) -> Result<Self, Fault> {
         Ok(Self {
-            client: shared_client()?,
+            client: client_of(Network::shared())?,
             base: respan_gateway_http::call::base_url(&base_url.into(), &["ws", "wss"])?,
             headers: HeaderMap::new(),
             limits: Limits::default(),
@@ -119,6 +121,20 @@ impl WsTransport {
     pub fn with_headers(mut self, headers: HeaderMap) -> Result<Self, Fault> {
         self.headers = respan_gateway_http::call::own_headers(headers, is_handshake)?;
         Ok(self)
+    }
+
+    /// Connect through `network`, sharing its sessions' client.
+    pub fn with_network(mut self, network: &Network) -> Result<Self, Fault> {
+        self.client = client_of(network)?;
+        Ok(self)
+    }
+
+    /// Open its sessions with `client`, in place of a network's: one of your
+    /// own. Have it speak HTTP/1.1 alone, which upgrades, and follow no
+    /// redirects.
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
     }
 
     /// Take `limits` ([`Limits`]): a message, or a refusal's body, over
@@ -138,35 +154,31 @@ impl WsTransport {
     }
 }
 
-/// The client every transport shares: HTTP/1.1, as only HTTP/1.1 upgrades;
+/// A network's client for sessions: HTTP/1.1, as only HTTP/1.1 upgrades;
 /// no redirects, as they are the client's to follow; and the system's root
-/// certificates with an explicit TLS provider, `aws-lc-rs`, because the
-/// workspace's dependencies enable both `ring` and `aws-lc-rs`, which makes
-/// rustls's own choice panic. Proxies are the environment's, as for
-/// `HttpTransport`.
-fn shared_client() -> Result<reqwest::Client, Fault> {
-    static CLIENT: OnceLock<Result<reqwest::Client, Fault>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            let mut roots = rustls::RootCertStore::empty();
-            roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
-            let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .map_err(|e| Fault::internal("the TLS settings could not be built").with_source(e))?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-            reqwest::Client::builder()
-                .http1_only()
-                .redirect(reqwest::redirect::Policy::none())
-                .tls_backend_preconfigured(tls)
-                .build()
-                .map_err(|e| {
-                    Fault::internal("the WebSocket HTTP client could not be built").with_source(e)
-                })
-        })
-        .clone()
+/// certificates and the network's with an explicit TLS provider,
+/// `aws-lc-rs`, because the workspace's dependencies enable both `ring` and
+/// `aws-lc-rs`, which makes rustls's own choice panic.
+fn client_of(network: &Network) -> Result<reqwest::Client, Fault> {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+    network.client("WebSocket transport", |builder| {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+        let trusted = CertificateDer::pem_slice_iter(network.trusted_pem());
+        roots.add_parsable_certificates(trusted.filter_map(Result::ok));
+        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| Fault::internal("the TLS settings could not be built").with_source(e))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        Ok(builder
+            .http1_only()
+            .redirect(reqwest::redirect::Policy::none())
+            .tls_backend_preconfigured(tls))
+    })
 }
 
 /// Verify the negotiated protocol before exposing the upgraded stream.

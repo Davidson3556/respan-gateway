@@ -48,7 +48,8 @@ key = "env:MY_TINYFISH_KEY"             # Default: TINYFISH_API_KEY
 # base_url = "https://..."              # Default: the vendor's own
 ```
 
-A `vendor` entry takes `key` (literal or `env:NAME`) and `base_url` alone.
+A `vendor` entry takes `key` (literal or `env:NAME`), `base_url` and `proxy`
+alone.
 Its tools are reached like any server's: at `/mcp/{name}`, at `/mcp` as
 `{name}__{tool}` (`search__search`, `tinyfish__run_agent`), and in the tool
 loop. [Tool vendors](tool-vendors.md) lists them,

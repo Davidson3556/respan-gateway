@@ -35,6 +35,7 @@ environment wins over `.env`.
 | `RESPAN_LOG` | `text`, `json` or `off` (`--log`) |
 | `RESPAN_COLOR` | `auto`, `always` or `never` (`--color`) |
 | `RESPAN_<VENDOR>_BASE_URL` | Move a vendor's base URL when there is no config file |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | The proxy for outbound connections, unless [`[network]`](#network) sets one |
 
 ## The config file
 
@@ -81,6 +82,49 @@ A provider is a `vendor` with its key, or any compatible endpoint given
 `respan`, `typesafe`, `groq`, `deepseek`, `openrouter`, `xai`, `mistral`,
 `together`, `fireworks`, `ollama`, `azure`, `vllm` and `cloudflare`. Each
 vendor's tier, key, formats and base URL are in [Vendors](vendors.md).
+
+## Network
+
+Every connection the gateway makes, to providers, tool servers, OAuth
+endpoints and Respan, goes through one proxy, or none. By default that is
+the environment's: `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY`, minus the
+hosts in `NO_PROXY`. `[network]` sets it in the config instead:
+
+```toml
+[network]
+proxy    = "env:CORP_PROXY"             # http://user:password@proxy.corp:3128
+no_proxy = ["localhost", ".corp.internal", "10.0.0.0/8"]
+ca       = "corp-root.pem"              # Trusted besides the system's
+
+[providers.local]
+formats  = ["openai-chat"]
+base_url = "http://gpu-box:8000/v1"
+proxy    = false                        # Straight there, not through the proxy
+```
+
+- `proxy` is a URL (`http://` or `https://`), literal or `env:NAME`, or
+  `false` for none, even if the environment names one. A provider or tool
+  server may set its own `proxy`, which replaces `[network]`'s.
+- `no_proxy` lists hosts reached directly: a host, a domain from its
+  leading `.`, an IP address or CIDR range, or `*`. It goes with a `proxy`.
+- `ca` is a PEM file of certificate authorities, relative to the config
+  file, such as a TLS-inspecting proxy's. The system's are trusted too.
+- A tool server run as a `command` gets the proxy as `HTTPS_PROXY`,
+  `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` in its environment, unless its
+  `env` sets them. It does not get `ca`; give the program its own setting,
+  such as `NODE_EXTRA_CA_CERTS`.
+
+A proxy that wants a password and gets the wrong one answers 502 with
+`the proxy refused the gateway (407)`.
+
+As a library, the same settings are a `Network`
+(`respan_gateway_http_transport::Network`), given to a provider with
+`VendorProvider::network`, to a tool vendor's API with `Api::with_network`,
+or to a transport with `HttpTransport::with_network` and
+`WsTransport::with_network`. Each also takes a `reqwest::Client` of your own:
+`VendorProvider::http_client`, `Api::with_client`,
+`HttpTransport::with_client`, `WsTransport::with_client` and
+`Respan::with_client`.
 
 ## Client keys
 

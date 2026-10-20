@@ -201,7 +201,13 @@ async fn the_example_config_routes_by_model_both_ways() {
 fn plan(text: &str) -> Result<Plan, String> {
     let config = Config::parse(text).map_err(|e| e.to_string())?;
     let formats = crate::formats::formats();
-    let composed = compose(&config, &formats, 1 << 20, Default::default());
+    let composed = compose(
+        &config,
+        &formats,
+        1 << 20,
+        Default::default(),
+        &Default::default(),
+    );
     composed
         .map(|(_, plan)| plan)
         .map_err(|e| e.message().to_owned())

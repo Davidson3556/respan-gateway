@@ -707,8 +707,14 @@ mod tests {
             "a = { url = \"http://a.test\" }\nb = { url = \"http://b.test\", auth = \"forward\" }\nc = { url = \"http://c.test\" }",
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        let mcp = crate::mcp::servers(&mcp, &[], std::path::Path::new(".respan/mcp"))
-            .unwrap_or_else(|e| panic!("{e}"));
+        let config = crate::Config {
+            tools: mcp,
+            ..crate::Config::default()
+        };
+        let network = respan_gateway_http_transport::Network::shared();
+        let logins = std::path::Path::new(".respan/mcp");
+        let mcp =
+            crate::mcp::servers(&config, network, &[], logins).unwrap_or_else(|e| panic!("{e}"));
         let config: ToolLoopConfig = toml::from_str("").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(servers(&config, &mcp), ["a", "c"]);
         assert!(check(&config, &mcp, true).is_ok());

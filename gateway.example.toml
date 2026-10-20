@@ -26,6 +26,13 @@ ui     = true                      # web UI and admin API at /ui/
 [cors]
 origins = ["http://localhost:3000"]
 
+# Outbound connections: a proxy for every provider and tool server (default:
+# HTTPS_PROXY and the rest), and certificates trusted besides the system's.
+[network]
+# proxy    = "env:CORP_PROXY"     # http://user:password@proxy.corp:3128, or false
+# no_proxy = ["localhost", ".corp.internal"]
+# ca       = "corp-root.pem"      # e.g. a TLS-inspecting proxy's
+
 
 # ─── Providers ───────────────────────────────────────────────────────
 # A vendor knows its URLs and formats. The first provider of a kind is its
@@ -50,6 +57,7 @@ key    = "env:ANTHROPIC_API_KEY"
 # [providers.ollama]
 # vendor   = "ollama"
 # base_url = "http://localhost:11434"
+# proxy    = false                # straight there, past [network]'s proxy
 
 # Any OpenAI-compatible endpoint:
 # [providers.local]

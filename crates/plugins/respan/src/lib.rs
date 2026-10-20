@@ -26,7 +26,7 @@ use respan_gateway_conversation::{Assembled, Content, Input, Message, Output, Ro
 use respan_gateway_core::{
     ClientContext, Fault, Filter, Plugin, ProviderContext, Response, Result, async_trait,
 };
-use respan_gateway_http_transport::reqwest;
+use respan_gateway_http_transport::{Network, reqwest};
 use respan_gateway_mcp as mcp;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -164,17 +164,33 @@ impl std::fmt::Debug for Respan {
 
 impl Respan {
     /// Traces of service `service` sent to `url` with `key`, messages and
-    /// replies among them unless `content` is false. Its task runs on the
-    /// current Tokio runtime.
+    /// replies among them unless `content` is false, through
+    /// [`Network::shared`]. Its task runs on the current Tokio runtime.
     pub fn new(key: &str, url: &str, service: &str, content: bool) -> Result<Self> {
+        let http = Self::client(Network::shared())?;
+        Self::with_client(key, url, service, content, http)
+    }
+
+    /// The client it sends with through `network`: thirty seconds a batch.
+    pub fn client(network: &Network) -> Result<reqwest::Client> {
+        network.client("Respan", |builder| {
+            Ok(builder.timeout(Duration::from_secs(30)))
+        })
+    }
+
+    /// Like [`new`](Self::new), sending with `http`: one of your own, or
+    /// [`client`](Self::client)'s through a network.
+    pub fn with_client(
+        key: &str,
+        url: &str,
+        service: &str,
+        content: bool,
+        http: reqwest::Client,
+    ) -> Result<Self> {
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| Fault::config("respan: needs a Tokio runtime to send from"))?;
         let url =
             reqwest::Url::parse(url).map_err(|e| Fault::config(format!("respan: url: {e}")))?;
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| Fault::internal("respan: no HTTP client").with_source(e))?;
         let (queue, traces) = mpsc::channel(QUEUE);
         let health = Arc::new(Health::default());
         let poster = Poster {

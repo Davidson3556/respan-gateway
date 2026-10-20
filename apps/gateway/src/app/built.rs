@@ -16,6 +16,7 @@ use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_plugin_credentials::ClientCredentials;
 use respan_gateway_plugin_mcp_router::{Closer as McpCloser, McpRouter};
 use respan_gateway_plugin_relay::Relay;
+use respan_gateway_plugin_respan::Respan;
 use respan_gateway_plugin_routing::{Dispatch, Routing};
 use respan_gateway_plugin_tool_loop::ToolFilter;
 use respan_gateway_ws::Limits;
@@ -62,13 +63,14 @@ impl Built {
         let mut formats = formats();
         let providers: Vec<&str> = config.providers.keys().map(String::as_str).collect();
         let logins = crate::mcp_oauth::logins_dir(config.source());
-        let mcp = mcp::servers(&config.tools, &providers, &logins)?;
+        let network = crate::network::network(&config)?;
+        let mcp = mcp::servers(&config, &network, &providers, &logins)?;
         let fronted = mcp::fronted(&mcp);
         if !mcp.is_empty() {
             formats.push(mcp::known(mcp.clone(), !fronted.is_empty(), limit));
         }
         let aggregate = (!fronted.is_empty()).then_some(fronted);
-        let (gateway, mut plan) = compose(&config, &formats, limit, sessions)?;
+        let (gateway, mut plan) = compose(&config, &formats, limit, sessions, &network)?;
         plan.mcp = mcp;
         if let Some(tool_loop) = &config.plugins.tool_loop {
             let serving = plan.serves(mcp::FORMAT);
@@ -89,9 +91,9 @@ impl Built {
                 let content = respan.content.unwrap_or(true);
                 // A client's request alone: the gateway's own, such as the
                 // tool loop's and the dashboard's to tool servers, are not.
-                let respan =
-                    respan_gateway_plugin_respan::Respan::new(&key, url, service, content)?
-                        .only(requests::is_clients);
+                let http = Respan::client(&network)?;
+                let respan = Respan::with_client(&key, url, service, content, http)?
+                    .only(requests::is_clients);
                 let health = respan.health();
                 let log = config.log;
                 health.on_change(move |why| match why {

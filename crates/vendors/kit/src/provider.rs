@@ -7,7 +7,7 @@ use crate::{Connect, KeyIn, Models, Reach, Upstream, Vendor, located};
 use respan_gateway_core::{Fault, Gateway};
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
-use respan_gateway_http_transport::{HttpTransport, reqwest, unreachable};
+use respan_gateway_http_transport::{HttpTransport, Network, reqwest, unreachable};
 use respan_gateway_ws::{Limits, WsTransport};
 
 /// A provider of a vendor ([`Vendor::provider`]), or of formats of no
@@ -29,6 +29,9 @@ pub struct VendorProvider {
     key: Key,
     limit: usize,
     sessions: Limits,
+    network: Network,
+    /// The client of its calls over HTTP, in place of its network's.
+    client: Option<reqwest::Client>,
 }
 
 /// One format's core provider of a [`VendorProvider`] ([`VendorProvider::parts`]).
@@ -114,6 +117,8 @@ impl VendorProvider {
             key: Key::Client,
             limit: respan_gateway_http::call::MAX_BODY,
             sessions: Limits::default(),
+            network: Network::shared().clone(),
+            client: None,
         }
     }
 
@@ -183,6 +188,22 @@ impl VendorProvider {
         self
     }
 
+    /// Connecting through `network`: its proxy, and the certificates it
+    /// trusts.
+    pub fn network(mut self, network: Network) -> Self {
+        self.network = network;
+        self
+    }
+
+    /// Making its calls over HTTP with `client`, one of your own, in place
+    /// of its network's; its sessions over WebSocket keep the network's.
+    /// Have it follow no redirects
+    /// ([`reqwest::redirect::Policy::none`]).
+    pub fn http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = Some(client);
+        self
+    }
+
     /// Its vendor: [`Vendor::DEFAULT`]'s, of no id, for one of no vendor.
     pub fn vendor(&self) -> &'static Vendor {
         self.vendor
@@ -222,14 +243,16 @@ impl VendorProvider {
     /// API over HTTP, with its key as that format takes it.
     pub fn client(&self) -> Result<HttpTransport, Fault> {
         let part = self.api()?;
-        HttpTransport::new(&part.base_url)?.with_headers(part.headers)
+        self.keyless_client_at(&part.base_url)?
+            .with_headers(part.headers)
     }
 
     /// A client of it at `base_url`, such as an API beside the one its
     /// formats are at, with its key as its first format of an API over HTTP
     /// takes it.
     pub fn client_at(&self, base_url: &str) -> Result<HttpTransport, Fault> {
-        HttpTransport::new(base_url)?.with_headers(self.api()?.headers)
+        self.keyless_client_at(base_url)?
+            .with_headers(self.api()?.headers)
     }
 
     /// A client of it at the base URL of its format `format`, if it speaks
@@ -239,7 +262,7 @@ impl VendorProvider {
             .parts()?
             .into_iter()
             .find(|p| p.format.name() == format);
-        let client = |p: Part| HttpTransport::new(&p.base_url)?.with_headers(p.headers);
+        let client = |p: Part| self.keyless_client_at(&p.base_url)?.with_headers(p.headers);
         part.map(client).transpose()
     }
 
@@ -252,6 +275,16 @@ impl VendorProvider {
         }
         let listed = (self.vendor.models)(self).await;
         Some(listed.map_err(|f| unreached(&f).map_or(f, Fault::upstream)))
+    }
+
+    /// A client of it at `base_url` carrying no key, such as for a page
+    /// that needs none, through its network or with its client.
+    pub fn keyless_client_at(&self, base_url: &str) -> Result<HttpTransport, Fault> {
+        let transport = HttpTransport::new(base_url)?;
+        match &self.client {
+            Some(client) => Ok(transport.with_client(client.clone())),
+            None => transport.with_network(&self.network),
+        }
     }
 
     /// Its first format of an API over HTTP.
@@ -286,13 +319,14 @@ impl VendorProvider {
         let follow = match format.reach() {
             Reach::Session { binary_text } => {
                 let transport = WsTransport::new(base)?
+                    .with_network(&self.network)?
                     .with_binary_text(binary_text)
                     .with_limits(self.sessions);
                 return Ok(Arc::new(transport.with_headers(auth)?.connect()));
             }
             Reach::Http { follow } => follow,
         };
-        let mut client = HttpTransport::new(base)?;
+        let mut client = self.keyless_client_at(base)?;
         if let Some(follow) = follow {
             client = client.follow_redirects(follow);
         }

@@ -13,8 +13,8 @@ use respan_gateway_core::Filter;
 use serde_json::Value;
 
 use respan_gateway_vendor_kit::{
-    Ask, Body, BoxFuture, Capability, HttpTransport, Modality, Model, Models, Price, Vendor,
-    VendorProvider, built_wrong, chat, http, json, time,
+    Ask, Body, BoxFuture, Capability, Modality, Model, Models, Price, Vendor, VendorProvider,
+    built_wrong, chat, http, json, time,
 };
 
 use crate::openai::responses_only;
@@ -83,7 +83,7 @@ fn list_models(p: &VendorProvider) -> BoxFuture<'_, Models> {
             }
             _ => CATALOG.to_owned(),
         };
-        let client = HttpTransport::new(&catalog)?;
+        let client = p.keyless_client_at(&catalog)?;
         let mut models = Vec::new();
         for page in 1.. {
             let call = http::Request::get(format!("/list?page={page}&page_size=1000"));

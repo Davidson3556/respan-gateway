@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use respan_gateway_core::Fault;
 use respan_gateway_http::http::{HeaderValue, header};
-use respan_gateway_http_transport::reqwest;
+use respan_gateway_http_transport::{Network, reqwest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -169,9 +169,9 @@ impl std::fmt::Debug for OAuth {
 }
 
 impl OAuth {
-    /// The source `config` names, its secrets read. `owner` names the server
-    /// in a fault.
-    pub fn new(owner: &str, config: &OAuthConfig) -> Result<Self, Fault> {
+    /// The source `config` names, its secrets read, reached through
+    /// `network`. `owner` names the server in a fault.
+    pub fn new(owner: &str, config: &OAuthConfig, network: &Network) -> Result<Self, Fault> {
         let bad = |e: &str| Fault::config(format!("{owner}: oauth: {e}"));
         let read = |what: &str, value: &str| {
             let value = secret(&format!("{owner}: oauth {what}"), value)?;
@@ -197,15 +197,16 @@ impl OAuth {
             Some(client_secret),
             &config.scopes,
             refresh,
-            from,
+            network,
         )?;
+        oauth.source = from;
         oauth.configured = configured;
         Ok(oauth)
     }
 
     /// The source of server `name`'s login at `path`, which `mcp login`
-    /// saved.
-    pub fn login(owner: &str, name: &str, path: &Path) -> Result<Self, Fault> {
+    /// saved, reached through `network`.
+    pub fn login(owner: &str, name: &str, path: &Path, network: &Network) -> Result<Self, Fault> {
         let text = std::fs::read_to_string(path).map_err(|e| {
             Fault::config(format!(
                 "{owner}: oauth: no login at {} ({e}); run `respan-gateway mcp login {name}`",
@@ -225,8 +226,9 @@ impl OAuth {
             login.client_secret.clone(),
             &login.scopes,
             Some(login.refresh_token.clone()),
-            format!("login {}", path.display()),
+            network,
         )?;
+        oauth.source = format!("login {}", path.display());
         oauth.resource.clone_from(&login.resource);
         oauth.saved = Some((path.to_owned(), login));
         Ok(oauth)
@@ -239,7 +241,7 @@ impl OAuth {
         client_secret: Option<String>,
         scopes: &[String],
         refresh: Option<String>,
-        source: String,
+        network: &Network,
     ) -> Result<Self, Fault> {
         let bad = |e: &str| Fault::config(format!("{owner}: oauth: {e}"));
         let token_url =
@@ -265,11 +267,11 @@ impl OAuth {
             return Err(bad("a scope is one word, with no spaces"));
         }
         let scope = (!scopes.is_empty()).then(|| scopes.join(" "));
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(TIMEOUT)
-            .build()
-            .map_err(|e| Fault::internal("no HTTP client for the token endpoint").with_source(e))?;
+        let http = network.client("OAuth token", |builder| {
+            Ok(builder
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(TIMEOUT))
+        })?;
         Ok(Self {
             token_url,
             client_id,
@@ -280,7 +282,7 @@ impl OAuth {
             configured: None,
             http,
             refreshing: refresh.is_some(),
-            source,
+            source: String::new(),
             state: Mutex::new(State {
                 access: None,
                 refresh,
@@ -436,7 +438,7 @@ mod tests {
 
     fn config(text: &str) -> Result<OAuth, String> {
         let config: OAuthConfig = toml::from_str(text).map_err(|e| e.to_string())?;
-        OAuth::new("mcp 'm'", &config).map_err(|e| e.message().to_owned())
+        OAuth::new("mcp 'm'", &config, Network::shared()).map_err(|e| e.message().to_owned())
     }
 
     #[test]

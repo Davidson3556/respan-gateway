@@ -8,14 +8,13 @@
 //! the API key. Sandboxes are billed per second while they run, so each
 //! lives only a few minutes past its last call unless killed sooner.
 
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use respan_gateway_tool_vendor_kit::args::{
     object, optional_bool, optional_enum, optional_int, optional_str, required_str,
 };
-use respan_gateway_tool_vendor_kit::reqwest::{self, Method};
+use respan_gateway_tool_vendor_kit::reqwest::Method;
 use respan_gateway_tool_vendor_kit::{
     Api, Content, KeyIn, ToolError, ToolOutput, ToolSpec, ToolVendor, Tools, decode_base64,
 };
@@ -180,15 +179,9 @@ async fn run_code(api: &Api, args: &Map<String, Value>) -> Result<ToolOutput, To
 /// whole.
 async fn execute(api: &Api, sandbox: &Sandbox, run: &Run) -> Result<String, ToolError> {
     // Not through `api.request`: the sandbox's host takes its own tokens,
-    // and the API key has no business inside a sandbox.
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    let client = CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .user_agent("respan-gateway")
-            .build()
-            .unwrap_or_default()
-    });
-    let mut req = client
+    // and the API key has no business inside a sandbox. Its own timeout
+    // replaces the client's.
+    let mut req = (api.client())
         .post(execute_url(sandbox))
         .header("E2b-Sandbox-Id", &sandbox.id)
         .header("E2b-Sandbox-Port", JUPYTER_PORT.to_string())

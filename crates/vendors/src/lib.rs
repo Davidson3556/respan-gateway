@@ -17,8 +17,8 @@
 
 pub use respan_gateway_vendor_kit::{
     Body, BoxFuture, Capability, Connect, FORMATS, HttpTransport, KeyIn, ListModels, Modality,
-    Model, Models, Part, Price, Reach, Upstream, Vendor, VendorProvider, built_wrong, chat, format,
-    http, json, located, models, time,
+    Model, Models, Network, Part, Price, Reach, Upstream, Vendor, VendorProvider, built_wrong,
+    chat, format, http, json, located, models, time,
 };
 
 pub use respan_gateway_vendors_green::{anthropic, gemini, openai, respan, typesafe};

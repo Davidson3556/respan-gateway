@@ -32,6 +32,7 @@ mod mcp_login;
 mod mcp_oauth;
 mod mcp_tools;
 mod models;
+mod network;
 mod redact;
 mod report;
 mod requests;
@@ -50,6 +51,7 @@ pub use init::starter_config;
 pub use logging::LogFormat;
 pub use mcp::McpConfig;
 pub use mcp_oauth::OAuthConfig;
+pub use network::{NetworkConfig, Proxy};
 
 /// This binary's version, the workspace's.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

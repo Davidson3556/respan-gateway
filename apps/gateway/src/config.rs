@@ -13,6 +13,7 @@ use serde::{Deserialize, Deserializer};
 use crate::Error;
 use crate::logging::LogFormat;
 use crate::mcp::McpConfig;
+use crate::network::{NetworkConfig, Proxy};
 use crate::vendors;
 pub use respan_gateway_sdk::{Model, Price};
 
@@ -256,6 +257,10 @@ pub struct Config {
     pub mcp: Option<serde::de::IgnoredAny>,
     /// Which web pages may call the gateway from a browser; none if unset.
     pub cors: Option<CorsConfig>,
+    /// How the gateway reaches providers and tool servers: through which
+    /// proxy, trusting which certificates besides the system's.
+    #[serde(default)]
+    pub network: NetworkConfig,
     /// The compiled-in plugins, each configured under its name. The gateway
     /// runs them in an order of its own, whatever the order here.
     #[serde(default)]
@@ -291,6 +296,7 @@ impl Default for Config {
             mcp: None,
             plugins: PluginsConfig::default(),
             cors: None,
+            network: NetworkConfig::default(),
             source: Source::Inline,
             relay: false,
         }
@@ -320,6 +326,9 @@ pub struct ProviderConfig {
     /// Its credentials as one header, in place of `key`. A provider with
     /// neither, and no vendor key, passes on the client's.
     pub auth: Option<Auth>,
+    /// Its proxy, in place of `network`'s: a URL, literal or `env:NAME`, or
+    /// `false` for none.
+    pub proxy: Option<Proxy>,
 }
 
 #[derive(Clone, Deserialize)]

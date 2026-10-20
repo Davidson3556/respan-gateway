@@ -24,7 +24,7 @@ use respan_gateway_http::http::header::{self, HeaderName, HeaderValue};
 use respan_gateway_http::http::{self, HeaderMap, StatusCode};
 use respan_gateway_http::{Body, Completion};
 use respan_gateway_http_transport::reqwest;
-use respan_gateway_http_transport::{HttpTransport, unreachable};
+use respan_gateway_http_transport::{HttpTransport, Network, unreachable};
 use respan_gateway_mcp::{Input, Output};
 use respan_gateway_mcp_http::{StdioTransport, StreamableHttp};
 use respan_gateway_plugin_routing::Model;
@@ -34,9 +34,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
 
 use crate::compose::{key_source, secret, valid_provider_name};
+use crate::config::Config;
 use crate::formats::{KnownFormat, kind};
 use crate::mcp_oauth::{OAuth, OAuthConfig};
 use crate::models::{Probe, Reach};
+use crate::network::Proxy;
 use crate::vendors::origin;
 
 /// The format's name, as the request log shows it.
@@ -68,7 +70,7 @@ pub struct McpConfig {
     #[serde(default)]
     pub args: Vec<String>,
     /// Its environment, values literal or `env:NAME`. It gets nothing else
-    /// of the gateway's but `PATH`.
+    /// of the gateway's but `PATH` and its proxy ([`child_env`](crate::network::child_env)).
     #[serde(default)]
     pub env: IndexMap<String, String>,
     /// The directory it runs in.
@@ -81,6 +83,10 @@ pub struct McpConfig {
     pub key: Option<String>,
     /// A tool vendor's base URL, if not its own.
     pub base_url: Option<String>,
+    /// Its proxy, in place of `network`'s: a URL, literal or `env:NAME`, or
+    /// `false` for none. A `command` is given it as `HTTPS_PROXY` and the
+    /// rest.
+    pub proxy: Option<Proxy>,
     // The fields this block once had, refused with how to write them now.
     #[serde(default)]
     oauth: Option<serde::de::IgnoredAny>,
@@ -225,6 +231,8 @@ pub struct McpServer {
     pub forward_auth: bool,
     /// Its token source, if it has OAuth.
     pub oauth: Option<Arc<OAuth>>,
+    /// What it is reached through: its proxy, the certificates trusted.
+    pub network: Network,
 }
 
 #[derive(Clone)]
@@ -302,13 +310,15 @@ impl McpServer {
 }
 
 /// The servers `config` names, checked: names, transports, keys read, and
-/// the programs found.
+/// the programs found; each reached through `network`, the config's, or
+/// a `proxy` of its own.
 pub fn servers(
-    config: &IndexMap<String, McpConfig>,
+    config: &Config,
+    network: &Network,
     providers: &[&str],
     logins: &std::path::Path,
 ) -> Result<Vec<McpServer>, Fault> {
-    config
+    (config.tools)
         .iter()
         .map(|(name, c)| {
             let bad = |e: &str| Fault::config(format!("tool server '{name}': {e}"));
@@ -318,7 +328,17 @@ pub fn servers(
             if providers.contains(&name.as_str()) {
                 return Err(bad("is also the name of a provider; names are shared"));
             }
-            server(name, c, logins)
+            let owner = format!("tool server '{name}'");
+            let reach = crate::network::of(&owner, network, &config.network, c.proxy.as_ref())?;
+            let mut server = server(name, c, logins, &reach)?;
+            if let Transport::Stdio { env, .. } = &mut server.transport {
+                let proxy = crate::network::child_env(&owner, &config.network, c.proxy.as_ref());
+                // Its own `env` says last.
+                let own = |k: &String| env.iter().any(|(set, _)| set == k);
+                let proxy: Vec<_> = proxy?.into_iter().filter(|(k, _)| !own(k)).collect();
+                env.splice(0..0, proxy);
+            }
+            Ok(server)
         })
         .collect()
 }
@@ -346,9 +366,14 @@ pub fn check_patterns(key: &str, patterns: &[String]) -> Result<(), String> {
     }
 }
 
-fn server(name: &str, c: &McpConfig, logins: &std::path::Path) -> Result<McpServer, Fault> {
+fn server(
+    name: &str,
+    c: &McpConfig,
+    logins: &std::path::Path,
+    network: &Network,
+) -> Result<McpServer, Fault> {
     if let Some(id) = &c.vendor {
-        return vendor_server(name, c, id);
+        return vendor_server(name, c, id, network);
     }
     let owner = format!("tool server '{name}'");
     let bad = |e: &str| Fault::config(format!("{owner}: {e}"));
@@ -398,13 +423,13 @@ fn server(name: &str, c: &McpConfig, logins: &std::path::Path) -> Result<McpServ
                     (None, given(&format!("bearer ({})", key_source(key))))
                 }
                 Some(McpAuth::OAuth(o)) => {
-                    let o = OAuth::new(&owner, o)?;
+                    let o = OAuth::new(&owner, o, network)?;
                     let from = given(&format!("oauth {} ({})", o.grant(), o.source));
                     (Some(Arc::new(o)), from)
                 }
                 Some(McpAuth::Login) => {
                     let path = logins.join(format!("{name}.json"));
-                    let o = OAuth::login(&owner, name, &path)?;
+                    let o = OAuth::login(&owner, name, &path, network)?;
                     let from = given(&format!("oauth login ({})", o.source));
                     (Some(Arc::new(o)), from)
                 }
@@ -480,12 +505,18 @@ fn server(name: &str, c: &McpConfig, logins: &std::path::Path) -> Result<McpServ
         key_from,
         forward_auth: matches!(c.auth, Some(McpAuth::Forward)),
         oauth,
+        network: network.clone(),
     })
 }
 
 /// A `vendor` server: the tool vendor, its key (its own variable's if
 /// `key` is unset) and any `base_url`, and nothing of a `url` or `command`.
-fn vendor_server(name: &str, c: &McpConfig, id: &str) -> Result<McpServer, Fault> {
+fn vendor_server(
+    name: &str,
+    c: &McpConfig,
+    id: &str,
+    network: &Network,
+) -> Result<McpServer, Fault> {
     let owner = format!("tool server '{name}'");
     let bad = |e: &str| Fault::config(format!("{owner}: {e}"));
     if c.url.is_some() || c.command.is_some() {
@@ -544,6 +575,7 @@ fn vendor_server(name: &str, c: &McpConfig, id: &str) -> Result<McpServer, Fault
         key_from,
         forward_auth: false,
         oauth: None,
+        network: network.clone(),
     })
 }
 
@@ -651,7 +683,9 @@ pub async fn probe(servers: &[McpServer]) -> Vec<Probe> {
 
 async fn probe_one(server: &McpServer) -> Reach {
     match &server.transport {
-        Transport::Http { url, auth, .. } => probe_http(url, auth, server.oauth.as_deref()).await,
+        Transport::Http { url, auth, .. } => {
+            probe_http(url, auth, server.oauth.as_deref(), &server.network).await
+        }
         Transport::Stdio {
             command,
             program,
@@ -664,7 +698,12 @@ async fn probe_one(server: &McpServer) -> Reach {
     }
 }
 
-async fn probe_http(url: &str, auth: &HeaderMap, oauth: Option<&OAuth>) -> Reach {
+async fn probe_http(
+    url: &str,
+    auth: &HeaderMap,
+    oauth: Option<&OAuth>,
+    network: &Network,
+) -> Reach {
     let mut auth = auth.clone();
     if let Some(oauth) = oauth {
         let sent = async { OAuth::header(&oauth.token(None).await?) }.await;
@@ -675,12 +714,10 @@ async fn probe_http(url: &str, auth: &HeaderMap, oauth: Option<&OAuth>) -> Reach
             Err(fault) => return Reach::Unreachable(fault.message().to_owned()),
         }
     }
-    let client = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
+    let probe = |b: reqwest::ClientBuilder| Ok(b.redirect(reqwest::redirect::Policy::none()));
+    let client = match network.client("MCP probe", probe) {
         Ok(client) => client,
-        Err(e) => return Reach::Unreachable(unreachable(&e)),
+        Err(fault) => return Reach::Unreachable(fault.message().to_owned()),
     };
     let asked = client
         .post(url)
@@ -856,7 +893,9 @@ fn register(
             Transport::Http {
                 origin, path, auth, ..
             } => {
-                let transport = HttpTransport::new(origin)?.with_headers(auth.clone())?;
+                let transport = HttpTransport::new(origin)?
+                    .with_network(&s.network)?
+                    .with_headers(auth.clone())?;
                 let io = reached(transport, &s.name, origin, limit, s.oauth.clone());
                 gateway.provider(Provider::new(name, StreamableHttp::new(path), io))?
             }
@@ -882,6 +921,7 @@ fn register(
             }
             Transport::Vendor { vendor, key, base } => {
                 let api = vendor.api(key.clone(), base.as_deref());
+                let api = api.with_network(&s.network)?;
                 let server = ToolServer::new(vendor, api);
                 gateway.provider(Provider::new(
                     name,
@@ -963,10 +1003,13 @@ mod tests {
     use super::*;
 
     fn parse(text: &str) -> Result<Vec<McpServer>, String> {
-        let config: IndexMap<String, McpConfig> =
-            toml::from_str(text).map_err(|e| e.to_string())?;
-        servers(&config, &["openai"], std::path::Path::new(".respan/mcp"))
-            .map_err(|e| e.message().to_owned())
+        let tools: IndexMap<String, McpConfig> = toml::from_str(text).map_err(|e| e.to_string())?;
+        let config = Config {
+            tools,
+            ..Config::default()
+        };
+        let logins = std::path::Path::new(".respan/mcp");
+        servers(&config, Network::shared(), &["openai"], logins).map_err(|e| e.message().to_owned())
     }
 
     /// A tool vendor of the tests' own, with no tools.

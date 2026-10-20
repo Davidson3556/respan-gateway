@@ -15,6 +15,7 @@ mod server;
 pub use api::{Api, ToolError};
 pub use output::{Content, ToolOutput, decode_base64};
 pub use reqwest;
+pub use respan_gateway_http_transport::Network;
 pub use server::ToolServer;
 
 use async_trait::async_trait;

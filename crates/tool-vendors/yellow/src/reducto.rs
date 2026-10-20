@@ -5,15 +5,12 @@
 //! large to answer inline comes back as `{"type": "url", "url": ...}`, a
 //! presigned link fetched here without the key.
 
-use std::sync::OnceLock;
-use std::time::Duration;
-
 use async_trait::async_trait;
 use respan_gateway_tool_vendor_kit::args::{
     object, optional_bool, optional_enum, optional_int, optional_str, pretty, required_str,
 };
 use respan_gateway_tool_vendor_kit::{
-    Api, KeyIn, ToolError, ToolOutput, ToolSpec, ToolVendor, Tools, reqwest,
+    Api, KeyIn, ToolError, ToolOutput, ToolSpec, ToolVendor, Tools,
 };
 use serde_json::{Map, Value, json};
 
@@ -132,18 +129,6 @@ impl Tools for ReductoTools {
     }
 }
 
-/// A client without the key, for the presigned links of URL results.
-fn plain_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .user_agent("respan-gateway")
-            .build()
-            .unwrap_or_default()
-    })
-}
-
 /// The URL a `{"type": "url"}` result points at, if it is one.
 fn url_result(response: &Value) -> Option<&str> {
     let result = response.get("result")?;
@@ -158,7 +143,7 @@ async fn resolve(api: &Api, response: &mut Value) -> Result<(), ToolError> {
     let Some(url) = url_result(response).map(str::to_owned) else {
         return Ok(());
     };
-    let fetched = api.json(plain_client().get(url)).await?;
+    let fetched = api.json(api.client().get(url)).await?;
     response["result"] = fetched;
     Ok(())
 }

@@ -15,8 +15,8 @@ pub const PLACEHOLDER: &str = "…";
 /// (the entry, or a named entry's `key`), a provider's key (also inside
 /// `auth`), an MCP server's header, bearer key, OAuth client secret and
 /// refresh token, environment value or argument (not the program), and a
-/// URL that holds credentials (a server's, a provider's, an OAuth token
-/// endpoint's or Respan's). An `env:NAME` reference is no secret; it is
+/// URL that holds credentials (a server's, a provider's, a proxy's, an
+/// OAuth token endpoint's or Respan's). An `env:NAME` reference is no secret; it is
 /// shown as written.
 fn is_secret(path: &[String], value: &Value) -> bool {
     let path: Vec<&str> = path.iter().map(String::as_str).collect();
@@ -40,6 +40,8 @@ fn is_secret(path: &[String], value: &Value) -> bool {
         | ["tools", _, "key"] => !value.is_null(),
         ["tools", _, "url"]
         | ["tools", _, "base_url"]
+        | ["network", "proxy"]
+        | ["providers" | "tools", _, "proxy"]
         | ["tools", _, "auth", "oauth", "token_url"]
         | ["plugins", "respan", "url"]
         | ["providers", _, "base_url"]
@@ -200,6 +202,17 @@ mod tests {
         } else {
             toml::from_str(text).unwrap_or_else(|e| panic!("{e}"))
         }
+    }
+
+    #[test]
+    fn hides_a_proxy_password() {
+        let shown = redact(text(
+            "network = { proxy = \"http://u:pw@proxy:3128\" }\nproviders = { a = { proxy = \"http://u:pw@p:1\" }, b = { proxy = false } }\ntools = { t = { proxy = \"http://p:1\" } }",
+        ));
+        assert_eq!(shown["network"]["proxy"], PLACEHOLDER);
+        assert_eq!(shown["providers"]["a"]["proxy"], PLACEHOLDER);
+        assert_eq!(shown["providers"]["b"]["proxy"], false);
+        assert_eq!(shown["tools"]["t"]["proxy"], "http://p:1");
     }
 
     const FULL: &str = "client_keys = [\"gw-secret\", \"env:GATEWAY_KEY\", { name = \"app\", key = \"named-secret\" }]\nproviders = { a = { vendor = \"openai\", key = \"sk-live-1\" }, b = { formats = \"openai-chat\", base_url = \"http://b.test\", auth = { type = \"bearer\", key = \"sk-live-2\" } }, c = { vendor = \"groq\", key = \"env:GROQ_API_KEY\" } }\ntools = { m = { command = \"npx\", args = [\"-y\", \"server\", \"--token\", \"tok-1\"], env = { TOKEN = \"tok-2\", FROM_ENV = \"env:X\" } }, h = { url = \"https://h.test/mcp/\", auth = { bearer = \"tok-3\" } }, t = { url = \"https://t.test/mcp/abcdef0123456789abcdef0123\" }, q = { url = \"https://q.test/mcp?token=zzz\", headers = { x-k = \"tok-4\", x-from = \"env:Y\" } }, o = { url = \"https://o.test/mcp\", auth = { oauth = { token_url = \"https://o.test/token\", client_id = \"cid\", client_secret = \"oauth-secret\", refresh_token = \"oauth-refresh\" } } }, f = { url = \"https://f.test/mcp\", auth = \"forward\" }, s = { vendor = \"linkup\", key = \"lk-secret\" }, e = { vendor = \"linkup\", key = \"env:LK\" } }\n";

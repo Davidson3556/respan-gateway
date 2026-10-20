@@ -16,7 +16,7 @@ use crate::formats::{KnownFormat, kind};
 use crate::vendors;
 use respan_gateway_plugin_routing::{Routes, Rule, Speaks};
 use respan_gateway_sdk::{Catalog, Model};
-use respan_gateway_vendors::VendorProvider;
+use respan_gateway_vendors::{Network, VendorProvider};
 
 /// The name of the format that relays what no other served format accepts.
 pub const PASSTHROUGH: &str = "passthrough";
@@ -74,14 +74,16 @@ impl Plan {
 }
 
 /// The gateway `config` says, its providers reading up to `limit` bytes of
-/// an answer at once and their sessions taking `sessions`.
+/// an answer at once, their sessions taking `sessions`, and connecting
+/// through `network` but for a `proxy` of their own.
 pub fn compose(
     config: &Config,
     formats: &[KnownFormat],
     limit: usize,
     sessions: Limits,
+    network: &Network,
 ) -> Result<(Gateway, Plan), Fault> {
-    let (gateway, mut upstreams) = providers(config, formats, limit, sessions)?;
+    let (gateway, mut upstreams) = providers(config, formats, limit, sessions, network)?;
     for u in &mut upstreams {
         let declared = config.models.values().filter(|m| m.provider == u.name);
         u.models = declared.cloned().collect();
@@ -168,11 +170,14 @@ fn providers(
     formats: &[KnownFormat],
     limit: usize,
     sessions: Limits,
+    network: &Network,
 ) -> Result<(Gateway, Vec<Upstream>), Fault> {
     let mut gateway = Gateway::new();
     let mut upstreams = Vec::new();
     for (name, p) in &config.providers {
-        let upstream = upstream(name, p, formats)?;
+        let owner = format!("provider '{name}'");
+        let network = crate::network::of(&owner, network, &config.network, p.proxy.as_ref())?;
+        let upstream = upstream(name, p, formats, network)?;
         let provider = upstream.provider.clone().limit(limit).sessions(sessions);
         gateway = provider
             .register(gateway)
@@ -286,7 +291,12 @@ fn at_different_urls(formats: &[(&dyn respan_gateway_vendors::Upstream, Option<&
 }
 
 /// A provider's formats, each with its base URL and credentials.
-fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<Upstream, Fault> {
+fn upstream(
+    name: &str,
+    p: &ProviderConfig,
+    formats: &[KnownFormat],
+    network: Network,
+) -> Result<Upstream, Fault> {
     let owner = format!("provider '{name}'");
     let bad = |e: String| Fault::config(format!("{owner}: {e}"));
     if !valid_provider_name(name) {
@@ -303,10 +313,11 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
             ))
         })?),
     };
-    let mut provider = match vendor {
+    let provider = match vendor {
         Some(vendor) => vendor.provider(name),
         None => VendorProvider::new(name),
     };
+    let mut provider = provider.network(network);
     let names: Vec<&str> = match (&p.formats, vendor) {
         (Some(formats), _) => formats.names(),
         (None, Some(vendor)) => vendor.formats.iter().map(|(f, _)| f.name()).collect(),

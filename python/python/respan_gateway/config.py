@@ -28,6 +28,7 @@ class ProviderConfig(TypedDict, total=False):
     base_url: str
     key: str  # literal or "env:NAME"
     auth: Auth
+    proxy: Union[str, bool]  # its own proxy URL, literal or "env:NAME"; False for none
 
 
 class OAuthConfig(TypedDict, total=False):
@@ -66,6 +67,7 @@ class McpConfig(TypedDict, total=False):
     vendor: str  # a tool vendor's id, such as "linkup" or "tinyfish"
     key: str  # a tool vendor's key, literal or "env:NAME"; its own variable if unset
     base_url: str  # a tool vendor's base URL, if not its own
+    proxy: Union[str, bool]  # its own proxy URL, literal or "env:NAME"; False for none
 
 
 class ToolLoopConfig(TypedDict, total=False):
@@ -82,6 +84,14 @@ class ToolLoopConfig(TypedDict, total=False):
     parallel: int  # tool calls of one step that run at once
     max_result: Union[int, str]  # bytes, or a size such as "64KiB"
     max_results: Union[int, str]  # bytes of tool answers in one request
+
+
+class NetworkConfig(TypedDict, total=False):
+    """Outbound connections: their proxy, and certificates trusted besides the system's."""
+
+    proxy: Union[str, bool]  # "http://user:password@proxy:3128", literal or "env:NAME"; False for none; HTTPS_PROXY & co. if unset
+    no_proxy: List[str]  # hosts reached directly: "localhost", ".corp.internal", "10.0.0.0/8"
+    ca: str  # a PEM file of certificate authorities, relative to the config file
 
 
 class CorsConfig(TypedDict):
@@ -222,4 +232,5 @@ class GatewayConfig(TypedDict, total=False):
     shutdown_grace: Union[int, float, str]  # seconds, or "30s", "2m", "500ms"
     tools: Dict[str, McpConfig]  # tool servers by name: an MCP `url` or `command`, or a tool `vendor`
     cors: CorsConfig
+    network: NetworkConfig
     ui: bool  # False also turns off the admin API behind models()/requests()/providers()

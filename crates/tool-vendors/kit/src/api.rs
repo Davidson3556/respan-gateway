@@ -2,7 +2,19 @@
 
 use std::time::Duration;
 
+use respan_gateway_core::Fault;
+use respan_gateway_http_transport::Network;
+
 use crate::KeyIn;
+
+/// A network's client for tool APIs: two minutes for an answer.
+fn client_of(network: &Network) -> Result<reqwest::Client, Fault> {
+    network.client("tool API", |builder| {
+        Ok(builder
+            .timeout(Duration::from_secs(120))
+            .user_agent("respan-gateway"))
+    })
+}
 
 /// The most of a refusal's body an error quotes.
 const QUOTED: usize = 2000;
@@ -35,18 +47,33 @@ pub struct Api {
 
 impl Api {
     /// The API at `base` with `key`, taken as `key_in` says.
+    /// It connects through [`Network::shared`], until told otherwise.
     pub fn new(base: impl Into<String>, key: impl Into<String>, key_in: KeyIn) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .user_agent("respan-gateway")
-            .build()
-            .unwrap_or_default();
         Self {
-            client,
+            client: client_of(Network::shared()).unwrap_or_default(),
             base: base.into().trim_end_matches('/').to_owned(),
             key: key.into(),
             key_in,
         }
+    }
+
+    /// Connect through `network`, sharing its tool APIs' client.
+    pub fn with_network(mut self, network: &Network) -> Result<Self, Fault> {
+        self.client = client_of(network)?;
+        Ok(self)
+    }
+
+    /// Send its requests with `client`, one of your own, in place of a
+    /// network's.
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
+    /// Its client, carrying no key: for a request the key has no business
+    /// in, such as to a presigned link.
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     /// `path` under the base URL, or `path` itself when it is an absolute URL.

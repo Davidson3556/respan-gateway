@@ -4,7 +4,7 @@
 //! does to a call and its answer is the HTTP wire's
 //! (`respan_gateway_http::call`), shared with every transport.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use http::header::{COOKIE, LOCATION};
@@ -19,6 +19,9 @@ use respan_gateway_http::{call::is_credential, call::prepare_call, call::strip_o
 
 /// The Reqwest this transport is built on, at its version.
 pub use reqwest;
+
+mod network;
+pub use network::Network;
 
 /// The most redirects a call follows.
 const REDIRECTS: usize = 5;
@@ -50,33 +53,45 @@ impl std::fmt::Debug for HttpTransport {
     }
 }
 
-/// The client every transport shares: it returns redirects unfollowed, as
+/// A network's client for transports: it returns redirects unfollowed, as
 /// they are the client's to follow, and gives up connecting after
 /// [`CONNECT_TIMEOUT`].
-fn shared_client() -> Result<reqwest::Client, Fault> {
-    static CLIENT: OnceLock<Result<reqwest::Client, Fault>> = OnceLock::new();
-    let client = || {
-        reqwest::Client::builder()
+fn client_of(network: &Network) -> Result<reqwest::Client, Fault> {
+    network.client("HTTP transport", |builder| {
+        Ok(builder
             .connect_timeout(CONNECT_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| Fault::internal("the HTTP client could not be built").with_source(e))
-    };
-    CLIENT.get_or_init(client).clone()
+            .redirect(reqwest::redirect::Policy::none()))
+    })
 }
 
 impl HttpTransport {
     /// A transport to `base_url`: `http` or `https` ([`base_url`](respan_gateway_http::call::base_url)),
     /// else
-    /// `Err` with `config`. It connects within 10 s and reads up to 32 MiB
-    /// of one answer at once, until told otherwise.
+    /// `Err` with `config`. It connects within 10 s, through
+    /// [`Network::shared`], and reads up to 32 MiB of one answer at once,
+    /// until told otherwise.
     pub fn new(base_url: impl Into<String>) -> Result<Self, Fault> {
         Ok(Self {
-            client: shared_client()?,
+            client: client_of(Network::shared())?,
             base: respan_gateway_http::call::base_url(&base_url.into(), &["http", "https"])?,
             headers: HeaderMap::new(),
             follow: None,
         })
+    }
+
+    /// Connect through `network`, sharing its transports' client.
+    pub fn with_network(mut self, network: &Network) -> Result<Self, Fault> {
+        self.client = client_of(network)?;
+        Ok(self)
+    }
+
+    /// Send its calls with `client`, in place of a network's: one of your
+    /// own, with its proxy, certificates and timeouts. Have it follow no
+    /// redirects ([`reqwest::redirect::Policy::none`]); this transport
+    /// follows those it is told to ([`follow_redirects`](Self::follow_redirects)).
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
     }
 
     /// Send `headers`, such as the API key, with every call, replacing any
@@ -142,6 +157,12 @@ impl HttpTransport {
                 _ => break resp,
             }
         };
+        // A plain-HTTP proxy's refusal comes back as an answer.
+        if resp.status() == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+            return Err(Fault::upstream(
+                "the proxy refused the gateway (407): check the user and password in its URL",
+            ));
+        }
         if resp.status() == http::StatusCode::SWITCHING_PROTOCOLS {
             return Err(Fault::upstream(
                 "the provider switched protocols, which this transport does not",

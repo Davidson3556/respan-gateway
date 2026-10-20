@@ -48,10 +48,15 @@ pub async fn login(config: &Config, name: &str) -> Result<PathBuf, String> {
     let url = server.url.as_deref().ok_or_else(|| {
         format!("tool server '{name}' runs a `command`; only a `url` is logged in to")
     })?;
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("no HTTP client: {e}"))?;
+    let owner = format!("tool server '{name}'");
+    let network = crate::network::network(config)
+        .and_then(|n| crate::network::of(&owner, &n, &config.network, server.proxy.as_ref()))
+        .map_err(|e| e.message().to_owned())?;
+    let http = network
+        .client("MCP login", |builder| {
+            Ok(builder.timeout(Duration::from_secs(30)))
+        })
+        .map_err(|e| e.message().to_owned())?;
     let at = Endpoints {
         http: &http,
         server: name,
@@ -215,10 +220,12 @@ fn http_auth(name: &str, c: &McpConfig, saved: &Path) -> (bool, String) {
             Ok(_) => (true, format!("bearer ({})", key_source(key))),
             Err(e) => (false, e.message().to_owned()),
         },
-        Some(McpAuth::OAuth(o)) => match OAuth::new("oauth", o) {
-            Ok(o) => (true, format!("oauth {}", o.grant())),
-            Err(e) => (false, e.message().to_owned()),
-        },
+        Some(McpAuth::OAuth(o)) => {
+            match OAuth::new("oauth", o, respan_gateway_http_transport::Network::shared()) {
+                Ok(o) => (true, format!("oauth {}", o.grant())),
+                Err(e) => (false, e.message().to_owned()),
+            }
+        }
         Some(McpAuth::Forward) => (true, "forwarded (each client's own)".to_owned()),
         None if c.headers.is_empty() => (true, "none".to_owned()),
         None => (true, "headers".to_owned()),

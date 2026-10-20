@@ -25,7 +25,7 @@ pub use models::{BoxFuture, Capability, ListModels, Modality, Model, Models, Pri
 pub use provider::{Part, VendorProvider};
 pub use respan_gateway_http::{Body, Connect, KeyIn, Reach, Upstream, http};
 pub use respan_gateway_http_faults::built_wrong;
-pub use respan_gateway_http_transport::{HttpTransport, json};
+pub use respan_gateway_http_transport::{HttpTransport, Network, json, reqwest};
 pub use respan_gateway_sdk::{Ask, FormatFor};
 
 /// A vendor: a template of the providers of it ([`Vendor::provider`]). A

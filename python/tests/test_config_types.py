@@ -30,6 +30,7 @@ def test_a_full_typed_config_parses() -> None:
                 "formats": ["openai-chat"],
                 "base_url": "http://127.0.0.1:9/v1",
                 "auth": {"type": "header", "name": "x-api-key", "key": "k"},
+                "proxy": False,
             },
         },
         "formats": ["openai-chat", "anthropic-messages", "mcp"],
@@ -52,6 +53,7 @@ def test_a_full_typed_config_parses() -> None:
             "remote": {
                 "url": "http://127.0.0.1:9/mcp",
                 "auth": {"bearer": "fake"},
+                "proxy": "http://127.0.0.1:9",
             },
             "headered": {"url": "http://127.0.0.1:9/mcp", "headers": {"x-api-key": "k"}},
             "forwarded": {"url": "http://127.0.0.1:9/mcp", "auth": "forward"},
@@ -75,6 +77,7 @@ def test_a_full_typed_config_parses() -> None:
             },
         },
         "cors": {"origins": ["https://app.example.com"]},
+        "network": {"proxy": "http://user:pw@127.0.0.1:9", "no_proxy": ["localhost", "127.0.0.1"]},
         "plugins": {
             "routing": {"default": "openai"},
             "request_log": {"history": 500},
