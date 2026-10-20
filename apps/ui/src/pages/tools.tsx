@@ -8,6 +8,7 @@ import {
   Plug,
   RefreshCw,
   Repeat,
+  Search,
   ShieldAlert,
   Terminal,
   UserRound,
@@ -17,6 +18,7 @@ import { toast } from "sonner";
 import { Link } from "react-router";
 import { CodeBlock } from "@/components/code-block";
 import { CopyButton } from "@/components/copy-button";
+import { FilterPills } from "@/components/request-filters";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -136,59 +138,45 @@ function useBulkSwitch(server: string) {
 }
 
 /** The kinds of tool a list is filtered to, by the server's hints. */
-const kinds = {
-  all: { label: "All", is: () => true },
-  read: { label: "Read-only", is: (t: McpTool) => t.read_only === true },
-  write: { label: "Writes", is: (t: McpTool) => t.read_only !== true && t.destructive !== true },
-  destructive: { label: "Destructive", is: (t: McpTool) => t.destructive === true },
-  off: { label: "Off", is: (t: McpTool) => !t.enabled },
-} satisfies Record<string, { label: string; is: (t: McpTool) => boolean }>;
-type Kind = keyof typeof kinds;
+const kinds = [
+  { value: "all", label: "All", is: () => true },
+  { value: "read", label: "Read-only", is: (t: McpTool) => t.read_only === true },
+  { value: "write", label: "Writes", is: (t: McpTool) => t.read_only !== true && t.destructive !== true },
+  { value: "destructive", label: "Destructive", dot: "bg-destructive", is: (t: McpTool) => t.destructive === true },
+  { value: "off", label: "Off", dot: "bg-muted-foreground", is: (t: McpTool) => !t.enabled },
+];
 
-/** A server's tools, filterable by text and kind, with a switch each and for all those shown. */
+/** A server's tools, filterable by text and kind, with a switch each and one for all those shown. */
 function ToolList({ server, tools }: { server: McpServer; tools: McpTool[] }) {
   const [query, setQuery] = useState("");
-  const [kind, setKind] = useState<Kind>("all");
+  const [kind, setKind] = useState("all");
   const bulk = useBulkSwitch(server.name);
   const q = query.trim().toLowerCase();
+  const isKind = kinds.find((k) => k.value === kind)?.is ?? (() => true);
   const shown = tools.filter((t) =>
-    kinds[kind].is(t) && (!q || [t.name, t.title, t.description].some((x) => x?.toLowerCase().includes(q))));
-  const shownOn = shown.filter((t) => t.enabled).length;
+    isKind(t) && (!q || [t.name, t.title, t.description].some((x) => x?.toLowerCase().includes(q))));
+  const counts = Object.fromEntries(kinds.map((k) => [k.value, tools.filter(k.is).length]));
   // The master switch is on while every shown tool is; flipping it sets them all.
-  const allOn = shown.length > 0 && shownOn === shown.length;
+  const allOn = shown.length > 0 && shown.every((t) => t.enabled);
+  const what = shown.length === tools.length ? "all" : `the ${shown.length} shown`;
   const set = (enabled: boolean) => bulk.mutate({ names: shown.filter((t) => t.enabled !== enabled).map((t) => t.name), enabled });
-  const what = shown.length === tools.length ? `all ${tools.length}` : `the ${shown.length} shown`;
   return (
     <div className="border-t">
-      <div className="flex flex-wrap items-center gap-2 px-5 py-2">
+      <div className="flex flex-wrap items-center gap-2 px-5 py-3">
         {tools.length > 8 && (
-          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter tools"
-            aria-label={`Filter the tools of ${server.name}`} className="h-8 max-w-xs" />
+          <div className="relative w-full sm:w-56">
+            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search tools"
+              aria-label={`Search the tools of ${server.name}`} className="h-8 pl-8" />
+          </div>
         )}
-        <div role="group" aria-label={`Kinds of tool of ${server.name}`} className="flex flex-wrap rounded-md border p-0.5">
-          {(Object.keys(kinds) as Kind[]).map((k) => {
-            const count = tools.filter(kinds[k].is).length;
-            return (
-              <button key={k} type="button" aria-pressed={kind === k} onClick={() => setKind(k)}
-                disabled={!count && k !== "all"}
-                className={`rounded px-2 py-0.5 text-xs transition-colors disabled:opacity-40 ${kind === k ? "bg-muted font-medium" : "text-muted-foreground hover:text-foreground"}`}>
-                {kinds[k].label} <span className="tabular-nums opacity-70">{count}</span>
-              </button>
-            );
-          })}
-        </div>
-
+        <FilterPills label={`Kinds of tool of ${server.name}`} options={kinds} value={kind} counts={counts} onChange={setKind} />
+        <label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+          Turn {what} {allOn ? "off" : "on"}
+          <Switch checked={allOn} disabled={!server.enabled || bulk.isPending || !shown.length}
+            onCheckedChange={(next) => set(next)} aria-label={`Turn ${what} tools ${allOn ? "off" : "on"}`} />
+        </label>
       </div>
-      {shown.length > 0 && (
-        <div className="flex items-center gap-3 border-t bg-muted/30 px-5 py-1.5">
-          <span className="flex-1 text-xs text-muted-foreground">{shownOn} of {shown.length} on</span>
-          <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
-            Turn {what} {allOn ? "off" : "on"}
-            <Switch size="sm" checked={allOn} disabled={!server.enabled || bulk.isPending}
-              onCheckedChange={(next) => set(next)} aria-label={`Turn ${what} tools ${allOn ? "off" : "on"}`} />
-          </label>
-        </div>
-      )}
       {shown.length ? (
         <ul className="max-h-[28rem] divide-y overflow-y-auto border-t" aria-label={`Tools of ${server.name}`}>
           {shown.map((t) => <ToolRow key={t.name} server={server} tool={t} />)}

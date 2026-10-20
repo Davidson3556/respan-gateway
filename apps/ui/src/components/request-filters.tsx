@@ -19,26 +19,31 @@ const outcomes: { value: Outcome | typeof ANY; label: string; dot?: string }[] =
   { value: "pending", label: "In flight", dot: "bg-brand" },
 ];
 
-/** Status as pills, each with how many requests it would show. */
-function StatusPills({
+/** Options as pills, one chosen, each with how many it would show; an empty one is disabled. */
+export function FilterPills({
+  label,
+  options,
   value,
   counts,
   onChange,
 }: {
+  label: string;
+  options: { value: string; label: string; dot?: string }[];
   value: string;
   counts: Record<string, number>;
   onChange: (value: string) => void;
 }) {
   return (
-    <div role="group" aria-label="Status" className="flex flex-wrap gap-1.5">
-      {outcomes.map((o) => (
+    <div role="group" aria-label={label} className="flex flex-wrap gap-1.5">
+      {options.map((o) => (
         <button
           key={o.value}
           type="button"
           aria-pressed={value === o.value}
+          disabled={!counts[o.value] && value !== o.value}
           onClick={() => onChange(o.value)}
           className={cn(
-            "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium outline-none transition-colors hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50",
+            "inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium outline-none transition-colors hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-40",
             value === o.value && "border-brand bg-brand-soft/60",
           )}
         >
@@ -101,7 +106,7 @@ export function RequestFilters({
   return (
     <div className="grid gap-3 border-b p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <StatusPills value={filter.status} counts={counts} onChange={(v) => onChange("status", v)} />
+        <FilterPills label="Status" options={outcomes} value={filter.status} counts={counts} onChange={(v) => onChange("status", v)} />
         <span className="text-xs text-muted-foreground tabular" aria-live="polite">
           {shown.toLocaleString()} of {total.toLocaleString()}
         </span>
