@@ -22,6 +22,7 @@ import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { useMcpOverview, useMcpTools } from "@/hooks/queries";
@@ -82,37 +83,118 @@ function useSwitch(server: string, tool?: string) {
   });
 }
 
+/** Whether a title only repeats the name, as "Get attachment" does get_attachment. */
+const sameName = (title: string, name: string) =>
+  title.toLowerCase().replace(/[^a-z0-9]/g, "") === name.toLowerCase().replace(/[^a-z0-9]/g, "");
+
 function ToolRow({ server, tool }: { server: McpServer; tool: McpTool }) {
   const toggle = useSwitch(server.name, tool.name);
+  const [open, setOpen] = useState(false);
+  const title = tool.title && !sameName(tool.title, tool.name) ? tool.title : null;
+  const on = tool.enabled && server.enabled;
   return (
-    <li className={`grid gap-1 px-5 py-3 ${tool.enabled && server.enabled ? "" : "opacity-60"}`}>
-      <div className="flex flex-wrap items-center gap-2">
-        <Switch size="sm" checked={tool.enabled} disabled={!server.enabled}
-          onCheckedChange={(on) => toggle.mutate(on)}
-          aria-label={`Offer ${tool.name}`} title={server.enabled ? undefined : `${server.name} is off`} />
-        <code className="text-sm font-medium">{tool.name}</code>
-        {tool.title && tool.title !== tool.name && <span className="text-sm text-muted-foreground">{tool.title}</span>}
-        <span className="ml-auto flex flex-wrap gap-1.5">
-          {tool.read_only && <Badge variant="outline" className="font-normal">read-only</Badge>}
+    <li className="flex items-start gap-3 px-5 py-2 hover:bg-muted/40">
+      <button type="button" onClick={() => setOpen(!open)} aria-expanded={open}
+        className={`grid min-w-0 flex-1 gap-0.5 text-left ${on ? "" : "opacity-50"}`}>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <code className="truncate text-[13px] font-medium">{tool.name}</code>
+          {title && <span className="truncate text-xs text-muted-foreground">{title}</span>}
+          {tool.read_only && <Badge variant="outline" className="h-4 px-1 text-[10px] font-normal">read-only</Badge>}
           {tool.destructive && (
-            <Badge variant="outline" className="font-normal text-destructive">
+            <Badge variant="outline" className="h-4 px-1 text-[10px] font-normal text-destructive">
               <ShieldAlert aria-hidden />destructive
             </Badge>
           )}
-          {tool.tool_loop && (
-            <Badge variant="secondary" className="font-normal" title="The tool loop offers it to models">
-              <Repeat aria-hidden />tool loop
-            </Badge>
-          )}
-          {tool.aggregate && (
-            <Badge variant="secondary" className="font-normal" title="Offered at /mcp">
-              <Layers aria-hidden />/mcp
-            </Badge>
-          )}
+          {tool.tool_loop && <span title="The tool loop offers it to models"><Repeat className="size-3 shrink-0 text-muted-foreground" aria-label="tool loop" /></span>}
+          {tool.aggregate && <span title="Offered at /mcp"><Layers className="size-3 shrink-0 text-muted-foreground" aria-label="offered at /mcp" /></span>}
         </span>
-      </div>
-      {tool.description && <p className="line-clamp-2 text-xs text-muted-foreground" title={tool.description}>{tool.description}</p>}
+        {tool.description && (
+          <span className={`text-xs text-muted-foreground ${open ? "whitespace-pre-line" : "truncate"}`}>{tool.description}</span>
+        )}
+      </button>
+      <Switch size="sm" className="mt-1 data-[state=checked]:bg-success" checked={tool.enabled} disabled={!server.enabled}
+        onCheckedChange={(next) => toggle.mutate(next)}
+        aria-label={`Offer ${tool.name}`} title={server.enabled ? undefined : `${server.name} is off`} />
     </li>
+  );
+}
+
+/** Turns every tool of `names` on or off at once, as the switches would one by one. */
+function useBulkSwitch(server: string) {
+  const client = useQueryClient();
+  const key = ["mcp-tools", server];
+  return useMutation({
+    mutationFn: ({ names, enabled }: { names: string[]; enabled: boolean }) =>
+      Promise.all(names.map((name) => api.setToolEnabled(server, name, enabled))),
+    onMutate: ({ names, enabled }) =>
+      client.setQueryData<McpTools>(key, (data) =>
+        data && { ...data, tools: data.tools.map((t) => (names.includes(t.name) ? { ...t, enabled } : t)) }),
+    onError: (error, { enabled }) =>
+      toast.error(`Couldn't turn every tool ${enabled ? "on" : "off"}`, { description: describeError(error) }),
+    onSettled: () => client.invalidateQueries({ queryKey: key }),
+  });
+}
+
+/** The kinds of tool a list is filtered to, by the server's hints. */
+const kinds = {
+  all: { label: "All", is: () => true },
+  read: { label: "Read-only", is: (t: McpTool) => t.read_only === true },
+  write: { label: "Writes", is: (t: McpTool) => t.read_only !== true && t.destructive !== true },
+  destructive: { label: "Destructive", is: (t: McpTool) => t.destructive === true },
+  off: { label: "Off", is: (t: McpTool) => !t.enabled },
+} satisfies Record<string, { label: string; is: (t: McpTool) => boolean }>;
+type Kind = keyof typeof kinds;
+
+/** A server's tools, filterable by text and kind, with a switch each and for all those shown. */
+function ToolList({ server, tools }: { server: McpServer; tools: McpTool[] }) {
+  const [query, setQuery] = useState("");
+  const [kind, setKind] = useState<Kind>("all");
+  const bulk = useBulkSwitch(server.name);
+  const q = query.trim().toLowerCase();
+  const shown = tools.filter((t) =>
+    kinds[kind].is(t) && (!q || [t.name, t.title, t.description].some((x) => x?.toLowerCase().includes(q))));
+  const shownOn = shown.filter((t) => t.enabled).length;
+  // The master switch is on while every shown tool is; flipping it sets them all.
+  const allOn = shown.length > 0 && shownOn === shown.length;
+  const set = (enabled: boolean) => bulk.mutate({ names: shown.filter((t) => t.enabled !== enabled).map((t) => t.name), enabled });
+  const what = shown.length === tools.length ? `all ${tools.length}` : `the ${shown.length} shown`;
+  return (
+    <div className="border-t">
+      <div className="flex flex-wrap items-center gap-2 px-5 py-2">
+        {tools.length > 8 && (
+          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter tools"
+            aria-label={`Filter the tools of ${server.name}`} className="h-8 max-w-xs" />
+        )}
+        <div role="group" aria-label={`Kinds of tool of ${server.name}`} className="flex flex-wrap rounded-md border p-0.5">
+          {(Object.keys(kinds) as Kind[]).map((k) => {
+            const count = tools.filter(kinds[k].is).length;
+            return (
+              <button key={k} type="button" aria-pressed={kind === k} onClick={() => setKind(k)}
+                disabled={!count && k !== "all"}
+                className={`rounded px-2 py-0.5 text-xs transition-colors disabled:opacity-40 ${kind === k ? "bg-muted font-medium" : "text-muted-foreground hover:text-foreground"}`}>
+                {kinds[k].label} <span className="tabular-nums opacity-70">{count}</span>
+              </button>
+            );
+          })}
+        </div>
+
+      </div>
+      {shown.length > 0 && (
+        <div className="flex items-center gap-3 border-t bg-muted/30 px-5 py-1.5">
+          <span className="flex-1 text-xs text-muted-foreground">{shownOn} of {shown.length} on</span>
+          <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
+            Turn {what} {allOn ? "off" : "on"}
+            <Switch size="sm" className="data-[state=checked]:bg-success" checked={allOn} disabled={!server.enabled || bulk.isPending}
+              onCheckedChange={(next) => set(next)} aria-label={`Turn ${what} tools ${allOn ? "off" : "on"}`} />
+          </label>
+        </div>
+      )}
+      {shown.length ? (
+        <ul className="max-h-[28rem] divide-y overflow-y-auto border-t" aria-label={`Tools of ${server.name}`}>
+          {shown.map((t) => <ToolRow key={t.name} server={server} tool={t} />)}
+        </ul>
+      ) : <p className="border-t px-5 py-3 text-sm text-muted-foreground">No tool matches.</p>}
+    </div>
   );
 }
 
@@ -165,9 +247,7 @@ function Tools({ server }: { server: McpServer }) {
         ) : !data ? (
           <div className="grid gap-2 px-5 pb-4"><Skeleton className="h-10" /><Skeleton className="h-10" /></div>
         ) : data.tools.length ? (
-          <ul className="divide-y border-t" aria-label={`Tools of ${server.name}`}>
-            {data.tools.map((t) => <ToolRow key={t.name} server={server} tool={t} />)}
-          </ul>
+          <ToolList server={server} tools={data.tools} />
         ) : <p className="px-5 pb-4 text-sm text-muted-foreground">It lists no tools.</p>
       )}
     </div>
@@ -200,7 +280,7 @@ function ServerCard({ server: s, overview }: { server: McpServer; overview: McpO
           <div className="flex flex-wrap items-center gap-1.5">
             {inLoop && <Badge variant="secondary" className="font-normal"><Repeat aria-hidden />tool loop</Badge>}
             {inAggregate && <Badge variant="secondary" className="font-normal"><Layers aria-hidden />/mcp</Badge>}
-            <Switch checked={s.enabled} onCheckedChange={(on) => toggle.mutate(on)} className="ml-1"
+            <Switch checked={s.enabled} onCheckedChange={(on) => toggle.mutate(on)} className="ml-1 data-[state=checked]:bg-success"
               aria-label={`Serve ${s.name}`} title="Until the gateway restarts" />
           </div>
         </div>

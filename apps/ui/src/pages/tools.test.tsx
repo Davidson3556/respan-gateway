@@ -74,9 +74,47 @@ describe("ToolsPage", () => {
     const [search, remove] = within(list).getAllByRole("listitem");
     expect(search).toHaveTextContent("search_issues");
     expect(search).toHaveTextContent("read-only");
-    expect(search).toHaveTextContent("tool loop");
+    expect(within(search).getByLabelText("tool loop")).toBeInTheDocument();
     expect(remove).toHaveTextContent("destructive");
-    expect(remove).not.toHaveTextContent("tool loop");
+    expect(within(remove).queryByLabelText("tool loop")).toBeNull();
+    expect(screen.getByText("2 of 2 on")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Turn all 2 tools off" })).toBeChecked();
+  });
+
+  it("narrows the list to a kind of tool, by the server's hints", async () => {
+    serve({
+      "GET /ui/api/mcp": () => json(overview),
+      "GET /ui/api/mcp/github/tools": () => json(tools),
+    });
+    renderApp(<ToolsPage />);
+    await userEvent.click((await screen.findAllByRole("button", { name: /Tools/ }))[0]);
+    const list = await screen.findByRole("list", { name: "Tools of github" });
+    await userEvent.click(screen.getByRole("button", { name: /Destructive/ }));
+    expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual([expect.stringContaining("delete_repo")]);
+    await userEvent.click(screen.getByRole("button", { name: /Read-only/ }));
+    expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual([expect.stringContaining("search_issues")]);
+    expect(screen.getByRole("button", { name: /Off/ })).toBeDisabled();
+  });
+
+  it("filters a long list and turns all those shown off at once", async () => {
+    const many: McpTools = {
+      ...tools,
+      tools: Array.from({ length: 12 }, (_, i) => ({ ...tools.tools[0], description: null, name: i < 3 ? `issue_${i}` : `doc_${i}` })),
+    };
+    const calls = serve({
+      "GET /ui/api/mcp": () => json(overview),
+      "GET /ui/api/mcp/github/tools": () => json(many),
+      ...Object.fromEntries(many.tools.map((t) => [`PUT /ui/api/mcp/github/tools/${t.name}`, () => new Response(null, { status: 204 })])),
+    });
+    renderApp(<ToolsPage />);
+    await userEvent.click((await screen.findAllByRole("button", { name: /Tools/ }))[0]);
+    await userEvent.type(await screen.findByRole("textbox", { name: "Filter the tools of github" }), "issue");
+    expect(within(screen.getByRole("list", { name: "Tools of github" })).getAllByRole("listitem")).toHaveLength(3);
+    const master = screen.getByRole("switch", { name: "Turn the 3 shown tools off" });
+    expect(master).toBeChecked();
+    await userEvent.click(master);
+    const puts = calls.filter((c) => c.key.startsWith("PUT "));
+    expect(puts.map((c) => c.key).sort()).toEqual(["issue_0", "issue_1", "issue_2"].map((n) => `PUT /ui/api/mcp/github/tools/${n}`));
   });
 
   it("says why a server would not list, and how to log in again", async () => {
