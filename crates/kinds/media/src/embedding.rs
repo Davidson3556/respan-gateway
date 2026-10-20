@@ -1,7 +1,8 @@
-//! The embedding kind: vectors for texts.
+//! The embedding kind: vectors for texts, images and videos.
 //!
 //! A response is a sequence of events: a [`Output::Start`], then an
-//! [`Output::Embedding`] for each item of the request, in order, with
+//! [`Output::Embedding`] for each item of the request, in order (as many as
+//! the model answers for an [`Item::Parts`]), with
 //! [`Output::Usage`] and [`Output::Native`] among them.
 
 use respan_gateway_conversation::Usage;
@@ -53,6 +54,10 @@ pub enum Item {
     Text(String),
     /// A text as the ids of its tokens, in the model's own vocabulary.
     Tokens(Vec<u32>),
+    /// Parts (texts, images, videos), each as the client wrote it, such as
+    /// `{"type": "image", "url": ..}`: the model answers one vector for them
+    /// all, or one for each.
+    Parts(Vec<Value>),
 }
 
 /// The kind's output: one event of a response.

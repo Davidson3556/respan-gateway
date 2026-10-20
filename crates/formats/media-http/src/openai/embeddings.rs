@@ -22,8 +22,10 @@ const EMBEDDINGS: &str = "/embeddings";
 /// OpenAI Embeddings, as OpenAI or a compatible vendor serves it: a `POST`
 /// to a path ending in `/embeddings`.
 ///
-/// The input is a text, a list of texts, a list of token ids, or a list of
-/// those; a single item is written as it is, several as a list. A vector
+/// The input is a text, a list of texts, a list of token ids, a list of
+/// those, or a list of parts (objects such as `{"type": "image", ..}`),
+/// relayed as written; a single item is written as it is, several as a
+/// list. A vector
 /// is decoded from a list of numbers or from base64 (little-endian `f32`s),
 /// whichever the provider answers, and written as the client's
 /// `encoding_format` asks, `float` unless it says `base64`. The field is
@@ -92,7 +94,7 @@ fn read_items(v: &Value) -> Result<Vec<Item>, Fault> {
     let bad = || {
         invalid(
             "input",
-            "must be a string, or an array of strings or tokens",
+            "must be a string, or an array of strings, tokens or parts",
         )
     };
     let items = match v {
@@ -102,6 +104,9 @@ fn read_items(v: &Value) -> Result<Vec<Item>, Fault> {
             .filter_map(Value::as_str)
             .map(|text| Item::Text(text.to_owned()))
             .collect(),
+        Value::Array(all) if !all.is_empty() && all.iter().all(Value::is_object) => {
+            vec![Item::Parts(all.clone())]
+        }
         Value::Array(all) if all.iter().all(Value::is_array) => all
             .iter()
             .map(|ids| token_ids(ids).map(Item::Tokens))
@@ -140,6 +145,7 @@ fn items_json(items: &[Item]) -> Result<Value, Fault> {
     let item = |item: &Item| match item {
         Item::Text(text) => Value::from(text.clone()),
         Item::Tokens(ids) => Value::from(ids.clone()),
+        Item::Parts(parts) => Value::from(parts.clone()),
         _ => Value::Null,
     };
     if let [only] = items {
@@ -148,7 +154,9 @@ fn items_json(items: &[Item]) -> Result<Value, Fault> {
     let same = |pair: &[Item]| std::mem::discriminant(&pair[0]) == std::mem::discriminant(&pair[1]);
     match items.windows(2).all(same) {
         true => Ok(items.iter().map(item).collect::<Vec<_>>().into()),
-        false => Err(Fault::bad_request("an input cannot mix texts and tokens")),
+        false => Err(Fault::bad_request(
+            "an input cannot mix texts, tokens and parts",
+        )),
     }
 }
 
