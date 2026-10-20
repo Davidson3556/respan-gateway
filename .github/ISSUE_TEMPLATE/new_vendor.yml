@@ -1,6 +1,6 @@
 name: New vendor or tool vendor
 description: Ask for a model provider or a tool API to be built in.
-labels: [new vendor]
+labels: [C-vendor-request]
 body:
   - type: dropdown
     id: kind

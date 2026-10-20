@@ -164,7 +164,7 @@ with the [plugin guide](docs/plugins.md) and the [`examples/`](examples/README.m
 Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers the
 architecture, building, tests and releases. A new vendor or tool vendor is
 usually one file; issues labeled
-[good first issue](https://github.com/respanai/respan-gateway/labels/good%20first%20issue)
+[E-easy](https://github.com/respanai/respan-gateway/labels/E-easy)
 are a place to start.
 
 - Bugs and feature requests: [Issues](https://github.com/respanai/respan-gateway/issues/new/choose)

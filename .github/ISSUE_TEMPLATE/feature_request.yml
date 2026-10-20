@@ -1,6 +1,6 @@
 name: Feature request
 description: Something the gateway should do but doesn't.
-labels: [enhancement]
+labels: [C-feature-request]
 body:
   - type: textarea
     id: problem

@@ -1,0 +1,26 @@
+name: labels
+
+# Makes the repository's labels match .github/labels.yml.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/labels.yml
+      - .github/workflows/labels.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    permissions:
+      contents: read
+      issues: write # to create, edit and delete labels
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'respanai'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crazy-max/ghaction-github-labeler@v6
+        with:
+          yaml-file: .github/labels.yml

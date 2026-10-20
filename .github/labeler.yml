@@ -1,0 +1,98 @@
+# The A-* and M-* labels of a pull request, by the paths it changes, for
+# `.github/workflows/labeler.yml` (actions/labeler). The labels themselves
+# are `.github/labels.yml`'s.
+
+A-core:
+- changed-files:
+  - any-glob-to-any-file: crates/core/**
+A-kinds:
+- changed-files:
+  - any-glob-to-any-file: crates/kinds/**
+A-wires:
+- changed-files:
+  - any-glob-to-any-file: crates/wires/**
+A-formats:
+- changed-files:
+  - any-glob-to-any-file: crates/formats/**
+A-vendors:
+- changed-files:
+  - any-glob-to-any-file: crates/vendors/**
+A-tool-vendors:
+- changed-files:
+  - any-glob-to-any-file: crates/tool-vendors/**
+A-plugins:
+- changed-files:
+  - any-glob-to-any-file: crates/plugins/**
+A-sdk:
+- changed-files:
+  - any-glob-to-any-file: crates/sdk/**
+A-serve:
+- changed-files:
+  - any-glob-to-any-file: crates/serve/**
+A-gateway:
+- changed-files:
+  - any-glob-to-any-file: apps/gateway/**
+A-ui:
+- changed-files:
+  - any-glob-to-any-file: apps/ui/**
+A-python:
+- changed-files:
+  - any-glob-to-any-file: python/**
+A-examples:
+- changed-files:
+  - any-glob-to-any-file: examples/**
+A-ci:
+- changed-files:
+  - any-glob-to-any-file:
+    - .github/**
+    - justfile
+    - deny.toml
+    - install.sh
+    - install.ps1
+A-readme:
+- changed-files:
+  - any-glob-to-any-file:
+    - docs/**
+    - '*.md'
+
+M-conversation:
+- changed-files:
+  - any-glob-to-any-file:
+    - crates/kinds/conversation/**
+    - crates/formats/conversation-http/**
+M-media:
+- changed-files:
+  - any-glob-to-any-file:
+    - crates/kinds/media/**
+    - crates/formats/media-http/**
+M-decision:
+- changed-files:
+  - any-glob-to-any-file:
+    - crates/kinds/decision/**
+    - crates/formats/decision-http/**
+M-mcp:
+- changed-files:
+  - any-glob-to-any-file:
+    - crates/kinds/mcp/**
+    - crates/formats/mcp-http/**
+    - crates/plugins/mcp-router/**
+M-realtime:
+- changed-files:
+  - any-glob-to-any-file:
+    - crates/kinds/realtime/**
+    - crates/formats/realtime-ws/**
+M-passthrough:
+- changed-files:
+  - any-glob-to-any-file: crates/formats/passthrough-http/**
+M-http:
+- changed-files:
+  - any-glob-to-any-file:
+    - crates/wires/http/**
+    - crates/wires/http-faults/**
+    - crates/wires/http-transport/**
+M-sse:
+- changed-files:
+  - any-glob-to-any-file: crates/wires/sse/**
+M-ws:
+- changed-files:
+  - any-glob-to-any-file: crates/wires/ws/**
