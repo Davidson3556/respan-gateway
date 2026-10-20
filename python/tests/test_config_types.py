@@ -80,7 +80,6 @@ def test_a_full_typed_config_parses() -> None:
             "request_log": {"history": 500},
             "responses": {"enabled": True, "keep": "30m"},
             "respan": {"key": "fake", "url": "http://127.0.0.1:9/v1/traces", "content": False, "service": "test"},
-            "mcp_aggregate": {"servers": ["remote", "local"], "allow": ["remote__*"], "deny": ["remote__x"]},
             "tool_loop": {
                 "servers": ["remote", "local"],
                 "allow": ["remote__*"],

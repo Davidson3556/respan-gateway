@@ -13,7 +13,6 @@ use serde::{Deserialize, Deserializer};
 use crate::Error;
 use crate::logging::LogFormat;
 use crate::mcp::McpConfig;
-use crate::mcp_aggregate::AggregateConfig;
 use crate::vendors;
 pub use respan_gateway_sdk::{Model, Price};
 
@@ -361,9 +360,6 @@ pub struct PluginsConfig {
     pub responses: ResponsesConfig,
     /// Send each request to Respan as a trace; off if unset.
     pub respan: Option<RespanConfig>,
-    /// One MCP endpoint, `/mcp`, that fronts the tool servers as a single
-    /// server (tools and prompts as `{server}__{name}`); off if unset.
-    pub mcp_aggregate: Option<AggregateConfig>,
     /// The request history the web UI and admin API read; always on.
     #[serde(default)]
     pub request_log: RequestLogConfig,
@@ -707,14 +703,9 @@ impl Config {
             .filter(|v| v.key_from_env().is_some() && !providers.contains_key(v.id))
             .map(|v| (v.id.to_owned(), McpConfig::tool_vendor(v.id)))
             .collect();
-        let mut plugins = PluginsConfig::default();
-        if !tools.is_empty() {
-            plugins.mcp_aggregate = Some(AggregateConfig::default());
-        }
         Ok(Config {
             providers,
             tools,
-            plugins,
             source: Source::Environment,
             ..Config::default()
         })

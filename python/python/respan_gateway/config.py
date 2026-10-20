@@ -40,14 +40,6 @@ class OAuthConfig(TypedDict, total=False):
     refresh_token: str  # literal or "env:NAME"; the refresh token grant, else client credentials
 
 
-class McpAggregateConfig(TypedDict, total=False):
-    """One MCP endpoint, /mcp, that fronts the `mcp` servers as a single server."""
-
-    servers: List[str]  # the tool servers fronted; all but auth "forward" ones if unset
-    allow: List[str]  # tool names "server__tool", "*" for any characters; all if unset
-    deny: List[str]  # never offered; wins over `allow`
-
-
 class McpAuth(TypedDict, total=False):
     """How the gateway authenticates to an HTTP MCP server: one of the keys.
 
@@ -168,7 +160,6 @@ class PluginsConfig(TypedDict, total=False):
     tool_loop: ToolLoopConfig
     responses: ResponsesConfig
     respan: RespanConfig
-    mcp_aggregate: McpAggregateConfig
     request_log: RequestLogConfig
 
 

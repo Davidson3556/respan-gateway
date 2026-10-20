@@ -61,6 +61,32 @@ impl Api {
         }
     }
 
+    /// Its key, as configured, for a vendor whose tools send it themselves
+    /// ([`KeyIn::Manual`]) or need parts of it.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// A `method` request to `path` (as [`url`](Self::url) resolves it),
+    /// carrying the key as the vendor takes it. Send it with
+    /// [`json`](Self::json), [`text`](Self::text) or [`bytes`](Self::bytes).
+    pub fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let request = self.client.request(method, self.url(path));
+        match self.key_in {
+            KeyIn::Bearer => request.bearer_auth(&self.key),
+            KeyIn::Header(name) => request.header(name, &self.key),
+            KeyIn::Scheme(scheme) => request.header(
+                reqwest::header::AUTHORIZATION,
+                format!("{scheme} {}", self.key),
+            ),
+            KeyIn::Basic => match self.key.split_once(':') {
+                Some((user, password)) => request.basic_auth(user, Some(password)),
+                None => request.basic_auth(&self.key, None::<&str>),
+            },
+            KeyIn::Manual => request,
+        }
+    }
+
     /// `POST` `body` as JSON to `path` and read the answer as JSON. A failed
     /// request or an answer other than 2xx is a [`ToolError`] saying why.
     pub async fn post_json(
@@ -68,7 +94,8 @@ impl Api {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, ToolError> {
-        self.send(self.client.post(self.url(path)).json(body)).await
+        self.json(self.request(reqwest::Method::POST, path).json(body))
+            .await
     }
 
     /// `GET` `path` with `query` and read the answer as JSON, failing as
@@ -78,23 +105,54 @@ impl Api {
         path: &str,
         query: &[(&str, String)],
     ) -> Result<serde_json::Value, ToolError> {
-        self.send(self.client.get(self.url(path)).query(query))
+        self.json(self.request(reqwest::Method::GET, path).query(query))
             .await
     }
 
-    /// Send `request` with the key and read its answer as JSON.
-    async fn send(&self, request: reqwest::RequestBuilder) -> Result<serde_json::Value, ToolError> {
-        let request = match self.key_in {
-            KeyIn::Bearer => request.bearer_auth(&self.key),
-            KeyIn::Header(name) => request.header(name, &self.key),
-        };
+    /// Send `request` and read its answer as JSON; an empty answer, such as
+    /// a `204`'s, is `null`. Fails as [`post_json`](Self::post_json) does.
+    pub async fn json(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<serde_json::Value, ToolError> {
+        let text = self.text(request).await?;
+        if text.trim().is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_str(&text).map_err(|e| {
+            ToolError(format!(
+                "the API answered with no JSON ({e}): {}",
+                quote(&text)
+            ))
+        })
+    }
+
+    /// Send `request` and read its answer as text, failing as
+    /// [`post_json`](Self::post_json) does.
+    pub async fn text(&self, request: reqwest::RequestBuilder) -> Result<String, ToolError> {
+        let (_, bytes) = self.bytes(request).await?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Send `request` and read its answer's media type and bytes, failing
+    /// as [`post_json`](Self::post_json) does.
+    pub async fn bytes(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<(String, Vec<u8>), ToolError> {
         // Its errors, without their URL, name no header, so not the key.
         let resp = request
             .send()
             .await
             .map_err(|e| ToolError(format!("the API could not be reached: {}", e.without_url())))?;
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| {
+        let mime = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let bytes = resp.bytes().await.map_err(|e| {
             ToolError(format!(
                 "the API's answer could not be read: {}",
                 e.without_url()
@@ -103,15 +161,10 @@ impl Api {
         if !status.is_success() {
             return Err(ToolError(format!(
                 "the API answered {status}: {}",
-                quote(&text)
+                quote(&String::from_utf8_lossy(&bytes))
             )));
         }
-        serde_json::from_str(&text).map_err(|e| {
-            ToolError(format!(
-                "the API answered with no JSON ({e}): {}",
-                quote(&text)
-            ))
-        })
+        Ok((mime, bytes.to_vec()))
     }
 }
 

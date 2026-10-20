@@ -9,7 +9,7 @@ use respan_gateway_http::{Body, Sent};
 use respan_gateway_mcp::RpcCode;
 use serde_json::{Value, json};
 
-use crate::{Api, ToolVendor};
+use crate::{Api, Content, ToolVendor};
 
 /// JSON-RPC's code for a body that is no JSON-RPC.
 const PARSE_ERROR: i64 = -32700;
@@ -151,8 +151,8 @@ impl ToolServer {
         json!({ "tools": tools })
     }
 
-    /// `tools/call`'s result: the tool's text, or its failure as an error
-    /// result the model reads.
+    /// `tools/call`'s result: the tool's output, or its failure as an
+    /// error result the model reads.
     async fn call(&self, params: Value) -> Result<Value, (i64, String)> {
         let name = params
             .get("name")
@@ -165,16 +165,17 @@ impl ToolServer {
             Some(Value::Null) | None => json!({}),
             Some(arguments) => arguments.clone(),
         };
-        let (text, failed) = match self
+        let (output, failed) = match self
             .vendor
             .tools
             .call(&self.api, tool.name, arguments)
             .await
         {
-            Ok(text) => (text, false),
-            Err(e) => (e.0, true),
+            Ok(output) => (output, false),
+            Err(e) => (e.0.into(), true),
         };
-        Ok(json!({"content": [{"type": "text", "text": text}], "isError": failed}))
+        let content: Vec<Value> = output.0.iter().map(Content::to_json).collect();
+        Ok(json!({"content": content, "isError": failed}))
     }
 }
 
@@ -193,7 +194,7 @@ fn empty(status: StatusCode) -> http::Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{KeyIn, ToolError, ToolSpec, Tools};
+    use crate::{KeyIn, ToolError, ToolOutput, ToolSpec, Tools};
     use async_trait::async_trait;
 
     struct Echo;
@@ -215,9 +216,14 @@ mod tests {
             ]
         }
 
-        async fn call(&self, _: &Api, name: &str, arguments: Value) -> Result<String, ToolError> {
+        async fn call(
+            &self,
+            _: &Api,
+            name: &str,
+            arguments: Value,
+        ) -> Result<ToolOutput, ToolError> {
             match name {
-                "echo" => Ok(arguments["text"].as_str().unwrap_or_default().to_owned()),
+                "echo" => Ok(arguments["text"].as_str().unwrap_or_default().into()),
                 _ => Err(ToolError::new("it broke")),
             }
         }

@@ -9,9 +9,12 @@
 
 mod api;
 pub mod args;
+mod output;
 mod server;
 
 pub use api::{Api, ToolError};
+pub use output::{Content, ToolOutput, decode_base64};
+pub use reqwest;
 pub use server::ToolServer;
 
 use async_trait::async_trait;
@@ -24,6 +27,13 @@ pub enum KeyIn {
     Bearer,
     /// The key as the value of this header.
     Header(&'static str),
+    /// `Authorization: <scheme> <key>`, such as Zep's `Api-Key`.
+    Scheme(&'static str),
+    /// `Authorization: Basic`, the key being `user:password`.
+    Basic,
+    /// Not sent by [`Api`]: the vendor's tools send it themselves, from
+    /// [`Api::key`], as for a key that also says where the API is.
+    Manual,
 }
 
 /// A tool vendor: an HTTP API's tools, its key and its base URL.
@@ -80,8 +90,9 @@ pub trait Tools: Send + Sync + 'static {
     /// Every tool.
     fn list(&self) -> &'static [ToolSpec];
 
-    /// Call the tool `name` with `arguments` through `api`. The text is the
-    /// tool's result for the model; an [`ToolError`] is a result too, one
-    /// the model is told failed.
-    async fn call(&self, api: &Api, name: &str, arguments: Value) -> Result<String, ToolError>;
+    /// Call the tool `name` with `arguments` through `api`. The output is
+    /// the tool's result for the model, text or media (a `String` is
+    /// `.into()` one); a [`ToolError`] is a result too, one the model is
+    /// told failed.
+    async fn call(&self, api: &Api, name: &str, arguments: Value) -> Result<ToolOutput, ToolError>;
 }

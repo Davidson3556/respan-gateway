@@ -44,7 +44,6 @@ respan-gateway-plugin-routing = { path = "crates/plugins/routing", version = "0.
 respan-gateway-plugin-fallback = { path = "crates/plugins/fallback", version = "0.1.0" }
 respan-gateway-plugin-tool-loop = { path = "crates/plugins/tool-loop", version = "0.1.0" }
 respan-gateway-plugin-respan = { path = "crates/plugins/respan", version = "0.1.0" }
-respan-gateway-plugin-mcp-aggregate = { path = "crates/plugins/mcp-aggregate", version = "0.1.0" }
 respan-gateway-plugin-pricing = { path = "crates/plugins/pricing", version = "0.1.0" }
 respan-gateway-plugin-responses = { path = "crates/plugins/responses", version = "0.1.0" }
 respan-gateway-mcp = { path = "crates/kinds/mcp", version = "0.1.0" }

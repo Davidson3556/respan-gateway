@@ -14,10 +14,10 @@ use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_media::video::{LocateContent, VideoJobs};
 use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_plugin_credentials::ClientCredentials;
-use respan_gateway_plugin_mcp_aggregate::{Aggregate, Closer as AggregateCloser};
-use respan_gateway_plugin_mcp_router::McpRouter;
+use respan_gateway_plugin_mcp_router::{Closer as McpCloser, McpRouter};
 use respan_gateway_plugin_relay::Relay;
 use respan_gateway_plugin_routing::{Dispatch, Routing};
+use respan_gateway_plugin_tool_loop::ToolFilter;
 use respan_gateway_ws::Limits;
 use tokio::sync::watch;
 
@@ -27,7 +27,6 @@ use crate::auth::{self, ClientKeys, Cors, LocalOnly};
 use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{KnownFormat, formats, kind};
 use crate::mcp;
-use crate::mcp_aggregate;
 use crate::models::{self, Models};
 use crate::requests::{self, Recorder};
 use crate::tool_loop;
@@ -44,8 +43,8 @@ pub(super) struct Built {
     pub(super) local: Option<Arc<LocalOnly>>,
     /// Ends the tool loop's sessions with its tool servers.
     pub(super) closer: Option<tool_loop::Closer>,
-    /// Ends the aggregate's sessions with its servers.
-    pub(super) aggregate: Option<AggregateCloser>,
+    /// Ends the sessions at `/mcp` with its servers.
+    pub(super) aggregate: Option<McpCloser>,
     /// Becomes `true` once its providers' first listings are in; none if it
     /// reads no lists.
     pub(super) listed: Option<tokio::sync::watch::Receiver<bool>>,
@@ -64,17 +63,11 @@ impl Built {
         let providers: Vec<&str> = config.providers.keys().map(String::as_str).collect();
         let logins = crate::mcp_oauth::logins_dir(config.source());
         let mcp = mcp::servers(&config.tools, &providers, &logins)?;
+        let fronted = mcp::fronted(&mcp);
         if !mcp.is_empty() {
-            formats.push(mcp::known(
-                mcp.clone(),
-                config.plugins.mcp_aggregate.is_some(),
-                limit,
-            ));
+            formats.push(mcp::known(mcp.clone(), !fronted.is_empty(), limit));
         }
-        let aggregate = match &config.plugins.mcp_aggregate {
-            Some(a) => Some(mcp_aggregate::check(a, &mcp)?),
-            None => None,
-        };
+        let aggregate = (!fronted.is_empty()).then_some(fronted);
         let (gateway, mut plan) = compose(&config, &formats, limit, sessions)?;
         plan.mcp = mcp;
         if let Some(tool_loop) = &config.plugins.tool_loop {
@@ -197,8 +190,8 @@ fn routing(plan: &Plan, formats: &[KnownFormat]) -> Routing {
 }
 
 /// The gateway with the binary's plugins, and what ends the sessions of the
-/// tool loop and of the aggregate.
-type Plugins = (Gateway, Option<tool_loop::Closer>, Option<AggregateCloser>);
+/// tool loop and of `/mcp`.
+type Plugins = (Gateway, Option<tool_loop::Closer>, Option<McpCloser>);
 
 /// The gateway with the binary's plugins, in a fixed order whatever the
 /// config's: the request log, routing, MCP, video jobs, whose credentials go
@@ -243,26 +236,20 @@ fn with_plugins(
         Some((_, closer)) => gateway.plugin(closer.plugin()),
         None => gateway,
     };
-    let aggregate = match (&config.plugins.mcp_aggregate, aggregate) {
-        (Some(config), Some(servers)) => {
-            Some(mcp_aggregate::aggregate(config, servers, switches.clone()))
-        }
-        _ => None,
-    };
-    let aggregate_closer = aggregate.as_ref().map(Aggregate::closer);
+    // `/mcp` answers itself for the servers it fronts; `/mcp/{name}` is
+    // routed to its server.
+    let fronts = aggregate.is_some();
+    let fronted = aggregate.unwrap_or_default();
+    let mcp_router = McpRouter::with_switches(fronted, ToolFilter::default(), switches.clone());
+    let aggregate_closer = fronts.then(|| mcp_router.closer());
     let gateway = match &aggregate_closer {
         Some(closer) => gateway.plugin(closer.plugin()),
         None => gateway,
     };
     let gateway = gateway
         .plugin(Recorder::new(log.clone(), formats, names.clone()))
-        .plugin(routing(plan, formats));
-    // `/mcp` answers itself; `/mcp/{name}` is routed to its server.
-    let gateway = match aggregate {
-        Some(aggregate) => gateway.plugin(aggregate),
-        None => gateway,
-    };
-    let gateway = gateway.plugin(McpRouter::with_switches(switches.clone()));
+        .plugin(routing(plan, formats))
+        .plugin(mcp_router);
     let gateway = gateway.plugin(video_jobs(plan, formats)).plugin(locate);
     // A provider without a key of its own gets the client's.
     let keyless = plan.upstreams.iter().filter(|u| !u.own_key);

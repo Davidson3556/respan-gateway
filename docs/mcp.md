@@ -55,15 +55,18 @@ loop. [Tool vendors](tool-vendors.md) lists them,
 their tiers and their tools.
 
 Without a `gateway.toml`, each tool vendor whose key is in the environment
-(`LINKUP_API_KEY`, `TINYFISH_API_KEY`) is a server named after it, and `/mcp`
-serves them all. The tool loop stays off until you configure it.
+(such as `TAVILY_API_KEY`) is a server named after it, served at `/mcp` with
+the others. The tool loop stays off until you configure it.
 
 ## One endpoint for all servers
 
-`[plugins.mcp_aggregate]` serves `/mcp`, which merges every server into one,
-with tools named `{server}__{tool}` and optional `allow`/`deny` globs. A
-client key limited to certain `tools` reaches MCP servers only through it
-(see [client keys](configuration.md#client-keys)).
+`/mcp` merges every tool server into one, with tools named
+`{server}__{tool}`. It is always served when there are tool servers, and
+fronts all of them but those with `auth = "forward"`, whose sessions would
+need a client's own credentials. A client key limited to certain `tools`
+reaches tool servers only through it
+(see [client keys](configuration.md#client-keys)), and a tool turned off
+(below) is not offered.
 
 ## Tool loop
 
@@ -73,7 +76,7 @@ in realtime sessions too. The client sees one ordinary reply.
 
 ```toml
 [plugins.tool_loop]
-servers = ["github"]                    # Default: every server /mcp would front
+servers = ["github"]                    # Default: every server /mcp fronts
 allow = ["github__search_*"]            # Offer only what you would let any client do
 max_steps = 8
 ```

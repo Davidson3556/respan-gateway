@@ -1,4 +1,4 @@
-//! The aggregate's state: its sessions with clients, and each of theirs
+//! The state of `/mcp`: its sessions with clients, and each of theirs
 //! with a server, and what ends them when a reload retires the build.
 
 use std::collections::HashMap;
@@ -67,11 +67,11 @@ impl Session {
     }
 }
 
-/// Marks the request that ends a retired aggregate's sessions.
+/// Marks the request that ends a retired router's sessions at `/mcp`.
 #[derive(Debug, Clone, Copy)]
 struct Close;
 
-/// Ends the sessions the aggregate kept, with clients and with servers.
+/// Ends the sessions `/mcp` kept, with clients and with servers.
 #[derive(Clone)]
 pub struct Closer(pub(super) Arc<Inner>);
 
@@ -88,7 +88,7 @@ impl Closer {
         Closing(self.0.clone())
     }
 
-    /// Ends every session, through `gateway`: the one the aggregate was built
+    /// Ends every session, through `gateway`: the one the router was built
     /// into, once its requests are done. A session that does not end is the
     /// server's to time out.
     pub async fn close(&self, gateway: &Gateway) {

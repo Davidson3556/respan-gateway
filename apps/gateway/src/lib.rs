@@ -28,7 +28,6 @@ mod history;
 mod init;
 mod logging;
 mod mcp;
-mod mcp_aggregate;
 mod mcp_login;
 mod mcp_oauth;
 mod mcp_tools;
@@ -50,7 +49,6 @@ pub use config::{
 pub use init::starter_config;
 pub use logging::LogFormat;
 pub use mcp::McpConfig;
-pub use mcp_aggregate::AggregateConfig;
 pub use mcp_oauth::OAuthConfig;
 
 /// This binary's version, the workspace's.

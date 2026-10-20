@@ -484,7 +484,7 @@ fn clients(entries: &[ClientKey]) -> Result<Vec<Client>, Fault> {
         let tools = entry.tools().map(<[String]>::to_vec);
         if let Some(tools) = &tools {
             let owner = format!("client_keys: '{name}': tools");
-            crate::mcp_aggregate::check_patterns(&owner, tools).map_err(Fault::config)?;
+            crate::mcp::check_patterns(&owner, tools).map_err(Fault::config)?;
         }
         clients.push(Client {
             name,

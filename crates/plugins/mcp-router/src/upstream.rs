@@ -1,4 +1,4 @@
-//! A request's dealings with the servers behind the aggregate: lists
+//! A request's dealings with the servers behind `/mcp`: lists
 //! merged, calls routed, and the sessions opened and used.
 
 use std::sync::Arc;
@@ -213,7 +213,7 @@ impl Run {
         let slot = session
             .upstream
             .get(server)
-            .ok_or_else(|| Fault::internal(format!("no aggregate server '{server}'")))?;
+            .ok_or_else(|| Fault::internal(format!("no server '{server}' behind /mcp")))?;
         let mut slot = slot.lock().await;
         if let Some(opened) = &*slot {
             return Ok(opened.clone());

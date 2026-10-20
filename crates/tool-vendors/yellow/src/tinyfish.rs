@@ -10,7 +10,9 @@ use respan_gateway_tool_vendor_kit::args::{
     object, optional_bool, optional_date, optional_enum, optional_int, optional_str,
     optional_str_list, pretty, required_str,
 };
-use respan_gateway_tool_vendor_kit::{Api, KeyIn, ToolError, ToolSpec, ToolVendor, Tools};
+use respan_gateway_tool_vendor_kit::{
+    Api, KeyIn, ToolError, ToolOutput, ToolSpec, ToolVendor, Tools,
+};
 use serde_json::{Map, Value, json};
 
 /// TinyFish.
@@ -96,22 +98,22 @@ impl Tools for TinyFishTools {
         TOOLS
     }
 
-    async fn call(&self, api: &Api, name: &str, arguments: Value) -> Result<String, ToolError> {
+    async fn call(&self, api: &Api, name: &str, arguments: Value) -> Result<ToolOutput, ToolError> {
         let args = object(&arguments)?;
         match name {
             "search" => {
                 let query = search_query(args)?;
                 let query: Vec<(&str, String)> =
                     query.iter().map(|(k, v)| (*k, v.clone())).collect();
-                Ok(render_search(&api.get_json(SEARCH_URL, &query).await?))
+                Ok(render_search(&api.get_json(SEARCH_URL, &query).await?).into())
             }
             "fetch" => {
                 let body = fetch_body(args)?;
-                Ok(render_fetch(&api.post_json(FETCH_URL, &body).await?))
+                Ok(render_fetch(&api.post_json(FETCH_URL, &body).await?).into())
             }
             "run_agent" => {
                 let body = run_body(args)?;
-                render_run(&api.post_json("/v1/automation/run", &body).await?)
+                render_run(&api.post_json("/v1/automation/run", &body).await?).map(Into::into)
             }
             _ => Err(ToolError::new(format!("no tool named {name:?}"))),
         }

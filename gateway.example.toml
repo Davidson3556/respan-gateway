@@ -90,9 +90,10 @@ to = "anthropic/{model}"
 
 
 # ─── Tools ───────────────────────────────────────────────────────────
-# Each tool server is served over MCP at /mcp/{name}.
+# Each tool server is served over MCP at /mcp/{name}, and all of them
+# together at /mcp, their tools named server__tool.
 
-# A tool vendor: an HTTP API served as MCP tools (linkup, tinyfish).
+# A tool vendor: an HTTP API served as MCP tools (see docs/tool-vendors.md).
 [tools.search]
 vendor = "linkup"
 key    = "env:LINKUP_API_KEY"
@@ -110,10 +111,6 @@ args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 # [tools.web]
 # vendor = "tinyfish"
 # key    = "env:TINYFISH_API_KEY"
-
-# Every server at /mcp, tools named server__tool.
-[plugins.mcp_aggregate]
-deny = ["files__write*", "files__move*"]
 
 # Any chat model, any client, can use the tools: the gateway runs the calls.
 [plugins.tool_loop]

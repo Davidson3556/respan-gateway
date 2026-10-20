@@ -1,4 +1,4 @@
-//! What the aggregate puts on what it passes: the names and URIs a client
+//! What `/mcp` puts on what it passes: the names and URIs a client
 //! sees, the routing by them, and the answers it builds.
 
 use respan_gateway_mcp::{Message, Outcome, Output, RpcError};
@@ -212,13 +212,13 @@ mod tests {
         use respan_gateway_plugin_tool_loop::{ToolFilter, ToolSwitches};
         use std::sync::Arc;
         let switches = Arc::new(ToolSwitches::default());
-        let aggregate = crate::Aggregate::with_switches(
+        let router = crate::McpRouter::with_switches(
             names(&["gh"]),
             ToolFilter::default(),
             switches.clone(),
         );
         let run = Run {
-            inner: aggregate.0.clone(),
+            inner: router.0.clone(),
             calls: Arc::default(),
             scope: None,
         };

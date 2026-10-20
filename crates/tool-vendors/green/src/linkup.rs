@@ -7,7 +7,9 @@ use respan_gateway_tool_vendor_kit::args::{
     object, optional_bool, optional_date, optional_enum, optional_int, optional_str_list, pretty,
     required_str,
 };
-use respan_gateway_tool_vendor_kit::{Api, KeyIn, ToolError, ToolSpec, ToolVendor, Tools};
+use respan_gateway_tool_vendor_kit::{
+    Api, KeyIn, ToolError, ToolOutput, ToolSpec, ToolVendor, Tools,
+};
 use serde_json::{Map, Value, json};
 
 /// Linkup.
@@ -89,20 +91,20 @@ impl Tools for LinkupTools {
         TOOLS
     }
 
-    async fn call(&self, api: &Api, name: &str, arguments: Value) -> Result<String, ToolError> {
+    async fn call(&self, api: &Api, name: &str, arguments: Value) -> Result<ToolOutput, ToolError> {
         let args = object(&arguments)?;
         match name {
             "search" => {
                 let body = search_body(args, "searchResults")?;
-                Ok(render_search(&api.post_json("search", &body).await?))
+                Ok(render_search(&api.post_json("search", &body).await?).into())
             }
             "answer" => {
                 let body = search_body(args, "sourcedAnswer")?;
-                Ok(render_answer(&api.post_json("search", &body).await?))
+                Ok(render_answer(&api.post_json("search", &body).await?).into())
             }
             "fetch" => {
                 let body = fetch_body(args)?;
-                Ok(render_fetch(&api.post_json("fetch", &body).await?))
+                Ok(render_fetch(&api.post_json("fetch", &body).await?).into())
             }
             _ => Err(ToolError::new(format!("no tool named {name:?}"))),
         }

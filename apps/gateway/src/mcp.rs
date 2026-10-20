@@ -323,6 +323,29 @@ pub fn servers(
         .collect()
 }
 
+/// The servers `/mcp` fronts, in their config order: all but those that
+/// pass on a client's credentials (`auth = "forward"`), as its sessions are
+/// the gateway's own. None turns `/mcp` off.
+pub fn fronted(servers: &[McpServer]) -> Vec<String> {
+    (servers.iter().filter(|s| !s.forward_auth))
+        .map(|s| s.name.clone())
+        .collect()
+}
+
+/// Patterns of tool names as `/mcp` has them, `{server}__{name}`, with `*`
+/// for any characters: none empty or with a space.
+pub fn check_patterns(key: &str, patterns: &[String]) -> Result<(), String> {
+    match patterns
+        .iter()
+        .any(|p| p.is_empty() || p.contains(char::is_whitespace))
+    {
+        true => Err(format!(
+            "{key}: a pattern is a tool name, with `*` for any characters"
+        )),
+        false => Ok(()),
+    }
+}
+
 fn server(name: &str, c: &McpConfig, logins: &std::path::Path) -> Result<McpServer, Fault> {
     if let Some(id) = &c.vendor {
         return vendor_server(name, c, id);
@@ -967,7 +990,8 @@ mod tests {
             _: &respan_gateway_tool_vendors::Api,
             name: &str,
             _: serde_json::Value,
-        ) -> Result<String, respan_gateway_tool_vendors::ToolError> {
+        ) -> Result<respan_gateway_tool_vendors::ToolOutput, respan_gateway_tool_vendors::ToolError>
+        {
             Err(respan_gateway_tool_vendors::ToolError::new(format!(
                 "no tool {name}"
             )))

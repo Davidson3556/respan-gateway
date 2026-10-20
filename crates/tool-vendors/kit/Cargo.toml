@@ -15,9 +15,10 @@ respan-gateway-core.workspace = true
 respan-gateway-http.workspace = true
 respan-gateway-mcp.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 bytes.workspace = true
 http.workspace = true
-reqwest = { workspace = true, features = ["json", "query"] }
+reqwest = { workspace = true, features = ["json", "query", "multipart"] }
 serde_json.workspace = true
 
 [dev-dependencies]

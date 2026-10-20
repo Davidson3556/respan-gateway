@@ -21,24 +21,108 @@ are:
 - 🟢 **Green**: maintained, and verified end to end against the vendor's
   live API.
 - 🟡 **Yellow**: maintained, but not yet verified end to end against the
-  vendor's live API. A yellow vendor becomes green once it is.
+  vendor's live API. A yellow vendor becomes green once it is: once each
+  of its tools passes the live check in
+  [`crates/tool-vendors`](../crates/tool-vendors/README.md).
 
 ## 🟢 Green
 
-None yet.
+| | Vendor | For | `vendor` | Key | Tools |
+|:-:|---|---|---|---|---|
+| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tool-vendors/linkup-dark.svg"><img src="assets/tool-vendors/linkup.svg" width="20" height="20" alt=""></picture> | [Linkup](https://linkup.so) | Search | `linkup` | `LINKUP_API_KEY` | `search`, `answer`, `fetch` |
 
 ## 🟡 Yellow
 
-| | Vendor | `vendor` | Key | Tools |
-|:-:|---|---|---|---|
-| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tool-vendors/linkup-dark.svg"><img src="assets/tool-vendors/linkup.svg" width="20" height="20" alt=""></picture> | [Linkup](https://linkup.so) | `linkup` | `LINKUP_API_KEY` | `search`, `answer`, `fetch` |
-| <img src="assets/tool-vendors/tinyfish.png" width="20" height="20" alt=""> | [TinyFish](https://tinyfish.ai) | `tinyfish` | `TINYFISH_API_KEY` | `search`, `fetch`, `run_agent` |
+| | Vendor | For | `vendor` | Key | Tools |
+|:-:|---|---|---|---|---|
+| <img src="assets/tool-vendors/apify.svg" width="20" height="20" alt=""> | [Apify](https://apify.com) | Web scraping | `apify` | `APIFY_TOKEN` or `APIFY_API_TOKEN` | `search_actors`, `run_actor`, `get_run_items`, `browse_web` |
+| <img src="assets/tool-vendors/browserbase.svg" width="20" height="20" alt=""> | [Browserbase](https://browserbase.com) | Browser automation | `browserbase` | `BROWSERBASE_API_KEY` | `search`, `fetch`, `run_agent`, `get_agent_run`, `stop_agent_run`, `live_view` |
+| <img src="assets/tool-vendors/cloudinary.svg" width="20" height="20" alt=""> | [Cloudinary](https://cloudinary.com) | Image and video | `cloudinary` | `CLOUDINARY_URL` | `upload`, `search`, `get_asset`, `delivery_url`, `delete_asset` |
+| <img src="assets/tool-vendors/context7.svg" width="20" height="20" alt=""> | [Context7](https://context7.com) | Coding docs | `context7` | `CONTEXT7_API_KEY` | `resolve_library_id`, `query_docs`, `search_docs` |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tool-vendors/daytona-dark.png"><img src="assets/tool-vendors/daytona.png" width="20" height="20" alt=""></picture> | [Daytona](https://daytona.io) | Code sandbox | `daytona` | `DAYTONA_API_KEY` | `create_sandbox`, `list_sandboxes`, `delete_sandbox`, `run_command`, `run_code`, `write_file` |
+| <img src="assets/tool-vendors/e2b.png" width="20" height="20" alt=""> | [E2B](https://e2b.dev) | Code execution | `e2b` | `E2B_API_KEY` | `run_code`, `list_sandboxes`, `kill_sandbox` |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tool-vendors/elevenlabs-dark.svg"><img src="assets/tool-vendors/elevenlabs.svg" width="20" height="20" alt=""></picture> | [ElevenLabs](https://elevenlabs.io) | Voice | `elevenlabs` | `ELEVENLABS_API_KEY` | `text_to_speech`, `search_voices`, `speech_to_text`, `sound_effect` |
+| <img src="assets/tool-vendors/reducto.svg" width="20" height="20" alt=""> | [Reducto](https://reducto.ai) | Document parsing | `reducto` | `REDUCTO_API_KEY` | `parse_document`, `extract_fields`, `split_document` |
+| <img src="assets/tool-vendors/tavily.svg" width="20" height="20" alt=""> | [Tavily](https://tavily.com) | Search | `tavily` | `TAVILY_API_KEY` | `search`, `extract`, `crawl`, `map_site` |
+| <img src="assets/tool-vendors/tinyfish.png" width="20" height="20" alt=""> | [TinyFish](https://tinyfish.ai) | Search and browser agent | `tinyfish` | `TINYFISH_API_KEY` | `search`, `fetch`, `run_agent` |
+| <img src="assets/tool-vendors/zep.png" width="20" height="20" alt=""> | [Zep](https://getzep.com) | Memory | `zep` | `ZEP_API_KEY` | `search`, `get_graph_context`, `get_thread_context`, `add_messages`, `add_data` |
 
 These tables are kept by hand: a vendor added to `ALL` in
 [`crates/tool-vendors`](../crates/tool-vendors/README.md), or a tool added
 to a vendor, is a row or an entry here too.
 
 ## Their tools
+
+**Apify**, at `https://api.apify.com/v2`, its key a bearer token:
+
+- `search_actors` is `GET /store`: Actors (scrapers) to run, free.
+- `run_actor` is `POST /actors/{actor}/run-sync-get-dataset-items`: runs
+  one and waits up to 300 s for its items.
+- `get_run_items` reads a past run's items, by run or an Actor's last run.
+- `browse_web` runs the `apify~rag-web-browser` Actor: a search or a URL,
+  pages as markdown.
+
+Runs are billed: compute, plus the Actor's own price. Results are capped
+at about 40,000 characters, with the `offset` to read on from.
+
+**Browserbase**, at `https://api.browserbase.com/v1`, its key in
+`X-BB-API-Key`:
+
+- `search` is `POST /search`; `fetch` is `POST /fetch`, a page without a
+  browser, as markdown.
+- `run_agent` is `POST /agents/runs`: Browserbase's browser agent on a
+  task. It returns at once; `get_agent_run` reads it and its result,
+  `stop_agent_run` stops it.
+- `live_view` is `GET /sessions/{id}/debug`: URLs a person can watch the
+  agent's browser at.
+
+**Cloudinary**, at `https://api.cloudinary.com/v1_1`, its key Cloudinary's
+own `cloudinary://<api_key>:<api_secret>@<cloud_name>`, which names the
+cloud too:
+
+- `upload` uploads an image, video or file from a URL, creating an asset.
+- `search` is the Search API; `get_asset` an asset's details.
+- `delivery_url` builds a transformation URL, calling nothing.
+- `delete_asset` deletes an asset, for good.
+
+An EU or AP account sets `base_url` to `https://api-eu.cloudinary.com/v1_1`
+or `https://api-ap.cloudinary.com/v1_1`.
+
+**Context7**, at `https://context7.com/api`, its key a bearer token:
+
+- `resolve_library_id` is `GET /v2/libs/search`: a library's Context7 ID.
+- `query_docs` is `GET /v2/context`: a library's current docs for a
+  question, as markdown.
+- `search_docs` is `GET /v3/search`: the same across up to four libraries.
+
+**Daytona**, at `https://app.daytona.io/api`, its key a bearer token:
+
+- `create_sandbox`, `list_sandboxes` and `delete_sandbox` manage
+  sandboxes. A new one stops after 15 idle minutes and is deleted when it
+  stops, unless asked otherwise.
+- `run_command`, `run_code` and `write_file` work in one, through the
+  sandbox's toolbox. `run_code` returns charts as images.
+
+Sandboxes bill per second while they run.
+
+**E2B**, at `https://api.e2b.app`, its key in `X-API-Key`:
+
+- `run_code` runs Python, JavaScript, TypeScript, R, Java or Bash in a
+  code-interpreter sandbox, new or given, and returns its output, with
+  charts as images.
+- `list_sandboxes` and `kill_sandbox` manage them.
+
+A sandbox lives 180 s by default and bills per second; the key never goes
+to the sandbox's own host.
+
+**ElevenLabs**, at `https://api.elevenlabs.io`, its key in `xi-api-key`:
+
+- `text_to_speech` returns speech as audio, MP3 by default.
+- `search_voices` is `GET /v2/voices`, free.
+- `speech_to_text` transcribes audio at a URL, with speakers if asked.
+- `sound_effect` returns a generated sound as audio.
+
+Speech is billed per character, transcripts per second of audio.
 
 **Linkup**, at `https://api.linkup.so/v1`, its key a bearer token:
 
@@ -47,6 +131,24 @@ to a vendor, is a row or an entry here too.
 - `fetch` is `POST /fetch`, a page as markdown.
 
 Each call is billed; `depth: "deep"` costs more.
+
+**Reducto**, at `https://platform.reducto.ai`, its key a bearer token. Each
+tool takes a document URL, or the `jobid://` of an earlier parse:
+
+- `parse_document` is `POST /parse`: the document as markdown.
+- `extract_fields` is `POST /extract`: fields by a JSON Schema.
+- `split_document` is `POST /split`: the pages of each named section.
+
+Each is billed per page.
+
+**Tavily**, at `https://api.tavily.com`, its key a bearer token:
+
+- `search` is `POST /search`, with an answer if asked.
+- `extract` is `POST /extract`: up to 20 pages as markdown.
+- `crawl` is `POST /crawl` and `map_site` `POST /map`: a site's pages, or
+  only their URLs.
+
+Each is billed in credits; `advanced` depths cost more.
 
 **TinyFish**, its key in `X-API-Key`:
 
@@ -59,14 +161,24 @@ Each call is billed; `depth: "deep"` costs more.
 
 `base_url` moves only the agent's host.
 
-A tool's result is text for the model: results as compact JSON or
-markdown, URLs kept. Bad arguments, a failed request and a failed run are
-tool errors, told to the model as such.
+**Zep**, at `https://api.getzep.com/api/v4`, its key as
+`Authorization: Api-Key <key>`. Users, threads and graphs are the UUIDs
+Zep gives them, which the model must be given:
+
+- `search` searches a graph's facts, entities or episodes.
+- `get_graph_context` and `get_thread_context` return a context block.
+- `add_messages` and `add_data` add to memory, billed per 350 bytes.
+
+A tool's result is text for the model (results as compact JSON or
+markdown, URLs kept), with images or audio where the tool makes them. Bad
+arguments, a failed request and a failed run are tool errors, told to the
+model as such.
 
 How a tool vendor is built, and how to add one, is in
 [`crates/tool-vendors`](../crates/tool-vendors/README.md).
 
 ---
 
-Logos are each vendor's trademark, shown only to identify it, and are from
-the vendors' own sites.
+Logos are each vendor's trademark, shown only to identify it. Tavily's and
+ElevenLabs' are from [LobeHub Icons](https://github.com/lobehub/lobe-icons)
+(MIT); the others are from the vendors' own sites.

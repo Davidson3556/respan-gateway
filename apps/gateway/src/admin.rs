@@ -151,9 +151,7 @@ impl Admin {
                 let filter = ToolFilter::new(t.allow.clone(), t.deny.clone());
                 (crate::tool_loop::servers(t, &plan.mcp), filter)
             }),
-            aggregate: (config.plugins.mcp_aggregate.as_ref())
-                .zip(aggregate)
-                .map(|(a, servers)| (servers, ToolFilter::new(a.allow.clone(), a.deny.clone()))),
+            aggregate: aggregate.map(|servers| (servers, ToolFilter::default())),
             gateway,
             tools: moka::sync::Cache::builder()
                 .time_to_live(Duration::from_secs(60))

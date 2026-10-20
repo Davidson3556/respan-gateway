@@ -1119,9 +1119,9 @@ const routesTable = {
         const status = !stats.requests ? "idle" : stats.errors === stats.requests ? "failing" : "ok";
         return { name, transport, target, endpoint, credentials, auth, ...stats, status, enabled: !switchedOff.has(name) };
       }),
-      // As `plugins.tool_loop` and `plugins.mcp_aggregate` configure them.
+      // As `plugins.tool_loop` configures it, and /mcp fronts every server.
       tool_loop: { servers: ["github"] },
-      aggregate: { servers: ["github", "files"], endpoint: "/mcp" },
+      aggregate: { servers: mcpServers.map((s) => s.name), endpoint: "/mcp" },
     }),
   // Each server's tools, as asking it through the gateway lists them.
   ...Object.fromEntries(mcpServers.map((server) => [
