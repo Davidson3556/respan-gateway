@@ -28,6 +28,8 @@
 //! - [`elevenlabs`]: ElevenLabs's speech, voices, transcripts and sound
 //!   effects (`text_to_speech`, `search_voices`, `speech_to_text`,
 //!   `sound_effect`), its key from `ELEVENLABS_API_KEY`.
+//! - [`exa`]: Exa's web search and page contents (`search`, `get_contents`),
+//!   its key from `EXA_API_KEY`.
 //! - [`linkup`]: Linkup's web search, sourced answers and page fetches
 //!   (`search`, `answer`, `fetch`), its key from `LINKUP_API_KEY`.
 //! - [`reducto`]: Reducto's document parsing, field extraction and
@@ -48,7 +50,7 @@ pub use respan_gateway_tool_vendor_kit::*;
 pub use respan_gateway_tool_vendors_green::{
     apify, browserbase, cloudinary, context7, daytona, linkup, reducto, tavily, tinyfish, zep,
 };
-pub use respan_gateway_tool_vendors_yellow::{e2b, elevenlabs};
+pub use respan_gateway_tool_vendors_yellow::{e2b, elevenlabs, exa};
 
 /// The green tool vendors: maintained, and verified end to end.
 pub const GREEN: &[&ToolVendor] = respan_gateway_tool_vendors_green::ALL;
@@ -65,6 +67,7 @@ pub const ALL: &[&ToolVendor] = &[
     &daytona::VENDOR,
     &e2b::VENDOR,
     &elevenlabs::VENDOR,
+    &exa::VENDOR,
     &linkup::VENDOR,
     &reducto::VENDOR,
     &tavily::VENDOR,
