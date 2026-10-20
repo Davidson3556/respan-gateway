@@ -46,6 +46,7 @@ are:
 |:-:|---|---|---|---|---|
 | <img src="assets/tool-vendors/e2b.png" width="20" height="20" alt=""> | [E2B](https://e2b.dev) | Code execution | `e2b` | `E2B_API_KEY` | `run_code`, `list_sandboxes`, `kill_sandbox` |
 | <picture><source media="(prefers-color-scheme: dark)" srcset="assets/tool-vendors/elevenlabs-dark.svg"><img src="assets/tool-vendors/elevenlabs.svg" width="20" height="20" alt=""></picture> | [ElevenLabs](https://elevenlabs.io) | Voice | `elevenlabs` | `ELEVENLABS_API_KEY` | `text_to_speech`, `search_voices`, `speech_to_text`, `sound_effect` |
+| | [Exa](https://exa.ai) | Search | `exa` | `EXA_API_KEY` | `search`, `get_contents` |
 
 These tables are kept by hand: a vendor added to `ALL` in
 [`crates/tool-vendors`](../crates/tool-vendors/README.md), or a tool added
@@ -61,6 +62,7 @@ the arguments; a free call carries none.
 | Vendor | Unit | From |
 |---|---|---|
 | Linkup | `usd` | Its price list, by depth and fetch mode |
+| Exa | `usd` | The answer's `costDollars.total` |
 | Tavily | `credits` | The answer's `usage.credits` |
 | Context7 | `requests` | One a call |
 | TinyFish | `steps` | An agent run's `num_of_steps`; search and fetch are free |
@@ -144,6 +146,14 @@ to the sandbox's own host.
 - `sound_effect` returns a generated sound as audio.
 
 Speech is billed per character, transcripts per second of audio.
+
+**Exa**, at `https://api.exa.ai`, its key a bearer token:
+
+- `search` is `POST /search`, with ranked results and relevant highlights.
+- `get_contents` is `POST /contents`, returning page text and a status per URL.
+
+Each call is billed; Exa reports its cost in US dollars. Its deprecated
+`/findSimilar` endpoint is not offered.
 
 **Linkup**, at `https://api.linkup.so/v1`, its key a bearer token:
 

@@ -160,6 +160,13 @@ fn steps(vendor: &str) -> Vec<Step> {
             ),
             step("speech_to_text", json!({"url": AUDIO})),
         ],
+        "exa" => vec![
+            step(
+                "search",
+                json!({"query": "Rust 1.0 release date", "num_results": 1}),
+            ),
+            step("get_contents", json!({"urls": ["https://example.com"]})),
+        ],
         "linkup" => vec![
             step("search", json!({"q": "Rust 1.0 release date"})),
             step("answer", json!({"q": "When was Rust 1.0 released?"})),
