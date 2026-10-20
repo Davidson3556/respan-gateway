@@ -4,6 +4,7 @@
 
 import anthropic from "@lobehub/icons-static-svg/icons/anthropic.svg?url";
 import azure from "@lobehub/icons-static-svg/icons/azure-color.svg?url";
+import cerebras from "@lobehub/icons-static-svg/icons/cerebras-color.svg?url";
 import cloudflare from "@lobehub/icons-static-svg/icons/cloudflare-color.svg?url";
 import deepseek from "@lobehub/icons-static-svg/icons/deepseek-color.svg?url";
 import fireworks from "@lobehub/icons-static-svg/icons/fireworks-color.svg?url";
@@ -26,6 +27,7 @@ export interface VendorIcon {
 const icons: Record<string, VendorIcon> = {
   anthropic: { src: anthropic, mono: true },
   azure: { src: azure, mono: false },
+  cerebras: { src: cerebras, mono: false },
   cloudflare: { src: cloudflare, mono: false },
   deepseek: { src: deepseek, mono: false },
   fireworks: { src: fireworks, mono: false },
@@ -44,6 +46,7 @@ const icons: Record<string, VendorIcon> = {
 const domains: [string, string][] = [
   ["anthropic.com", "anthropic"],
   ["azure.com", "azure"],
+  ["cerebras.ai", "cerebras"],
   ["cloudflare.com", "cloudflare"],
   ["deepseek.com", "deepseek"],
   ["fireworks.ai", "fireworks"],
