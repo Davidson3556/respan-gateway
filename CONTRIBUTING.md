@@ -129,7 +129,8 @@ The first line:
 - is prefixed with what it changes: a crate's name without
   `respan-gateway-` (`core`, `media-http`, `vendors`, `tool-vendors`,
   `serve`), `gateway` for `apps/gateway`, `ui`, `python`, `ci`, `docs`,
-  or several, comma-separated, for a change across them;
+  `deps` for a change of dependencies' versions alone, or several,
+  comma-separated, for a change across them;
 - is short, 50 characters if it can be and never over 72, in lowercase
   but for proper nouns, acronyms and names in code, which go in backticks;
 - starts with an imperative verb, and has no period at the end.
