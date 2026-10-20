@@ -93,21 +93,29 @@ impl Tools for Context7Tools {
         match name {
             "resolve_library_id" => {
                 let query = resolve_query(args)?;
-                Ok(render_libraries(&api.get_json("v2/libs/search", &query).await?).into())
+                let text = render_libraries(&api.get_json("v2/libs/search", &query).await?);
+                Ok(one_request(text))
             }
             "query_docs" => {
                 let query = context_query(args)?;
                 let req = api.request(Method::GET, "v2/context").query(&query);
-                Ok(render_docs(&api.text(req).await?)?.into())
+                Ok(one_request(render_docs(&api.text(req).await?)?))
             }
             "search_docs" => {
                 let query = search_query(args)?;
                 let req = api.request(Method::GET, "v3/search").query(&query);
-                Ok(render_docs(&api.text(req).await?)?.into())
+                Ok(one_request(render_docs(&api.text(req).await?)?))
             }
             _ => Err(ToolError::new(format!("no tool named {name:?}"))),
         }
     }
+}
+
+/// `text`, having used one request: Context7 bills each API call as one
+/// against the plan's monthly allowance, its answers saying nothing of it
+/// (<https://context7.com/plans>).
+fn one_request(text: String) -> ToolOutput {
+    ToolOutput::from(text).with_usage("requests", 1.0)
 }
 
 /// The string `key`, which must be there, of at most `max` characters.
@@ -485,5 +493,10 @@ mod tests {
         let cut = render_docs(&long).expect("text");
         assert!(cut.ends_with("[cut at 100000 bytes]"));
         assert!(cut.len() < MAX_DOCS + 40);
+    }
+
+    #[test]
+    fn each_call_is_one_request() {
+        assert_eq!(one_request("x".into()).usage.get("requests"), Some(&1.0));
     }
 }

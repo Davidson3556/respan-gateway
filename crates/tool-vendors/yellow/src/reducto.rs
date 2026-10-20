@@ -110,23 +110,36 @@ impl Tools for ReductoTools {
                     optional_int(args, "max_chars", 1000, 1_000_000)?.unwrap_or(DEFAULT_MAX_CHARS);
                 let mut response = api.post_json("parse", &body).await?;
                 resolve(api, &mut response).await?;
-                Ok(render_parse(&response, max as usize).into())
+                Ok(used(render_parse(&response, max as usize), &response))
             }
             "extract_fields" => {
                 let body = extract_body(args)?;
                 let mut response = api.post_json("extract", &body).await?;
                 resolve(api, &mut response).await?;
-                Ok(render_extract(&response).into())
+                Ok(used(render_extract(&response), &response))
             }
             "split_document" => {
                 let body = split_body(args)?;
                 let mut response = api.post_json("split", &body).await?;
                 resolve(api, &mut response).await?;
-                Ok(render_split(&response).into())
+                Ok(used(render_split(&response), &response))
             }
             _ => Err(ToolError::new(format!("no tool named {name:?}"))),
         }
     }
+}
+
+/// `text`, having used what the response's `usage` says: `num_pages` as
+/// `pages` and, on accounts billed in credits, `credits` (absent on the
+/// newer pricing model). <https://docs.reducto.ai/api-reference/parse>
+fn used(text: String, response: &Value) -> ToolOutput {
+    let mut out = ToolOutput::from(text);
+    for (unit, key) in [("pages", "/usage/num_pages"), ("credits", "/usage/credits")] {
+        if let Some(n) = response.pointer(key).and_then(Value::as_f64) {
+            out = out.with_usage(unit, n);
+        }
+    }
+    out
 }
 
 /// The URL a `{"type": "url"}` result points at, if it is one.
@@ -614,6 +627,26 @@ mod tests {
             deep.starts_with("3 pages · confidence low: blurry scan\n\n["),
             "{deep}"
         );
+    }
+
+    #[test]
+    fn usage_is_the_responses() {
+        let out = used(
+            "x".into(),
+            &json!({"usage": {"num_pages": 3, "num_fields": 2, "credits": 4.5}}),
+        );
+        assert_eq!(
+            out,
+            ToolOutput::from("x")
+                .with_usage("pages", 3.0)
+                .with_usage("credits", 4.5)
+        );
+        let newer = used(
+            "x".into(),
+            &json!({"usage": {"num_pages": 1, "credits": null}}),
+        );
+        assert_eq!(newer, ToolOutput::from("x").with_usage("pages", 1.0));
+        assert_eq!(used("x".into(), &json!({})), ToolOutput::from("x"));
     }
 
     #[test]

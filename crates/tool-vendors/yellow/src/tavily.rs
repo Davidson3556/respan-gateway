@@ -136,23 +136,33 @@ impl Tools for TavilyTools {
         let args = object(&arguments)?;
         match name {
             "search" => {
-                let body = search_body(args)?;
-                Ok(render_search(&api.post_json("search", &body).await?).into())
+                let response = api.post_json("search", &search_body(args)?).await?;
+                Ok(billed(render_search(&response).into(), &response))
             }
             "extract" => {
-                let body = extract_body(args)?;
-                Ok(render_extract(&api.post_json("extract", &body).await?).into())
+                let response = api.post_json("extract", &extract_body(args)?).await?;
+                Ok(billed(render_extract(&response).into(), &response))
             }
             "crawl" => {
-                let body = site_body(args, true)?;
-                Ok(render_crawl(&long_post(api, "crawl", &body).await?).into())
+                let response = long_post(api, "crawl", &site_body(args, true)?).await?;
+                Ok(billed(render_crawl(&response).into(), &response))
             }
             "map_site" => {
-                let body = site_body(args, false)?;
-                Ok(render_map(&long_post(api, "map", &body).await?).into())
+                let response = long_post(api, "map", &site_body(args, false)?).await?;
+                Ok(billed(render_map(&response).into(), &response))
             }
             _ => Err(ToolError::new(format!("no tool named {name:?}"))),
         }
+    }
+}
+
+/// `output`, having used the credits Tavily reports in `usage.credits`,
+/// which every body asks for with `include_usage`
+/// (<https://docs.tavily.com/documentation/api-reference/endpoint/search>).
+fn billed(output: ToolOutput, response: &Value) -> ToolOutput {
+    match response.pointer("/usage/credits").and_then(Value::as_f64) {
+        Some(credits) => output.with_usage("credits", credits),
+        None => output,
     }
 }
 
@@ -169,6 +179,7 @@ async fn long_post(api: &Api, path: &str, body: &Value) -> Result<Value, ToolErr
 fn search_body(args: &Map<String, Value>) -> Result<Value, ToolError> {
     let mut body = Map::new();
     body.insert("query".into(), required_str(args, "query")?.into());
+    body.insert("include_usage".into(), true.into());
     let depths = ["ultra-fast", "fast", "basic", "advanced"];
     if let Some(v) = optional_enum(args, "search_depth", &depths)? {
         body.insert("search_depth".into(), v.into());
@@ -224,6 +235,7 @@ fn extract_body(args: &Map<String, Value>) -> Result<Value, ToolError> {
     let mut body = Map::new();
     body.insert("urls".into(), json!(urls));
     body.insert("format".into(), "markdown".into());
+    body.insert("include_usage".into(), true.into());
     let query = optional_str(args, "query")?;
     if let Some(v) = query {
         body.insert("query".into(), v.into());
@@ -248,6 +260,7 @@ fn extract_body(args: &Map<String, Value>) -> Result<Value, ToolError> {
 fn site_body(args: &Map<String, Value>, crawl: bool) -> Result<Value, ToolError> {
     let mut body = Map::new();
     body.insert("url".into(), required_str(args, "url")?.into());
+    body.insert("include_usage".into(), true.into());
     let instructions = optional_str(args, "instructions")?;
     if let Some(v) = instructions {
         body.insert("instructions".into(), v.into());
@@ -471,8 +484,8 @@ mod tests {
         assert_eq!(
             body,
             json!({
-                "query": "rust", "search_depth": "advanced", "topic": "news", "max_results": 5,
-                "start_date": "2025-01-01", "include_answer": "basic",
+                "query": "rust", "include_usage": true, "search_depth": "advanced", "topic": "news",
+                "max_results": 5, "start_date": "2025-01-01", "include_answer": "basic",
                 "include_raw_content": "markdown", "include_domains": ["rust-lang.org"],
                 "country": "united states", "include_images": true,
                 "include_image_descriptions": true
@@ -480,7 +493,7 @@ mod tests {
         );
         assert_eq!(
             search_body(&args(json!({"query": "x", "raw_content": false}))).expect("valid"),
-            json!({"query": "x"})
+            json!({"query": "x", "include_usage": true})
         );
     }
 
@@ -503,7 +516,7 @@ mod tests {
             })))
             .expect("valid"),
             json!({
-                "urls": ["https://a.b"], "format": "markdown", "query": "price",
+                "urls": ["https://a.b"], "format": "markdown", "include_usage": true, "query": "price",
                 "chunks_per_source": 2, "extract_depth": "advanced"
             })
         );
@@ -532,8 +545,8 @@ mod tests {
             )
             .expect("valid"),
             json!({
-                "url": "docs.tavily.com", "instructions": "SDK pages", "max_depth": 2,
-                "limit": 10, "select_paths": ["/docs/.*"], "allow_external": false,
+                "url": "docs.tavily.com", "include_usage": true, "instructions": "SDK pages",
+                "max_depth": 2, "limit": 10, "select_paths": ["/docs/.*"], "allow_external": false,
                 "format": "markdown", "chunks_per_source": 1
             })
         );
@@ -543,7 +556,7 @@ mod tests {
                 false
             )
             .expect("valid"),
-            json!({"url": "a.b", "limit": 300})
+            json!({"url": "a.b", "include_usage": true, "limit": 300})
         );
         assert!(site_body(&args(json!({})), false).is_err());
         assert!(site_body(&args(json!({"url": "a.b", "limit": 300})), true).is_err());
@@ -608,5 +621,12 @@ mod tests {
             "2 URLs found from a.b:\nhttps://a.b/\nhttps://a.b/c"
         );
         assert_eq!(render_map(&json!({"results": []})), "No URLs were found.");
+    }
+
+    #[test]
+    fn reads_credits_used() {
+        let used = billed("x".into(), &json!({"results": [], "usage": {"credits": 2}}));
+        assert_eq!(used, ToolOutput::from("x").with_usage("credits", 2.0));
+        assert!(billed("x".into(), &json!({"results": []})).usage.is_empty());
     }
 }

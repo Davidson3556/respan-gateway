@@ -155,7 +155,7 @@ impl Tools for CloudinaryTools {
                 let request = account
                     .request(api, Method::POST, &format!("{resource_type}/upload"))
                     .multipart(form(fields));
-                Ok(render_asset(&api.json(request).await?).into())
+                Ok(uploaded(&api.json(request).await?))
             }
             "search" => {
                 let body = search_body(args)?;
@@ -492,6 +492,21 @@ fn render_asset(response: &Value) -> String {
     capped(pretty(&Value::Object(out)))
 }
 
+/// An upload's asset, having used the transformations Cloudinary counts
+/// for it (<https://cloudinary.com/documentation/transformation_counts>):
+/// one for an image or video, and one per eager version of an image. A
+/// video's eager versions count by output second and are left out; raw
+/// files count none.
+fn uploaded(response: &Value) -> ToolOutput {
+    let out = ToolOutput::from(render_asset(response));
+    let eager = array_of(response, "eager").len() as f64;
+    match response.get("resource_type").and_then(Value::as_str) {
+        Some("image") => out.with_usage("transformations", 1.0 + eager),
+        Some("video") => out.with_usage("transformations", 1.0),
+        _ => out,
+    }
+}
+
 /// Search results as JSON: the total, each asset in brief, and the cursor
 /// for the next page.
 fn render_search(response: &Value) -> String {
@@ -726,6 +741,17 @@ mod tests {
         let text = render_asset(&json!({"public_id": "p", "colors": colors}));
         let parsed: Value = serde_json::from_str(&text).expect("json");
         assert_eq!(parsed["colors"].as_array().map(Vec::len), Some(10));
+    }
+
+    #[test]
+    fn uploads_count_transformations() {
+        let image = json!({"public_id": "p", "resource_type": "image",
+            "eager": [{"transformation": "w_100"}, {"transformation": "w_200"}]});
+        assert_eq!(uploaded(&image).usage.get("transformations"), Some(&3.0));
+        let video = json!({"public_id": "v", "resource_type": "video", "eager": [{}]});
+        assert_eq!(uploaded(&video).usage.get("transformations"), Some(&1.0));
+        let raw = json!({"public_id": "r.csv", "resource_type": "raw"});
+        assert!(uploaded(&raw).usage.is_empty());
     }
 
     #[test]

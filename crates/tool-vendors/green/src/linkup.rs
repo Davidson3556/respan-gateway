@@ -96,15 +96,18 @@ impl Tools for LinkupTools {
         match name {
             "search" => {
                 let body = search_body(args, "searchResults")?;
-                Ok(render_search(&api.post_json("search", &body).await?).into())
+                let text = render_search(&api.post_json("search", &body).await?);
+                Ok(ToolOutput::from(text).with_usage("usd", usd(&body)))
             }
             "answer" => {
                 let body = search_body(args, "sourcedAnswer")?;
-                Ok(render_answer(&api.post_json("search", &body).await?).into())
+                let text = render_answer(&api.post_json("search", &body).await?);
+                Ok(ToolOutput::from(text).with_usage("usd", usd(&body)))
             }
             "fetch" => {
                 let body = fetch_body(args)?;
-                Ok(render_fetch(&api.post_json("fetch", &body).await?).into())
+                let text = render_fetch(&api.post_json("fetch", &body).await?);
+                Ok(ToolOutput::from(text).with_usage("usd", usd(&body)))
             }
             _ => Err(ToolError::new(format!("no tool named {name:?}"))),
         }
@@ -160,6 +163,29 @@ fn fetch_body(args: &Map<String, Value>) -> Result<Value, ToolError> {
         body.insert("extractImages".into(), v.into());
     }
     Ok(Value::Object(body))
+}
+
+/// What the call with `body` costs in US dollars, by Linkup's price table
+/// (<https://docs.linkup.so/pages/documentation/development/pricing>); its
+/// answers don't say. A search is $0.005 (`deep` $0.05), $0.001 more for a
+/// sourced answer; a fetch $0.001, $0.005 rendering JavaScript or `pro`,
+/// $0.01 both.
+fn usd(body: &Value) -> f64 {
+    let answer = str_of(body, "outputType") == "sourcedAnswer";
+    match (str_of(body, "depth"), answer) {
+        ("deep", false) => 0.05,
+        ("deep", true) => 0.055,
+        ("", _) => {
+            let js = body.get("renderJs").and_then(Value::as_bool) == Some(true);
+            match (str_of(body, "mode") == "pro", js) {
+                (false, false) => 0.001,
+                (true, true) => 0.01,
+                _ => 0.005,
+            }
+        }
+        (_, false) => 0.005,
+        (_, true) => 0.006,
+    }
 }
 
 fn str_of<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -321,5 +347,34 @@ mod tests {
             "markdown": "# Hi", "favicon": "f", "images": [{"alt": "a", "url": "https://i"}]
         }));
         assert_eq!(text, "# Hi\n\nImages:\n- a <https://i>");
+    }
+
+    #[test]
+    fn prices_calls_by_their_body() {
+        let search = |a: Value, kind| usd(&search_body(&args(a), kind).expect("valid"));
+        assert_eq!(search(json!({"q": "x"}), "searchResults"), 0.005);
+        assert_eq!(
+            search(json!({"q": "x", "depth": "flash"}), "sourcedAnswer"),
+            0.006
+        );
+        assert_eq!(
+            search(json!({"q": "x", "depth": "deep"}), "searchResults"),
+            0.05
+        );
+        assert_eq!(
+            search(json!({"q": "x", "depth": "deep"}), "sourcedAnswer"),
+            0.055
+        );
+        let fetch = |a: Value| usd(&fetch_body(&args(a)).expect("valid"));
+        assert_eq!(fetch(json!({"url": "https://a.b"})), 0.001);
+        assert_eq!(
+            fetch(json!({"url": "https://a.b", "render_js": true})),
+            0.005
+        );
+        assert_eq!(fetch(json!({"url": "https://a.b", "mode": "pro"})), 0.005);
+        assert_eq!(
+            fetch(json!({"url": "https://a.b", "mode": "pro", "render_js": true})),
+            0.01
+        );
     }
 }

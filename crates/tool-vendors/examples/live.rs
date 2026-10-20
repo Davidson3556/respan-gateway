@@ -285,7 +285,7 @@ async fn run(vendor: &ToolVendor, key: String) -> usize {
         match result {
             Ok(output) => {
                 let mut text = String::new();
-                for content in &output.0 {
+                for content in &output.content {
                     match content {
                         Content::Text(t) => text.push_str(t),
                         Content::Image { data, mime_type } => {

@@ -142,7 +142,7 @@ impl Tools for ApifyTools {
                 let run = run_request(args)?;
                 let items = run_sync(api, &run).await?;
                 let more = format!("`get_run_items` with `actor` {:?}", run.actor);
-                Ok(render_items(&items, 0, &more).into())
+                Ok(counted(&items, render_items(&items, 0, &more)))
             }
             "get_run_items" => {
                 let (path, query) = items_request(args)?;
@@ -156,7 +156,8 @@ impl Tools for ApifyTools {
             }
             "browse_web" => {
                 let run = browse_request(args)?;
-                Ok(render_pages(&run_sync(api, &run).await?).into())
+                let items = run_sync(api, &run).await?;
+                Ok(counted(&items, render_pages(&items)))
             }
             _ => Err(ToolError::new(format!("no tool named {name:?}"))),
         }
@@ -195,6 +196,13 @@ async fn run_sync(api: &Api, run: &Run) -> Result<Value, ToolError> {
             e
         }
     })
+}
+
+/// `text` from a run, with the dataset `items` it made: what Store Actors
+/// priced per result bill by. The run's compute is not in the answer.
+fn counted(items: &Value, text: String) -> ToolOutput {
+    let made = items.as_array().map_or(0, Vec::len);
+    ToolOutput::from(text).with_usage("items", made as f64)
 }
 
 /// An Actor's id as its paths take it: `owner/name` becomes `owner~name`.
@@ -486,6 +494,12 @@ fn render_pages(items: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_counts_its_items() {
+        let out = counted(&json!([{"a": 1}, {"a": 2}]), "two".into());
+        assert_eq!(out, ToolOutput::from("two").with_usage("items", 2.0));
+    }
 
     fn args(v: Value) -> Map<String, Value> {
         match v {

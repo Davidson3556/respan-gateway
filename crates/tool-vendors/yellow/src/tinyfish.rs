@@ -113,7 +113,12 @@ impl Tools for TinyFishTools {
             }
             "run_agent" => {
                 let body = run_body(args)?;
-                render_run(&api.post_json("/v1/automation/run", &body).await?).map(Into::into)
+                let response = api.post_json("/v1/automation/run", &body).await?;
+                let output = ToolOutput::from(render_run(&response)?);
+                Ok(match steps(&response) {
+                    Some(n) => output.with_usage("steps", n),
+                    None => output,
+                })
             }
             _ => Err(ToolError::new(format!("no tool named {name:?}"))),
         }
@@ -308,13 +313,18 @@ fn render_fetch(response: &Value) -> String {
     pages.join("\n\n---\n\n")
 }
 
+/// The steps a run took, its `num_of_steps`: what TinyFish bills an agent
+/// run by, per step (<https://tinyfish.ai/pricing>); search and fetch are
+/// free.
+fn steps(response: &Value) -> Option<f64> {
+    response.get("num_of_steps").and_then(Value::as_f64)
+}
+
 /// A completed run's result as JSON; a failed run is a [`ToolError`].
 fn render_run(response: &Value) -> Result<String, ToolError> {
     if str_of(response, "status") == Some("COMPLETED") {
         let result = response.get("result").cloned().unwrap_or(Value::Null);
-        let steps = response
-            .get("num_of_steps")
-            .and_then(Value::as_f64)
+        let steps = steps(response)
             .map(|n| format!(" in {n} steps"))
             .unwrap_or_default();
         return Ok(format!(
@@ -436,10 +446,12 @@ mod tests {
 
     #[test]
     fn renders_run() {
-        let ok = render_run(&json!({
+        let done = json!({
             "run_id": "r", "status": "COMPLETED", "num_of_steps": 5, "result": {"price": "$799"}, "error": null
-        }))
-        .expect("completed");
+        });
+        assert_eq!(steps(&done), Some(5.0));
+        assert_eq!(steps(&json!({"status": "COMPLETED"})), None);
+        let ok = render_run(&done).expect("completed");
         assert_eq!(
             ok,
             "Run completed in 5 steps. Result:\n{\n  \"price\": \"$799\"\n}"

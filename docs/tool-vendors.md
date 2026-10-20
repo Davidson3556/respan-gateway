@@ -51,6 +51,27 @@ These tables are kept by hand: a vendor added to `ALL` in
 [`crates/tool-vendors`](../crates/tool-vendors/README.md), or a tool added
 to a vendor, is a row or an entry here too.
 
+## What a call used
+
+Each call's result carries what it used, in the vendor's own unit, in its
+`_meta` under `respan.ai/usage`: `{"credits": 2}`, `{"pages": 40}`. It is
+read from the vendor's answer where the answer says, else worked out from
+the arguments; a free call carries none.
+
+| Vendor | Unit | From |
+|---|---|---|
+| Linkup | `usd` | Its price list, by depth and fetch mode |
+| Tavily | `credits` | The answer's `usage.credits` |
+| Context7 | `requests` | One a call |
+| TinyFish | `steps` | An agent run's `num_of_steps`; search and fetch are free |
+| Apify | `items` | The items a run made; its compute is not in the answer |
+| Browserbase | `searches`, `requests`, `runs` | One a search, fetch or agent run |
+| Reducto | `pages`, `credits` | The answer's `usage` |
+| ElevenLabs | `characters`, `seconds` | The text spoken; the audio transcribed; a sound's set length |
+| Cloudinary | `transformations` | An upload, and each eager version of an image |
+| E2B, Daytona | `seconds` | The call's time in its sandbox, timed |
+| Zep | `episodes`, `credits` | Each message or datum, a credit a 350 bytes |
+
 ## Their tools
 
 **Apify**, at `https://api.apify.com/v2`, its key a bearer token:

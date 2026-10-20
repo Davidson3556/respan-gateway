@@ -142,8 +142,12 @@ impl Tools for ElevenLabsTools {
                     .query(&[("output_format", format)])
                     .json(&body);
                 let (mime, data) = api.bytes(req).await?;
-                let what = format!("Speech of {} characters", text_len(&body));
-                Ok(audio(what, format, &mime, data))
+                let chars = text_len(&body);
+                let what = format!("Speech of {chars} characters");
+                // Billed per character of `text`
+                // (<https://elevenlabs.io/pricing/api>); the `character-cost`
+                // header says so too, but `Api::bytes` drops headers.
+                Ok(audio(what, format, &mime, data).with_usage("characters", chars as f64))
             }
             "search_voices" => {
                 let query = voices_query(args)?;
@@ -157,7 +161,8 @@ impl Tools for ElevenLabsTools {
                 let req = api
                     .request(Method::POST, "v1/speech-to-text")
                     .multipart(form);
-                Ok(render_transcript(&api.json(req).await?).into())
+                let response = api.json(req).await?;
+                Ok(transcribed(render_transcript(&response), &response))
             }
             "sound_effect" => {
                 let (format, body) = sound_body(args)?;
@@ -166,7 +171,7 @@ impl Tools for ElevenLabsTools {
                     .query(&[("output_format", format)])
                     .json(&body);
                 let (mime, data) = api.bytes(req).await?;
-                Ok(audio(
+                let out = audio(
                     format!(
                         "A sound effect of {:?}",
                         body["text"].as_str().unwrap_or_default()
@@ -174,7 +179,13 @@ impl Tools for ElevenLabsTools {
                     format,
                     &mime,
                     data,
-                ))
+                );
+                // Billed per second generated (<https://elevenlabs.io/pricing/api>):
+                // `duration_seconds` when given; unknown when it is chosen.
+                Ok(match body["duration_seconds"].as_f64() {
+                    Some(secs) => out.with_usage("seconds", secs),
+                    None => out,
+                })
             }
             _ => Err(ToolError::new(format!("no tool named {name:?}"))),
         }
@@ -357,7 +368,7 @@ fn mime_of(format: &str, answered: &str) -> String {
 fn audio(what: String, format: &str, answered: &str, data: Vec<u8>) -> ToolOutput {
     let mime_type = mime_of(format, answered);
     let kb = data.len().div_ceil(1024);
-    ToolOutput(vec![
+    ToolOutput::from(vec![
         Content::Text(format!("{what}, as {format} ({mime_type}, {kb} KB).")),
         Content::Audio { data, mime_type },
     ])
@@ -460,6 +471,17 @@ fn render_transcript(response: &Value) -> String {
     )
 }
 
+/// `text`, having used the seconds of audio the response's
+/// `audio_duration_secs` says, which Scribe bills by
+/// (<https://elevenlabs.io/docs/api-reference/speech-to-text/convert>).
+fn transcribed(text: String, response: &Value) -> ToolOutput {
+    let out = ToolOutput::from(text);
+    match response.get("audio_duration_secs").and_then(Value::as_f64) {
+        Some(secs) => out.with_usage("seconds", secs),
+        None => out,
+    }
+}
+
 /// Words as one line per turn: `[start] speaker: text`.
 fn by_speaker(words: &[Value]) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -517,6 +539,8 @@ mod tests {
         .expect("valid");
         assert_eq!(format, "mp3_22050_32");
         assert_eq!(body, json!({"text": "Hi", "model_id": "eleven_flash_v2_5"}));
+        // Speech is billed by character, not byte.
+        assert_eq!(text_len(&json!({"text": "héllo 👋"})), 7);
     }
 
     #[test]
@@ -606,7 +630,7 @@ mod tests {
         );
         assert_eq!(
             out,
-            ToolOutput(vec![
+            ToolOutput::from(vec![
                 Content::Text("Speech, as mp3_22050_32 (audio/mpeg, 2 KB).".into()),
                 Content::Audio {
                     data: vec![0; 2000],
@@ -668,5 +692,14 @@ mod tests {
             diarized,
             "Language: en\n\n[0.0s] speaker_0: Hi.\n[1.3s] speaker_1: Hey.\n\nTranscription: t1"
         );
+    }
+
+    #[test]
+    fn transcripts_use_their_seconds() {
+        let response = json!({"text": "Hi.", "audio_duration_secs": 12.5});
+        let out = transcribed(render_transcript(&response), &response);
+        assert_eq!(out.usage.get("seconds"), Some(&12.5));
+        let unknown = transcribed("x".into(), &json!({"text": "x"}));
+        assert!(unknown.usage.is_empty());
     }
 }

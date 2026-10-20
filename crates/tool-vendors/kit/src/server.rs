@@ -11,6 +11,10 @@ use serde_json::{Value, json};
 
 use crate::{Api, Content, ToolVendor};
 
+/// The key of a `tools/call` result's `_meta` that holds what the call
+/// used ([`ToolOutput::usage`](crate::ToolOutput::usage)), by unit:
+/// `{"_meta": {"respan.ai/usage": {"credits": 2}}}`.
+pub const USAGE: &str = "respan.ai/usage";
 /// JSON-RPC's code for a body that is no JSON-RPC.
 const PARSE_ERROR: i64 = -32700;
 /// JSON-RPC's code for a message that is no request.
@@ -174,8 +178,12 @@ impl ToolServer {
             Ok(output) => (output, false),
             Err(e) => (e.0.into(), true),
         };
-        let content: Vec<Value> = output.0.iter().map(Content::to_json).collect();
-        Ok(json!({"content": content, "isError": failed}))
+        let content: Vec<Value> = output.content.iter().map(Content::to_json).collect();
+        let mut result = json!({"content": content, "isError": failed});
+        if !output.usage.is_empty() {
+            result["_meta"] = json!({ USAGE: output.usage });
+        }
+        Ok(result)
     }
 }
 
@@ -223,7 +231,10 @@ mod tests {
             arguments: Value,
         ) -> Result<ToolOutput, ToolError> {
             match name {
-                "echo" => Ok(arguments["text"].as_str().unwrap_or_default().into()),
+                "echo" => {
+                    let text = arguments["text"].as_str().unwrap_or_default();
+                    Ok(ToolOutput::from(text).with_usage("characters", text.len() as f64))
+                }
                 _ => Err(ToolError::new("it broke")),
             }
         }
@@ -291,7 +302,11 @@ mod tests {
         assert_eq!(answer["id"], 3);
         assert_eq!(
             answer["result"],
-            json!({"content": [{"type": "text", "text": "hi"}], "isError": false})
+            json!({
+                "content": [{"type": "text", "text": "hi"}],
+                "isError": false,
+                "_meta": {"respan.ai/usage": {"characters": 2.0}},
+            })
         );
     }
 

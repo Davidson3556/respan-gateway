@@ -160,13 +160,19 @@ impl Tools for ZepTools {
                 let thread = uuid_arg(args, "thread_uuid")?;
                 let body = messages_body(args)?;
                 let path = format!("threads/{thread}/messages");
-                Ok(render_added_messages(&api.post_json(&path, &body).await?).into())
+                let text = render_added_messages(&api.post_json(&path, &body).await?);
+                let contents = array_of(&body, "messages").iter();
+                Ok(billed(
+                    text.into(),
+                    contents.filter_map(|m| str_of(m, "content")),
+                ))
             }
             "add_data" => {
                 let graph = uuid_arg(args, "graph_uuid")?;
                 let body = episode_body(args)?;
                 let path = format!("graphs/{graph}/episodes");
-                Ok(render_added_episode(&api.post_json(&path, &body).await?).into())
+                let text = render_added_episode(&api.post_json(&path, &body).await?);
+                Ok(billed(text.into(), str_of(&body, "data")))
             }
             _ => Err(ToolError::new(format!("no tool named {name:?}"))),
         }
@@ -271,6 +277,22 @@ fn episode_body(args: &Map<String, Value>) -> Result<Value, ToolError> {
         }
     }
     Ok(Value::Object(body))
+}
+
+/// The bytes one credit covers: Zep bills an episode 1 credit per 350
+/// bytes or part (<https://www.getzep.com/pricing>); retrieval is free.
+const CREDIT_BYTES: usize = 350;
+
+/// `out`, having added `episodes`, one per content: their count, and
+/// `credits` by Zep's published rule, as no answer reports them.
+fn billed<'a>(out: ToolOutput, episodes: impl IntoIterator<Item = &'a str>) -> ToolOutput {
+    let (mut count, mut credits) = (0, 0);
+    for content in episodes {
+        count += 1;
+        credits += content.len().div_ceil(CREDIT_BYTES).max(1);
+    }
+    out.with_usage("episodes", count as f64)
+        .with_usage("credits", credits as f64)
 }
 
 fn str_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -416,6 +438,7 @@ fn render_added_episode(response: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use respan_gateway_tool_vendor_kit::ToolUsage;
     use serde_json::json;
 
     const G: &str = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
@@ -528,6 +551,27 @@ mod tests {
         ))
         .expect_err("bad role");
         assert!(e.0.starts_with("messages[0]:"), "{e}");
+    }
+
+    #[test]
+    fn episodes_are_billed_by_size() {
+        let usage = |contents: &[&str]| billed("".into(), contents.iter().copied()).usage;
+        let one = "x".repeat(350);
+        let two = "x".repeat(640);
+        let four = "x".repeat(1200);
+        assert_eq!(
+            usage(&[&one, &two, &four, "é"]),
+            ToolUsage::from([("credits", 8.0), ("episodes", 4.0)])
+        );
+        let body = messages_body(&args(
+            json!({"messages": [{"content": "hi"}, {"content": two}]}),
+        ))
+        .expect("valid");
+        let contents = array_of(&body, "messages").iter();
+        assert_eq!(
+            billed("".into(), contents.filter_map(|m| str_of(m, "content"))).usage,
+            ToolUsage::from([("credits", 3.0), ("episodes", 2.0)])
+        );
     }
 
     #[test]

@@ -140,7 +140,7 @@ impl Tools for BrowserbaseTools {
 
     async fn call(&self, api: &Api, name: &str, arguments: Value) -> Result<ToolOutput, ToolError> {
         let args = object(&arguments)?;
-        match name {
+        let output: ToolOutput = match name {
             "search" => {
                 let body = search_body(args)?;
                 Ok(render_search(&api.post_json("/search", &body).await?).into())
@@ -175,7 +175,26 @@ impl Tools for BrowserbaseTools {
                 Ok(render_live_view(&api.get_json(&path, &query).await?).into())
             }
             _ => Err(ToolError::new(format!("no tool named {name:?}"))),
-        }
+        }?;
+        Ok(match usage(name) {
+            Some((unit, n)) => output.with_usage(unit, n),
+            None => output,
+        })
+    }
+}
+
+/// What a call of `name` uses, as Browserbase bills it
+/// (<https://www.browserbase.com/pricing>), its answers saying nothing of
+/// cost: a search is one of the searches it bills per 1,000; a fetch one of
+/// its calls per 1,000 (dearer with proxies or extraction); `run_agent` one
+/// agent run, its browser time and model tokens billed to its session and
+/// the model gateway. The other tools are free.
+fn usage(name: &str) -> Option<(&'static str, f64)> {
+    match name {
+        "search" => Some(("searches", 1.0)),
+        "fetch" => Some(("requests", 1.0)),
+        "run_agent" => Some(("runs", 1.0)),
+        _ => None,
     }
 }
 
@@ -537,6 +556,16 @@ mod tests {
         assert!(run_body(&args(json!({}))).is_err());
         assert!(run_body(&args(json!({"task": "t", "proxy_country": "USA"}))).is_err());
         assert!(run_body(&args(json!({"task": "t", "result_schema": "x"}))).is_err());
+    }
+
+    #[test]
+    fn usage_is_per_call() {
+        assert_eq!(usage("search"), Some(("searches", 1.0)));
+        assert_eq!(usage("fetch"), Some(("requests", 1.0)));
+        assert_eq!(usage("run_agent"), Some(("runs", 1.0)));
+        for free in ["get_agent_run", "stop_agent_run", "live_view"] {
+            assert_eq!(usage(free), None);
+        }
     }
 
     #[test]

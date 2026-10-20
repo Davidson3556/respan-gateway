@@ -13,10 +13,10 @@ mod output;
 mod server;
 
 pub use api::{Api, ToolError};
-pub use output::{Content, ToolOutput, decode_base64};
+pub use output::{Content, ToolOutput, ToolUsage, decode_base64};
 pub use reqwest;
 pub use respan_gateway_http_transport::Network;
-pub use server::ToolServer;
+pub use server::{ToolServer, USAGE};
 
 use async_trait::async_trait;
 use serde_json::Value;

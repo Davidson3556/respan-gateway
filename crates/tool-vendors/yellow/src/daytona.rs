@@ -180,9 +180,11 @@ impl Tools for DaytonaTools {
         let args = object(&arguments)?;
         match name {
             "create_sandbox" => {
-                let created = api.post_json("/sandbox", &create_body(args)?).await?;
+                let body = create_body(args)?;
+                let since = Instant::now();
+                let created = api.post_json("/sandbox", &body).await?;
                 let sandbox = started(api, sandbox_id(&created)?).await?;
-                Ok(render_sandbox(&sandbox).into())
+                Ok(timed(render_sandbox(&sandbox).into(), since))
             }
             "list_sandboxes" => {
                 let limit = optional_int(args, "limit", 1, 200)?.unwrap_or(50);
@@ -201,16 +203,22 @@ impl Tools for DaytonaTools {
             }
             "run_command" => {
                 let body = execute_body(args)?;
+                let since = Instant::now();
                 let sandbox = started(api, sandbox_arg(args)?).await?;
                 let url = toolbox_url(&sandbox, "/process/execute")?;
-                render_execute(&api.post_json(&url, &body).await?).map(Into::into)
+                let text = render_execute(&api.post_json(&url, &body).await?)?;
+                Ok(timed(text.into(), since))
             }
             "run_code" => {
                 let id = sandbox_arg(args)?;
+                let since = Instant::now();
                 let sandbox = started(api, id).await?;
                 let body = code_body(args, sandbox_language(&sandbox))?;
                 let url = toolbox_url(&sandbox, "/process/code-run")?;
-                Ok(render_code(&api.post_json(&url, &body).await?))
+                Ok(timed(
+                    render_code(&api.post_json(&url, &body).await?),
+                    since,
+                ))
             }
             "write_file" => {
                 let path = required_str(args, "path")?;
@@ -221,6 +229,7 @@ impl Tools for DaytonaTools {
                     }
                     Some(_) => return Err(ToolError::new("`content` must be a string")),
                 };
+                let since = Instant::now();
                 let sandbox = started(api, sandbox_arg(args)?).await?;
                 let url = toolbox_url(&sandbox, "/files/upload")?;
                 let bytes = content.len();
@@ -234,11 +243,23 @@ impl Tools for DaytonaTools {
                     .query(&[("path", path)])
                     .multipart(form);
                 api.json(req).await?;
-                Ok(format!("Wrote {bytes} bytes to {path}.").into())
+                Ok(timed(
+                    format!("Wrote {bytes} bytes to {path}.").into(),
+                    since,
+                ))
             }
             _ => Err(ToolError::new(format!("no tool named {name:?}"))),
         }
     }
+}
+
+/// `out`, with the `seconds` since `since`: Daytona bills a sandbox per
+/// second while it is creating, starting or started
+/// (<https://www.daytona.io/docs/en/billing/>) and its answers report no
+/// usage, so a call is timed from its first request to the sandbox until
+/// its answer; the sandbox's life outside calls bills outside them.
+fn timed(out: ToolOutput, since: Instant) -> ToolOutput {
+    out.with_usage("seconds", since.elapsed().as_secs_f64())
 }
 
 /// The `sandbox` argument, an id or name safe in a URL path.
@@ -697,6 +718,15 @@ mod tests {
     }
 
     #[test]
+    fn calls_are_timed_in_seconds() {
+        let since = Instant::now() - Duration::from_secs(2);
+        let out = timed("x".into(), since);
+        let seconds = out.usage.get("seconds").copied().unwrap_or_default();
+        assert!((2.0..60.0).contains(&seconds), "{seconds}");
+        assert_eq!(out.usage.len(), 1);
+    }
+
+    #[test]
     fn renders_code_with_charts() {
         let out = render_code(&json!({
             "exitCode": 0, "result": "done\n",
@@ -704,7 +734,7 @@ mod tests {
         }));
         assert_eq!(
             out,
-            ToolOutput(vec![
+            ToolOutput::from(vec![
                 Content::Text("Exit code 0. Output:\ndone\nChart 1: Sine (line)".into()),
                 Content::Image {
                     data: vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a],

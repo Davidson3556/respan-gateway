@@ -13,7 +13,10 @@ a vendor is a `ToolVendor` (its id, key, base URL and `Tools`), and
 header of its own, an `Authorization` scheme, Basic, or sent by the tools
 themselves. `Api` sends any request with it and reads JSON, text or bytes,
 `args` reads a call's arguments, and a call returns a `ToolOutput` of text,
-image and audio blocks.
+image and audio blocks, and the usage it measured, by the vendor's own unit
+(`with_usage("credits", 2.0)`): read from the vendor's answer, or worked out
+from the arguments. `ToolServer` puts it in the result's `_meta`, under
+`USAGE` (`respan.ai/usage`), for whoever prices it.
 
 Each vendor is one file in a tier's crate, as the model vendors are:
 

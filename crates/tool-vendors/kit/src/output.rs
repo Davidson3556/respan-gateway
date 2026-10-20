@@ -1,5 +1,7 @@
 //! A tool's result: text, and media MCP carries as content blocks.
 
+use std::collections::BTreeMap;
+
 use base64::Engine as _;
 use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD};
@@ -52,13 +54,31 @@ pub fn decode_base64(text: &str) -> Option<Vec<u8>> {
     LENIENT.decode(digits).ok()
 }
 
-/// A tool's result: its blocks, in order.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ToolOutput(pub Vec<Content>);
+/// What a call used, as its vendor measures it, by unit: `credits`,
+/// `pages`, `characters`, `usd` and the like.
+pub type ToolUsage = BTreeMap<&'static str, f64>;
+
+/// A tool's result: its blocks, in order, and what the call used.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolOutput {
+    /// Its blocks, for the model.
+    pub content: Vec<Content>,
+    /// What the call used: read from the vendor's answer, or worked out
+    /// from the arguments; empty if neither says.
+    pub usage: ToolUsage,
+}
+
+impl ToolOutput {
+    /// It, having used `amount` of `unit`, such as `("credits", 2.0)`.
+    pub fn with_usage(mut self, unit: &'static str, amount: f64) -> Self {
+        self.usage.insert(unit, amount);
+        self
+    }
+}
 
 impl From<String> for ToolOutput {
     fn from(text: String) -> Self {
-        Self(vec![Content::Text(text)])
+        vec![Content::Text(text)].into()
     }
 }
 
@@ -70,13 +90,16 @@ impl From<&str> for ToolOutput {
 
 impl From<Content> for ToolOutput {
     fn from(block: Content) -> Self {
-        Self(vec![block])
+        vec![block].into()
     }
 }
 
 impl From<Vec<Content>> for ToolOutput {
-    fn from(blocks: Vec<Content>) -> Self {
-        Self(blocks)
+    fn from(content: Vec<Content>) -> Self {
+        Self {
+            content,
+            usage: ToolUsage::new(),
+        }
     }
 }
 
@@ -100,7 +123,7 @@ mod tests {
         );
         assert_eq!(
             ToolOutput::from("x"),
-            ToolOutput(vec![Content::Text("x".into())])
+            ToolOutput::from(vec![Content::Text("x".into())])
         );
     }
 }

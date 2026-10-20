@@ -8,7 +8,7 @@
 //! the API key. Sandboxes are billed per second while they run, so each
 //! lives only a few minutes past its last call unless killed sooner.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use respan_gateway_tool_vendor_kit::args::{
@@ -138,8 +138,13 @@ struct Run {
     execute: Value,
 }
 
+/// The run, with the `seconds` from creating or reconnecting its sandbox
+/// to the run's answer: E2B bills a running sandbox per second
+/// (<https://docs.e2b.dev/billing>) and reports no usage, so the call is
+/// timed; the sandbox's life past the call bills outside it.
 async fn run_code(api: &Api, args: &Map<String, Value>) -> Result<ToolOutput, ToolError> {
     let run = run_request(args)?;
+    let since = Instant::now();
     let (response, created) = match &run.sandbox_id {
         Some(id) => {
             let path = format!("/v2/sandboxes/{id}/connect");
@@ -172,7 +177,7 @@ async fn run_code(api: &Api, args: &Map<String, Value>) -> Result<ToolOutput, To
         if created { "new" } else { "reused" },
         run.timeout
     );
-    render_execution(&header, &lines)
+    Ok(render_execution(&header, &lines)?.with_usage("seconds", since.elapsed().as_secs_f64()))
 }
 
 /// The cell sent to the sandbox's code interpreter, its NDJSON answer read
@@ -460,7 +465,7 @@ mod tests {
     }
 
     fn text_of(output: &ToolOutput) -> &str {
-        match output.0.first() {
+        match output.content.first() {
             Some(Content::Text(t)) => t,
             _ => "",
         }
@@ -554,7 +559,7 @@ mod tests {
              <Figure size 640x480 with 1 Axes>\n\nResult:\n2"
         );
         assert_eq!(
-            out.0.get(1),
+            out.content.get(1),
             Some(&Content::Image {
                 data: b"\x89PNG\r\n\x1a\n".to_vec(),
                 mime_type: "image/png".into()
