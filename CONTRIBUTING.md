@@ -110,6 +110,60 @@ cargo test -p respan-gateway-conversation-http --lib anthropic::
 Put a new test beside the code that owns the behavior, and name it for the
 behavior. A test must not need keys or the network.
 
+## Commits and pull requests
+
+These follow [Tokio's](https://github.com/tokio-rs/tokio/blob/master/docs/contributing/pull-requests.md#commits).
+
+Work on a branch, never on your `main`. Keep each commit one logical
+change, and squash checkpoint commits ("wip", "fix typo") into the change
+they belong to before opening the pull request. Once it is open, do not
+rebase or squash: push review fixes as new commits, so the review history
+stays on the pull request.
+
+A pull request lands as one squashed commit: its title is the commit's
+first line (GitHub adds ` (#N)`), and its description the body. So write
+both as a commit message.
+
+The first line:
+
+- is prefixed with what it changes: a crate's name without
+  `respan-gateway-` (`core`, `media-http`, `vendors`, `tool-vendors`,
+  `serve`), `gateway` for `apps/gateway`, `ui`, `python`, `ci`, `docs`,
+  or several, comma-separated, for a change across them;
+- is short, 50 characters if it can be and never over 72, in lowercase
+  but for proper nouns, acronyms and names in code, which go in backticks;
+- starts with an imperative verb, and has no period at the end.
+
+```txt
+vendors: add Mistral transcriptions and speech
+media-http: let a vendor read an answer in its dialect
+ci: cache the UI's pnpm store
+```
+
+Leave the second line blank. The body, which a self-explanatory change can
+leave out, is usually three sentences at most, in plain prose (no list of
+the files or functions changed). Say what the code does now, what goes
+wrong because of it, and the fix in the imperative: "When X happens, Y
+does Z. This leads to W. Thus, do V." Give the intent, not the diff's
+mechanics, and mention no test unless it was unusual, such as a live check
+against a vendor. Wrap it at 72 columns in a commit; do not hard-wrap a
+pull request's description.
+
+End with what it refers to: `Fixes: #123` for an issue it closes,
+`Refs: #123, #124` for others. Credit others' work with
+`Co-authored-by: Name <email>`.
+
+```txt
+vendors: read Mistral's speech answer in its dialect
+
+Mistral answers speech with JSON of base64 audio, whatever the
+`response_format`. Read as OpenAI's audio, it is relayed as the JSON's
+bytes. Thus, decode its `audio_data` in Mistral's dialect, within the
+body's limit.
+
+Refs: #11
+```
+
 ## Releasing
 
 Each crate has its own version, in its `Cargo.toml`. A release is named for
