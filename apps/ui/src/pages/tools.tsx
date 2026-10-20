@@ -112,7 +112,7 @@ function ToolRow({ server, tool }: { server: McpServer; tool: McpTool }) {
           <span className={`text-xs text-muted-foreground ${open ? "whitespace-pre-line" : "truncate"}`}>{tool.description}</span>
         )}
       </button>
-      <Switch size="sm" className="mt-1 data-[state=checked]:bg-success" checked={tool.enabled} disabled={!server.enabled}
+      <Switch size="sm" className="mt-1" checked={tool.enabled} disabled={!server.enabled}
         onCheckedChange={(next) => toggle.mutate(next)}
         aria-label={`Offer ${tool.name}`} title={server.enabled ? undefined : `${server.name} is off`} />
     </li>
@@ -184,7 +184,7 @@ function ToolList({ server, tools }: { server: McpServer; tools: McpTool[] }) {
           <span className="flex-1 text-xs text-muted-foreground">{shownOn} of {shown.length} on</span>
           <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
             Turn {what} {allOn ? "off" : "on"}
-            <Switch size="sm" className="data-[state=checked]:bg-success" checked={allOn} disabled={!server.enabled || bulk.isPending}
+            <Switch size="sm" checked={allOn} disabled={!server.enabled || bulk.isPending}
               onCheckedChange={(next) => set(next)} aria-label={`Turn ${what} tools ${allOn ? "off" : "on"}`} />
           </label>
         </div>
@@ -280,7 +280,7 @@ function ServerCard({ server: s, overview }: { server: McpServer; overview: McpO
           <div className="flex flex-wrap items-center gap-1.5">
             {inLoop && <Badge variant="secondary" className="font-normal"><Repeat aria-hidden />tool loop</Badge>}
             {inAggregate && <Badge variant="secondary" className="font-normal"><Layers aria-hidden />/mcp</Badge>}
-            <Switch checked={s.enabled} onCheckedChange={(on) => toggle.mutate(on)} className="ml-1 data-[state=checked]:bg-success"
+            <Switch checked={s.enabled} onCheckedChange={(on) => toggle.mutate(on)} className="ml-1"
               aria-label={`Serve ${s.name}`} title="Until the gateway restarts" />
           </div>
         </div>
