@@ -1,7 +1,7 @@
 # The repository's labels, after Tokio's. `.github/workflows/labels.yml`
 # makes the repository's match this file when it changes on `main`: it
 # creates, renames (`from_name`) and edits labels, and deletes those not
-# here. A-* and M-* are applied to pull requests by the paths they change
+# here. A-* are applied to pull requests by the paths they change
 # (`.github/labeler.yml`); the others by hand, or by an issue template.
 
 # Area: a layer of the crates, or what is beside them.
@@ -23,11 +23,9 @@
 - name: A-tool-vendors
   color: f7e101
   description: "Area: the tool vendors, HTTP APIs as MCP tools (crates/tool-vendors)"
-  from_name: tool vendor
 - name: A-plugins
   color: f7e101
   description: "Area: the first-party plugins (crates/plugins)"
-  from_name: plugin
 - name: A-sdk
   color: f7e101
   description: "Area: what plugins, vendors and hosts share (crates/sdk)"
@@ -53,123 +51,37 @@
   color: f7e101
   description: "Area: documentation that isn't part of any crate, such as docs/, README.md or CONTRIBUTING.md"
 
-# Module: one kind or wire, across the layers it spans.
-- name: M-conversation
-  color: f7b101
-  description: "Module: the conversation kind and its formats"
-- name: M-media
-  color: f7b101
-  description: "Module: the media kinds and their formats"
-- name: M-decision
-  color: f7b101
-  description: "Module: the decision kind and its format"
-- name: M-mcp
-  color: f7b101
-  description: "Module: the MCP kind, its format and its router"
-- name: M-realtime
-  color: f7b101
-  description: "Module: the realtime kind and its formats"
-- name: M-passthrough
-  color: f7b101
-  description: "Module: traffic of no kind, relayed as it is"
-- name: M-http
-  color: f7b101
-  description: "Module: HTTP, its faults and its transport"
-- name: M-sse
-  color: f7b101
-  description: "Module: server-sent events"
-- name: M-ws
-  color: f7b101
-  description: "Module: WebSocket"
-
-# Category: what an issue or pull request is.
+# Category: what an issue is.
 - name: C-bug
   color: f5f1fd
   description: "Category: This is a bug."
-  from_name: bug
-- name: C-enhancement
-  color: f5f1fd
-  description: "Category: A PR with an enhancement or bugfix."
 - name: C-feature-request
   color: f5f1fd
   description: "Category: A feature request."
-  from_name: enhancement
-- name: C-feature-accepted
-  color: f5f1fd
-  description: "Category: A feature request that has been accepted pending implementation."
 - name: C-vendor-request
   color: f5f1fd
   description: "Category: A model vendor or tool vendor to build in."
-  from_name: new vendor
 - name: C-maintenance
   color: f5f1fd
   description: "Category: PRs that clean code up or issues documenting cleanup."
-- name: C-proposal
-  color: 9514d1
-  description: "Category: a proposal and request for comments"
-- name: C-question
-  color: f5f1fd
-  description: "User questions that are neither feature requests nor bug reports"
-  from_name: question
-- name: C-request
-  color: f5f1fd
-  description: "Category: A non-feature request, e.g.: metadata updates, optimization suggestion, etc."
 
-# Call for participation: the experience a fix needs.
-- name: E-easy
+# Call for participation. `good first issue` is GitHub's own name, which it
+# shows on the repository's contribute page.
+- name: good first issue
   color: 02e10c
   description: "Call for participation: Experience needed to fix: Easy / not much"
-  from_name: good first issue
-- name: E-medium
-  color: 02e10c
-  description: "Call for participation: Experience needed to fix: Medium / intermediate"
-- name: E-hard
-  color: 02e10c
-  description: "Call for participation: Experience needed to fix: Hard / a lot"
+  from_name: E-easy
 - name: E-help-wanted
   color: 02e10c
   description: "Call for participation: Help is requested to fix this issue."
-  from_name: help wanted
-- name: E-needs-mcve
-  color: 02e10c
-  description: "Call for participation: This issue needs a Minimal Complete and Verifiable Example"
-
-# Issue: how it goes wrong.
-- name: I-crash
-  color: e10c02
-  description: "Problems and improvements related to program crashes/panics."
-- name: I-hang
-  color: e10c02
-  description: "Program never terminates, resulting from infinite loops, deadlock, livelock, etc."
-- name: I-slow
-  color: e10c02
-  description: "Problems and improvements related to performance."
-- name: I-needs-decision
-  color: e10c02
-  description: "Issues in need of decision."
 
 # Status.
 - name: S-blocked
   color: d3dddd
   description: "Status: marked as blocked on something else such as a PR or other implementation work."
-- name: S-blocked-on-msrv
-  color: d3dddd
-  description: "Status: need an MSRV bump to progress"
 - name: S-breaking-change
   color: d3dddd
   description: "A breaking change that requires manual coordination to be released."
 - name: S-waiting-on-author
   color: d3dddd
   description: "Status: awaiting some action (such as code changes) from the PR or issue author."
-- name: S-waiting-on-review
-  color: d3dddd
-  description: "Status: Awaiting review from the assignee but also interested parties."
-
-# Topic.
-- name: T-docs
-  color: bfd4f2
-  description: "Topic: documentation"
-  from_name: documentation
-- name: T-performance
-  color: bfd4f2
-  description: "Topic: performance and benchmarks"

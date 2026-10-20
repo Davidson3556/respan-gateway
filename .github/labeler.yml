@@ -1,4 +1,4 @@
-# The A-* and M-* labels of a pull request, by the paths it changes, for
+# The A-* labels of a pull request, by the paths it changes, for
 # `.github/workflows/labeler.yml` (actions/labeler). The labels themselves
 # are `.github/labels.yml`'s.
 
@@ -55,44 +55,3 @@ A-readme:
     - docs/**
     - '*.md'
 
-M-conversation:
-- changed-files:
-  - any-glob-to-any-file:
-    - crates/kinds/conversation/**
-    - crates/formats/conversation-http/**
-M-media:
-- changed-files:
-  - any-glob-to-any-file:
-    - crates/kinds/media/**
-    - crates/formats/media-http/**
-M-decision:
-- changed-files:
-  - any-glob-to-any-file:
-    - crates/kinds/decision/**
-    - crates/formats/decision-http/**
-M-mcp:
-- changed-files:
-  - any-glob-to-any-file:
-    - crates/kinds/mcp/**
-    - crates/formats/mcp-http/**
-    - crates/plugins/mcp-router/**
-M-realtime:
-- changed-files:
-  - any-glob-to-any-file:
-    - crates/kinds/realtime/**
-    - crates/formats/realtime-ws/**
-M-passthrough:
-- changed-files:
-  - any-glob-to-any-file: crates/formats/passthrough-http/**
-M-http:
-- changed-files:
-  - any-glob-to-any-file:
-    - crates/wires/http/**
-    - crates/wires/http-faults/**
-    - crates/wires/http-transport/**
-M-sse:
-- changed-files:
-  - any-glob-to-any-file: crates/wires/sse/**
-M-ws:
-- changed-files:
-  - any-glob-to-any-file: crates/wires/ws/**

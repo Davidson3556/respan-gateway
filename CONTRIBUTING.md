@@ -167,25 +167,19 @@ Refs: #11
 
 ## Labels
 
-Labels follow Tokio's too, a prefix each, and are defined in
+Labels follow Tokio's, fewer of them, and are defined in
 [`.github/labels.yml`](.github/labels.yml): a change there is made on the
 repository when it lands on `main`, so add or rename a label there, not in
 GitHub's settings.
 
 - `A-*`, the area: a layer of the crates (`A-formats`, `A-vendors`), or
-  what is beside them (`A-ui`, `A-ci`, `A-readme`).
-- `M-*`, the module: one kind or wire across the layers it spans
-  (`M-media` is `crates/kinds/media` and `crates/formats/media-http`).
+  what is beside them (`A-ui`, `A-ci`, `A-readme`). A pull request gets
+  them from the paths it changes ([`.github/labeler.yml`](.github/labeler.yml)).
 - `C-*`, the category: `C-bug`, `C-feature-request`, `C-vendor-request`,
-  `C-enhancement`, `C-maintenance`, ….
-- `E-*`, a call for participation: `E-easy`, `E-medium`, `E-hard`,
-  `E-help-wanted`.
-- `I-*`, how it goes wrong; `S-*`, its status; `T-*`, its topic.
-
-A pull request gets its `A-*` and `M-*` labels from the paths it changes
-([`.github/labeler.yml`](.github/labeler.yml)); its commit's prefix is
-usually one of them, without the `A-` or `M-`. An issue gets its `C-*`
-label from its template; the rest are a triager's.
+  `C-maintenance`. An issue gets one from its template.
+- `good first issue` and `E-help-wanted`, a call for participation.
+- `S-*`, the status: `S-blocked`, `S-waiting-on-author`,
+  `S-breaking-change`.
 
 ## Releasing
 
