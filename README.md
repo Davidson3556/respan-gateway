@@ -1,4 +1,6 @@
-![Respan Gateway](docs/assets/respan-gateway-banner-v2.png)
+<h1 align="center">
+  <a href="https://www.respan.ai"><img src="docs/assets/respan-logo.png" alt="Respan" width="64" valign="middle" /></a> Respan Gateway
+</h1>
 
 <p align="center">
   <a href="https://github.com/respanai/respan-gateway/actions/workflows/ci.yml"><img src="https://github.com/respanai/respan-gateway/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
@@ -10,9 +12,11 @@
   <a href="https://x.com/RespanAI"><img src="https://img.shields.io/badge/X-%40RespanAI-000000?logo=x&amp;logoColor=white" alt="Follow Respan on X" /></a>
 </p>
 
-**[▶ Watch the demo](https://www.youtube.com/watch?v=pVv2ibXiTXM)**
+<p align="center"><a href="https://www.respan.ai"><b>respan.ai</b></a></p>
 
-# Respan Gateway
+![Respan Gateway](docs/assets/respan-gateway-banner-v2.png)
+
+**[▶ Watch the demo](https://www.youtube.com/watch?v=pVv2ibXiTXM)**
 
 One endpoint for every LLM vendor. Point any official SDK at the gateway,
 name any model, and it routes the request to the right provider,
