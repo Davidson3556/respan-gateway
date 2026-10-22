@@ -12,6 +12,8 @@ use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, Request, StatusC
 use respan_gateway_http::{self as h, ClientIo, Decoder, Encoder, ProviderIo};
 use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::WsTransport;
+
+use crate::foreign::Harmless;
 use serde_json::Value;
 
 /// Reads one frame as zero or more events.
@@ -30,6 +32,15 @@ pub(crate) fn say() -> (Say, Said) {
     mpsc::unbounded()
 }
 
+/// Every spec of the crate, which a client's request is matched against
+/// together, and whose natives each other's writers know what to do with.
+pub(crate) const SPECS: [&Spec; 4] = [
+    &crate::openai::SPEC,
+    &crate::gemini::SPEC,
+    &crate::mistral::SPEC,
+    &crate::responses::SPEC,
+];
+
 /// What a spec says of its session.
 #[derive(Debug)]
 pub(crate) struct Spec {
@@ -41,16 +52,29 @@ pub(crate) struct Spec {
     pub(crate) protocol: Option<&'static str>,
     /// Whether its provider sends JSON in binary frames.
     pub(crate) binary_text: bool,
+    /// Whether its sessions transcribe alone: one opened at its path is a
+    /// transcription from its connect, whoever provides it.
+    pub(crate) transcribes: bool,
+    /// What of its natives another format may drop; with none, all are
+    /// refused.
+    pub(crate) harmless: Option<&'static Harmless>,
 }
 
 impl Spec {
-    /// Whether a client's request is an upgrade to this session.
+    /// Whether a client's request is an upgrade to this session: at a path
+    /// ending in its own, but not in another spec's that ends in it, as
+    /// Mistral's `/audio/transcriptions/realtime` does in OpenAI's
+    /// `/realtime`, whatever order they are served in.
     pub(crate) fn matches(&self, io: &ClientIo) -> bool {
         let head = io.request();
+        let at = |path| respan_gateway_http::path::path_ends_with(head.uri(), path);
+        let longer =
+            |other: &Spec| other.path.len() > self.path.len() && other.path.ends_with(self.path);
         head.method() == Method::GET
             && respan_gateway_http::rules::header_tokens(head.headers(), UPGRADE)
                 .any(|v| v.eq_ignore_ascii_case("websocket"))
-            && respan_gateway_http::path::path_ends_with(head.uri(), self.path)
+            && at(self.path)
+            && !SPECS.iter().any(|other| longer(other) && at(other.path))
     }
 
     /// A transport to its provider at `base_url`, taking binary text if the
@@ -154,6 +178,13 @@ pub(crate) fn model_at(uri: &Uri) -> Option<String> {
     form_urlencoded::parse(query)
         .find(|(name, model)| name == "model" && !model.is_empty())
         .map(|(_, model)| model.into_owned())
+}
+
+/// Whether a session opened at `uri` is a transcription from its connect,
+/// as one at the path of a spec that transcribes alone is.
+pub(crate) fn transcribes_at(uri: &Uri) -> bool {
+    let at = |path| respan_gateway_http::path::path_ends_with(uri, path);
+    SPECS.iter().any(|spec| spec.transcribes && at(spec.path))
 }
 
 /// A handshake's query naming `model`, escaped, as [`model_at`] reads it.

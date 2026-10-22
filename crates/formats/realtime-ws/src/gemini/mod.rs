@@ -32,7 +32,6 @@ const NAME: &str = SPEC.name;
 /// the start of the user's activity, which a format's voice detection or
 /// its next commit implies, and the end of its audio stream.
 pub(crate) const HARMLESS: Harmless = Harmless {
-    format: NAME,
     session: &[
         "setup.contextWindowCompression",
         "setup.inputAudioTranscription",
@@ -78,11 +77,13 @@ type Shared = Arc<Mutex<State>>;
 /// Whether a client is being answered: its writer says, its reader reads.
 type Answering = Arc<AtomicBool>;
 
-const SPEC: Spec = Spec {
+pub(crate) const SPEC: Spec = Spec {
     name: "gemini-live",
     path: "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
     protocol: None,
     binary_text: true,
+    transcribes: false,
+    harmless: Some(&HARMLESS),
 };
 
 /// Gemini Live: a `GET` upgrade to a path ending in the Live API's endpoint,

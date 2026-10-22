@@ -163,6 +163,7 @@ describe("the socket", () => {
     const socket = openRealtime({
       api,
       model: "gpt realtime",
+      mode: "conversation",
       key,
       onOpen: () => seen.open++,
       onEvent: (e) => seen.events.push(e),
@@ -173,11 +174,15 @@ describe("the socket", () => {
 
   it("builds OpenAI Realtime's URL and sends the key as a subprotocol", () => {
     const openai = openaiRealtime;
-    expect(openai.url("a/b", "k", { protocol: "https:", host: "gw.test" })).toBe(
+    expect(openai.url("a/b", "k", { protocol: "https:", host: "gw.test" }, "conversation")).toBe(
       "wss://gw.test/v1/realtime?model=a%2Fb",
     );
-    expect(openai.url("m", null, { protocol: "http:", host: "localhost:8080" })).toBe(
+    expect(openai.url("m", null, { protocol: "http:", host: "localhost:8080" }, "conversation")).toBe(
       "ws://localhost:8080/v1/realtime?model=m",
+    );
+    // A transcription is one from its connect.
+    expect(openai.url("m", null, { protocol: "http:", host: "gw.test" }, "transcription")).toBe(
+      "ws://gw.test/v1/realtime?model=m&intent=transcription",
     );
     expect(openai.protocols(null)).toEqual(["realtime"]);
     const { fake } = connect("sk-1");

@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 
 use respan_gateway_core::{Fault, NativeFields, NativeValue};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_realtime::{Audio, AudioFormat, Cause, Output, Status, Usage};
+use respan_gateway_realtime::{Audio, AudioFormat, Cause, Output, Purpose, Status, Usage};
 use respan_gateway_ws::CloseCode;
 use serde_json::{Map, Value, json};
 
@@ -44,6 +44,11 @@ pub(super) struct Provider {
     /// Whether an interruption said the user began speaking before
     /// `voiceActivity`, which the Live API sends just after it.
     told: bool,
+    /// What was heard of the user's turn, in a transcription.
+    heard: String,
+    /// Whether the model answers the user's turn, in a transcription,
+    /// whose answer is dropped.
+    answered: bool,
 }
 
 impl Provider {
@@ -53,6 +58,8 @@ impl Provider {
             ended: false,
             spoke: false,
             told: false,
+            heard: String::new(),
+            answered: false,
         }
     }
 
@@ -63,16 +70,19 @@ impl Provider {
             out.push(Output::native(NAME, v));
             return Ok(());
         }
+        // A model that only transcribes ends its generation, never a turn.
+        let generated = v["serverContent"]["generationComplete"] == true;
         let used = usage(&mut v);
         let mut events = Vec::new();
         let shared = self.shared.clone();
+        let mut said = Vec::new();
         if self.decode(&mut shared.lock(), &mut v, &mut events) {
-            out.push(Output::ResponseStart {
+            said.push(Output::ResponseStart {
                 id: None,
                 native: None,
             });
         }
-        out.extend(used.map(Output::Usage));
+        said.extend(used.map(Output::Usage));
         let rest = v.as_object().filter(|rest| !rest.is_empty());
         match events
             .iter_mut()
@@ -81,8 +91,61 @@ impl Provider {
             Some(first) => keep(first, rest),
             None => events.extend(rest.map(|rest| Output::native(NAME, rest.clone()))),
         }
-        out.extend(events);
+        said.extend(events);
+        let purpose = shared.lock().applied.as_ref().and_then(|s| s.purpose);
+        if purpose != Some(Purpose::Transcription) {
+            out.extend(said);
+            return Ok(());
+        }
+        for event in said {
+            self.transcribed(event, out);
+        }
+        if generated && !self.answered {
+            out.extend(self.whole());
+        }
         Ok(())
+    }
+
+    /// `event` in a transcription, which the Live API answers all the
+    /// same: its answer is dropped, and the user's transcript is whole when
+    /// the answer is (all the user said of its turn has come by then), or
+    /// when the user's next turn begins.
+    fn transcribed(&mut self, event: Output, out: &mut Vec<Output>) {
+        match event {
+            Output::InputTranscript {
+                ref text,
+                complete: false,
+                ..
+            } => {
+                self.heard.push_str(text);
+                out.push(event);
+            }
+            Output::SpeechStarted { .. } => {
+                out.extend(self.whole());
+                out.push(event);
+            }
+            Output::ResponseStart { .. } => self.answered = true,
+            Output::ResponseDone { status, .. } => {
+                self.answered = false;
+                if status == Status::Completed {
+                    out.extend(self.whole());
+                }
+            }
+            Output::Audio { .. }
+            | Output::Text { .. }
+            | Output::Transcript { .. }
+            | Output::ToolCall { .. } => {}
+            event => out.push(event),
+        }
+    }
+
+    /// The user's whole transcript of its turn, if anything was heard.
+    fn whole(&mut self) -> Option<Output> {
+        (!self.heard.is_empty()).then(|| Output::InputTranscript {
+            text: std::mem::take(&mut self.heard),
+            complete: true,
+            native: None,
+        })
     }
 
     /// The events of what `v` says, taken from it; whether a response

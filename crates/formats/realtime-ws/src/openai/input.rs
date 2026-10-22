@@ -4,7 +4,7 @@
 use respan_gateway_conversation::{Content, Message, Role};
 use respan_gateway_core::{Fault, NativeValue};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_realtime::{Audio, AudioFormat, Input, Session, ToolResult};
+use respan_gateway_realtime::{Audio, AudioFormat, Input, Purpose, Session, ToolResult};
 use serde_json::{Value, json};
 
 use super::{NAME, session};
@@ -18,16 +18,16 @@ use crate::json::{self, merge, own, string, take, text, untranslatable_input};
 /// of that model alone before it.
 #[derive(Debug)]
 pub(super) struct Client {
-    /// The model the handshake asked for, until the first frame.
-    opening: Option<Option<String>>,
+    /// The model and purpose the handshake asked for, until the first frame.
+    opening: Option<(Option<String>, Option<Purpose>)>,
     /// The format of the client's audio, as its session says.
     input: AudioFormat,
 }
 
 impl Client {
-    pub(super) fn new(model: Option<String>) -> Self {
+    pub(super) fn new(model: Option<String>, purpose: Option<Purpose>) -> Self {
         Self {
-            opening: Some(model),
+            opening: Some((model, purpose)),
             input: AudioFormat::pcm16(24_000),
         }
     }
@@ -36,13 +36,16 @@ impl Client {
         let v: Value = serde_json::from_slice(&raw)
             .map_err(|_| Fault::bad_request("a client's frame is not a JSON event"))?;
         let mut event = decode(v, self.input);
-        if let Some(model) = self.opening.take() {
+        if let Some((model, purpose)) = self.opening.take() {
             match &mut event {
-                Input::Session(s) if s.model.is_none() => s.model = model,
-                Input::Session(_) => {}
+                Input::Session(s) => {
+                    s.model = s.model.take().or(model);
+                    s.purpose = s.purpose.or(purpose);
+                }
                 _ => {
                     let mut opening = Session::default();
                     opening.model = model;
+                    opening.purpose = purpose;
                     out.push(Input::Session(opening));
                 }
             }
@@ -190,8 +193,11 @@ pub(super) fn admit(event: &Input) -> Result<Input, Fault> {
 /// The client's events written to the provider.
 #[derive(Debug)]
 pub(super) struct Provider {
-    /// The model the session was opened with, at its URL.
+    /// The model the session was opened with, at its URL, or, in a
+    /// transcription, the one that transcribes.
     model: String,
+    /// Whether it was opened for a transcription, at its intent.
+    transcribing: bool,
     /// Whether its first session was written.
     opened: bool,
     /// The format of the audio it takes, as the sessions written say.
@@ -201,10 +207,12 @@ pub(super) struct Provider {
 }
 
 impl Provider {
-    /// A writer to a session opened with `model`.
-    pub(super) fn new(model: String) -> Self {
+    /// A writer to a session opened with `model`, or for a transcription by
+    /// it if `transcribing`.
+    pub(super) fn new(model: String, transcribing: bool) -> Self {
         Self {
             model,
+            transcribing,
             opened: false,
             input: AudioFormat::pcm16(24_000),
             convert: Convert::default(),
@@ -231,7 +239,8 @@ impl Provider {
                 if opening || s.model.as_ref() == Some(&self.model) {
                     s.model = None;
                 }
-                if s == Session::default() {
+                // A transcription names its model in its first session.
+                if s == Session::default() && !(opening && self.transcribing) {
                     return Ok(None);
                 }
                 if let Some(format) = s.input_audio {
@@ -244,14 +253,29 @@ impl Provider {
                     own(NAME, &s.native, || refuse("another format's session"))?,
                 );
                 if v["session"].get("type").is_none() {
-                    v["session"]["type"] = "realtime".into();
+                    let kind = if self.transcribing {
+                        "transcription"
+                    } else {
+                        "realtime"
+                    };
+                    v["session"]["type"] = kind.into();
                 }
-                // It transcribes the user's audio only with a named model.
+                // It transcribes the user's audio only with a named model:
+                // in a transcription, the one routing chose, which its first
+                // session names.
+                if opening && self.transcribing {
+                    let path = ["session", "audio", "input", "transcription", "model"];
+                    json::set(&mut v, &path, self.model.as_str().into());
+                }
                 let transcription = v.pointer_mut("/session/audio/input/transcription");
                 if let Some(transcription) = transcription.and_then(Value::as_object_mut) {
-                    transcription
-                        .entry("model")
-                        .or_insert_with(|| super::TRANSCRIPTION_MODEL.into());
+                    let model = match self.transcribing {
+                        true => self.model.as_str(),
+                        false => super::TRANSCRIPTION_MODEL,
+                    };
+                    if self.transcribing || !transcription.contains_key("model") {
+                        transcription.insert("model".into(), model.into());
+                    }
                 }
                 return Ok(Some(v));
             }

@@ -5,7 +5,8 @@
 event each. Its formats, over WebSocket, are
 [`respan-gateway-realtime-ws`](../../formats/realtime-ws/README.md)'s.
 
-- `Input`: a `Session` configuration (its model, instructions, voice, audio
+- `Input`: a `Session` configuration (its `Purpose`, a conversation or a
+  transcription that nothing answers; its model, instructions, voice, audio
   formats, turn detection, transcription, tools), the user's `Audio`, a
   `Commit` of the user's turn, a whole `Message`, a `ToolResult`, `Respond`
   and `Cancel`.

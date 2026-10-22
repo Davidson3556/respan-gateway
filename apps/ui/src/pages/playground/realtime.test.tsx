@@ -176,12 +176,50 @@ describe("RealtimeTab", () => {
     expect(screen.getByText("Hello there")).toBeInTheDocument();
     // Its server hears a barge-in itself, and a client can't cancel a reply.
     expect(screen.queryByRole("button", { name: /interrupt/i })).not.toBeInTheDocument();
+    // Nor can it ask for a transcription alone.
+    expect(screen.queryByRole("combobox", { name: "Mode" })).not.toBeInTheDocument();
 
     const sent = ws.sent.length;
     act(() => ws.emit({ serverContent: { interrupted: true } }));
     expect(player.stop).toHaveBeenCalled();
     expect(ws.sent.length).toBe(sent);
     expect(screen.getByText("interrupted")).toBeInTheDocument();
+  });
+
+  it("opens a transcription when chosen, by a model that transcribes, which nothing answers", async () => {
+    const models = () =>
+      json({
+        object: "list",
+        data: ["gpt-realtime", "gpt-realtime-whisper"].map((id) => ({ id, object: "model", owned_by: "openai", kind: "realtime" })),
+      });
+    serve({ "GET /v1/models": models, "GET /ui/api/routes": routes(true) });
+    renderApp(<RealtimeTab />);
+    await userEvent.click(await screen.findByRole("combobox", { name: "Mode" }));
+    await userEvent.click(await screen.findByRole("option", { name: "transcription" }));
+    expect(screen.getByText("Your transcript appears here as you talk.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+    const ws = FakeSocket.last;
+    expect(ws.url).toContain("/v1/realtime?model=gpt-realtime-whisper&intent=transcription");
+    await act(async () => ws.open());
+    expect(ws.sent[0]).toMatchObject({ type: "session.update", session: { type: "transcription" } });
+    expect(screen.getByRole("combobox", { name: "Mode" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /interrupt/i })).not.toBeInTheDocument();
+    act(() => {
+      ws.emit({ type: "conversation.item.input_audio_transcription.delta", item_id: "u1", delta: "Hello" });
+      ws.emit({ type: "conversation.item.input_audio_transcription.delta", item_id: "u1", delta: " there" });
+    });
+    expect(screen.getByText("Hello there")).toBeInTheDocument();
+  });
+
+  it("says why the gateway closed a session it opened", async () => {
+    serve({ "GET /v1/models": modelsWithRealtime, "GET /ui/api/routes": routes(true) });
+    renderApp(<RealtimeTab />);
+    await userEvent.click(await screen.findByRole("button", { name: "Start session" }));
+    const ws = FakeSocket.last;
+    await act(async () => ws.open());
+    act(() => ws.onclose?.({ code: 1008, reason: "bad_request" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The gateway closed the session: bad_request.");
   });
 
   it("ends a session the user cancels while it connects, without calling it refused", async () => {

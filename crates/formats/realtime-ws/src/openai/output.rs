@@ -304,7 +304,7 @@ impl Client {
                     _ => "session.updated",
                 };
                 let mut session = session::encode(s, refuse)?;
-                if s.native.is_none() {
+                if s.native.is_none() && session.get("type").is_none() {
                     session["type"] = "realtime".into();
                 }
                 (json!({"type": kind, "session": session}), &s.native)
@@ -346,7 +346,8 @@ impl Client {
                     v["content_index"] = 0.into();
                     match complete {
                         false => self.heard.get_or_insert_default().push_str(text),
-                        true => self.heard = None,
+                        // Its item is whole: the next transcript is another's.
+                        true => (self.heard, self.user) = (None, None),
                     }
                 }
                 (v, native)

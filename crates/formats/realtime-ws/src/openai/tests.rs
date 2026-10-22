@@ -1,14 +1,16 @@
 use respan_gateway_core::FaultKind;
 use respan_gateway_core::NativeFields;
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_realtime::{AudioFormat, Cause, Input, Output, Session, Status, ToolResult};
+use respan_gateway_realtime::{
+    AudioFormat, Cause, Input, Output, Purpose, Session, Status, ToolResult,
+};
 use serde_json::{Value, json};
 
 use super::{input, output};
 
 /// The events of `frames`, a client's, after the session its handshake opens.
 fn inputs(frames: &[Value]) -> Vec<Input> {
-    let mut client = input::Client::new(Some("gpt-realtime".into()));
+    let mut client = input::Client::new(Some("gpt-realtime".into()), None);
     let mut events = Vec::new();
     for frame in frames {
         client
@@ -20,7 +22,7 @@ fn inputs(frames: &[Value]) -> Vec<Input> {
 
 /// What `events` are written as, to a provider.
 fn sent(events: &[Input]) -> Result<Vec<Value>, respan_gateway_core::Fault> {
-    let mut provider = input::Provider::new("gpt-realtime".into());
+    let mut provider = input::Provider::new("gpt-realtime".into(), false);
     let mut frames = Vec::new();
     for event in events {
         provider.write(event, &mut frames)?;
@@ -467,4 +469,93 @@ fn an_error_says_its_cause_as_any_format_reads_it() {
     // OpenAI's own error is written back as it came.
     let written = heard(&read[1..2]).expect("written");
     assert_eq!(written[0]["error"]["code"], "response_cancel_not_active");
+}
+
+#[test]
+fn each_whole_transcript_is_an_item_of_its_own() {
+    let transcript = |text: &str, complete| Output::InputTranscript {
+        text: text.into(),
+        complete,
+        native: None,
+    };
+    let frames = heard(&[
+        transcript("one", false),
+        transcript("one", true),
+        transcript("two", false),
+        transcript("two", true),
+    ])
+    .expect("heard");
+    let items: Vec<_> = frames.iter().map(|f| f["item_id"].clone()).collect();
+    assert_eq!(items[0], items[1]);
+    assert_eq!(items[2], items[3]);
+    assert_ne!(items[1], items[2]);
+}
+
+#[test]
+fn a_sessions_type_is_its_purpose() {
+    let events = inputs(&[json!({"type": "session.update",
+        "session": {"type": "transcription"}})]);
+    let purposes: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Input::Session(s) => Some(s.purpose),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(purposes.last(), Some(&Some(Purpose::Transcription)));
+    let mut transcription = Session::default();
+    transcription.purpose = Some(Purpose::Transcription);
+    let frames = heard(&[Output::Opened(transcription)]).expect("heard");
+    assert_eq!(frames[0]["session"]["type"], "transcription");
+    let frames = heard(&[Output::Opened(Session::default())]).expect("heard");
+    assert_eq!(frames[0]["session"]["type"], "realtime");
+}
+
+#[test]
+fn a_transcription_is_opened_by_the_model_routing_chose() {
+    let mut client = input::Client::new(
+        Some("gpt-4o-transcribe".into()),
+        Some(Purpose::Transcription),
+    );
+    let mut events = Vec::new();
+    let update = json!({"type": "session.update", "session": {
+        "audio": {"input": {"transcription": {"model": "gpt-4o-mini-transcribe"}}}}});
+    client
+        .read(Bytes::from(update.to_string()), &mut events)
+        .expect("read");
+    let [Input::Session(session)] = events.as_slice() else {
+        panic!("{events:?}");
+    };
+    assert_eq!(session.purpose, Some(Purpose::Transcription));
+
+    let mut provider = input::Provider::new("gpt-4o-transcribe".into(), true);
+    let mut frames = Vec::new();
+    provider.write(&events[0], &mut frames).expect("written");
+    let v: Value = serde_json::from_slice(&frames[0]).expect("JSON");
+    assert_eq!(v["session"]["type"], "transcription");
+    assert_eq!(v["session"].get("model"), None);
+    assert_eq!(
+        v["session"]["audio"]["input"]["transcription"]["model"],
+        "gpt-4o-transcribe"
+    );
+    // A later session's transcription settings keep the model routing chose.
+    let mut later = Session::default();
+    later.input_transcription = Some(true);
+    let mut frames = Vec::new();
+    provider
+        .write(&Input::Session(later), &mut frames)
+        .expect("written");
+    let v: Value = serde_json::from_slice(&frames[0]).expect("JSON");
+    assert_eq!(
+        v["session"]["audio"]["input"]["transcription"]["model"],
+        "gpt-4o-transcribe"
+    );
+}
+
+#[test]
+fn a_handshake_asks_for_a_transcription_at_its_intent() {
+    let purpose = |at: &str| super::purpose_at(&at.parse().expect("a URI"));
+    let intent = "/v1/realtime?model=m&intent=transcription";
+    assert_eq!(purpose(intent), Some(Purpose::Transcription));
+    assert_eq!(purpose("/v1/realtime?model=m"), None);
 }

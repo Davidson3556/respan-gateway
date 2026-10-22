@@ -3,7 +3,7 @@
 // events, as OpenAI Realtime's, into what the page shows. The audio itself
 // is handled beside this, in realtime-io.
 
-import type { ClientMessage, RealtimeApi } from "@/lib/realtime-apis";
+import type { ClientMessage, RealtimeApi, RealtimeMode } from "@/lib/realtime-apis";
 
 export interface ServerEvent {
   type: string;
@@ -28,6 +28,7 @@ export interface RealtimeSocket {
 export function openRealtime({
   api,
   model,
+  mode,
   key,
   onOpen,
   onEvent,
@@ -35,13 +36,14 @@ export function openRealtime({
 }: {
   api: RealtimeApi;
   model: string;
+  mode: RealtimeMode;
   key: string | null;
   onOpen: () => void;
   onEvent: (event: ServerEvent) => void;
   /** `opened` is false when the gateway refused the upgrade. */
   onClose: (info: { opened: boolean; code: number; reason: string }) => void;
 }): RealtimeSocket {
-  const socket = new WebSocket(api.url(model, key, window.location), api.protocols(key));
+  const socket = new WebSocket(api.url(model, key, window.location, mode), api.protocols(key));
   socket.binaryType = "arraybuffer";
   const read = api.reader();
   const text = new TextDecoder();

@@ -9,11 +9,13 @@ use respan_gateway_ws::WsTransport;
 
 use crate::session::{self, Spec};
 
-const SPEC: Spec = Spec {
+pub(crate) const SPEC: Spec = Spec {
     name: "responses-ws",
     path: "/responses",
     protocol: None,
     binary_text: false,
+    transcribes: false,
+    harmless: None,
 };
 
 /// OpenAI's Responses over WebSocket: a `GET` upgrade to a path ending in

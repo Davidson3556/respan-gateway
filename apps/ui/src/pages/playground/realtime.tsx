@@ -16,18 +16,19 @@ import {
   type RealtimeState,
 } from "@/lib/realtime";
 import type { RequestRecord } from "@/lib/api";
-import { realtimeApis, type RealtimeApi } from "@/lib/realtime-apis";
+import { realtimeApis, transcribersFirst, type RealtimeApi, type RealtimeMode } from "@/lib/realtime-apis";
 import { locateCall } from "@/lib/served";
 import { Player, startMic, type Mic as MicHandle } from "@/lib/realtime-io";
 import { cn } from "@/lib/utils";
 import { ModelPicker } from "./model-picker";
 import { ConfigCard, PlaygroundLayout } from "./layout";
+import { SelectField } from "./select-field";
 
 const REFUSED =
   "The gateway refused the session. Check that a provider serves realtime for this model and that the gateway key is right.";
 
-/** A realtime session in `api`: the socket, the mic, the speaker, and the transcript they make. */
-function useRealtimeSession(api: RealtimeApi, model: string) {
+/** A realtime session in `api`, for `mode`: the socket, the mic, the speaker, and the transcript they make. */
+function useRealtimeSession(api: RealtimeApi, model: string, mode: RealtimeMode) {
   const key = useGatewayKey();
   const [state, dispatch] = useReducer(realtimeReducer, initialRealtime);
   const [level, setLevel] = useState(0);
@@ -82,10 +83,11 @@ function useRealtimeSession(api: RealtimeApi, model: string) {
     const ws = openRealtime({
       api,
       model,
+      mode,
       key,
       onOpen: () => {
         dispatch({ type: "open" });
-        api.opening(model).forEach(ws.send);
+        api.opening(model, mode).forEach(ws.send);
         startMic(
           speaker,
           (audio) => ws.send(api.audio(audio)),
@@ -120,15 +122,18 @@ function useRealtimeSession(api: RealtimeApi, model: string) {
           };
         }
       },
-      onClose: ({ opened, reason }) => {
+      onClose: ({ opened, code, reason }) => {
         if (socket.current !== ws) return;
         socket.current = null;
         teardown();
-        dispatch({ type: "close", error: opened ? undefined : reason || REFUSED });
+        // A session the gateway refused once open, such as a conversation
+        // with a model that only transcribes, says why in its close.
+        const closed = code !== 1000 && reason ? `The gateway closed the session: ${reason}.` : undefined;
+        dispatch({ type: "close", error: opened ? closed : reason || REFUSED });
       },
     });
     socket.current = ws;
-  }, [api, cutOff, end, key, model, stop, teardown]);
+  }, [api, cutOff, end, key, mode, model, stop, teardown]);
 
   const interrupt = useCallback(() => {
     cutOff();
@@ -221,11 +226,18 @@ function Transcript({ lines }: { lines: Line[] }) {
 }
 
 export function RealtimeTab() {
-  const choice = useModelChoice("realtime", "gpt-realtime");
   const { data: routes } = useRoutes();
   const apiChoice = useApiChoice("realtime", realtimeApis);
   const api = apiChoice.api;
-  const { state, level, start, stop, interrupt } = useRealtimeSession(api, choice.model);
+  const [chosenMode, setMode] = useState<RealtimeMode>("conversation");
+  const mode = api.modes.includes(chosenMode) ? chosenMode : api.modes[0];
+  const transcribing = mode === "transcription";
+  const choice = useModelChoice(
+    "realtime",
+    transcribing ? "gpt-realtime-whisper" : "gpt-realtime",
+    transcribing ? transcribersFirst : undefined,
+  );
+  const { state, level, start, stop, interrupt } = useRealtimeSession(api, choice.model, mode);
   const active = state.phase === "connecting" || state.phase === "live";
   // A session's record is finished when it ends.
   const [record, setRecord] = useState<RequestRecord>();
@@ -255,8 +267,8 @@ export function RealtimeTab() {
       <Card className="py-0">
         <EmptyState icon={AudioLines} title="No realtime provider" className="border-none">
           <p>
-            No provider here serves realtime voice. Add one that speaks OpenAI Realtime or Gemini Live
-            (kind <code>realtime</code>) to the gateway's config, and it shows up here.
+            No provider here serves realtime voice. Add one that speaks OpenAI Realtime, Gemini Live or
+            Mistral Realtime (kind <code>realtime</code>) to the gateway's config, and it shows up here.
           </p>
         </EmptyState>
       </Card>
@@ -276,9 +288,24 @@ export function RealtimeTab() {
           record={record}
         >
         <ModelPicker id="realtime-model" choice={choice} disabled={active} />
+        {api.modes.length > 1 && (
+          <SelectField
+            id="realtime-mode"
+            label="Mode"
+            value={mode}
+            onChange={(m) => {
+              setMode(m as RealtimeMode);
+              // Each mode starts from its own first model.
+              choice.setModel("");
+            }}
+            options={api.modes}
+            className="capitalize"
+            disabled={active}
+          />
+        )}
         {active ? (
           <div className="grid gap-2">
-            {api.cancel && (
+            {api.cancel && !transcribing && (
               <Button variant="outline" onClick={interrupt} disabled={state.speaker !== "assistant"}>
                 <Hand /> Interrupt
               </Button>
@@ -294,8 +321,10 @@ export function RealtimeTab() {
         )}
         <p className="text-xs text-muted-foreground">
           Talks to the gateway's {api.label} endpoint over a WebSocket; any realtime model works,
-          as the gateway translates. The browser asks for your microphone once the session opens;
-          audio is sent as 24 kHz PCM16.
+          as the gateway translates.{" "}
+          {transcribing &&
+            "In transcription, your speech is transcribed and nothing answers; the model is the one that transcribes, so pick one that does. "}
+          The browser asks for your microphone once the session opens; audio is sent as 24 kHz PCM16.
         </p>
         </ConfigCard>
       }
@@ -313,7 +342,9 @@ export function RealtimeTab() {
           )}
           {state.lines.length === 0 ? (
             <p className="text-center text-sm text-muted-foreground">
-              Transcripts of both sides appear here as you talk.
+              {transcribing
+                ? "Your transcript appears here as you talk."
+                : "Transcripts of both sides appear here as you talk."}
             </p>
           ) : (
             <Transcript lines={state.lines} />

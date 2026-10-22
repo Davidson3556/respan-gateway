@@ -2,13 +2,14 @@
 
 use respan_gateway_core::Fault;
 use respan_gateway_realtime::{
-    AudioFormat, Encoding, Modality, Session, Tool, ToolChoice, Turns, Vad,
+    AudioFormat, Encoding, Modality, Purpose, Session, Tool, ToolChoice, Turns, Vad,
 };
 use serde_json::{Map, Value, json};
 
 use super::NAME;
 use crate::json::{self, at, merge, number, own, set, string, take, text};
 
+const TYPE: &[&str] = &["session", "type"];
 const MODEL: &[&str] = &["session", "model"];
 const INSTRUCTIONS: &[&str] = &["session", "instructions"];
 const MODALITIES: &[&str] = &["session", "output_modalities"];
@@ -27,6 +28,7 @@ const MAX_OUTPUT_TOKENS: &[&str] = &["session", "max_output_tokens"];
 pub(super) fn decode(mut v: Value) -> Session {
     let v = &mut v;
     let mut s = Session::default();
+    s.purpose = take(v, TYPE, purpose, |p| purpose_json(*p));
     s.model = take(v, MODEL, string, text);
     s.instructions = take(v, INSTRUCTIONS, string, text);
     s.output = take(v, MODALITIES, modality, |m| modality_json(*m));
@@ -59,6 +61,7 @@ pub(super) fn encode(s: &Session, refuse: fn(&str) -> Fault) -> Result<Value, Fa
             set(&mut v, &path[1..], value);
         }
     };
+    put(TYPE, s.purpose.and_then(purpose_json));
     put(MODEL, s.model.as_ref().and_then(text));
     put(INSTRUCTIONS, s.instructions.as_ref().and_then(text));
     put(MODALITIES, s.output.and_then(modality_json));
@@ -107,6 +110,22 @@ pub(super) fn encode(s: &Session, refuse: fn(&str) -> Fault) -> Result<Value, Fa
 /// OpenAI frame are written back as OpenAI's.
 fn refuse(_: &str) -> Fault {
     Fault::internal("a session field could not be written back")
+}
+
+fn purpose(v: &Value) -> Option<Purpose> {
+    match v.as_str()? {
+        "realtime" => Some(Purpose::Conversation),
+        "transcription" => Some(Purpose::Transcription),
+        _ => None,
+    }
+}
+
+fn purpose_json(p: Purpose) -> Option<Value> {
+    match p {
+        Purpose::Conversation => Some("realtime".into()),
+        Purpose::Transcription => Some("transcription".into()),
+        _ => None,
+    }
 }
 
 fn modality(v: &Value) -> Option<Modality> {

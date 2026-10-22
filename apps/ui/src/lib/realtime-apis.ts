@@ -3,14 +3,30 @@
 // and reads what the server sends into OpenAI Realtime's events, which the
 // page and its reducer read whatever the API.
 
+import type { Model } from "@/lib/api";
 import type { Json } from "@/lib/playground-apis";
 import type { ServerEvent } from "@/lib/realtime";
 import { REALTIME_RATE } from "@/lib/realtime-audio";
 
-export type RealtimeApiId = "openai-realtime" | "gemini-live";
+export type RealtimeApiId = "openai-realtime" | "gemini-live" | "mistral-realtime";
 
 /** A message a client sends, as the API has it. */
 export type ClientMessage = Record<string, unknown>;
+
+/** What a session is for: the model answering, or the user's speech transcribed alone. */
+export type RealtimeMode = "conversation" | "transcription";
+
+/** Whether a model transcribes, as its name says: a guess, as a model list says no more. */
+const transcribes = (model: Model) => /transcribe|whisper/i.test(model.id);
+
+/**
+ * `models` with those that transcribe first: a transcription's model is the
+ * one that transcribes, and a conversational one may refuse to.
+ */
+export const transcribersFirst = (models: Model[]) => [
+  ...models.filter(transcribes),
+  ...models.filter((m) => !transcribes(m)),
+];
 
 export interface RealtimeApi {
   id: RealtimeApiId;
@@ -19,12 +35,19 @@ export interface RealtimeApi {
   path: string;
   /** That path, as shown. */
   endpoint: string;
-  /** Its URL on the page's host, for `model`, carrying `key` if the API takes it there. */
-  url: (model: string, key: string | null, location: Pick<Location, "protocol" | "host">) => string;
+  /** Its URL on the page's host, for `model` and `mode`, carrying `key` if the API takes it there. */
+  url: (
+    model: string,
+    key: string | null,
+    location: Pick<Location, "protocol" | "host">,
+    mode: RealtimeMode,
+  ) => string;
   /** The subprotocols it offers, carrying `key` if the API takes it there. */
   protocols: (key: string | null) => string[];
+  /** What its sessions can be for, the first its default. */
+  modes: RealtimeMode[];
   /** What a client sends first, once the session is open. */
-  opening: (model: string) => ClientMessage[];
+  opening: (model: string, mode: RealtimeMode) => ClientMessage[];
   /** One chunk of the mic: base64 PCM16 mono at 24 kHz. */
   audio: (base64: string) => ClientMessage;
   /**
@@ -51,14 +74,20 @@ export const openaiRealtime: RealtimeApi = {
   label: "OpenAI Realtime",
   path: "/v1/realtime",
   endpoint: "/v1/realtime",
-  url: (model, _key, location) =>
-    socketUrl(location, `/v1/realtime?model=${encodeURIComponent(model)}`),
+  // A transcription is one from its connect, as OpenAI takes it; the model
+  // routes it, as the gateway takes it.
+  url: (model, _key, location, mode) =>
+    socketUrl(
+      location,
+      `/v1/realtime?model=${encodeURIComponent(model)}${mode === "transcription" ? "&intent=transcription" : ""}`,
+    ),
   protocols: (key) => (key ? ["realtime", `openai-insecure-api-key.${key}`] : ["realtime"]),
-  opening: () => [
+  modes: ["conversation", "transcription"],
+  opening: (_model, mode) => [
     {
       type: "session.update",
       session: {
-        type: "realtime",
+        type: mode === "transcription" ? "transcription" : "realtime",
         audio: { input: { transcription: { model: "gpt-4o-mini-transcribe" } } },
       },
     },
@@ -95,6 +124,7 @@ export const geminiLive: RealtimeApi = {
     return socketUrl(location, `${GEMINI_PATH}?${query}`);
   },
   protocols: () => [],
+  modes: ["conversation"],
   opening: (model) => [
     {
       setup: {
@@ -180,4 +210,50 @@ export const geminiLive: RealtimeApi = {
   },
 };
 
-export const realtimeApis: RealtimeApi[] = [openaiRealtime, geminiLive];
+const MISTRAL_PATH = "/v1/audio/transcriptions/realtime";
+
+/**
+ * Mistral's realtime transcription, at its own path, its model on `?model=`
+ * and the gateway key on `?key=`. It transcribes alone, with no voice
+ * detection: the user's line grows until its audio ends.
+ */
+export const mistralRealtime: RealtimeApi = {
+  id: "mistral-realtime",
+  label: "Mistral Realtime",
+  path: MISTRAL_PATH,
+  endpoint: MISTRAL_PATH,
+  url: (model, key, location) => {
+    const query = new URLSearchParams({ model });
+    if (key) query.set("key", key);
+    return socketUrl(location, `${MISTRAL_PATH}?${query}`);
+  },
+  protocols: () => [],
+  modes: ["transcription"],
+  opening: () => [
+    {
+      type: "session.update",
+      session: { audio_format: { encoding: "pcm_s16le", sample_rate: REALTIME_RATE } },
+    },
+  ],
+  audio: (audio) => ({ type: "input_audio.append", audio }),
+  reader: () => {
+    let turn = 0;
+    return (message) => {
+      const m = message as Json;
+      const user = `user-${turn}`;
+      switch (m.type) {
+        case "transcription.text.delta":
+          return [{ type: "conversation.item.input_audio_transcription.delta", item_id: user, delta: m.text }];
+        case "transcription.done":
+          turn += 1;
+          return [{ type: "conversation.item.input_audio_transcription.completed", item_id: user, transcript: m.text }];
+        case "error":
+          return [{ type: "error", error: { message: String(m.error?.message ?? "") } }];
+        default:
+          return [];
+      }
+    };
+  },
+};
+
+export const realtimeApis: RealtimeApi[] = [openaiRealtime, geminiLive, mistralRealtime];

@@ -117,6 +117,8 @@ pub fn set_model(
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Session {
+    /// What the session is for: a conversation unless it says.
+    pub purpose: Option<Purpose>,
     /// The model, as its provider names it, without any path prefix a spec adds.
     pub model: Option<String>,
     /// Instructions for the model.
@@ -145,6 +147,17 @@ pub struct Session {
     /// The fields the kind has no place for, such as noise
     /// reduction or context window compression.
     pub native: Option<NativeFields>,
+}
+
+/// What a session is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Purpose {
+    /// The model answers the user.
+    Conversation,
+    /// The user's audio is transcribed ([`Output::InputTranscript`]), and
+    /// nothing answers.
+    Transcription,
 }
 
 /// What the model answers in.

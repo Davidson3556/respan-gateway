@@ -4,6 +4,7 @@
 //!
 //! - [`OpenAiRealtime`]: OpenAI Realtime, `openai-realtime`.
 //! - [`GeminiLive`]: Gemini Live, `gemini-live`.
+//! - [`MistralRealtime`]: Mistral's realtime transcription, `mistral-realtime`.
 //! - [`ResponsesWs`]: OpenAI's Responses over WebSocket, `responses-ws`,
 //!   which is not realtime: it streams Responses over a socket, and uses the
 //!   kind's types only as native events.
@@ -25,11 +26,13 @@ mod audio;
 mod foreign;
 mod gemini;
 mod json;
+mod mistral;
 mod openai;
 mod responses;
 mod session;
 
 pub use gemini::GeminiLive;
+pub use mistral::MistralRealtime;
 pub use openai::OpenAiRealtime;
 pub use responses::ResponsesWs;
 

@@ -2,7 +2,7 @@ use respan_gateway_core::Fault;
 use respan_gateway_core::FaultKind;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_realtime::{
-    AudioFormat, Cause, Input, Modality, Output, Session, Status, Turns,
+    AudioFormat, Cause, Input, Modality, Output, Purpose, Session, Status, Turns,
 };
 use respan_gateway_ws::CloseCode;
 use serde_json::{Value, json};
@@ -416,4 +416,120 @@ fn a_cancelled_turn_says_nothing_more_and_a_withdrawn_call_takes_no_answer() {
         1,
         "no answer to a withdrawn call, nor a response"
     );
+}
+
+#[test]
+fn a_transcription_drops_the_answer_and_ends_the_users_transcript() {
+    let shared = Shared::default();
+    let mut session = Session::default();
+    session.purpose = Some(Purpose::Transcription);
+    session.input_transcription = Some(true);
+    sent(&shared, &[Input::Session(session)]).expect("sent");
+    let events = outputs(
+        &shared,
+        &[
+            json!({"serverContent": {"inputTranscription": {"text": "Hel"}}}),
+            json!({"serverContent": {"inputTranscription": {"text": "lo"}}}),
+            json!({"serverContent": {"modelTurn": {"parts": [{"text": "Hi there"}]}}}),
+            json!({"serverContent": {"outputTranscription": {"text": "Hi there"}}}),
+            json!({"serverContent": {"turnComplete": true}}),
+        ],
+    );
+    let said: Vec<_> = events
+        .iter()
+        .map(|e| match e {
+            Output::InputTranscript { text, complete, .. } => (text.as_str(), *complete),
+            other => panic!("not dropped: {other:?}"),
+        })
+        .collect();
+    assert_eq!(said, [("Hel", false), ("lo", false), ("Hello", true)]);
+}
+
+#[test]
+fn a_transcriber_ends_the_users_transcript_at_its_generations_end() {
+    let shared = Shared::default();
+    let mut session = Session::default();
+    session.purpose = Some(Purpose::Transcription);
+    sent(&shared, &[Input::Session(session)]).expect("sent");
+    let events = outputs(
+        &shared,
+        &[
+            json!({"serverContent": {"inputTranscription": {"text": "Hello there."}}}),
+            json!({"serverContent": {"generationComplete": true}}),
+        ],
+    );
+    let said: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Output::InputTranscript { text, complete, .. } => Some((text.as_str(), *complete)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, [("Hello there.", false), ("Hello there.", true)]);
+}
+
+#[test]
+fn a_session_that_says_no_purpose_is_a_conversation() {
+    // An OpenAI client's session opened by its first audio says none; its
+    // next says it converses, which changes nothing.
+    let shared = Shared::default();
+    let mut conversation = Session::default();
+    conversation.purpose = Some(Purpose::Conversation);
+    let sessions = [
+        Input::Session(Session::default()),
+        Input::Session(conversation),
+    ];
+    sent(&shared, &sessions).expect("no change");
+    let mut transcription = Session::default();
+    transcription.purpose = Some(Purpose::Transcription);
+    let shared = Shared::default();
+    let sessions = [
+        Input::Session(Session::default()),
+        Input::Session(transcription),
+    ];
+    sent(&shared, &sessions).expect_err("a change of purpose");
+}
+
+/// The user's whole transcripts of a transcription told by `messages`.
+fn transcribed(messages: &[Value]) -> Vec<String> {
+    let shared = Shared::default();
+    let mut session = Session::default();
+    session.purpose = Some(Purpose::Transcription);
+    sent(&shared, &[Input::Session(session)]).expect("sent");
+    outputs(&shared, messages)
+        .into_iter()
+        .filter_map(|e| match e {
+            Output::InputTranscript {
+                text,
+                complete: true,
+                ..
+            } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_interrupted_answer_leaves_the_users_turn_to_its_end() {
+    let heard = |text: &str| json!({"serverContent": {"inputTranscription": {"text": text}}});
+    let answer = json!({"serverContent": {"modelTurn": {"parts": [{"text": "Sure"}]}}});
+    let transcripts = transcribed(&[
+        heard("One."),
+        answer.clone(),
+        json!({"serverContent": {"interrupted": true}}),
+        heard(" Two."),
+        answer,
+        json!({"serverContent": {"turnComplete": true}}),
+    ]);
+    assert_eq!(transcripts, ["One.", " Two."]);
+}
+
+#[test]
+fn a_transcribers_generation_ends_its_users_transcript_whatever_it_carries() {
+    let transcripts = transcribed(&[
+        json!({"serverContent": {"inputTranscription": {"text": "Hello", "finished": false}}}),
+        json!({"serverContent": {"inputTranscription": {"text": " there."}}}),
+        json!({"serverContent": {"generationComplete": true}}),
+    ]);
+    assert_eq!(transcripts, ["Hello there."]);
 }
