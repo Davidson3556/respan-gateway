@@ -133,7 +133,8 @@ on a public address.
 |---|---|
 | chat | `openai-chat`, `openai-responses`, `anthropic-messages`, `gemini-generate`; `passthrough` for a vendor's other endpoints |
 | realtime | `openai-realtime` ⇄ `gemini-live`; transcription: `openai-realtime` ⇄ `gemini-live` ⇄ `mistral-realtime`; `responses-ws` relayed |
-| image, speech, transcription, embedding | OpenAI's endpoints |
+| image | `openai-images`, `gemini-images` |
+| speech, transcription, embedding | OpenAI's endpoints |
 | video | `openai-videos`, `gemini-veo` |
 
 **Vendors:** OpenAI, Anthropic, Gemini, Respan, TypeSafe, Groq, DeepSeek,
