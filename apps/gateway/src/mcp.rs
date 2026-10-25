@@ -1063,6 +1063,287 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn firecrawl_is_served_as_mcp_with_its_configured_key_and_base_url() {
+        use axum::Json;
+        use axum::extract::{Path as Parameter, Query};
+        use respan_gateway_http::http_body_util::BodyExt;
+        use serde_json::{Value, json};
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tower::ServiceExt;
+
+        async fn rpc(app: &crate::App, method: &str, params: Value) -> Value {
+            let request = axum::http::Request::post("/mcp/web")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .body(axum::body::Body::from(
+                    json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+                        .to_string(),
+                ))
+                .expect("MCP request");
+            let response = app.router().oneshot(request).await.expect("MCP response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let streamed = response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/event-stream"));
+            let bytes = response
+                .into_body()
+                .collect()
+                .await
+                .expect("MCP body")
+                .to_bytes();
+            let answer: Value = if streamed {
+                String::from_utf8_lossy(&bytes)
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data:"))
+                    .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
+                    .find(|message| message["id"] == 1)
+                    .unwrap_or_else(|| panic!("MCP event missing its response: {bytes:?}"))
+            } else {
+                serde_json::from_slice(&bytes).expect("MCP JSON")
+            };
+            assert!(answer.get("error").is_none(), "{answer}");
+            answer["result"].clone()
+        }
+
+        async fn call(app: &crate::App, name: &str, arguments: Value) -> Value {
+            rpc(
+                app,
+                "tools/call",
+                json!({"name": name, "arguments": arguments}),
+            )
+            .await
+        }
+
+        fn output(result: Value) -> Value {
+            assert_eq!(result["isError"], false, "{result}");
+            let text = result["content"][0]["text"].as_str().expect("tool text");
+            let output: Value = serde_json::from_str(text).expect("JSON output");
+            assert_eq!(text, output.to_string(), "compact JSON");
+            output
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let upstream = axum::Router::new()
+            .route(
+                "/v2/scrape",
+                axum::routing::post(|Json(body): Json<Value>| async move {
+                    if body["url"] == "https://example.com/refused" {
+                        assert_eq!(body, json!({
+                            "url": "https://example.com/refused", "formats": ["markdown"]
+                        }));
+                        return Json(json!({"success": false, "error": "Insufficient credits"}));
+                    }
+                    assert_eq!(body, json!({
+                        "url": "https://example.com", "formats": ["markdown"],
+                        "onlyMainContent": false, "waitFor": 250
+                    }));
+                    Json(json!({"success": true, "data": {"markdown": "# Example"}}))
+                }),
+            )
+            .route(
+                "/v2/crawl",
+                axum::routing::post(|Json(body): Json<Value>| async move {
+                    assert_eq!(body, json!({
+                        "url": "https://example.com", "limit": 10,
+                        "scrapeOptions": {"formats": ["markdown"]},
+                        "maxDiscoveryDepth": 0, "includePaths": ["/docs/.*"],
+                        "excludePaths": ["/private/.*"], "allowExternalLinks": false
+                    }));
+                    Json(json!({
+                        "success": true, "id": "crawl-job-123",
+                        "url": "https://api.firecrawl.dev/v2/crawl/crawl-job-123"
+                    }))
+                }),
+            )
+            .route(
+                "/v2/crawl/{id}",
+                axum::routing::get(
+                    |Parameter(id): Parameter<String>, Query(query): Query<HashMap<String, String>>| async move {
+                        assert_eq!(id, "crawl-job-123");
+                        assert_eq!(query, HashMap::from([
+                            ("skip".to_owned(), "2".to_owned()),
+                            ("limit".to_owned(), "1".to_owned())
+                        ]));
+                        Json(json!({
+                            "success": true, "status": "completed", "total": 4, "completed": 4,
+                            "next": "https://cursor.invalid/elsewhere?skip=3&limit=1",
+                            "data": [{"markdown": "# Docs", "metadata": {"sourceURL": "https://example.com/docs"}}]
+                        }))
+                    },
+                ),
+            )
+            .route(
+                "/v2/map",
+                axum::routing::post(|Json(body): Json<Value>| async move {
+                    assert_eq!(body, json!({
+                        "url": "https://example.com", "limit": 3, "search": "docs",
+                        "includeSubdomains": false, "sitemap": "only"
+                    }));
+                    Json(json!({"success": true, "links": [{"url": "https://example.com/docs", "title": "Docs"}]}))
+                }),
+            )
+            .route(
+                "/v2/search",
+                axum::routing::post(|Json(body): Json<Value>| async move {
+                    assert_eq!(body, json!({
+                        "query": "Rust release", "limit": 2, "sources": ["web"],
+                        "scrapeOptions": {"formats": ["markdown"]}
+                    }));
+                    Json(json!({"success": true, "data": {"web": [{"url": "https://example.com", "markdown": "# Rust"}]}}))
+                }),
+            )
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let seen = seen.clone();
+                    async move {
+                        assert_eq!(request.headers()[header::AUTHORIZATION], "Bearer fc-test-key");
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        next.run(request).await
+                    }
+                },
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local Firecrawl fake");
+        let address = listener.local_addr().expect("fake address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, upstream)
+                .await
+                .expect("Firecrawl fake");
+        });
+        let config = Config::parse(&format!(
+            r#"log = "off"
+[network]
+proxy = false
+[tools.web]
+vendor = "firecrawl"
+key = "fc-test-key"
+base_url = "http://{address}/v2/"
+"#
+        ))
+        .expect("Firecrawl config");
+        let app = crate::App::new(config).expect("Firecrawl app");
+        let listed = rpc(&app, "tools/list", json!({})).await;
+        let mut names: Vec<_> = listed["tools"]
+            .as_array()
+            .expect("MCP tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["crawl", "get_crawl", "map_site", "scrape", "search"]
+        );
+
+        let scraped = output(
+            call(
+                &app,
+                "scrape",
+                json!({"url": "https://example.com", "only_main_content": false, "wait_for": 250}),
+            )
+            .await,
+        );
+        assert_eq!(scraped["data"]["markdown"], "# Example");
+
+        let started = output(
+            call(
+                &app,
+                "crawl",
+                json!({
+                    "url": "https://example.com", "max_depth": 0,
+                    "include_paths": ["/docs/.*"], "exclude_paths": ["/private/.*"],
+                    "allow_external_links": false
+                }),
+            )
+            .await,
+        );
+        assert_eq!(started["id"], "crawl-job-123");
+        assert_eq!(
+            started["url"],
+            "https://api.firecrawl.dev/v2/crawl/crawl-job-123"
+        );
+
+        let crawled = output(
+            call(
+                &app,
+                "get_crawl",
+                json!({
+                    "crawl_id": started["id"], "skip": 2, "limit": 1
+                }),
+            )
+            .await,
+        );
+        assert_eq!(crawled["status"], "completed");
+        assert_eq!(crawled["data"][0]["markdown"], "# Docs");
+        assert_eq!(
+            crawled["data"][0]["metadata"]["sourceURL"],
+            "https://example.com/docs"
+        );
+        assert_eq!(crawled["next_skip"], 3);
+
+        let mapped = output(
+            call(
+                &app,
+                "map_site",
+                json!({
+                    "url": "https://example.com", "limit": 3, "search": "docs",
+                    "include_subdomains": false, "sitemap": "only"
+                }),
+            )
+            .await,
+        );
+        assert_eq!(mapped["links"][0]["url"], "https://example.com/docs");
+
+        let searched = output(
+            call(
+                &app,
+                "search",
+                json!({
+                    "query": "Rust release", "limit": 2, "scrape": true
+                }),
+            )
+            .await,
+        );
+        assert_eq!(searched["data"]["web"][0]["markdown"], "# Rust");
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+
+        let invalid = call(&app, "get_crawl", json!({"crawl_id": "../search?x"})).await;
+        assert_eq!(invalid["isError"], true);
+        assert!(
+            invalid["content"][0]["text"]
+                .as_str()
+                .expect("error text")
+                .contains("crawl_id")
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            5,
+            "invalid job id made no request"
+        );
+
+        let refused = call(
+            &app,
+            "scrape",
+            json!({"url": "https://example.com/refused"}),
+        )
+        .await;
+        assert_eq!(refused["isError"], true);
+        assert!(
+            refused["content"][0]["text"]
+                .as_str()
+                .expect("error text")
+                .contains("Insufficient credits")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        server.abort();
+    }
+
     #[test]
     fn tool_vendor_mistakes_are_named() {
         let said = |text: &str| parse(text).err().unwrap_or_default();
