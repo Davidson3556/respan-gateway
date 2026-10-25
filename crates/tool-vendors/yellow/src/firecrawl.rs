@@ -239,8 +239,14 @@ fn render(name: &str, mut response: Value) -> Result<ToolOutput, ToolError> {
         "map_site" => response.get("links").is_some_and(Value::is_array),
         "get_crawl" => {
             let status = response.get("status").and_then(Value::as_str);
-            if matches!(status, Some("failed" | "cancelled")) {
-                return Err(ToolError::new(format!("Firecrawl crawl: {response}")));
+            if let Some(status @ ("failed" | "cancelled")) = status {
+                // Not the whole answer: its pages can run to megabytes.
+                let count = |key: &str| response.get(key).and_then(Value::as_u64).unwrap_or(0);
+                return Err(ToolError::new(format!(
+                    "Firecrawl crawl {status} after {} of {} pages",
+                    count("completed"),
+                    count("total")
+                )));
             }
             let has_status = status.is_some_and(|status| !status.is_empty());
             // Only reuse the offset; authenticated requests always use
@@ -395,14 +401,17 @@ mod tests {
             assert!(output.usage.is_empty());
         }
         for status in ["failed", "cancelled"] {
-            assert!(
-                render(
-                    "get_crawl",
-                    json!({
-                        "success": true, "status": status, "data": []
-                    })
-                )
-                .is_err()
+            let error = render(
+                "get_crawl",
+                json!({
+                    "success": true, "status": status, "total": 3, "completed": 1,
+                    "data": [{"markdown": "x".repeat(10_000)}]
+                }),
+            )
+            .expect_err("crawl ended early");
+            assert_eq!(
+                error.0,
+                format!("Firecrawl crawl {status} after 1 of 3 pages")
             );
         }
     }
