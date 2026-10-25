@@ -27,6 +27,8 @@ version, as OpenAI's SDKs take it: `https://api.openai.com/v1`,
 - An edit goes to `/images/edits` as a form of its images' bytes, or in JSON
   if one is a URL. An image a client names by file id cannot be relayed and
   is refused.
+- An answer's image is of its `output_format`, else of the type its bytes
+  say, else PNG.
 - A file's type is its part's, unless that says none or
   `application/octet-stream`, which OpenAI refuses for images; then its
   name's, then its first bytes'.

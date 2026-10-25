@@ -7,6 +7,7 @@ pub mod cerebras;
 pub mod cloudflare;
 pub mod deepinfra;
 pub mod deepseek;
+pub mod empiriolabs;
 pub mod fireworks;
 pub mod groq;
 pub mod mistral;
@@ -17,7 +18,10 @@ pub mod together;
 pub mod vllm;
 pub mod xai;
 
+use respan_gateway_core::Fault;
+use respan_gateway_http::bytes::Bytes;
 use respan_gateway_vendor_kit::Vendor;
+use serde_json::{Map, Value};
 
 /// Every yellow vendor.
 pub const ALL: &[&Vendor] = &[
@@ -34,5 +38,18 @@ pub const ALL: &[&Vendor] = &[
     &cloudflare::VENDOR,
     &cerebras::VENDOR,
     &perplexity::VENDOR,
+    &empiriolabs::VENDOR,
     &deepinfra::VENDOR,
 ];
+
+/// A call's JSON without its field `key`.
+fn without(body: Bytes, key: &str) -> Result<Bytes, Fault> {
+    let unwritten = |e| Fault::internal("a call is no JSON object").with_source(e);
+    let mut call: Map<String, Value> = serde_json::from_slice(&body).map_err(unwritten)?;
+    if call.shift_remove(key).is_none() {
+        return Ok(body);
+    }
+    serde_json::to_vec(&call)
+        .map(Bytes::from)
+        .map_err(unwritten)
+}

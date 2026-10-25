@@ -628,6 +628,31 @@ fn a_gemini_call_for_an_image_another_provider_draws_is_an_images() {
 }
 
 #[test]
+fn empiriolabs_is_called_at_each_of_its_apis() {
+    let plan = plan("providers = { e = { vendor = \"empiriolabs\", key = \"k\" } }\n")
+        .unwrap_or_else(|e| panic!("{e}"));
+    let entries: Vec<(&str, &str)> = plan.upstreams[0]
+        .entries
+        .iter()
+        .map(|e| (e.format.as_str(), e.base_url.as_str()))
+        .collect();
+    let api = "https://api.empiriolabs.ai/v1";
+    assert_eq!(
+        entries,
+        [
+            ("openai-chat", api),
+            ("openai-responses", api),
+            ("anthropic-messages", "https://api.empiriolabs.ai"),
+            ("gemini-generate", "https://api.empiriolabs.ai/v1beta"),
+            ("openai-images", api),
+            ("openai-embeddings", api),
+            ("openai-speech", api),
+            ("decisions", api),
+        ]
+    );
+}
+
+#[test]
 fn veo_is_served_to_its_clients() {
     let text =
         "providers = { g = { vendor = \"gemini\", key = \"k\" } }\nformats = [\"gemini-veo\"]\n";

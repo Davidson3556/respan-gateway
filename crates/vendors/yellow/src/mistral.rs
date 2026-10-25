@@ -14,7 +14,7 @@ use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_media::speech;
 use respan_gateway_media_http::openai::{OpenAiEmbeddings, OpenAiSpeech, OpenAiTranscriptions};
 use respan_gateway_realtime_ws::MistralRealtime;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use respan_gateway_vendor_kit::{Dialect, Dialected, Rewrite, Vendor};
 
@@ -91,14 +91,7 @@ fn taken(input: &mut speech::Input) -> Result<(), Fault> {
 
 /// A call's JSON without its `stream_format`.
 fn unstreamed(body: Bytes) -> Result<Bytes, Fault> {
-    let unwritten = |e| Fault::internal("a speech call is no JSON object").with_source(e);
-    let mut call: Map<String, Value> = serde_json::from_slice(&body).map_err(unwritten)?;
-    if call.shift_remove("stream_format").is_none() {
-        return Ok(body);
-    }
-    serde_json::to_vec(&call)
-        .map(Bytes::from)
-        .map_err(unwritten)
+    crate::without(body, "stream_format")
 }
 
 /// The audio of a whole answer: its `audio_data`, decoded.
