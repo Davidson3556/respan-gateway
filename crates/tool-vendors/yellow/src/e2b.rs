@@ -172,12 +172,15 @@ async fn run_code(api: &Api, args: &Map<String, Value>) -> Result<ToolOutput, To
         }
         Err(e) => return Err(ToolError::new(format!("{e} (in sandbox {})", sandbox.id))),
     };
-    let header = format!(
-        "Sandbox: {} ({}; requested {} s timeout before execution; kill when done)",
-        sandbox.id,
-        if created { "new" } else { "reused" },
-        run.timeout
-    );
+    let lives = if created {
+        format!("new; lives {} s from creation", run.timeout)
+    } else {
+        format!(
+            "reused; lives at least {} s from before this run",
+            run.timeout
+        )
+    };
+    let header = format!("Sandbox: {} ({lives}; kill when done)", sandbox.id);
     Ok(render_execution(&header, &lines)?.with_usage("seconds", since.elapsed().as_secs_f64()))
 }
 
