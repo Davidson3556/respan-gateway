@@ -222,7 +222,8 @@ fn search_body(args: &Map<String, Value>) -> Result<Value, ToolError> {
 }
 
 fn render(name: &str, mut response: Value) -> Result<ToolOutput, ToolError> {
-    if response.get("success").and_then(Value::as_bool) != Some(true) {
+    // A crawl's status answer carries no `success`: only `false` is a refusal.
+    if response.get("success").and_then(Value::as_bool) == Some(false) {
         let error = response.get("error").and_then(Value::as_str);
         return Err(ToolError::new(format!(
             "Firecrawl: {}",
@@ -427,7 +428,14 @@ mod tests {
         for name in ["scrape", "crawl", "get_crawl", "map_site", "search"] {
             assert!(render(name, json!({"success": true})).is_err(), "{name}");
         }
-        assert!(render("scrape", json!({"data": {"markdown": "x"}})).is_err());
+        assert!(
+            render(
+                "scrape",
+                json!({"success": false, "data": {"markdown": "x"}})
+            )
+            .is_err()
+        );
+        assert!(render("get_crawl", json!({"status": "scraping", "data": []})).is_ok());
         assert!(render("search", json!({"success": true, "data": {}})).is_err());
     }
 }
